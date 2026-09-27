@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Generates fixed-target two-stack minimizer contract probes.
+ * @brief Tests two-stack minimizer helpers on each compiled CPU target.
  */
 
 #ifndef BIOSEQ_TEST_INDEXES
@@ -23,14 +23,13 @@ namespace bioseq::simd::@BIOSEQ_HIGHWAY_PROBE_TARGET_NAMESPACE@::probe_detail {
 
 namespace hn = hwy::HWY_NAMESPACE;
 
-/** @brief Accumulates assertions for one target-local probe category. */
+/** @brief Counts attempted and passing checks within one test category. */
 struct group_receipt final {
     std::uint32_t cases_run = 0U;     ///< Checks attempted in the category.
     std::uint32_t cases_passed = 0U;  ///< Checks passed in the category.
 
     /**
-     * @brief Records one Boolean contract check.
-     * @param[in] condition Result of the checked property.
+     * @brief Records whether one check passed.
      */
     auto expect(const bool condition) noexcept -> void {
         ++cases_run;
@@ -81,8 +80,10 @@ static_assert(
 }
 
 /**
- * @brief Checks the u32/u64 mask split and join contract.
- * @return Assertion counts for the mask category.
+ * @brief Splits four 32-bit mask lanes and joins them back.
+ *
+ * Checks every four-bit mask when the target has the required lane widths.
+ * @return Counts for the mask tests.
  */
 [[nodiscard]] auto check_masks() -> group_receipt {
     group_receipt receipt;
@@ -90,8 +91,8 @@ static_assert(
     const hn::ScalableTag<std::uint64_t> uint64_simd_tag;
     if (hn::Lanes(uint32_simd_tag) != 4U
         || hn::Lanes(uint64_simd_tag) != 2U) {
-        // This fast-kernel helper is intentionally shape-specific. The
-        // reference property treats other supported targets as not applicable.
+        // This helper needs four 32-bit lanes and two 64-bit lanes.
+        // Other vector widths skip this check.
         receipt.expect(true);
         return receipt;
     }
@@ -112,8 +113,11 @@ static_assert(
 }
 
 /**
- * @brief Checks packed DNA4 SWAR helpers against scalar bit construction.
- * @return Assertion counts for the SWAR category.
+ * @brief Checks DNA4 packing and k-mer extraction against scalar bit operations.
+ *
+ * Tries every packed eight-base value. On the supported SIMD width, also
+ * checks forward and reverse-complement 15-base windows.
+ * @return Counts for the packed-rank tests.
  */
 [[nodiscard]] auto check_swar() -> group_receipt {
     group_receipt receipt;
@@ -186,8 +190,7 @@ static_assert(
 }
 
 /**
- * @brief Builds the deterministic DNA4 fixture used by decode checks.
- * @return Logical DNA4 symbols for packed decoding.
+ * @brief Builds a repeatable 96-base DNA4 sequence for decoding tests.
  */
 [[nodiscard]] auto decode_fixture() -> std::vector<seq::dna4> {
     std::vector<seq::dna4> data(96U);
@@ -200,10 +203,10 @@ static_assert(
 }
 
 /**
- * @brief Checks packed-rank decoding for one storage-unit width.
+ * @brief Checks decoded ranks around packed-word boundaries.
  * @tparam p_storage_unit Unsigned packed storage type.
- * @param[in,out] receipt Category assertion counters.
- * @param[in] data Logical DNA4 fixture.
+ * @param[in,out] receipt Test counts.
+ * @param[in] data DNA4 sequence to pack and compare.
  */
 template<class p_storage_unit>
 auto check_decode_storage(
@@ -244,8 +247,8 @@ auto check_decode_storage(
 }
 
 /**
- * @brief Checks the supported u64 lane-matrix transpose shape.
- * @param[in,out] receipt Category assertion counters.
+ * @brief Checks 64-bit matrix transposition and scalar-target rejection.
+ * @param[in,out] receipt Test counts.
  */
 auto check_transpose(group_receipt& receipt) -> void {
     using simd_tag_type = hn::ScalableTag<std::uint64_t>;
@@ -306,8 +309,11 @@ auto check_transpose(group_receipt& receipt) -> void {
 }
 
 /**
- * @brief Checks exact-kernel selection for supported and fallback shapes.
- * @return Assertion counts for the selector category.
+ * @brief Checks selection of the K15 fast kernel and generic fallback.
+ *
+ * Covers supported lane widths, packed storage types and coordinates
+ * that exceed the 32-bit range.
+ * @return Counts for the selection tests.
  */
 [[nodiscard]] auto check_selector() -> group_receipt {
     group_receipt receipt;
@@ -340,7 +346,7 @@ auto check_transpose(group_receipt& receipt) -> void {
     return receipt;
 }
 
-/** @brief Collects target-local minimizer records for normalized comparison. */
+/** @brief Saves minimizer records for later sorting and comparison. */
 class reference_output_collector final {
 public:
     /**
@@ -355,13 +361,15 @@ public:
 };
 
 /**
- * @brief Collects sorted unique minimizers for the supported uint8 fixture.
- * @param[in] ranks Logical DNA4 ranks.
+ * @brief Collects sorted unique minimizer pairs from byte-packed DNA4 input.
+ *
+ * Rejects ranks outside 0..3 and output that exceeds the receipt capacity.
+ * @param[in] ranks DNA4 ranks.
  * @param[in] rank_count Number of ranks.
  * @param[in] window Minimizer window.
  * @param[in] kmer K-mer length.
- * @param[out] receipt Bounded normalized result receipt.
- * @return `true` when ranks and output capacity satisfy the contract.
+ * @param[out] receipt Output pairs and parameters.
+ * @return True when collection succeeds and the pairs fit.
  */
 [[nodiscard]] auto collect_reference_uint8_output(
     const std::uint8_t* ranks,

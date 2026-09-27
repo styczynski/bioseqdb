@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Generator-owned Highway SIMD primitives shared by Bioseq kernels.
+ * @brief SIMD lane and matrix helpers compiled for each Highway CPU target.
  */
 module;
 
@@ -16,7 +16,7 @@ export namespace bioseq::simd {
 namespace [[bioseq::simd]] target {
 namespace hn = hwy::HWY_NAMESPACE;
 
-/// @brief Makes the canonical compile-time index loop available to generated kernels.
+/// @brief Reuses the compile-time index loop in generated kernels.
 using ::bioseq::common::templating::for_each_index;
 
 /**
@@ -59,13 +59,12 @@ HWY_INLINE auto extract_last_lane(p_simd_tag simd_tag, hn::Vec<p_simd_tag> vecto
 }
 
 /**
- * @brief Broadcasts a lane counted backward from the vector tail.
- *
- * @tparam p_simd_tag Highway descriptor type.
- * @tparam p_tail_offset Zero-based distance from the final lane.
- * @param[in] simd_tag Highway descriptor defining the active lane count.
+ * @brief Copies a tail lane into every lane of the vector.
+ * @tparam p_tail_offset Distance from the final lane.
+ * @param[in] simd_tag SIMD lane type and width.
  * @param[in] vector Source vector.
- * @return Vector whose lanes contain the selected scalar value.
+ * @pre The selected lane exists. For tags with at most 64 maximum lanes,
+ * the lane index is based on MaxLanes, so the active width must match it.
  */
 template <class p_simd_tag, std::size_t p_tail_offset = 0u>
 HWY_INLINE auto broadcast_last_lane(p_simd_tag simd_tag, hn::Vec<p_simd_tag> vector)
@@ -82,15 +81,9 @@ HWY_INLINE auto broadcast_last_lane(p_simd_tag simd_tag, hn::Vec<p_simd_tag> vec
 }
 
 /**
- * @brief Replaces the first lanes of a vector with one scalar value.
+ * @brief Replaces the first p_first_lane_count lanes with first_value.
  *
- * @tparam p_simd_tag Highway descriptor type.
- * @tparam p_first_lane_count Number of leading lanes to replace.
- * @tparam p_value_type Scalar lane type.
- * @param[in] simd_tag Highway descriptor defining the active lane count.
- * @param[in] vector Source vector.
- * @param[in] first_value Replacement value.
- * @return Vector with the requested leading lanes replaced.
+ * Other lanes keep their original values.
  */
 template <class p_simd_tag,
           std::size_t p_first_lane_count = 1u,
@@ -123,15 +116,9 @@ HWY_INLINE auto extract_lane([[maybe_unused]] p_simd_tag simd_tag,
 }
 
 /**
- * @brief Finds the first lane containing a supplied maximum value.
+ * @brief Returns the first lane equal to the maximum supplied by the caller.
  *
- * @tparam p_simd_tag Highway descriptor type.
- * @tparam p_value_type Scalar lane type.
- * @param[in] simd_tag Highway descriptor defining the active lane count.
- * @param[in] vector Vector searched for the maximum.
- * @param[in] maximum Maximum scalar value already computed by the caller.
- * @return Zero-based index of the first matching lane.
- * @pre At least one active lane equals `maximum`. Violation terminates the process.
+ * Aborts if no lane contains that value.
  */
 template <class p_simd_tag, class p_value_type = hn::TFromD<p_simd_tag>>
 HWY_INLINE auto find_first_maximum_lane(p_simd_tag simd_tag,
@@ -147,16 +134,10 @@ HWY_INLINE auto find_first_maximum_lane(p_simd_tag simd_tag,
 }
 
 /**
- * @brief Shifts lanes left within each 128-bit block and fills vacancies with zero.
+ * @brief Shifts lanes left within each 128-bit block, filling with zeros.
  *
- * @tparam p_lane_count Number of scalar lanes shifted within each block.
- * @tparam p_simd_tag Highway descriptor type.
- * @param[in] simd_tag Highway descriptor defining the lane type.
- * @param[in] vector Source vector.
- * @return Block-local shifted vector.
- *
- * Block-local semantics are required by the alignment prefix scans and must
- * not be replaced with a whole-vector slide.
+ * Alignment prefix scans depend on values staying inside their blocks.
+ * @tparam p_lane_count Number of lanes to shift.
  */
 template <std::size_t p_lane_count, class p_simd_tag>
 HWY_INLINE auto shift_lanes_left_zero(p_simd_tag simd_tag, hn::Vec<p_simd_tag> vector)
@@ -166,13 +147,12 @@ HWY_INLINE auto shift_lanes_left_zero(p_simd_tag simd_tag, hn::Vec<p_simd_tag> v
 }
 
 /**
- * @brief Shifts lanes left once and fills the first lane from a predecessor vector.
+ * @brief Shifts current one lane left and inserts the predecessor's last lane.
  *
- * @tparam p_simd_tag Highway descriptor type.
- * @param[in] simd_tag Highway descriptor defining the active lane count.
- * @param[in] current Current vector.
- * @param[in] predecessor Vector preceding `current` in logical lane order.
- * @return Shifted vector with the predecessor's last active lane inserted first.
+ * This carries a value across consecutive vectors.
+ * @param[in] simd_tag SIMD lane type and width.
+ * @param[in] current Vector to shift.
+ * @param[in] predecessor Vector immediately before current.
  */
 template <class p_simd_tag>
 HWY_INLINE auto shift_lanes_left_with_predecessor(p_simd_tag simd_tag,
@@ -198,14 +178,14 @@ HWY_INLINE auto shift_lanes_left_with_predecessor(p_simd_tag simd_tag,
 }
 
 /**
- * @brief Approximates base-two logarithms for positive integer lanes.
+ * @brief Approximates log2 for positive 32-bit integer lanes.
  *
- * @tparam p_integer_simd_tag Highway descriptor for input integers and bit operations.
- * @tparam p_float_simd_tag Highway descriptor for output floating-point lanes.
- * @param[in] integer_simd_tag Integer descriptor.
- * @param[in] float_simd_tag Floating-point descriptor with the same lane geometry.
- * @param[in] integer_values Positive integer input values.
- * @return Polynomial log2 approximation for every input lane.
+ * Converts to float and combines the exponent with a polynomial estimate
+ * for the fractional part. Used when scoring chaining gaps.
+ * @param[in] integer_simd_tag 32-bit integer tag.
+ * @param[in] float_simd_tag Float tag with the same lane count.
+ * @param[in] integer_values Positive values to evaluate.
+ * @return Approximate base-two logarithm in each float lane.
  */
 template <class p_integer_simd_tag, class p_float_simd_tag>
 HWY_INLINE auto approximate_log2(p_integer_simd_tag integer_simd_tag,
@@ -267,12 +247,10 @@ concept simd_lane_widenable_once =
 
 #if HWY_TARGET == HWY_SCALAR
 
-// Keep the scalar translation entirely free of multi-lane Highway operations.
-// These stubs let the common reset/consume templates compile, but the target
-// gate rejects them before any biological work or stats accounting.
-/// @brief Rejects u64 transpose admission for the scalar Highway target.
-/// @tparam p_simd_tag Highway descriptor with u64 lanes.
-/// @return Always `false` on the scalar target.
+// Scalar builds need these declarations to compile shared callers.
+// Returning false prevents use of the multi-lane transpose path.
+/// @brief Reports that the scalar target cannot use the u64 transpose path.
+/// @return Always false.
 template<class p_simd_tag>
 [[nodiscard]] HWY_INLINE bool u64_lane_transpose_shape_supported(p_simd_tag) noexcept
 {
@@ -280,9 +258,8 @@ template<class p_simd_tag>
     return false;
 }
 
-/// @brief Rejects matrix transpose execution for the scalar Highway target.
-/// @tparam p_simd_tag Highway descriptor with u64 lanes.
-/// @return Always `false` on the scalar target.
+/// @brief Leaves the matrix unchanged on the scalar target.
+/// @return Always false.
 template<class p_simd_tag>
 [[nodiscard]] HWY_INLINE bool transpose_u64_lane_matrix(
     p_simd_tag,
@@ -295,14 +272,12 @@ template<class p_simd_tag>
 #else
 
 /**
- * @brief Tests whether recursive half descriptors form a square u64 matrix.
+ * @brief Checks whether this target supports the 64-bit matrix transpose.
  *
- * Repeated half-descriptor operations must exactly describe a power-of-two square
- * for this target. This is checked before any biological work so an unusual
- * scalable-vector shape cannot reach a late transpose failure.
- * @tparam p_simd_tag Highway descriptor with u64 lanes.
- * @param d Active u64 descriptor.
- * @return Whether the recursive in-register transpose supports this shape.
+ * The lane count must be 2, 4, 8 or 16, and each half-width tag must
+ * have exactly half as many lanes. Check this before choosing the path.
+ * @param d Tag for unsigned 64-bit lanes.
+ * @return True when the recursive transpose can handle the active width.
  */
 template<class p_simd_tag>
 [[nodiscard]] HWY_INLINE bool u64_lane_transpose_shape_supported(p_simd_tag d) noexcept
@@ -324,17 +299,15 @@ template<class p_simd_tag>
 }
 
 /**
- * @brief Transposes an in-register square matrix of u64 lanes.
+ * @brief Transposes a square matrix of unsigned 64-bit lanes using SIMD.
  *
- * The generic square lane matrix widens
- * lane types between stages, which reaches a nonexistent u128 lane for u64
- * matrices. This network instead recursively transposes four half-width
- * quadrants and joins them with Highway Combine. The only base operation is a
- * two-lane Interleave. There are no scalar lane or event-record stores.
- * @tparam p_simd_tag Highway descriptor with u64 lanes.
- * @param d Active u64 descriptor defining both matrix dimensions.
- * @param matrix Mutable array of at least `Lanes(d)` vectors.
- * @return Whether the matrix shape was supported and transposed.
+ * Splits the matrix into four smaller squares, transposes them recursively
+ * and combines the halves. The two-lane case uses interleaving. This avoids
+ * requiring a wider lane type than uint64_t.
+ *
+ * @param d Tag defining the matrix width.
+ * @param matrix Array containing at least Lanes(d) vectors.
+ * @return True when the matrix was transposed, or false for an unsupported width.
  */
 template<class p_simd_tag>
 [[nodiscard]] HWY_INLINE bool transpose_u64_lane_matrix(
@@ -396,16 +369,16 @@ template<class p_simd_tag>
 #endif
 
 /**
- * @brief Loads and transposes one square matrix of active SIMD lanes.
+ * @brief Loads and transposes a square matrix stored in SIMD vectors.
  *
- * The object borrows an indexable matrix-storage handle and never reallocates
- * it. The caller owns the storage and synchronization. Supported active lane
- * counts are one, two, four, eight, and sixteen. Wider matrices terminate
- * rather than changing their coordinate or transpose semantics.
+ * The wrapper borrows its storage. The caller keeps that storage alive
+ * and prevents concurrent changes. Transposition supports 1, 2, 4, 8 or
+ * 16 lanes, with element-width limits checked by each implementation.
+ * Unsupported combinations abort.
  *
- * @tparam p_simd_tag Highway descriptor type.
- * @tparam p_simd_vector Highway vector type for the descriptor.
- * @tparam p_matrix_storage Borrowed indexable storage handle.
+ * @tparam p_simd_tag Highway lane tag.
+ * @tparam p_simd_vector Vector type for the tag.
+ * @tparam p_matrix_storage Indexable handle to the caller's storage.
  */
 template <
     class p_simd_tag,
@@ -678,15 +651,13 @@ private:
     }
 
     /**
-     * @brief Interleaves corresponding columns from two eight-row matrix halves.
-     *
-     * @tparam p_select_upper Whether to select the upper interleave result.
-     * @tparam p_triple_wide_simd_tag Deduced descriptor type for eight lanes.
-     * @param[in] simd_tag Active Highway descriptor.
-     * @param[in] triple_wide_simd_tag Descriptor spanning eight scalar lanes.
-     * @param[in] upper_column Column from the first matrix half.
-     * @param[in] lower_column Column from the second matrix half.
-     * @return One interleaved column of the sixteen-row matrix.
+     * @brief Combines columns from the two eight-row halves of a matrix.
+     * @tparam p_select_upper Select the upper interleave result when true.
+     * @param[in] simd_tag Original lane tag.
+     * @param[in] triple_wide_simd_tag Tag whose lanes hold eight original elements.
+     * @param[in] upper_column Column from the first half.
+     * @param[in] lower_column Column from the second half.
+     * @return One column of the sixteen-row matrix.
      */
     template <bool p_select_upper, class p_triple_wide_simd_tag>
     static constexpr auto
@@ -843,15 +814,14 @@ public:
         : matrix_storage_(matrix_storage) {}
 
     /**
-     * @brief Loads one complete SIMD row at each supplied source offset.
+     * @brief Loads one SIMD row from each of the active row offsets.
      *
-     * @tparam p_value_type Scalar source element type.
-     * @tparam p_offset_count Number of source offsets.
-     * @param[in] simd_tag Highway descriptor defining row width.
-     * @param[in] offsets Scalar offsets for consecutive matrix rows.
-     * @param[in] source Readable scalar source storage.
-     * @return Number of fully loaded rows.
-     * @pre `p_offset_count >= hn::Lanes(simd_tag)` and every row is fully readable.
+     * Smaller unsigned source elements are widened to the matrix lane type.
+     * @param[in] simd_tag Tag defining the number of rows and columns.
+     * @param[in] offsets Source element offset for each row.
+     * @param[in] source Readable source elements.
+     * @return Number of loaded rows.
+     * @pre There are at least Lanes(simd_tag) offsets and every row is readable.
      */
     template <typename p_value_type, std::size_t p_offset_count>
     constexpr auto load_rows_at_offsets(p_simd_tag& simd_tag,
@@ -884,16 +854,18 @@ public:
     }
 
     /**
-     * @brief Loads bounded rows and zero-fills rows with no available source lanes.
+     * @brief Loads rows from available source elements and fills missing lanes with zero.
      *
-     * @tparam p_value_type Scalar source element type.
-     * @tparam p_offset_count Number of source offsets.
-     * @param[in] simd_tag Highway descriptor defining row width.
-     * @param[in] available_value_count Readable scalar count in `source`.
-     * @param[in] offsets Scalar offsets for consecutive matrix rows.
-     * @param[in] source Readable scalar source storage.
-     * @return Pair of fully loaded row count and lane count in the final partial row.
-     * @pre `p_offset_count == hn::Lanes(simd_tag)`.
+     * Processes every supplied offset, including offsets beyond the active
+     * matrix width. Smaller unsigned source elements are widened.
+     *
+     * @param[in] simd_tag Tag defining row width.
+     * @param[in] available_value_count Readable source element count.
+     * @param[in] offsets Source element offset for each row.
+     * @param[in] source Source elements.
+     * @return Full row count and valid lane count of the last partial row.
+     * @pre At least Lanes(simd_tag) offsets are required. Matrix storage must
+     * hold p_offset_count rows, and adding a lane count to an offset must not overflow.
      */
     template <typename p_value_type, std::size_t p_offset_count>
     constexpr auto
@@ -968,8 +940,8 @@ public:
         const std::size_t lane_count = hn::Lanes(simd_tag);
         if constexpr (std::same_as<hn::TFromD<p_simd_tag>, std::uint64_t>) {
             if (lane_count > 2u) {
-                // Reuse the existing SIMD-only half-width network: widening
-                // u64 to a fictitious u128 lane is not a valid transpose.
+                // Use the half-width transpose for uint64_t because Highway has no
+                // wider integer lane type for the widening-based transpose.
                 if (!transpose_u64_lane_matrix(simd_tag, &matrix_storage_[0])) {
                     std::abort();
                 }
