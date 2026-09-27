@@ -1,6 +1,6 @@
 /**
  * @file bioseq_caching/core/write_observation.cppm
- * @brief Fixed transaction/subtransaction write-observation ledger.
+ * @brief Tracks keys written by a transaction and its subtransactions.
  */
 module;
 
@@ -28,13 +28,13 @@ enum class write_subtransaction_result : std::uint8_t {
 };
 
 /**
- * A bounded allocation-free transaction ledger.
+ * Tracks written keys in fixed storage.
  *
- * Keys are owned by their current subtransaction.  A subtransaction commit
- * retags its unique keys to the parent; abort removes only the child's keys.
- * Capacity failure makes coarse mode sticky until top-level cleanup, even if
- * the subtransaction which observed the failure later aborts.  This permits
- * false invalidation but never a missed committed write.
+ * Committing a subtransaction transfers its keys to the parent. Aborting it
+ * removes its keys. If either array fills, the ledger treats the transaction
+ * as touching every key until reset, even if the subtransaction later aborts.
+ * Callers use this mode to invalidate entries when the ledger cannot name each
+ * changed key.
  */
 template <class p_key_type, std::size_t p_key_capacity, std::size_t p_frame_capacity = 64>
     requires(std::is_trivially_copyable_v<p_key_type> && p_key_capacity > 0 &&
@@ -162,7 +162,7 @@ class transaction_write_ledger {
         return false;
     }
 
-    /** Copy each distinct surviving key once, preserving bounded behavior. */
+    /** Copy distinct active keys into the output buffer and stop when it is full. */
     [[nodiscard]] std::size_t copy_unique(std::span<p_key_type> output) const noexcept {
         std::size_t copied = 0;
         for (const observation& candidate : observations_) {
