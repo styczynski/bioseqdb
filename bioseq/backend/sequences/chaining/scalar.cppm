@@ -1,10 +1,10 @@
 /**
  * @file scalar.cppm
- * @brief Scalar dynamic-programming anchor chaining.
+ * @brief Chain anchors with scalar dynamic programming.
  *
- * Scores coordinate-sorted anchors with prepared gap and skip penalties, then
- * writes retained chains through the shared arena-backed backtracking contract.
- * Complexity is O(n * max_chain_iter) per query.
+ * Score possible predecessors within a moving reference window, then follow
+ * the chosen predecessor links to recover chains. Temporary arrays and output
+ * records use the chaining arena.
  */
 module;
 
@@ -26,33 +26,18 @@ import bioseq.instrumentation;
 export {
 namespace bioseq::chaining {
 
-/// Chain coordinate-sorted anchors with scalar dynamic programming.
+/// Build chains by choosing a predecessor for each anchor.
+/// Search recent anchors first. Distance and iteration limits bound the search.
+/// The visited-mark skip rule can stop repeated unsuccessful checks, while a
+/// cached high-scoring anchor gets one extra check if the main search missed it.
+/// Backtrack from highest-scoring endpoints, keeping chains that meet score and
+/// seed-count limits. Claim shared anchors once. Both output slabs must stay
+/// bound to the caller's live chaining arena.
 ///
-/// For each coordinate-sorted anchor, the kernel:
-///   1. Searches prior anchors in `[window_start, current - 1]`.
-///   2. Adds the pair score to the candidate's best score.
-///   3. Tracks the best predecessor and score.
-///   4. Applies the configured maximum-skip termination.
-///   5. Tries the globally best anchor as a fallback candidate.
-///
-/// It then backtracks from highest-scoring anchors to extract chains.
-///
-/// @param anchors                  Sorted anchor array (read-only span. The
-///                                  kernel does not mutate the input — it only
-///                                  reads positions to score and emit a
-///                                  freshly-reordered anchor span alongside
-///                                  the chains).
-/// @param params                   Chaining parameters (must have prepare()
-///                                  called).
-/// @param chains_out               Output slab — surviving chains are appended
-///                                  here in score-descending order.
-/// @param reordered_anchors_out    Output slab — anchors of surviving chains
-///                                  appended in chain order. `chain::anchor_start`
-///                                  indexes into this slab.
-///
-/// Both output slabs must be live arena_slab values rooted in the caller's
-/// per-query `arena::chain` scope. The kernel writes directly into them via
-/// `backtrack_chains`, avoiding an intermediate output container and copy.
+/// @param anchors Anchors in canonical_anchor_less order.
+/// @param params Chaining settings with prepare() already called.
+/// @param chains_out Receives accepted chains in endpoint-processing order.
+/// @param reordered_anchors_out Receives each chain's anchors in forward order.
 void chain_anchors_scalar(
     std::span<const anchor> anchors,
     const chaining_parameters& params,
@@ -80,28 +65,25 @@ void chain_anchors_scalar(
     const int32_t max_skip = params.max_chain_skip;
     const int32_t max_iter = params.max_chain_iter;
 
-    // Keep all dynamic-programming storage in the per-query chain arena.
-    // best_scores and peak_scores are written before their first read;
-    // predecessors and visited require the exact -1 and zero sentinels below.
+    // Keep scoring arrays in the chaining arena. Scores are written before
+    // use. Initialize the predecessor and visited arrays for their sentinel checks.
     auto dp_scope = context::current().push<context::arena::chain>();
     auto& dp_ctx = context::current();
     auto best_scores  = dp_ctx.alloc_chain_array<int32_t>(scratch_count);
     auto predecessors = dp_ctx.alloc_chain_array<int64_t>(scratch_count);
     auto peak_scores  = dp_ctx.alloc_chain_array<int32_t>(scratch_count);
     auto visited      = dp_ctx.alloc_chain_array<int32_t>(scratch_count);
-    // predecessors[] = -1 (the "no predecessor" sentinel checked at line
-    // 143 below) — int64_t -1 is all-ones, so memset(0xff) does the job.
+    // -1 marks an anchor with no predecessor.
     std::memset(predecessors.data(), 0xff,
                 static_cast<std::size_t>(anchor_count) * sizeof(int64_t));
-    // visited[] = 0 (the "not visited" sentinel checked at line 137).
+    // Zero clears the visited-generation marks.
     std::memset(visited.data(), 0,
                 static_cast<std::size_t>(anchor_count) * sizeof(int32_t));
 
     int64_t window_start = 0;
     int64_t global_best_idx = -1;
 
-    // --- Forward DP pass ---
-    // Equivalent to lchain.c lines 171-206
+    // Score anchors in their sorted order.
     {
     static const auto* forward_instrumentation_descriptor =
         bioseq::instrumentation::register_static_loop("mg_lchain_dp_forward");
@@ -112,7 +94,7 @@ void chain_anchors_scalar(
         int32_t best_score = static_cast<int32_t>(anchors[current_idx].query_span);
         int32_t skip_count = 0;
 
-        // Advance window start: skip anchors on different chromosomes or too far
+        // Move past anchors from another strand or outside the reference window.
         while (window_start < current_idx &&
                (anchors[current_idx].strand_partition_key() != anchors[window_start].strand_partition_key() ||
                 anchors[current_idx].reference_sort_key() > anchors[window_start].reference_sort_key()
@@ -126,10 +108,8 @@ void chain_anchors_scalar(
 
         int64_t search_end = window_start;
 
-        // Cache the pair_score for the current `global_best_idx` so the
-        // post-loop fallback below can reuse it instead of calling
-        // compute_chaining_score a second time. Negative initialisation
-        // sentinel: only used when the matching candidate_idx is hit.
+        // Save the pair score if the search reaches the cached best anchor,
+        // so the later extra-candidate check can reuse it.
         int32_t cached_global_pair_score = std::numeric_limits<int32_t>::min();
         bool global_pair_score_cached = false;
 
@@ -145,10 +125,7 @@ void chain_anchors_scalar(
                 continue;
             }
 
-            // Stash the pair_score for global_best_idx — we may need it
-            // again right after this loop. compute_chaining_score is
-            // ~5-10 % of the chaining loop's CPU cost, so avoiding a
-            // second invocation per outer iter is a measurable win.
+            // Save this pair score for the extra-candidate check below.
             if (candidate_idx == global_best_idx) {
                 cached_global_pair_score = pair_score;
                 global_pair_score_cached = true;
@@ -172,7 +149,7 @@ void chain_anchors_scalar(
             }
         }
 
-        // Try the globally best anchor in the window (global_best_idx optimization)
+        // Refresh the cached best anchor when it leaves the reference window.
         if (global_best_idx < 0 ||
             anchors[current_idx].reference_sort_key() - anchors[global_best_idx].reference_sort_key()
                 > static_cast<uint64_t>(max_dist_x))
@@ -185,13 +162,11 @@ void chain_anchors_scalar(
                     global_best_idx = scan_idx;
                 }
             }
-            // global_best_idx changed — the cache is stale.
+            // The cached pair score belonged to the previous best anchor.
             global_pair_score_cached = false;
         }
         if (global_best_idx >= 0 && global_best_idx < search_end) {
-            // Use cached pair_score from pass 1 if available; otherwise
-            // recompute (early-exit case where the inner loop broke past
-            // global_best_idx, or a fresh global_best_idx from the rescan).
+            // Score the extra candidate if the main search did not save its score.
             const int32_t global_pair_score = global_pair_score_cached
                 ? cached_global_pair_score
                 : compute_chaining_score(

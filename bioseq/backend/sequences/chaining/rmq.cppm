@@ -1,16 +1,13 @@
 /**
  * @file rmq.cppm
- * @brief AVL tree with range-minimum augmentation for chaining.
+ * @brief Find chaining predecessors with an AVL range-minimum tree.
  *
- * The primary tree holds all in-range anchors and an optional inner tree
- * provides finer-grained refinement. Each subtree caches its minimum-priority
- * node so insert, erase, and predecessor queries remain logarithmic.
+ * Nodes are ordered by query position and anchor index. Each subtree remembers
+ * its lowest-priority node, letting a query reuse whole subtrees when looking
+ * for a promising predecessor within a query interval.
  *
- * Each tree node stores a priority = -(f[j] + 0.5 * gap_penalty * (ref_pos + query_pos)).
- * The subtree_minimum pointer tracks the minimum-priority node in each subtree,
- * enabling O(log n) range-minimum queries.
- *
- * Complexity: O(n log n) — each anchor does O(log n) insert + O(log n) rmq query.
+ * Reference-distance and size limits remove old nodes. An optional second tree
+ * keeps a shorter window for scoring nearby alternatives.
  */
 module;
 
@@ -37,15 +34,12 @@ import bioseq.common.checked_arithmetic;
 export {
 namespace bioseq::chaining {
 
-/// Node in the avl tree with rmq support.
-///
-/// Keyed by (query_position, anchor_index) ascending.
-/// The priority field enables rmq: each node tracks the minimum-priority
-/// node in its subtree via subtree_minimum.
+/// One anchor in the AVL lookup tree, ordered by query position and index.
+/// subtree_minimum points to the lowest-priority node in this node's subtree.
 struct rmq_node {
-    std::int64_t query_position = 0;   ///< Full-width query coordinate that is never truncated.
+    std::int64_t query_position = 0;   ///< Signed 64-bit query coordinate used by range bounds.
     int64_t anchor_index   = 0;
-    double  priority       = 0.0;  ///< -(best_scores[j] + 0.5 * gap_penalty * (ref_pos + query_pos))
+    double  priority       = 0.0;  ///< Negative score adjusted for position, used to choose a promising predecessor.
 
     std::array<rmq_node*, 2> children{nullptr, nullptr};
     rmq_node* subtree_minimum   = nullptr;
@@ -53,7 +47,7 @@ struct rmq_node {
     uint32_t subtree_size  = 0;
 };
 
-/// Existing RMQ initial geometry; the free list may grow beyond its initial reserve.
+/// Initial RMQ storage sizes. The recycled-node list may grow during chaining.
 struct rmq_chaining_storage_plan {
     chaining_output_storage_plan output;
     scalar_backtracking_storage_plan backtracking;
@@ -97,11 +91,8 @@ derive_rmq_chaining_storage_plan(std::size_t count, const chaining_parameters& p
         *nodes / 4u, trees, *total_arena, *total_tree};
 }
 
-/// Compare two rmq nodes by (query_position, anchor_index) ascending.
-///
-/// Equal query positions are ordered by ascending anchor index.
-///
-/// @return <0 if a < b, 0 if equal, >0 if a > b
+/// Compare query positions, breaking ties by anchor index.
+/// @return Negative if left precedes right, zero if equal, positive otherwise.
 [[nodiscard]] inline int compare_rmq_nodes(
         const rmq_node* left, const rmq_node* right) {
     if (left->query_position != right->query_position) {
@@ -113,10 +104,8 @@ derive_rmq_chaining_storage_plan(std::size_t count, const chaining_parameters& p
     return 0;
 }
 
-/// Update the subtree_minimum pointer for a node based on its children.
-///
-/// The subtree_minimum is the node with the smallest priority value in the subtree.
-/// This is the core augmentation that enables O(log n) range-minimum queries.
+/// Cache the lowest-priority node from this node and its two subtrees.
+/// Range queries can then inspect a covered subtree without visiting every node.
 inline void update_subtree_minimum(rmq_node* node) {
     if (node == nullptr) return;
     node->subtree_minimum = node;
@@ -138,19 +127,16 @@ inline void update_subtree_size(rmq_node* node) {
     if (node->children[1] != nullptr) node->subtree_size += node->children[1]->subtree_size;
 }
 
-/// avl+rmq tree for chaining predecessor lookup.
-///
-/// Supports insert, erase, find, and range-minimum query operations.
-///
-/// Uses a pool allocator: nodes are pre-allocated in a vector and recycled
-/// via a free list for allocation-free operation during the chaining loop.
+/// AVL tree for finding chaining predecessors within a query-position range.
+/// Nodes come from a preallocated pool and erased nodes can be reused.
+/// The free list itself may allocate more space as nodes are returned.
 struct rmq_tree {
     rmq_node* root = nullptr;
     std::vector<rmq_node> node_pool;
     size_t next_pool_index = 0;
     std::vector<rmq_node*> free_list;
 
-    /// Reserve pool capacity for up to max_nodes insertions.
+    /// Initialize a fresh tree's pool with max_nodes slots.
     void reserve(size_t max_nodes) {
         node_pool.resize(max_nodes);
         next_pool_index = 0;
@@ -185,7 +171,7 @@ struct rmq_tree {
         return (root != nullptr) ? root->subtree_size : 0;
     }
 
-    // --- avl rotations (translated from krmq.h) ---
+    // AVL rotations adapted from krmq.h
 
     /// Single rotation. Direction zero rotates left. One rotates right.
     static rmq_node* rotate_single(rmq_node* node, int direction) {
@@ -199,18 +185,18 @@ struct rmq_tree {
         return other;
     }
 
-    /// Double rotation.
+    /// Repair a left-right or right-left imbalance with two rotations.
     static rmq_node* rotate_double(rmq_node* node, int direction) {
         node->children[1 - direction] = rotate_single(
             node->children[1 - direction], 1 - direction);
         return rotate_single(node, direction);
     }
 
-    // --- Insert ---
+    // Insertion
 
-    /// Insert a node into the tree. Returns the node if it was a duplicate (not inserted).
-    ///
-    /// Duplicate keys are returned without modifying the tree.
+    /// Insert new_node and rebalance the tree.
+    /// Return the existing node for a duplicate key, or nullptr after insertion.
+    /// The caller still owns an uninserted new_node.
     rmq_node* insert(rmq_node* new_node) {
         new_node->children[0] = new_node->children[1] = nullptr;
         new_node->balance = 0;
@@ -241,11 +227,9 @@ struct rmq_tree {
         // Link the new node
         path_nodes[path_depth - 1]->children[path_dirs[path_depth - 1]] = new_node;
 
-        // Walk back up, updating sizes, mins, and rebalancing.
-        //
-        // Propagate AVL balance only while height changes. Subtree size and
-        // minimum augmentations must still reach every ancestor after height
-        // stabilizes, so the loop switches to augmentation-only mode.
+        // Update ancestors after insertion. Balance changes stop when subtree
+        // height stops changing, but every ancestor still needs a new size
+        // and minimum-priority pointer.
         bool still_propagating_balance = true;
         for (int depth = path_depth - 1; depth >= 0; --depth) {
             rmq_node* node = path_nodes[depth];
@@ -261,10 +245,8 @@ struct rmq_tree {
             update_subtree_minimum(node);
 
             if (node->balance == 0) {
-                // Height didn't change → balance is stable up the
-                // tree, but size/min still need to be updated on
-                // every ancestor. Continue the loop in
-                // augmentation-only mode.
+                // Height is unchanged above this node. Continue updating ancestor
+                // sizes and minima without changing their balance factors.
                 still_propagating_balance = false;
                 continue;
             } else if (node->balance == -2 || node->balance == 2) {
@@ -284,9 +266,8 @@ struct rmq_tree {
                         rotated->balance = 0;
                     }
                 } else {
-                    // Double-rotation assignments follow the post-rotation
-                    // grandchild balance exactly; parent and child receive
-                    // complementary values before the new root is cleared.
+                    // Use the grandchild's old balance to set the two lower nodes'
+                    // balances after the double rotation.
                     rmq_node* grandchild = child->children[rebalance_dir];
                     rotated = rotate_double(node, rebalance_dir);
                     const int8_t balance_sign = static_cast<int8_t>(
@@ -311,7 +292,7 @@ struct rmq_tree {
                     root = rotated;
                 }
 
-                // Update sizes and mins for ancestors above the rotation
+                // Refresh cached sizes and minima above the repaired subtree.
                 for (int ancestor = depth - 1; ancestor >= 0; --ancestor) {
                     update_subtree_size(path_nodes[ancestor]);
                     update_subtree_minimum(path_nodes[ancestor]);
@@ -323,12 +304,11 @@ struct rmq_tree {
         return nullptr;
     }
 
-    // --- Erase ---
+    // Removal
 
-    /// Find and erase a node matching the given key.
-    ///
-    /// Returns the erased node (caller should release_node it) or nullptr if not found.
-    /// Returns the detached node so the caller can recycle it.
+    /// Remove the node with this key and rebalance the tree.
+    /// Return the detached node, or nullptr when the key is absent.
+    /// The caller can pass the result to release_node() for reuse.
     rmq_node* erase(const rmq_node* key) {
         if (root == nullptr) return nullptr;
 
@@ -351,7 +331,7 @@ struct rmq_tree {
 
         rmq_node* erased = current;
 
-        // If node has two children, swap with in-order successor
+        // Replace a node with two children by its next node in sorted order.
         if (current->children[0] != nullptr && current->children[1] != nullptr) {
             // Find in-order successor (leftmost in right subtree)
             const int swap_depth = path_depth;
@@ -366,22 +346,21 @@ struct rmq_tree {
                 successor = successor->children[0];
             }
 
-            // Replace current's position in the tree with successor
-            // Copy successor's data into current, then remove successor
-            // Actually, we swap the tree links to avoid data copy issues
+            // Move the successor into current's place by changing links.
+            // Keeping each node's data intact preserves external node pointers.
             rmq_node* successor_right = successor->children[1];
 
-            // Successor takes current's children (except if successor is direct child)
+            // The successor inherits the removed node's left subtree.
             if (path_nodes[path_depth - 1] == current) {
                 // Successor is the direct right child
                 successor->children[0] = current->children[0];
                 successor->balance = current->balance;
                 successor->subtree_size = current->subtree_size;
-                // Don't set children[1], it stays
+                // Its right child remains attached.
                 path_nodes[swap_depth] = successor;
                 path_dirs[swap_depth] = 1;
             } else {
-                // Successor is deeper
+                // Detach the successor from its old parent before moving it.
                 path_nodes[path_depth - 1]->children[0] = successor_right;
                 successor->children[0] = current->children[0];
                 successor->children[1] = current->children[1];
@@ -398,7 +377,7 @@ struct rmq_tree {
             }
 
         } else {
-            // Zero or one child: replace with the existing child
+            // Replace a node with at most one child by that child, or nullptr.
             rmq_node* replacement = (current->children[0] != nullptr)
                 ? current->children[0] : current->children[1];
             if (path_depth > 0) {
@@ -408,17 +387,9 @@ struct rmq_tree {
             }
         }
 
-        // Rebalance upward.
-        //
-        // As in `insert`, AVL balance updates
-        // stop once height stabilises (balance settles to ±1, or a
-        // rotation restores the pre-erase height), but the
-        // subtree_size / subtree_minimum augmentations must continue
-        // walking to the root because we removed a node from every
-        // ancestor's subtree.
-        //
-        // Continue augmentation updates after height propagation stops so the
-        // root always retains the exact subtree size and range minimum.
+        // Repair balance factors while the subtree height keeps changing.
+        // Every ancestor still needs an updated size and minimum, even after
+        // its height stops changing.
         bool still_propagating_balance = true;
         for (int depth = path_depth - 1; depth >= 0; --depth) {
             rmq_node* node = path_nodes[depth];
@@ -434,8 +405,8 @@ struct rmq_tree {
             update_subtree_minimum(node);
 
             if (node->balance == -1 || node->balance == 1) {
-                // Height didn't change → balance is stable upward,
-                // but every ancestor still needs size/min updates.
+                // Height is unchanged above this node. Ancestor sizes and minima
+                // still need updating.
                 still_propagating_balance = false;
                 continue;
             } else if (node->balance == -2 || node->balance == 2) {
@@ -456,8 +427,7 @@ struct rmq_tree {
                         rotated->balance = 0;
                     }
                 } else {
-                    // Double rotation uses the same complementary balance
-                    // assignments as insertion before clearing the new root.
+                    // Restore the lower nodes' balances using the grandchild's old balance.
                     rmq_node* grandchild = child->children[rebalance_dir];
                     rotated = rotate_double(node, rebalance_dir);
                     const int8_t balance_sign = static_cast<int8_t>(
@@ -482,12 +452,11 @@ struct rmq_tree {
                 }
 
                 if (!height_changed) {
-                    // Rotation absorbed the height change. Balance is
-                    // stable upward; only augmentations remain.
+                    // This rotation restores the old height. Only ancestor sizes and
+                    // minima need updating from here.
                     still_propagating_balance = false;
                 }
-                // If height *did* change (the rotation propagated the
-                // shrink upward), balance work continues at depth-1.
+                // Otherwise the shorter subtree still affects its parent's balance.
             }
         }
 
@@ -495,7 +464,7 @@ struct rmq_tree {
         return erased;
     }
 
-    // --- Range Minimum Query ---
+    // Range-minimum lookup
 
     /// Find the minimum-priority node in the inclusive key range.
     ///
@@ -567,9 +536,7 @@ struct rmq_tree {
         return best;
     }
 
-    /// reverse_iterator for backwards traversal (used in inner-tree refinement).
-    ///
-    /// Provides move_previous() to step to the predecessor node.
+    /// Walk candidate nodes in decreasing key order for the shorter-window search.
     struct reverse_iterator {
         const rmq_node* stack_storage[64];
         const rmq_node** stack_top;
@@ -599,9 +566,8 @@ struct rmq_tree {
             }
         }
 
-        /// Step to the predecessor (previous in-order node).
-        ///
-        /// @return true if a predecessor was found, false if we've exhausted the tree
+        /// Move to the previous node in sorted order.
+        /// @return True when a node is available, false at the beginning of the tree.
         bool move_previous() {
             if (current_node == nullptr) return false;
 
@@ -616,7 +582,7 @@ struct rmq_tree {
                 return true;
             }
 
-            // Walk up the stack to find the first ancestor we came from the right of
+            // Find the nearest ancestor that precedes the current node.
             while (stack_top > stack_storage) {
                 const rmq_node* parent = *(--stack_top);
                 if (parent->children[1] == current_node ||
@@ -632,42 +598,29 @@ struct rmq_tree {
             return false;
         }
 
-        /// Get the current node.
+        /// Return the current node, or nullptr when the cursor is exhausted.
         [[nodiscard]] const rmq_node* current() const {
             return current_node;
         }
     };
 };
 
-// ============================================================================
-// rmq-based chaining entry point
-// ============================================================================
+// RMQ chaining
 
-/// rmq-based chaining.
+/// Chain anchors with a tree of candidate predecessors.
+/// Only earlier reference positions qualify. Remove anchors outside the
+/// reference window and score the lowest-priority node in the inclusive query
+/// interval. If that link leaves a gap or changes diagonal, an optional shorter
+/// window checks nearby alternatives.
+/// RMQ scoring allows equal query positions and imposes no diagonal bandwidth
+/// limit. Keep the caller's chaining arena alive for both output slabs.
 ///
-/// Uses the same scoring and ordering contract as the scalar chaining route.
-///
-/// Uses avl trees augmented with Range Minimum Query to find the best
-/// predecessor for each anchor in O(log n) instead of O(max_iter).
-///
-/// The algorithm groups anchors by reference position. When moving to a
-/// new ref position, the previous group's anchors are inserted into the
-/// tree(s). Out-of-range anchors are pruned. Then an rmq query finds
-/// the best predecessor in the valid query-position range.
-///
-/// @param anchors                  Sorted anchor array. The read-only span
-///                                  kernel only reads positions and emits a
-///                                  freshly-reordered anchor span.
-/// @param params                   Chaining parameters (must have prepare()
-///                                  called).
-/// @param chains_out               Output slab — surviving chains are appended
-///                                  here in score-descending order.
-/// @param reordered_anchors_out    Output slab — anchors of surviving chains
-///                                  appended in chain order. `chain::anchor_start`
-///                                  indexes into this slab.
-/// @param max_dist_inner           Inner tree max distance (0 = disabled).
-/// @param cap_rmq_size             Maximum tree size before pruning (default
-///                                  100000).
+/// @param anchors Anchors in canonical_anchor_less order.
+/// @param params Settings with prepare() already called.
+/// @param chains_out Receives chains in endpoint-processing order.
+/// @param reordered_anchors_out Receives each chain's anchors in forward order.
+/// @param max_dist_inner Shorter reference/query window, or zero to disable it.
+/// @param cap_rmq_size Limit on primary-tree nodes, enforced by removing oldest anchors.
 void chain_anchors_rmq(
     std::span<const anchor> anchors,
     const chaining_parameters& params,
@@ -694,9 +647,8 @@ void chain_anchors_rmq(
         max_dist_inner = 0;
     }
 
-    // Allocate all dynamic-programming arrays in the per-query chain arena.
-    // Bulk initialization retains the exact sentinel values used by the
-    // scalar and SIMD backends without introducing heap-owned intermediates.
+    // Keep scoring arrays in the chaining arena. A predecessor of -1
+    // means that the anchor starts a chain.
     auto dp_scope = context::current().push<context::arena::chain>();
     auto& dp_ctx = context::current();
     auto best_scores  = dp_ctx.alloc_chain_array<int32_t>(scratch_count);
@@ -709,7 +661,7 @@ void chain_anchors_rmq(
     std::memset(peak_scores.data(),  0,
                 static_cast<std::size_t>(anchor_count) * sizeof(int32_t));
 
-    // Allocate trees
+    // Prepare the primary tree and the optional shorter-window tree.
     rmq_tree primary_tree;
     primary_tree.reserve(storage_plan->nodes_per_tree);
     rmq_tree inner_tree;
@@ -717,13 +669,13 @@ void chain_anchors_rmq(
         inner_tree.reserve(storage_plan->nodes_per_tree);
     }
 
-    // Track which anchors are in the trees for pruning
+    // Remember which reference groups have been inserted and removed.
     int64_t group_start = 0;
     int64_t prune_start = 0;
     int64_t prune_start_inner = 0;
 
-    // Per-anchor node pointers live in the chain arena. Supported targets use
-    // the all-zero null-pointer representation required by this bulk reset.
+    // Keep node pointers by anchor index for removal. This reset assumes
+    // that supported platforms represent a null pointer with zero bytes.
     auto primary_nodes = dp_ctx.alloc_chain_array<rmq_node*>(
         scratch_count);
     auto inner_nodes   = dp_ctx.alloc_chain_array<rmq_node*>(
@@ -745,8 +697,8 @@ void chain_anchors_rmq(
             static_cast<int32_t>(anchors[current_index].query_span);
         int64_t best_predecessor = -1;
 
-        // === Step 1: Insert completed ref-position groups into trees ===
-        // Only insert when we move to a new reference position
+        // Insert the completed reference group. Delaying insertion prevents
+        // links between anchors at the same reference position.
         if (group_start < current_index &&
             anchors[group_start].reference_sort_key()
                 != anchors[current_index].reference_sort_key())
@@ -780,7 +732,7 @@ void chain_anchors_rmq(
             group_start = current_index;
         }
 
-        // === Step 2: Prune out-of-range nodes from primary tree ===
+        // Remove anchors from other strands or outside the reference window.
         while (prune_start < current_index) {
             if (anchors[current_index].strand_partition_key()
                     != anchors[prune_start].strand_partition_key()
@@ -799,7 +751,7 @@ void chain_anchors_rmq(
             }
         }
 
-        // Cap tree size (lchain.c:434-438)
+        // Remove oldest anchors until the primary tree fits its size limit.
         if (primary_tree.size() > static_cast<uint32_t>(cap_rmq_size)) {
             while (prune_start < current_index &&
                    primary_tree.size() > static_cast<uint32_t>(cap_rmq_size))
@@ -813,7 +765,7 @@ void chain_anchors_rmq(
             }
         }
 
-        // Prune inner tree
+        // Apply the shorter reference window to the inner tree.
         if (max_dist_inner > 0) {
             while (prune_start_inner < current_index) {
                 if (anchors[current_index].strand_partition_key()
@@ -834,7 +786,7 @@ void chain_anchors_rmq(
             }
         }
 
-        // === Step 3: Primary rmq query ===
+        // Choose a candidate from the inclusive query-position interval.
         if (primary_tree.size() > 0) {
             const std::int64_t current_query_pos = static_cast<std::int64_t>(
                 anchors[current_index].query_position);
@@ -862,9 +814,8 @@ void chain_anchors_rmq(
                     best_predecessor = predecessor_index;
                 }
 
-                // === Step 4: Inner-tree refinement ===
-                // If the primary result is not exact and inner tree exists,
-                // iterate backwards through inner tree applying skip logic
+                // If the first link leaves a gap or changes diagonal, check nearby
+                // alternatives in decreasing query order, subject to the skip limit.
                 if (!is_exact && max_dist_inner > 0 && inner_tree.size() > 0) {
                     rmq_node inner_hi_key;
                     inner_hi_key.query_position = current_query_pos;
@@ -906,7 +857,7 @@ void chain_anchors_rmq(
             }
         }
 
-        // === Step 5: Store results ===
+        // Save the best predecessor and score for this anchor.
         best_scores[current_index] = best_score;
         predecessors[current_index] = best_predecessor;
         peak_scores[current_index] = (best_predecessor >= 0
