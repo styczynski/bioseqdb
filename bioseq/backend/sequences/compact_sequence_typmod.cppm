@@ -1,6 +1,6 @@
 /**
  * @file compact_sequence_typmod.cppm
- * @brief Compact-sequence PostgreSQL typmod encoding shared across front ends.
+ * @brief Store a sequence's alphabet and packing width in its PostgreSQL type modifier.
  */
 module;
 
@@ -12,21 +12,22 @@ import std;
 import bioseq.common.logging;
 
 /**
- * @brief Runtime type parameters for a standard-layout compact sequence.
+ * @brief Alphabet and storage width for a compact sequence.
  *
- * The encoded representation stores the alphabet code in the next byte and
- * the base-two logarithm of the storage-unit byte width in the low byte.
+ * The type modifier keeps the alphabet code in bits 8-15. The low byte holds
+ * 0, 1, 2, or 3 for storage units of 1, 2, 4, or 8 bytes.
  */
 export struct compact_sequence_stdc_type_params {
-    /** @brief Index of the alphabet in the owning supported-alphabet set. */
+    /** @brief Alphabet number in the caller's supported-alphabet list. */
     std::uint8_t alphabet_code;
 
     /** @brief Width of one packed storage unit in bytes. */
     std::uint8_t storage_unit_byte_width;
 
     /**
-     * @brief Encode the parameters as a PostgreSQL type modifier.
-     * @return The compact signed 32-bit type modifier.
+     * @brief Pack the alphabet and width into a PostgreSQL type modifier.
+     * @pre The storage-unit width is 1, 2, 4, or 8 bytes.
+     * @return Encoded type modifier.
      */
     [[nodiscard]] constexpr std::int32_t encode() const noexcept {
         const std::uint8_t width_code =
@@ -42,9 +43,9 @@ export struct compact_sequence_stdc_type_params {
     }
 
     /**
-     * @brief Decode a PostgreSQL type modifier.
-     * @param typmod Encoded type modifier produced by encode().
-     * @return Decoded alphabet and storage-width parameters.
+     * @brief Read the alphabet and width from an encoded type modifier.
+     * @param typmod Value produced by encode(), with a width code from 0 to 3.
+     * @return Alphabet code and storage-unit width in bytes.
      */
     [[nodiscard]] static constexpr compact_sequence_stdc_type_params
     decode(std::int32_t typmod) noexcept {
