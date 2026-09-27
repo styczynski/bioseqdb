@@ -1,6 +1,6 @@
 /**
  * @file concat_reverse.cppm
- * @brief Concatenation and constant-time logical transform SQL adapters.
+ * SQL functions for joining sequences and reversing their letters.
  */
 module;
 
@@ -28,9 +28,9 @@ import bioseq.storage.lazy_sequence;
 namespace {
 
 /**
- * @brief Builds an unbound sequence Datum from a text fragment.
- * @param[in] value ASCII symbols copied into the current PostgreSQL memory context.
- * @return Newly allocated unbound sequence Datum.
+ * @brief Copy text into a sequence whose alphabet has not been chosen yet.
+ * @param[in] value ASCII symbols to copy.
+ * @return A sequence allocated in the current PostgreSQL memory context.
  */
 [[nodiscard]] inline Datum text_sequence_literal(std::string_view value)
 {
@@ -39,11 +39,11 @@ namespace {
 }
 
 /**
- * @brief Concatenates a temporary text literal with an existing sequence.
- * @param[in] value ASCII text converted to an unbound sequence leaf.
- * @param[in] sequence Sequence Datum borrowed for the operation.
- * @param[in] text_on_left Whether the text precedes the sequence.
- * @return Persistent concatenation Datum allocated for the SQL result.
+ * @brief Join text with a sequence and release the temporary text sequence.
+ * @param[in] value ASCII text to copy into the result.
+ * @param[in] sequence Existing sequence.
+ * @param[in] text_on_left Place text before sequence when true.
+ * @return The joined sequence.
  */
 [[nodiscard]] inline Datum concat_text_and_sequence(
     std::string_view value,
@@ -63,10 +63,12 @@ namespace {
 export namespace bioseq::pg_types::sql_routines {
 
 /**
- * @brief Concatenates two sequence values without flattening their piece trees.
- * @param[in] left Left sequence operand.
- * @param[in] right Right sequence operand.
- * @return Sequence containing both operands in order.
+ * @brief Join sequences by joining their piece trees.
+ * Existing pieces can be shared. Text with no alphabet is checked and packed
+ * when the other operand supplies an alphabet.
+ * @param[in] left Sequence prefix.
+ * @param[in] right Sequence suffix.
+ * @return The joined sequence.
  */
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq">,
@@ -93,10 +95,10 @@ Datum seq_concat(
 }
 
 /**
- * @brief Appends a text value to a sequence.
+ * @brief Append text to a sequence.
  * @param[in] sequence Sequence prefix.
- * @param[in] value ASCII suffix copied into an unbound literal leaf.
- * @return Concatenated sequence Datum.
+ * @param[in] value ASCII suffix, checked against the sequence alphabet when bound.
+ * @return The joined sequence.
  */
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq">,
@@ -120,10 +122,10 @@ Datum seq_concat_text(
 }
 
 /**
- * @brief Prepends a text value to a sequence.
- * @param[in] value ASCII prefix copied into an unbound literal leaf.
+ * @brief Prepend text to a sequence.
+ * @param[in] value ASCII prefix, checked against the sequence alphabet when bound.
  * @param[in] sequence Sequence suffix.
- * @return Concatenated sequence Datum.
+ * @return The joined sequence.
  */
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq">,
@@ -147,10 +149,10 @@ Datum text_concat_seq(
 }
 
 /**
- * @brief Appends a `varchar` value to a sequence.
+ * @brief Append varchar text to a sequence.
  * @param[in] sequence Sequence prefix.
- * @param[in] value ASCII suffix copied into an unbound literal leaf.
- * @return Concatenated sequence Datum.
+ * @param[in] value ASCII suffix, checked against the sequence alphabet when bound.
+ * @return The joined sequence.
  */
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq">,
@@ -177,10 +179,10 @@ Datum seq_concat_varchar(
 }
 
 /**
- * @brief Prepends a `varchar` value to a sequence.
- * @param[in] value ASCII prefix copied into an unbound literal leaf.
+ * @brief Prepend varchar text to a sequence.
+ * @param[in] value ASCII prefix, checked against the sequence alphabet when bound.
  * @param[in] sequence Sequence suffix.
- * @return Concatenated sequence Datum.
+ * @return The joined sequence.
  */
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq">,
@@ -207,9 +209,11 @@ Datum varchar_concat_seq(
 }
 
 /**
- * @brief Returns a logical reverse view of a sequence.
- * @param[in] input Sequence Datum whose root transform is composed with reversal.
- * @return Reversed sequence without eager payload materialization.
+ * @brief Return a sequence with its letter order reversed.
+ * The piece tree records the reversal so its letters can be read in reverse
+ * order when needed.
+ * @param[in] input Sequence to reverse.
+ * @return The reversed sequence.
  */
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq">,
@@ -230,10 +234,11 @@ Datum reverse(
 }
 
 /**
- * @brief Returns a logical reverse-complement view of a bound sequence.
- * @param[in] input Sequence using an alphabet with a complete complement map.
- * @return Reverse-complement sequence without eager payload materialization.
- * @note Unbound or non-complementable alphabets report a PostgreSQL error.
+ * @brief Reverse a sequence and replace each letter with its complement.
+ * The piece tree records this operation until the letters are read.
+ * @param[in] input Sequence with a known alphabet and a complement for every letter.
+ * @return The reverse-complement sequence.
+ * @throws PostgreSQL ERROR if the alphabet is unknown or lacks a complete complement map.
  */
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq">,
@@ -276,10 +281,10 @@ Datum reverse_complement(
 }
 
 /**
- * @brief Implements PostgreSQL array-style concatenation for two sequences.
- * @param[in] left Left sequence operand.
- * @param[in] right Right sequence operand.
- * @return Sequence containing both operands in order.
+ * @brief Join two sequences through the SQL array_cat function.
+ * @param[in] left Sequence prefix.
+ * @param[in] right Sequence suffix.
+ * @return The joined sequence.
  */
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq">,

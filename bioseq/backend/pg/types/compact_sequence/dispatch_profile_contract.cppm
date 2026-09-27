@@ -1,12 +1,12 @@
 /**
  * @file dispatch_profile_contract.cppm
- * @brief Lightweight compile-profile facts shared by typmod admission.
+ * Report which alphabets and packing widths this build supports.
  */
 export module bioseq.postgres.types.compact_sequence.dispatch_profile_contract;
 
 import std;
 
-/** @brief Number of alphabets enabled by the active template-flatten profile. */
+/** @brief Number of alphabets enabled in this build. */
 export inline constexpr std::size_t pgseq_dispatch_profile_alphabet_count =
 #if !defined(BIOSEQ_TEMPLATE_FLATTEN_HAS_ALL_ALPHABETS_UINT64)
     1u;
@@ -14,7 +14,7 @@ export inline constexpr std::size_t pgseq_dispatch_profile_alphabet_count =
     2u;
 #endif
 
-/** @brief Tests a packed storage width against the active coordinate profile. */
+/** @brief Check whether this build supports a storage-unit width in bytes. */
 export [[nodiscard]] constexpr bool
 pgseq_dispatch_profile_contains_storage_unit_byte_width(
     const std::uint8_t byte_width) noexcept
