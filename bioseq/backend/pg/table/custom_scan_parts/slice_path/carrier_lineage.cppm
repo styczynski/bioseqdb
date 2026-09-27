@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Builds SliceProject producer lineage and boundary dependencies.
+ * @brief Records sequence producers and dependencies for SliceProject plans.
  */
 module;
 #include <bioseq/pg_compat.h>
@@ -62,8 +62,8 @@ export {
         if (exprType(expression) != builder.oids->bioseq_seq_type_oid && !operation.has_value() &&
             !force_value)
             return 0u;
-        /* CSE is descriptive only, but even descriptive CSE would hide distinct
-         * occurrences of a volatile expression from EXPLAIN. */
+        /* Reusing graph entries affects the description only. Keep volatile
+         * occurrences separate so EXPLAIN still shows each evaluation site. */
         if (!distinct_consumer && !contain_volatile_functions(expression)) {
             for (std::size_t index = 0u; index < builder.producer_expressions.size(); ++index) {
                 if (equal(builder.producer_expressions[index], expression)) {
@@ -71,7 +71,7 @@ export {
                 }
             }
         }
-        /* Assign children first so stable ids are deterministic and topological. */
+        /* Number dependencies first, so every node refers to earlier IDs. */
         std::vector<std::uint32_t> dependencies;
         auto add_dependency = [&builder, &dependencies](Node* child, bool force_child) {
             const std::uint32_t dependency =
@@ -82,10 +82,8 @@ export {
                 return;
             dependencies.push_back(dependency);
         };
-        /* Opaque source expressions are PostgreSQL-evaluated leaves in this
-         * descriptive graph.  Only recognized lazy operations expose producer
-         * dependencies; otherwise a sequence-returning FuncExpr would be encoded
-         * as source_expr while still carrying children, contradicting the codec. */
+        /* PostgreSQL evaluates unrecognized source expressions as whole leaves.
+         * Only known sequence operations expose dependencies in this graph. */
         if (operation.has_value() && IsA(expression, SubscriptingRef)) {
             auto* subscript = reinterpret_cast<SubscriptingRef*>(expression);
             add_dependency(reinterpret_cast<Node*>(subscript->refexpr), false);
@@ -154,7 +152,7 @@ export {
                                 makeInteger(expression_index),
                                 makeInteger(lower_expression_index));
         node = lappend(node, makeInteger(upper_expression_index));
-        node = lappend(node, makeInteger(-1)); /* optional mmsearch options Expr */
+        node = lappend(node, makeInteger(-1)); /* reserved options-expression position */
         node = lappend(node, makeInteger(transform));
         node = lappend(node, makeInteger(mechanism));
         node = lappend(node, makeInteger(reason));
@@ -186,8 +184,8 @@ export {
             for (auto& binding : builder.source_bindings) {
                 if (!equal(binding.first, source))
                     continue;
-                /* Zero is the deliberate ambiguity marker.  A source Datum cannot
-                 * truthfully carry two simultaneous pre-projection producer ids. */
+                /* Zero marks a source used by different producers. A value can carry
+                 * only one producer ID before projection. */
                 if (binding.second != producer_id)
                     binding.second = 0u;
                 seen = true;
