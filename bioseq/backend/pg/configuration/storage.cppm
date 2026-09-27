@@ -1,6 +1,6 @@
 /**
  * @file storage.cppm
- * @brief Declares PostgreSQL settings for Bioseq sequence storage.
+ * @brief PostgreSQL settings for splitting sequence storage into shards.
  */
 module;
 
@@ -12,11 +12,11 @@ import bioseq.codegen.sql.annotation_model;
 
 export namespace bioseq::storage {
 
-/** Owns PostgreSQL settings for Bioseq sequence storage. */
+/** PostgreSQL settings for stored sequence data. */
 struct settings final {
     settings() = delete;
 
-    /** Owns settings that bound one sequence shard. */
+    /** Size limit for a sequence-storage shard. */
     struct sequence_shard final {
         sequence_shard() = delete;
 
