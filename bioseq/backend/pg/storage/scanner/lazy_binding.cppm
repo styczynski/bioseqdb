@@ -37,18 +37,18 @@ import bioseq.common.logging;
 import bioseq.common.checked_arithmetic;
 import bioseq.postgres.configuration.core;
 import bioseq.postgres.support;
-import bioseq.common.seqan_adapter;     
+import bioseq.common.seqan_adapter;
 import bioseq.postgres.storage.manager; // Sequence relation and reader cache.
-import bioseq.storage.scanner;          
+import bioseq.storage.scanner;
 import bioseq.storage.lazy_sequence;    // Lazy sequence views and their owners.
 import bioseq.storage.coordinates;
 import bioseq.storage.layout;
 import bioseq.postgres.storage.physical;
 import bioseq.storage.size;              // sequence_size_t
-import bioseq.postgres.storage.metadata; 
+import bioseq.postgres.storage.metadata;
 import bioseq.sequences;                 // Packed sequence types.
 import bioseq.postgres.types.compact_sequence;
-import bioseq.postgres.table.io; 
+import bioseq.postgres.table.io;
 import bioseq.parallelism.pool;
 import bioseq.postgres.storage.scanner.fragment_scanner;
 

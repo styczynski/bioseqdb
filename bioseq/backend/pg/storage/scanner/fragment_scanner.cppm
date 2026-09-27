@@ -48,7 +48,7 @@ import bioseq.postgres.support;
 import bioseq.common.seqan_adapter;              // seq::dna4 in static_assert below
 import bioseq.postgres.storage.manager;     // Fragment relation and reader cache.
 import bioseq.storage.scanner;              // scanner concepts
-import bioseq.storage.lazy_sequence;        
+import bioseq.storage.lazy_sequence;
 import bioseq.storage.coordinates;
 import bioseq.storage.layout;
 import bioseq.postgres.storage.physical;

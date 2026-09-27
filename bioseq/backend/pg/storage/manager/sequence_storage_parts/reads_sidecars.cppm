@@ -82,7 +82,7 @@ import bioseq.postgres.types.compact_sequence;
 import bioseq.sequences;
 import bioseq.sequences.simd;
 import bioseq.indexing.storage;
-import bioseq.common.seqan_adapter;  
+import bioseq.common.seqan_adapter;
 import bioseq.storage.size;
 import bioseq.storage.coordinates;
 import bioseq.codegen.sql.annotation_model;
@@ -753,7 +753,7 @@ void sidecar_read_blob_bulk(
                "(have {} need {})", sort_scratch.size(), requests.size());
     }
     std::copy(requests.begin(), requests.end(), sort_scratch.begin());
-    
+
     using fetch_request_type = sequence_storage_manager<sequence_size_t, 8, 42>::fetch_request;
     // Group physical reads by shard and then by sidecar key.
     std::sort(sort_scratch.begin(), sort_scratch.begin() + requests.size(),
