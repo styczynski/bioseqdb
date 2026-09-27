@@ -1,6 +1,6 @@
 /**
  * @file sequence_sort.cppm
- * @brief Executes dense and global Vulkan sequence-sort routes.
+ * @brief Sorts packed sequences on the GPU and returns their row order.
  */
 module;
 
@@ -22,7 +22,7 @@ import std;
 
 namespace bioseq::gpu::vulkan {
 
-/// @brief Sorts a contiguous packed-sequence image through the chunk-based overload.
+/// @brief Sorts one packed sequence buffer by passing it as a single chunk.
 std::vector<std::uint32_t>
 runtime::run_sequence_sort_roundtrip(std::span<const std::byte> packed_units,
                                      std::span<const sequence_descriptor_wire> descs,
@@ -34,7 +34,8 @@ runtime::run_sequence_sort_roundtrip(std::span<const std::byte> packed_units,
         std::span<const sequence_sort_upload_chunk>(&chunk, 1u), descs, params);
 }
 
-/// @brief Sorts borrowed packed chunks by shader keys and exact lexical tie breaks.
+/// @brief Uploads packed chunks and returns row indices in sequence order.
+/// Prefix keys narrow the work. Rows with equal keys are compared by their full sequences.
 std::vector<std::uint32_t>
 runtime::run_sequence_sort_roundtrip(std::span<const sequence_sort_upload_chunk> chunks,
                                      std::span<const sequence_descriptor_wire> descs,
@@ -108,8 +109,8 @@ runtime::run_sequence_sort_roundtrip(std::span<const sequence_sort_upload_chunk>
     };
     const std::uint32_t padded_sequence_count = next_power_of_two(sequence_count);
 
-    // Device buffers (unified/host-coherent on Apple). seq is the concatenated,
-    // 4-byte-aligned per-row unit blocks viewed as `uint seq_words[]`.
+    // Upload the packed sequence units as 32-bit shader words. Each row starts
+    // on a 4-byte boundary.
     const std::uint64_t seq_bytes = std::max<std::uint64_t>(packed_unit_bytes, 4u);
     buffer seq = create_device_buffer(seq_bytes, k_compute_buffer_usage);
     buffer descs_buf =
@@ -171,10 +172,9 @@ runtime::run_sequence_sort_roundtrip(std::span<const sequence_sort_upload_chunk>
 
     auto bump = [this]() { seq_sort_dispatch_count_.fetch_add(1, std::memory_order_relaxed); };
 
-    // Dense-rank GPU fast path. Offset 0 handles short/front-key batches. The
-    // tail offset handles long fixed-length common-prefix batches only when the
-    // shader validates the prefix identity and the selected key is
-    // [0, sequence_count)-dense.
+    // Try using the selected 64-bit sequence key as its final row rank.
+    // The shader checks that every rank occurs once. For long sequences, a
+    // second attempt uses the tail after checking that all prefixes match.
     auto* index_ptr = static_cast<std::uint32_t*>(index_buf.mapped);
     auto* dense_status_ptr = static_cast<std::uint32_t*>(dense_status.mapped);
     const std::uint32_t units_for_64 =
@@ -262,7 +262,7 @@ runtime::run_sequence_sort_roundtrip(std::span<const sequence_sort_upload_chunk>
         0u,
         0u};
 
-    // --- Submit 1: extract keys, then radix sort (key,value=row index) ---
+    // Extract prefix keys and sort the row indices by those keys.
     bool sorted_in_scratch = false;
     {
         reset_dispatch_descriptor_pool_locked();
@@ -287,7 +287,7 @@ runtime::run_sequence_sort_roundtrip(std::span<const sequence_sort_upload_chunk>
                                                                 k_sequence_sort_local_size));
         record_compute_barrier(command_buffer_);
         const gpu_sort_plan sort_plan{
-            sequence_count, 8u, 8u, 8u, 8u}; // full 64-bit key, 8 LSD passes
+            sequence_count, 8u, 8u, 8u, 8u}; // Sort all eight bytes of the key, starting with the least significant byte.
         record_radix_sort_locked(command_buffer_,
                                  keys_s,
                                  vals_s,
@@ -303,19 +303,19 @@ runtime::run_sequence_sort_roundtrip(std::span<const sequence_sort_upload_chunk>
         submit_and_wait(device_, queue_, command_buffer_, fence_, "submit(seqsort1)");
     }
 
-    // Sorted keys/vals live in keys/vals or their scratch, per the ping-pong parity.
+    // The last radix pass decides which buffer pair holds the sorted rows.
     const std::uint64_t* sorted_keys =
         static_cast<const std::uint64_t*>((sorted_in_scratch ? keys_scr : keys).mapped);
     const std::uint64_t* sorted_vals =
         static_cast<const std::uint64_t*>((sorted_in_scratch ? vals_scr : vals).mapped);
 
-    // Seed `index` from the sorted row ids (ascending by key, radix-stable on ties).
+    // Start the permutation with row indices sorted by their prefix keys.
     for (std::uint32_t i = 0; i < sequence_count; ++i)
         index_ptr[i] = static_cast<std::uint32_t>(sorted_vals[i] & 0xffffffffu);
     for (std::uint32_t i = sequence_count; i < padded_sequence_count; ++i)
         index_ptr[i] = 0xffffffffu;
 
-    // Build equal-key run ranges (only runs of length > 1 need a tie-break).
+    // Find rows with equal prefix keys so the GPU can compare their full sequences.
     struct run_range {
         std::uint32_t begin;
         std::uint32_t len;
@@ -335,14 +335,15 @@ runtime::run_sequence_sort_roundtrip(std::span<const sequence_sort_upload_chunk>
     }
 
     if (ranges.empty()) {
-        // No equal-key collisions: the 64-bit key fully ordered the batch.
+        // Every prefix key is different, so the row order is complete.
         std::vector<std::uint32_t> perm(index_ptr, index_ptr + sequence_count);
         bump();
         return perm;
     }
 
-    // --- Submit 2: GPU full-compare tie-break. Oversized collisions continue
-    // through a device-side global bitonic network before the one host readback.
+    // Compare full sequences within each equal-key group. If a group exceeds
+    // one workgroup, run global bitonic sorting over the whole permutation.
+    // Finish GPU sorting before copying the permutation back.
     buffer ranges_buf =
         create_device_buffer(std::uint64_t{ranges.size()} * 8u, k_compute_buffer_usage);
     if (ranges_buf.mapped == nullptr)
@@ -426,7 +427,7 @@ runtime::run_sequence_sort_roundtrip(std::span<const sequence_sort_upload_chunk>
                                                           std::memory_order_relaxed);
     }
     index_ptr =
-        static_cast<std::uint32_t*>(index_buf.mapped); // mapping is stable; re-fetch defensively
+        static_cast<std::uint32_t*>(index_buf.mapped); // Read the completed permutation from mapped storage.
     std::vector<std::uint32_t> perm(index_ptr, index_ptr + sequence_count);
     bump();
     return perm;

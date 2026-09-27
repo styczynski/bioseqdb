@@ -1,6 +1,6 @@
 /**
  * @file seed_anchor.cppm
- * @brief Executes resident seed lookup, anchor emission, and canonical GPU sorting.
+ * @brief Finds seed matches in device indexes and orders the resulting anchors for chaining.
  */
 module;
 
@@ -23,7 +23,8 @@ import std;
 namespace bioseq::gpu::vulkan {
 
 #if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
-/// @brief Authenticates a borrowed batch allocation and its exact submitted query slice.
+/// @brief Checks that a query slice matches the completed GPU sketch and its device buffer.
+/// @return Identifier of the matching sketch record.
 std::uint64_t runtime::validate_seed_query_authorization_locked(
     const device_query_sketch_authorization& authorization,
     const buffer* device_words,
@@ -52,16 +53,17 @@ std::uint64_t runtime::validate_seed_query_authorization_locked(
 }
 #endif
 
-/// @brief Counts and emits seed hits against an already resident target index.
-/// @param[in] inputs Borrowed resident index buffers and query minimizer storage.
-/// @param[in] prefix_counts Exclusive per-minimizer anchor offsets plus the final total.
-/// @param[in] query_len Query length used to encode anchor coordinates.
-/// @param[in] kmer_size K-mer span encoded into emitted anchors.
-/// @param[in] exact_anchor_count Exact output count established by the count pass.
-/// @param[in] sort_plan Device-specific bitonic or radix allocation plan.
-/// @param[in] expected_vulkan_allocation_bytes Exact allocation total admitted by the caller.
-/// @return Canonically ordered anchors in owned host storage with dispatch statistics.
-/// @throws vulkan_runtime_error When inputs, allocation accounting, dispatch, or order checks fail.
+/// @brief Writes counted seed hits and sorts anchors for chaining.
+/// The GPU orders strand and target position. The host resolves equal-position ties.
+/// @param[in] inputs Device index and resident or uploaded minimizers.
+/// @param[in] prefix_counts Output offsets followed by the total.
+/// @param[in] query_len Query length.
+/// @param[in] kmer_size Anchor span.
+/// @param[in] exact_anchor_count Expected count.
+/// @param[in] sort_plan Device sort plan.
+/// @param[in] expected_vulkan_allocation_bytes Reserved allocation bytes.
+/// @return Host anchors and measurements.
+/// @throws vulkan_runtime_error If validation or execution fails.
 seed_lookup_result
 runtime::run_seed_lookup_roundtrip(runtime_seed_lookup_inputs inputs,
                                    std::span<const std::uint32_t> prefix_counts,
@@ -233,7 +235,7 @@ runtime::run_seed_lookup_roundtrip(runtime_seed_lookup_inputs inputs,
     }
 
     std::uint64_t actual_vulkan_allocation_bytes = 0u;
-    // Accumulates the exact physical allocations retained for this operation.
+    // Count the physical bytes allocated for this lookup and sort.
     const auto add_allocation = [&actual_vulkan_allocation_bytes](const buffer& buffer) noexcept {
         actual_vulkan_allocation_bytes =
             bioseq::common::saturating_add(actual_vulkan_allocation_bytes, buffer.allocation_bytes);
@@ -486,17 +488,16 @@ runtime::run_seed_lookup_roundtrip(runtime_seed_lookup_inputs inputs,
     return result;
 }
 
-// ===========================================================================
-// GPU frontend — arena + frontend implementation
-// ===========================================================================
+// Seed lookup with GPU counting and an exactly sized output buffer.
 
-/// @brief Runs seed lookup and canonical anchor sorting for one query.
-/// @param[in] inputs Borrowed resident index and query minimizer buffers.
-/// @param[in] query_len Query length used to encode emitted anchors.
-/// @param[in] kmer_size K-mer span represented by each seed.
-/// @param[in] max_occ Maximum target occurrences emitted per minimizer.
-/// @return Canonically ordered anchors in owned host storage with dispatch statistics.
-/// @throws vulkan_runtime_error When validation, admission, allocation, dispatch, or order checks fail.
+/// @brief Counts seed matches, allocates exact output, and sorts anchors for chaining.
+/// The GPU orders strand and target position. The host resolves equal-position ties.
+/// @param[in] inputs Device index and resident or uploaded minimizers.
+/// @param[in] query_len Query length.
+/// @param[in] kmer_size Anchor span.
+/// @param[in] max_occ Skip minimizers whose target-occurrence count exceeds this limit.
+/// @return Host anchors and measurements.
+/// @throws vulkan_runtime_error If validation, memory reservation, or execution fails.
 seed_lookup_result runtime::run_seed_anchor_roundtrip(const gpu_seed_inputs& inputs,
                                                       std::uint64_t query_len,
                                                       std::uint32_t kmer_size,
@@ -565,41 +566,36 @@ seed_lookup_result runtime::run_seed_anchor_roundtrip(const gpu_seed_inputs& inp
                                                              mc),
                                       4u)
             : 0u;
-    // Each allocate_device call rounds the offset up to k_gpu_buffer_offset_alignment
-    // (256), so the five sub-allocations below can need up to 5*256 bytes of
-    // alignment padding on top of their byte footprint. Reserve one alignment
-    // unit per boundary plus initial cursor slack so cold and reused arenas obey
-    // the same capacity invariant.
+    // Include padding between arena slices, plus space to align a reused
+    // arena cursor. The same request must fit both new and reused arenas.
     std::uint64_t dt = std::uint64_t{mc} * 4u * 2u + std::uint64_t{num_blocks} * 4u + 16u +
                        min_words_bytes + 6u * std::uint64_t{k_gpu_buffer_offset_alignment};
     if (!arena.ensure_capacity(dt, 0, 0)) {
-        // ensure_capacity never advances a cursor.  Drop any partial/high-water
-        // backing before reporting the failure so a retry starts cold and does
-        // not inherit memory from a failed request.
+        // A failed grow leaves allocation positions unchanged. Release any idle
+        // backing buffers before reporting the failure so retries start clean.
         if (!arena.release_idle_capacity()) {
             throw vulkan_runtime_error("gpu seed failed grow left live arena slices");
         }
         throw vulkan_runtime_error("gpu seed arena grow failed");
     }
     const gpu_arena_mark mark = arena.mark();
-    // Rewinds all per-query slices and releases the arena on every exit path.
+    // Return all per-query arena space and free its backing buffers on exit.
     struct seed_arena_lifetime {
         gpu_arena& arena;
         gpu_arena_mark mark;
         bool released = false;
 
-        /// @brief Rewinds and trims the arena on exceptional exits.
+        /// @brief Restores the arena mark and attempts to free backing buffers on exceptional exits.
         ~seed_arena_lifetime() noexcept {
             if (!released) {
-                // Exception cleanup must leave a retryable arena.  Destructors
-                // cannot report the invariant failure, but every explicit
-                // return below uses release_or_throw() and does report it.
+                // Destruction cannot report a cleanup error. Normal returns use
+                // release_or_throw() so a remaining live slice is reported.
                 arena.rewind(mark);
                 (void)arena.release_idle_capacity();
             }
         }
 
-        /// @brief Rewinds, trims, and reports any live-slice invariant failure.
+        /// @brief Restores the arena mark and frees its buffers, throwing if a slice remains live.
         void release_or_throw() {
             arena.rewind(mark);
             if (!arena.release_idle_capacity()) {
@@ -688,7 +684,7 @@ seed_lookup_result runtime::run_seed_anchor_roundtrip(const gpu_seed_inputs& inp
     const std::uint32_t seed_groups = std::max<std::uint32_t>(
         1u, std::min(bioseq::common::ceil_div(mc, 128u), features_.max_workgroup_count_x));
 
-    // --- Submit 1: seed count + prefix scan ---
+    // First submission: count seed hits and find each minimizer's output offset.
     {
         static const auto* _rd = bioseq::instrumentation::register_static_region("seed_count");
         auto _rs = bioseq::instrumentation::region(_rd);
@@ -702,10 +698,10 @@ seed_lookup_result runtime::run_seed_anchor_roundtrip(const gpu_seed_inputs& inp
             {prefix_s.buffer->buffer_handle, prefix_s.offset, prefix_s.size},
             {counts_s.buffer->buffer_handle,
              counts_s.offset,
-             counts_s.size}, // anchors (unused in count)
+             counts_s.size}, // Anchor output is unused while counting.
             {counts_s.buffer->buffer_handle,
              counts_s.offset,
-             counts_s.size}, // anchor_keys (unused in count)
+             counts_s.size}, // Anchor-key output is unused while counting.
         }};
         const std::array<VkDescriptorBufferInfo, 3> scan_infos{{
             {counts_s.buffer->buffer_handle, counts_s.offset, counts_s.size},
@@ -790,12 +786,10 @@ seed_lookup_result runtime::run_seed_anchor_roundtrip(const gpu_seed_inputs& inp
         throw vulkan_runtime_error("gpu seed anchor count overflow");
     }
 
-    // --- Submit 2: seed emit + device anchor sort by ref_bits ---
-    // The exact anchor count is only known after the count submit, so the anchor
-    // and sort-scratch buffers are sized exactly here as standalone device
-    // buffers (the count/prefix arena slices from submit 1 must stay live, so the
-    // arena is never grown mid-op). They are wrapped as offset-0 gpu_arena_slice
-    // for the shared dispatch/sort recorders.
+    // Second submission: write anchors and sort by strand and target position.
+    // The count is now known, so allocate the output and sort buffers at their
+    // required sizes. Keep them separate from the arena, whose counts and
+    // offsets must remain valid until emission finishes.
     const std::uint64_t anchor_u64 = total * 3u; // 24-byte anchors as 3 u64
     const workgroup_plan awg = plan_workgroups(total, features_.max_workgroup_count_x);
     const std::uint64_t exact_reserve = seed_anchor_reserved_bytes(total, awg.num_workgroups);
