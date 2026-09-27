@@ -1,6 +1,6 @@
 /**
  * @file simd_implementation.cppm
- * @brief Same-module implementation unit for Highway-heavy sequence SIMD kernels.
+ * @brief Implements Highway SIMD lookup, packing, and decoding for DNA sequences.
  */
 module;
 
@@ -33,7 +33,7 @@ namespace hn = hwy::HWY_NAMESPACE;
 
 namespace detail {
 
-/// @brief Appends one valid rank to local packing state and grows its output.
+/// Appends a valid rank, writing each completed word to the output vector.
 template <typename p_storage_unit,
           std::size_t p_bits_per_character,
           std::size_t p_letters_per_unit>
@@ -59,7 +59,8 @@ HWY_INLINE void append_valid_rank_to_locals(
                  "growing SIMD rank pack unexpectedly overflowed");
 }
 
-/// @brief Encodes dna4 text with the selected unknown-byte policy.
+/// Appends dna4 text using the selected byte-lookup policy.
+/// SIMD lookups use only part of each byte and assume DNA input.
 template <typename p_storage_unit,
           std::size_t p_bits_per_character,
           std::size_t p_letters_per_unit,
@@ -92,9 +93,8 @@ HWY_INLINE void encode_body_chunk_dna4_simd_impl(
     auto* packed_words = state.output_storage;
 
     if constexpr (p_unknown_byte_policy == unknown_byte_policy::drop) {
-        // 16-byte low-nibble LUT — `'A' & 0x0F = 1`, etc. Sentinel
-        // (0xFF) appears for newlines, CR, and any unknown byte;
-        // chunks containing one fall back to scalar.
+        // The low-nibble lookup marks unused entries with 0xFF. Retry a chunk
+        // with the full byte table if any lane has that marker.
         static constexpr auto k_low_nibble_lut =
             build_dna4_low_nibble_lut();
         const auto letter_to_rank_table_vec = hn::LoadDup128(
@@ -103,8 +103,7 @@ HWY_INLINE void encode_body_chunk_dna4_simd_impl(
 
         std::size_t read_cursor = 0;
 
-        // Two-chunk unrolled fast path (32 bytes / 64 packed bits =
-        // exactly one uint64 storage unit when partial_letters == 0).
+        // Two chunks supply one full word when the partial word is empty.
         while (read_cursor + 2 * k_lanes <= body_size) {
             const auto first_chunk = hn::LoadU(
                 simd_tag, body_bytes + read_cursor);
@@ -217,8 +216,8 @@ HWY_INLINE void encode_body_chunk_dna4_simd_impl(
             read_cursor += 1;
         }
     } else {
-        // Map-to-default policy: use the 32-byte two-half LUT. No sentinels,
-        // no fallback path — every input byte produces a valid rank.
+        // Every entry in the map-to-default table holds a rank, so these chunks
+        // can be packed without checking for skip markers.
         static constexpr auto k_letter_to_rank_lut_32 =
             build_letter_to_rank_lut_32<
                 seq::dna4, p_unknown_byte_policy>();
@@ -242,7 +241,7 @@ HWY_INLINE void encode_body_chunk_dna4_simd_impl(
             local_total_letters += k_lanes;
             read_cursor += k_lanes;
         }
-        // Scalar tail (always-valid rank under map-to-default semantics).
+        // Finish the remaining bytes with the full byte lookup table.
         while (read_cursor < body_size) {
             const std::uint8_t letter_rank =
                 k_fallback_lut[body_bytes[read_cursor]];
@@ -264,7 +263,7 @@ HWY_INLINE void encode_body_chunk_dna4_simd_impl(
     state.total_letters = local_total_letters;
 }
 
-/// @brief Encodes dna4 text while dropping unknown input bytes.
+/// Appends dna4 text using the drop-policy codec.
 void encode_body_chunk_dna4_simd_drop_impl(
     encode_state<std::uint64_t, 2, 32>& state,
     const std::uint8_t* HWY_RESTRICT body_bytes,
@@ -273,7 +272,7 @@ void encode_body_chunk_dna4_simd_drop_impl(
         unknown_byte_policy::drop>(state, body_bytes, body_size);
 }
 
-/// @brief Encodes dna4 text while mapping unknown bytes to the default rank.
+/// Appends dna4 text using the map-to-default codec.
 void encode_body_chunk_dna4_simd_map_to_default_impl(
     encode_state<std::uint64_t, 2, 32>& state,
     const std::uint8_t* HWY_RESTRICT body_bytes,
@@ -282,7 +281,7 @@ void encode_body_chunk_dna4_simd_map_to_default_impl(
         unknown_byte_policy::map_to_default>(state, body_bytes, body_size);
 }
 
-/// @brief Encodes multiline dna4 text while ignoring line separators.
+/// Appends multiline dna4 text, filtering line separators in flagged chunks.
 template <typename p_storage_unit,
           std::size_t p_bits_per_character,
           std::size_t p_letters_per_unit>
@@ -336,9 +335,8 @@ HWY_INLINE void encode_body_chunk_dna4_simd_multiline_impl(
             continue;
         }
 
-        // Slow path: chunk contains newline/unknown sentinels. Keep this
-        // target-independent; mask bit ordering differs across Highway
-        // backends, while this path only runs at multiline boundaries.
+        // Filter flagged chunks one byte at a time. This keeps the packing order
+        // independent of how each Highway target represents SIMD masks.
         for (std::size_t lane = 0; lane < k_lanes; ++lane) {
             const std::uint8_t letter_rank =
                 k_fallback_lut[body_bytes[read_cursor + lane]];
@@ -378,7 +376,7 @@ HWY_INLINE void encode_body_chunk_dna4_simd_multiline_impl(
     state.total_letters = local_total_letters;
 }
 
-/// @brief Dispatch leaf for multiline dna4 encoding.
+/// Calls the multiline codec for dna4 packed in uint64_t words.
 void encode_body_chunk_dna4_simd_multiline_impl(
     encode_state<std::uint64_t, 2, 32>& state,
     const std::uint8_t* HWY_RESTRICT body_bytes,
@@ -387,7 +385,8 @@ void encode_body_chunk_dna4_simd_multiline_impl(
         state, body_bytes, body_size);
 }
 
-/// @brief Encodes multiline dna4 input until a boundary byte is encountered.
+/// Appends multiline dna4 input until the first boundary byte.
+/// Returns bytes consumed and adds encountered CR and LF bytes to the optional count.
 [[nodiscard]] HWY_INLINE std::size_t
 encode_body_chunk_dna4_simd_multiline_until_byte_runtime_impl(
     encode_state<std::uint64_t, 2, 32>& state,
@@ -505,9 +504,8 @@ encode_body_chunk_dna4_simd_multiline_until_byte_runtime_impl(
         local_newline_count += static_cast<std::size_t>(
             std::popcount(newline_bits & 0xFFFFu));
 
-        // Boundary was checked above; this chunk only needs newline/unknown
-        // filtering. Keep the rare multiline-boundary path scalar so it is
-        // independent of target-specific mask bit ordering.
+        // This chunk has no record boundary. Filter its bytes scalarly to keep
+        // their order independent of the target's SIMD mask representation.
         for (std::size_t lane = 0; lane < k_lanes; ++lane) {
             const std::uint8_t current_byte = body_bytes[read_cursor + lane];
             if (current_byte == '\n' || current_byte == '\r') continue;
@@ -554,7 +552,7 @@ encode_body_chunk_dna4_simd_multiline_until_byte_runtime_impl(
     return flush_state_and_return(read_cursor);
 }
 
-/// @brief Dispatch leaf for boundary-limited multiline dna4 encoding.
+/// Calls the multiline dna4 codec with a runtime record-boundary byte.
 [[nodiscard]] std::size_t encode_body_chunk_dna4_simd_multiline_until_byte_impl(
     encode_state<std::uint64_t, 2, 32>& state,
     const std::uint8_t* HWY_RESTRICT body_bytes,
@@ -645,7 +643,7 @@ HWY_INLINE void unpack_16_bytes_to_64_ascii(
         destination + 3 * k_lanes_per_chunk);
 }
 
-/// @brief Decodes packed dna4 words into ASCII without reading past the tail.
+/// Decodes dna4 with SIMD for complete blocks and scalar reads for the tail.
 void decode_dna4_words_to_ascii_impl(
     const std::uint64_t* HWY_RESTRICT words,
     std::uint8_t* HWY_RESTRICT destination,
@@ -688,7 +686,7 @@ void decode_dna4_words_to_ascii_impl(
     }
 }
 
-/// @brief Encodes two-ranks-per-byte dna5 input with a selected unknown policy.
+/// Appends dna5 text with two ranks per byte using the selected lookup policy.
 template <unknown_byte_policy p_unknown_byte_policy>
 HWY_INLINE void encode_body_chunk_dna5_uint8_simd_impl(
     encode_state<std::uint8_t, 3, 2>& state,
@@ -730,7 +728,7 @@ HWY_INLINE void encode_body_chunk_dna5_uint8_simd_impl(
 
     std::size_t cursor = 0;
 
-    // Compaction shuffles for the SIMD pack fast path.
+    // Gather even and odd ranks to combine each pair into one output byte.
 #if !BIOSEQ_SIMD_X86_PRE_AVX3_FIXED128
     HWY_ALIGN constexpr std::uint8_t k_even_indices_pattern[16] = {
         0, 2, 4, 6, 8, 10, 12, 14,
@@ -768,9 +766,8 @@ HWY_INLINE void encode_body_chunk_dna5_uint8_simd_impl(
             }
         }
 
-        // Fast path: 16 valid ranks. If the partial state is empty,
-        // the SIMD pack writes 8 contiguous bytes. If partial_letters
-        // == 1, fall back to scalar to keep state coherent (rare).
+        // Pack complete pairs directly when no rank is waiting in the partial
+        // word. Otherwise append ranks individually to finish that word first.
         if (local_partial_letters == 0) {
 #if BIOSEQ_SIMD_X86_PRE_AVX3_FIXED128
             HWY_ALIGN std::uint8_t rank_scratch[16];
@@ -825,7 +822,7 @@ HWY_INLINE void encode_body_chunk_dna5_uint8_simd_impl(
     state.total_letters = local_total_letters;
 }
 
-/// @brief Encodes dna5 bytes while dropping unknown symbols.
+/// Appends dna5 text using the drop-policy codec.
 void encode_body_chunk_dna5_uint8_simd_drop_impl(
     encode_state<std::uint8_t, 3, 2>& state,
     const std::uint8_t* HWY_RESTRICT body_bytes,
@@ -834,7 +831,7 @@ void encode_body_chunk_dna5_uint8_simd_drop_impl(
         state, body_bytes, body_size);
 }
 
-/// @brief Encodes dna5 bytes while mapping unknown symbols to the default rank.
+/// Appends dna5 text using the map-to-default codec, whose default is N.
 void encode_body_chunk_dna5_uint8_simd_map_to_default_impl(
     encode_state<std::uint8_t, 3, 2>& state,
     const std::uint8_t* HWY_RESTRICT body_bytes,
@@ -898,7 +895,8 @@ void decode_dna5_uint8_words_to_ascii_impl(
     }
 }
 
-/// @brief Maps ASCII bytes to ranks through a fixed-target lookup table.
+/// Maps DNA bytes to ranks with the five-bit SIMD table and a scalar tail.
+/// The reduced table assumes DNA text and cannot distinguish all invalid ASCII bytes.
 template <sequence_alphabet p_alphabet,
           unknown_byte_policy p_unknown_byte_policy>
 HWY_INLINE void ascii_to_rank_lut_simd_impl(
@@ -924,8 +922,8 @@ HWY_INLINE void ascii_to_rank_lut_simd_impl(
         const auto chunk = hn::LoadU(simd_tag, source + cursor);
         const auto ranks = lookup_ranks_via_32byte_lut(
             simd_tag, lower_lut, upper_lut, chunk);
-        // Callers may write into byte-offset storage (including PostgreSQL
-        // varlena payloads); the output interface promises no SIMD alignment.
+        // Callers can pass unaligned output, including PostgreSQL varlena data.
+        // StoreU writes ranks without requiring SIMD alignment.
         hn::StoreU(ranks, simd_tag, destination + cursor);
         cursor += k_lanes;
     }
@@ -935,7 +933,7 @@ HWY_INLINE void ascii_to_rank_lut_simd_impl(
     }
 }
 
-/// @brief Maps dna4 ASCII bytes and preserves the unknown sentinel.
+/// Looks up dna4 ranks, leaving 0xFF entries for the packer to skip.
 void ascii_to_rank_lut_simd_dna4_drop_impl(
     const std::uint8_t* HWY_RESTRICT source,
     std::uint8_t* HWY_RESTRICT destination,
@@ -944,7 +942,7 @@ void ascii_to_rank_lut_simd_dna4_drop_impl(
         source, destination, size);
 }
 
-/// @brief Maps dna4 ASCII bytes and replaces unknown bytes with rank zero.
+/// Looks up dna4 ranks with A in unused table entries.
 void ascii_to_rank_lut_simd_dna4_map_to_default_impl(
     const std::uint8_t* HWY_RESTRICT source,
     std::uint8_t* HWY_RESTRICT destination,
@@ -954,7 +952,7 @@ void ascii_to_rank_lut_simd_dna4_map_to_default_impl(
             source, destination, size);
 }
 
-/// @brief Maps dna5 ASCII bytes and preserves the unknown sentinel.
+/// Looks up dna5 ranks, leaving 0xFF entries for the packer to skip.
 void ascii_to_rank_lut_simd_dna5_drop_impl(
     const std::uint8_t* HWY_RESTRICT source,
     std::uint8_t* HWY_RESTRICT destination,
@@ -963,7 +961,7 @@ void ascii_to_rank_lut_simd_dna5_drop_impl(
         source, destination, size);
 }
 
-/// @brief Maps dna5 ASCII bytes and replaces unknown bytes with rank zero.
+/// Looks up dna5 ranks with N in unused table entries.
 void ascii_to_rank_lut_simd_dna5_map_to_default_impl(
     const std::uint8_t* HWY_RESTRICT source,
     std::uint8_t* HWY_RESTRICT destination,
