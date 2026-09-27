@@ -15,35 +15,30 @@ import :cpp_reference_index;
 import bioseq.codegen.website.model;
 import bioseq.codegen.support;
 
-// Canonical C++ entity merge (§11-12). Combines the Clang structural/export
-// identity (the authoritative page-owner set) with Doxygen's documentation
-// comments into one reference_entity graph keyed by canonical ID, in
-// deterministic order. SQL catalog entities are merged later by the postgres
-// policy stage.
+// Adds Doxygen descriptions to the public declarations found by Clang.
+// Clang determines which entries get reference pages. Each entry receives
+// a stable ID, and the merged list is sorted by that ID.
 namespace bioseq::codegen::website {
 
-/// @brief Per-module / SQL-domain documentation totals (§11.4 breakdown).
+/// @brief Documentation totals for one C++ module or SQL schema.
 struct reference_coverage_group {
     std::string group;              // C++ module/top namespace, or "sql:<schema>"
     std::size_t public_total{};
     std::size_t documented_total{};
 };
 
-/// @brief Documentation-coverage summary for the configured public surface (§11.4).
+/// @brief Missing documentation and totals for the public reference pages.
 struct reference_coverage_report {
     std::size_t public_total{};
     std::size_t documented_total{};
-    std::vector<std::string> missing_summary;    // public, undocumented, non-fatal
-    std::vector<std::string> missing_parameters; // functions with undocumented parameters
+    std::vector<std::string> missing_summary;    // optional public entries with no summary
+    std::vector<std::string> missing_parameters; // functions with no parameter documentation
     std::vector<std::string> missing_returns;    // value-returning functions with no @return
-    std::vector<std::string> fatal_missing;      // required/tutorial-referenced, undocumented
-    std::vector<reference_coverage_group> groups;   // totals by module / SQL domain
+    std::vector<std::string> fatal_missing;      // required or tutorial-linked entries with no summary
+    std::vector<reference_coverage_group> groups;   // totals by C++ module or SQL schema
 };
 
-/// @brief Maps an entity kind to its canonical-ID and route token (§12.1).
-///
-/// Centralized here so the canonical-ID kind tag and the output route segment
-/// (build-pipeline route builder) are always the same token and never drift.
+/// @brief Returns the entity-kind name used in both IDs and page routes.
 [[nodiscard]] std::string reference_kind_token(entity_kind kind) {
     switch (kind) {
     case entity_kind::namespace_: return "namespace";
@@ -65,17 +60,13 @@ struct reference_coverage_report {
     return "entity";
 }
 
-/// @brief Computes the canonical ID for a documented entity (§12.1).
-/// @param entity Entity whose kind/qualified name/signature seed the ID.
-/// @return A normalized, kind-tagged, domain-prefixed canonical identifier.
+/// @brief Builds the stable ID for a reference entry.
 ///
-/// The identifier is `<domain>:<kind>:<body>`. The body is the entity's
-/// normalized signature for functions - so overloads such as two constructors
-/// stay distinct - and its qualified name for every other kind. Both forms
-/// preserve `::` and overload-distinguishing template arguments and carry no
-/// parameter names or default arguments (the signature already carries the
-/// cv/ref/noexcept qualifiers that distinguish overloads). Insignificant
-/// whitespace is collapsed to single spaces and a leading `::` is stripped.
+/// IDs use `<domain>:<kind>:<body>`. Functions use their normalized signature
+/// so overloads get separate IDs. Other entries use the qualified name.
+/// Leading :: is removed and whitespace is collapsed.
+/// @param entity Entry with its kind, qualified name, and normalized signature.
+/// @return The stable ID used by links and reference pages.
 [[nodiscard]] std::string make_reference_entity_id(const reference_entity& entity) {
     const std::string prefix = entity.domain == entity_domain::sql ? "sql:" : "cpp:";
     const bool signature_keyed = entity.kind == entity_kind::function
@@ -110,11 +101,9 @@ struct reference_coverage_report {
 
 namespace {
 
-// Compares parameter lists by arity. Clang prints fully-qualified parameter
-// types while Doxygen keeps the as-written (usually unqualified) spelling, so an
-// exact type-text comparison almost never holds across the two producers; arity
-// plus qualified-name-and-kind is the reliable name-based discriminator, with
-// the location rule disambiguating same-arity overloads.
+// Compare argument counts because Clang and Doxygen can spell the same
+// type differently. Name and kind narrow the match. Source locations
+// provide another rule when that still leaves several overloads.
 [[nodiscard]] bool same_parameter_arity(
     const reference_entity& lhs, const reference_entity& rhs) {
     return lhs.parameters.size() == rhs.parameters.size();
@@ -125,8 +114,8 @@ namespace {
     if (!lhs.declaration || !rhs.declaration) {
         return false;
     }
-    // Clang emits absolute paths; Doxygen emits STRIP_FROM_PATH-relative paths,
-    // so compare by the final path component within the two-line tolerance.
+    // Clang paths may be absolute while Doxygen paths are relative.
+    // Match the filename here, then allow a two-line difference below.
     if (lhs.declaration->path.filename() != rhs.declaration->path.filename()) {
         return false;
     }
@@ -135,7 +124,7 @@ namespace {
     return (a > b ? a - b : b - a) <= 2;
 }
 
-// Attaches Doxygen documentation onto a Clang entity (Clang keeps identity).
+// Copies Doxygen descriptions onto the declaration identified by Clang.
 void attach_reference_content(reference_entity& target, const reference_entity& source) {
     target.summary_text = source.summary_text;
     target.detail_content = source.detail_content;
@@ -153,17 +142,14 @@ void attach_reference_content(reference_entity& target, const reference_entity& 
 
 }  // namespace
 
-/// @brief Merges Clang structural entities with Doxygen documentation (§11.6).
+/// @brief Adds Doxygen documentation to the public declarations found by Clang.
 ///
-/// Clang owns identity/visibility; the returned entities are exactly the Clang
-/// exported/public page-owners, each enriched with its unique Doxygen match by,
-/// in order: (1) exact normalized signature, (2) qualified name + kind +
-/// parameter types, (3) declaration path/line within two lines. Each rule is
-/// applied only when the match is unique. An unmatched Doxygen entity that
-/// shares a Clang page-owner's qualified name is a fatal signature mismatch.
-/// @param structural Clang structural/export index.
-/// @param documented Doxygen-parsed entities (documentation source).
-/// @return Canonical, canonical-ID-sorted reference_entity page graph.
+/// Tries a unique signature match first, then qualified name, kind, and
+/// argument count, then filename and a line difference of at most two.
+/// Unused Doxygen entries with a public declaration's name cause an error.
+/// @param structural Public declarations collected by Clang.
+/// @param documented Documentation collected by Doxygen.
+/// @return The Clang entries with matched descriptions, sorted by stable ID.
 [[nodiscard]] std::vector<reference_entity> merge_cpp_reference_entities(
     const cpp_reference_index& structural,
     const std::vector<reference_entity>& documented) {
@@ -235,10 +221,9 @@ void attach_reference_content(reference_entity& target, const reference_entity& 
     return merged;
 }
 
-// Does the documentation tree carry a Doxygen admonition of the given kind?
-// @param/@return are projected as admonition nodes whose "kind" attribute is
-// "param:<direction>"/"return" (see :doxygen_reference), so a prefix match locates
-// any parameter documentation and an exact match locates the return documentation.
+// Finds a Doxygen note of the requested kind in the content tree.
+// Parameter notes use param:<direction>, so those need a prefix match.
+// Return notes use the exact kind return.
 [[nodiscard]] bool detail_has_admonition(
     const std::vector<content_node>& nodes, std::string_view kind, bool prefix) {
     for (const content_node& node : nodes) {
@@ -257,8 +242,8 @@ void attach_reference_content(reference_entity& target, const reference_entity& 
     return false;
 }
 
-// Coverage bucket (§11.4 breakdown): SQL entities group by "sql:<schema>", C++
-// entities by their owning module, falling back to the top namespace component.
+// Group SQL entries by schema and C++ entries by module.
+// A C++ entry without a module uses its outermost namespace.
 [[nodiscard]] std::string coverage_group_of(const reference_entity& entity) {
     if (entity.domain == entity_domain::sql) {
         const std::size_t dot = entity.qualified_name.find('.');
@@ -273,11 +258,11 @@ void attach_reference_content(reference_entity& target, const reference_entity& 
                                     : entity.qualified_name.substr(0, sep);
 }
 
-/// @brief Computes documentation coverage over the public surface (§11.4).
-/// @param entities Canonical merged public entities.
-/// @param required_ids Canonical IDs marked public-documentation-required.
-/// @param referenced_ids Canonical IDs referenced by any tutorial.
-/// @return The coverage report; missing required/referenced docs are fatal.
+/// @brief Counts documented public entries and records missing descriptions.
+/// @param entities Merged public reference entries.
+/// @param required_ids IDs whose documentation is required by site settings.
+/// @param referenced_ids IDs linked from tutorials.
+/// @return Coverage report with missing required summaries in fatal_missing.
 [[nodiscard]] reference_coverage_report evaluate_reference_coverage(
     const std::vector<reference_entity>& entities,
     const std::vector<std::string>& required_ids,
@@ -310,8 +295,7 @@ void attach_reference_content(reference_entity& target, const reference_entity& 
         } else {
             report.missing_summary.push_back(entity.canonical_id);
         }
-        // Parameter/return documentation applies to C++ functions, whose @param/@return
-        // live in the Doxygen tree; SQL functions carry only a catalog summary.
+        // Check Doxygen parameter and return sections for C++ functions.
         if (entity.domain == entity_domain::cpp
             && entity.kind == entity_kind::function) {
             if (!entity.parameters.empty()

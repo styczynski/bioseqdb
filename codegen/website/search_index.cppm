@@ -16,19 +16,14 @@ import :serialization;
 import bioseq.codegen.website.model;
 import bioseq.codegen.support;
 
-// Precomputed static search index (§12.5). Emits a small deterministic JSON
-// document consumed by the accessible vanilla-JS search widget; no client
-// framework and no server. Records derive from the one canonical entity graph,
-// the tutorial plan, and the versioned index pages.
+// Builds the static JSON search index from reference entries, tutorials,
+// and index pages. The browser matches queries against the downloaded index.
 namespace bioseq::codegen::website {
 
-// §12.5 search-token normalization. This is the ONE deliberately small algorithm,
-// implemented byte-for-byte identically in static/js/search_tokens.mjs. It works
-// on UTF-8 BYTES so the two implementations cannot diverge: ASCII A-Z lowercases
-// by +0x20, ASCII non-alphanumeric splits tokens, and every non-ASCII byte is
-// preserved verbatim (so Straße != STRASSE, dotted != dotless I, composed !=
-// decomposed). It never calls a locale-sensitive casing routine. The shared
-// golden corpus lives at website/tests/fixtures/search_tokens_golden.json.
+// Keep this token conversion in sync with website/static/js/search_tokens.mjs.
+// Lowercase ASCII letters and split on ASCII punctuation or whitespace.
+// Preserve non-ASCII UTF-8 bytes, including their case and Unicode spelling.
+// Both implementations use website/tests/fixtures/search_tokens_golden.json.
 [[nodiscard]] std::string normalize_search_text(std::string_view text) {
     std::string out;
     out.reserve(text.size());
@@ -57,9 +52,8 @@ namespace bioseq::codegen::website {
     return out;
 }
 
-// Minimal UTF-8 validator (§12.5 "validate UTF-8"). Rejects overlong forms,
-// surrogate range, and out-of-range code points so an invalid record cannot enter
-// the index bytes.
+// Reject invalid UTF-8 before writing a search record, including overlong
+// encodings, surrogate code points, and values beyond the Unicode range.
 [[nodiscard]] bool is_valid_utf8(std::string_view text) {
     std::size_t index = 0;
     const std::size_t size = text.size();
@@ -106,10 +100,8 @@ namespace bioseq::codegen::website {
     return true;
 }
 
-// One deterministic record projected into the index. name_source is the high-
-// weight text (names, aliases, parameter names, signature); text_source is the
-// low-weight text (summary, module/schema, tutorial headings). Both are normalized
-// into token strings; the display fields stay original for rendering.
+// Search entry with separate name and description text for ranking.
+// Those two fields become normalized tokens. Display text stays unchanged.
 struct search_index_entry {
     std::string id;
     std::string group;  // "Tutorials" | "SQL" | "C++" | "Pages"
@@ -122,9 +114,7 @@ struct search_index_entry {
     std::string text_source;
 };
 
-// Human-readable entity-kind label. :serialization keeps its own entity_kind_name in
-// an anonymous namespace (internal linkage), so this partition carries its own
-// copy rather than reaching across the module boundary.
+// Returns the entity-kind label shown in search results.
 [[nodiscard]] std::string_view kind_label(entity_kind kind) {
     switch (kind) {
     case entity_kind::namespace_: return "namespace";
@@ -146,9 +136,9 @@ struct search_index_entry {
     return "unknown";
 }
 
-/// @brief Concatenates the visible text of every heading in a document tree.
-/// @param nodes Owned document nodes.
-/// @return Space-joined heading text, used as low-weight tutorial search tokens.
+/// @brief Collects text from heading nodes in the supplied list.
+/// @param nodes Document nodes to inspect.
+/// @return Heading text joined with spaces for tutorial search.
 [[nodiscard]] std::string collect_heading_text(const std::vector<content_node>& nodes) {
     std::string joined;
     const auto append_text = [&joined](const content_node& node, auto&& self) -> void {
@@ -170,9 +160,9 @@ struct search_index_entry {
     return joined;
 }
 
-/// @brief Projects a documented entity onto its search entry.
-/// @param entity Canonical documented entity with an assigned route.
-/// @return The search entry used by the static index.
+/// @brief Builds a search entry for a reference page.
+/// @param entity Reference entry with an assigned route.
+/// @return Display fields and text to index.
 [[nodiscard]] search_index_entry build_entity_search_entry(const reference_entity& entity) {
     search_index_entry entry;
     entry.id = entity.canonical_id;
@@ -203,11 +193,12 @@ struct search_index_entry {
     return entry;
 }
 
-/// @brief Builds the static search index JSON from projected entries.
-/// @param entries Search entries from entities, tutorials, and index pages.
-/// @return Canonical HTML-safe JSON text ending in one newline.
-/// Sorts by route then id, rejects a duplicate id, a missing target route, or an
-/// invalid-UTF-8 indexed field, and normalizes the token fields.
+/// @brief Writes the static search index as JSON.
+///
+/// Sorts entries by route and ID, then normalizes search tokens. Rejects
+/// duplicate IDs, empty routes, and invalid UTF-8 in the indexed text.
+/// @param entries Entries from reference pages, tutorials, and index pages.
+/// @return JSON escaped for HTML embedding, with a final newline.
 [[nodiscard]] std::string serialize_search_index(std::vector<search_index_entry> entries) {
     std::sort(entries.begin(), entries.end(),
               [](const search_index_entry& lhs, const search_index_entry& rhs) {
