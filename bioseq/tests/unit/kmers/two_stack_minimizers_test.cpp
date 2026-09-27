@@ -1,6 +1,6 @@
 /**
  * @file two_stack_minimizers_test.cpp
- * @brief Biological and dispatch checks for two-stack minimizer kernels.
+ * @brief Check two-stack and bounded ntHash results, supported formats, and work counters.
  */
 #include <catch2/catch_test_macros.hpp>
 
@@ -348,11 +348,10 @@ void require_fixed_resident_vector_stream_parity(
     actual.erase(
         std::ranges::unique(actual).begin(), actual.end());
 
-    // Source-derived resident-vector-stream contract from commit
-    // 847df443500008b453250ebedfa0d802b5dade88, source blob
-    // e9e433d0d58c1e71eef2d550bada0c4bd1b92e56. Raw overlap multiplicity
-    // follows target geometry, but this normalized oracle is identical for
-    // 2/4/8/16 u32 lanes.
+    // Compare a fingerprint after sorting and removing duplicates, so repeated
+    // output from overlapping SIMD streams does not change the expected result.
+    // The reference comes from commit 847df443500008b453250ebedfa0d802b5dade88,
+    // source blob e9e433d0d58c1e71eef2d550bada0c4bd1b92e56.
     std::uint64_t normalized_fingerprint = 1469598103934665603ULL;
     for (const minimizer_record& record : actual) {
         const auto raw = minimap_sketch_data{
