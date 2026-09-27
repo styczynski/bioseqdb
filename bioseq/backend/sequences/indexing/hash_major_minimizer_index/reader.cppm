@@ -1,6 +1,6 @@
 /**
  * @file hash_major_minimizer_index/reader.cppm
- * @brief Authenticated selective hash-major reads and lookup assembly.
+ * @brief Public module for reading selected hashes from a stored minimizer index.
  */
 
 export module bioseq.indexing.hash_major_minimizer_index:reader;
