@@ -1,12 +1,12 @@
 /**
  * @file implementation_parts/persisted_cpu_target.cppm
- * @brief Owns authenticated persisted CPU target preparation and reader retention.
+ * @brief Open and keep a compatible stored minimizer index for CPU alignment.
  */
 module;
 
 extern "C" {
 #include "postgres.h"
-// Anchor PG18+ tuple-descriptor inline helpers before importing catalog modules.
+// Include PostgreSQL 18+ tuple-descriptor helpers before the catalog modules.
 #include "access/tupdesc.h"
 #include "miscadmin.h"
 #include "nodes/pg_list.h"
@@ -59,13 +59,11 @@ import bioseq.storage.lazy_sequence_view;
 namespace bioseq::simd {
 
 /**
- * @brief Opens an authenticated persisted minimizer index and attaches a CPU target reader.
- *
- * Authorizes the minimizer-generation source, tries hash-major canonical-hash preparation when the
- * READY head matches the CPU sketch backend and storage profile, otherwise opens grouped-SoA for
- * minimizer-fragment or minimizer-sequence indexes. Calls prepare_cpu_shared_query_unions with a
- * route-specific union storage mode, then retains the matching hash-major, fragment, or sequence
- * reader on @p prepared_target.groups.
+ * @brief Prepare a stored target index for reuse across CPU query batches.
+ * Check the source sequence and minimizer settings, then combine query hashes
+ * for the reader. Try grouped-SoA when the hash-major head is absent or its
+ * valid profile does not apply. Save the reader in @p prepared_target.
+ * Corrupt required indexes raise a PostgreSQL error.
  */
 void batch_processor::prepare_cpu_persisted_native_target(
     const Oid database_oid,
@@ -268,10 +266,9 @@ void batch_processor::prepare_cpu_persisted_native_target(
             storage_profile.producer_backend_identity == static_cast<std::uint16_t>(producer.id) &&
             storage_profile.producer_backend_revision == producer.revision;
         if (!hash_major_profile_applicable) {
-            /* A self-authenticated but route-inapplicable hash-major profile is
-             * the only present-head fallback case. No source authorization has been
-             * consumed and no directory/control/posting callback has run, so
-             * the independent READY grouped-SoA sentinel may still be opened. */
+            /* This valid hash-major index uses different minimizer settings.
+             * No payload has been read, so close its metadata and try the
+             * separate grouped-SoA index. Keep the source check for that reader. */
             hash_major_session.close_metadata_read();
             opened_hash_major.session.reset();
         } else {
@@ -455,9 +452,8 @@ void batch_processor::prepare_cpu_persisted_native_target(
             hash_major_group.persisted_generation_id = hash_major_head.generation_id;
             hash_major_group.persisted_hash_major_source_identity = hash_major_head.source_identity;
             hash_major_group.persisted_hash_major_source_identity_present = true;
-            /* The diagnostic u64 pipeline correlation value is deliberately not used
-             * to authenticate hash-major; correctness above is bound to all 128
-             * source-identity bits. */
+            /* The 64-bit token links diagnostic counters. Index validation above
+             * uses the complete 128-bit source identity. */
             hash_major_group.persisted_source_identity =
                 hash_major_source_diagnostic_token(hash_major_head.source_identity);
             hash_major_group.persisted_read_stats = read_stats;
@@ -468,10 +464,8 @@ void batch_processor::prepare_cpu_persisted_native_target(
             return;
         }
     }
-    /* The binder's head_absent result is an authenticated absence of the
-     * distinct hash-major sentinel.  Together with the inapplicable-profile case
-     * above, this is before every hash-major stream payload callback and therefore the
-     * only clean boundary at which grouped-SoA may be tried. */
+    /* Try grouped-SoA only when the hash-major head is absent or its valid
+     * profile does not apply. No hash-major payload may have been read. */
     if (!hash_major_grouped_soa_fallback_allowed(opened_hash_major.head_absent,
                                                  hash_major_profile_applicable,
                                                  /*stream_io_started=*/false)) {
@@ -552,9 +546,9 @@ void batch_processor::prepare_cpu_persisted_native_target(
     const auto& selected_expected = *expected;
     session.consume_source_authorization(std::move(source_authorization));
     auto& query_prep_pool = bioseq::parallelism::global_pool::instance();
-    /* This is the exact eligibility boundary of the typed full-batch native
-     * route. Outside it, preserve synchronous physical-record validation because
-     * no later complete query_hash_plan stream is guaranteed to exist. */
+    /* Defer query-set validation only when the parallel batch route will
+     * later check the complete query hash stream. Other routes validate
+     * their prepared records here. */
     const bool defer_compact_direct_query_set_validation =
         compact_h32_direct_requested && base_params.max_occ > 0 && !base_params.enable_profiling &&
         target_bp_size > std::uint64_t{256000000} &&
@@ -604,12 +598,9 @@ void batch_processor::prepare_cpu_persisted_native_target(
         fail("grouped-SoA parameter group is not the pinned exclusive cold-read shape");
         return;
     }
-    // Minimizer-fragment storage remains a collection of independent physical-fragment
-    // indexes. The mmap image is the byte-exact artifact produced by the
-    // writer's complete authenticated READY reread, fsync, and durable rename.
-    // Cold open checks the exact generation identity and prepares only fragment
-    // address plans. Query-wave max-occ reduction is fused into the parallel
-    // fragment probe; no target-wide posting/count owner is constructed.
+    // MPF keeps a separate minimizer index for each sequence fragment. Open
+    // the mapped image for this generation and keep its mapping while the
+    // reader probes fragments. Occurrence filtering happens during those probes.
     if (mapped_minimizer_fragment_grouped_soa) {
         using fragment_reader_type = bioseq::indexing::prepared_minimizer_fragment_reader;
         const std::uint64_t fragment_load_started_ns =
@@ -680,10 +671,9 @@ void batch_processor::prepare_cpu_persisted_native_target(
                                                 : static_cast<unsigned>(bounded_direct.error())));
                 return;
             }
-            // The nested fixed header and its outer CRC receipt are now
-            // authenticated. Start fail-open metadata readahead now; selected
-            // posting pages are advised by the existing descriptor-layout pass.
-            // The unrelated outer minimizer-fragment payload remains demand-paged.
+            // The direct-index header and its checksum have been checked. Suggest
+            // reading its metadata pages ahead of use. Posting pages are selected
+            // later, and other mapped payload pages remain loaded on demand.
             mapped_image.advise_compact_h32_direct_metadata_readahead(bounded_direct->view());
             const auto selected_page_adviser =
                 mapped_image.borrow_compact_h32_selected_page_adviser(bounded_direct->view());
@@ -825,10 +815,8 @@ void batch_processor::prepare_cpu_persisted_native_target(
         return;
     }
 
-    /* Minimizer-sequence grouped-SoA remains a sequence-wide persisted index. Unlike the
-     * minimizer-fragment route above, it cannot open the minimizer-fragment mmap sidecar: read
-     * and authenticate the complete PostgreSQL payload into the established
-     * query-selected grouped-SoA reader. */
+    /* MPS stores one index for the whole sequence. Read and check its full
+     * PostgreSQL payload, keeping the positions needed by the query hashes. */
     if (full_minimizer_sequence_grouped_soa) {
         using grouped_soa_reader_type = bioseq::indexing::prepared_grouped_soa_query_reader;
         if (!authenticated_grouped_soa_directory) {
@@ -876,8 +864,8 @@ void batch_processor::prepare_cpu_persisted_native_target(
             return;
         }
         std::optional<grouped_soa_reader_type> grouped_soa_reader{std::in_place, std::move(*made)};
-        /* The reader owns the exact compact query-hash image from this point.
-         * Release the scheduler copy before allocating retained payload state. */
+        /* The reader now owns the query hashes. Free the scheduler copy before
+         * loading the selected index positions. */
         if (!prepared_target.release_group_canonical_query_hashes_noexcept(group)) {
             fail("minimizer-sequence grouped-SoA canonical query-union release disagrees with "
                  "admission ownership");

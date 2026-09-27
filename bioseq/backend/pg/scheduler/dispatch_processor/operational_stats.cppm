@@ -1,6 +1,6 @@
 /**
  * @file operational_stats.cppm
- * @brief Updates saturating counters shared by typed dispatch stages.
+ * @brief Keeps execution counters within the range of PostgreSQL bigint.
  */
 module;
 
@@ -13,10 +13,13 @@ export import bioseq.pipeline.stats;
 export namespace bioseq::simd::typed_dispatch::typed_support_detail {
 
 /**
- * @brief Adds one operational counter and records saturation.
+ * @brief Adds to a counter, clamping the sum to the PostgreSQL bigint maximum.
+ *
+ * Records clamping in stats so readers can tell that the count is incomplete.
+ * An earlier clamping event remains recorded.
  * @param[in,out] stats Execution statistics that own the saturation flag.
  * @param[in,out] destination Counter to update.
- * @param[in] increment Value added to the counter.
+ * @param[in] increment Value to add.
  */
 inline void add_operational_counter(::bioseq::pipeline_stats::pipeline_execution_stats& stats,
                                     std::uint64_t& destination,

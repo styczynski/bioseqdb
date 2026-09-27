@@ -1,12 +1,12 @@
 /**
  * @file implementation_parts/query_union.cppm
- * @brief Owns admitted CPU query-union preparation and compact-direct validation.
+ * @brief Combine CPU query minimizers for a shared target and track their memory use.
  */
 module;
 
 extern "C" {
 #include "postgres.h"
-// Anchor PG18+ tuple-descriptor inline helpers before importing catalog modules.
+// Include PostgreSQL 18+ tuple-descriptor helpers before the catalog modules.
 #include "access/tupdesc.h"
 #include "utils/errcodes.h"
 }
@@ -57,8 +57,8 @@ using cpu_preparation_status = batch_processor::cpu_preparation_status;
 using cpu_preparation_detail::append_physical_query_hashes;
 
 /**
- * @brief Reserves independently prepared query slots under one memory permit.
- * @return True when the requested slot capacity was admitted and allocated.
+ * @brief Reserve memory and create result slots for parallel query preparation.
+ * @return True when all requested slots are available within the memory permit.
  */
 [[nodiscard]] bool reserve_parallel_query_sketch_slots(
     std::vector<batch_processor::cpu_prepared_query_sketch>& destination,
@@ -112,14 +112,11 @@ using cpu_preparation_detail::append_physical_query_hashes;
 } // namespace
 
 /**
- * @brief Admits and builds query-hash unions or retained query sketches for CPU batch join.
- *
- * Resets @p prepared_target union state, validates query column shapes and exclusive
- * header-or-recipe ownership, and admits memory for union and optional sketch-cache
- * retention. Groups queries by the frozen statement minimizer parameters,
- * optionally preparing sketches in parallel for uniform batches. Finalizes each
- * group with deduplicated unions or retained sketches per @p union_storage and records
- * admission bytes and checksums on @p prepared_target.
+ * @brief Prepare the queries that will share one CPU target index.
+ * Combine their minimizer hashes so target preparation can select positions
+ * needed by any query. Flat queries can be prepared in parallel. Keep arrays
+ * within their memory permits. The record-only mode saves each query sketch
+ * and leaves query-set counts and checksums for later validation.
  */
 void batch_processor::prepare_cpu_shared_query_unions(
     const std::uint8_t alphabet_code,
@@ -239,10 +236,9 @@ void batch_processor::prepare_cpu_shared_query_unions(
         if (legacy_query_layout) {
             query_execution_layout = *legacy_query_layout;
         } else {
-            /* The registered profile remains authoritative, but its concrete
-             * record cannot be written into minimap_sketch_data. Retain that
-             * exact physical owner and canonical hashes instead (notably for
-             * scalar K20 and queries beyond the legacy L28 position domain). */
+            /* This query cannot use the legacy minimap_sketch_data record. Keep
+             * records in the selected format and collect their hashes separately,
+             * including for k=20 or positions beyond the legacy 28-bit limit. */
             effective_union_storage = cpu_query_union_storage::canonical_hashes;
         }
     }
@@ -370,9 +366,8 @@ void batch_processor::prepare_cpu_shared_query_unions(
                                 pool.maximum_concurrency() > 1u;
     if (effective_union_storage == cpu_query_union_storage::retained_sketch_only &&
         !parallel_group_is_uniform) {
-        /* Retention is an optimization, not a correctness prerequisite.  If
-         * full-batch retention cannot be proven before sketching starts, retain
-         * the admitted canonical owner and publish synchronously. */
+        /* This batch cannot use deferred validation through the parallel route.
+         * Build the query hash union and validate it during preparation. */
         effective_union_storage = cpu_query_union_storage::canonical_hashes;
     }
     if (parallel_group_is_uniform) {
@@ -836,20 +831,16 @@ void batch_processor::prepare_cpu_shared_query_unions(
             });
             pg_unreachable();
         }
-        /* The target-wide union has tens of millions of trivially-copyable
-         * sketches on the production workload.  The existing in-place radix
-         * implementation avoids comparison-sort's O(Q log Q) key extraction
-         * without introducing another full-size owner or admission peak. */
+        /* Sort hashes in place before removing duplicates. The radix sort
+         * avoids allocating another array the size of the query collection. */
         if (group.query_hash_union.size() > 1u) {
             std::uint64_t maximum_hash = 0u;
             for (const minimap_sketch_data& minimizer : group.query_hash_union) {
                 maximum_hash = std::max(maximum_hash, minimizer.kmer());
             }
             if (maximum_hash <= (std::numeric_limits<std::uint32_t>::max)()) {
-                /* This legacy fixed-record branch happens to fit in 32 bits.
-                 * Returning the proven narrower key avoids four known-zero
-                 * radix passes while the fallback below keeps the generic
-                 * 35-bit minimap_sketch_data contract intact. */
+                /* Every hash fits in 32 bits, so the radix sort can skip the upper
+                 * bytes. Larger hashes use the full-width key below. */
                 bioseq::sorting::radix_sort(
                     group.query_hash_union.data(),
                     group.query_hash_union.data() + group.query_hash_union.size(),
@@ -967,9 +958,9 @@ void batch_processor::prepare_cpu_shared_query_unions(
 }
 
 /**
- * @brief Publishes compact-direct query-set totals when retained-only preparation deferred validation.
- * @return True when @p prepared_target, @p group, and @p query_set_stats match the
- *         retained-sketch-only single-group contract and the stats were applied.
+ * @brief Record query-set totals produced by deferred compact-direct validation.
+ * @return True when the counts match the saved queries and were recorded.
+ * Invalid or already-published state returns false.
  */
 bool batch_processor::publish_compact_direct_query_set_stats(
     cpu_prepared_target& prepared_target,
@@ -1024,11 +1015,11 @@ bool batch_processor::publish_compact_direct_query_set_stats(
 }
 
 /**
- * @brief Recomputes compact-direct query-set stats from retained sketches when async validation did not run.
- *
- * No-op when query-set validation is already ready. Otherwise derives canonical u32 hashes
- * from the sole retained-sketch group and publishes stats via publish_compact_direct_query_set_stats.
- * @throws bioseq::indexing::persisted_minimizer_lookup_error when state is incomplete or admission fails.
+ * @brief Finish query-set validation when the parallel batch could not provide it.
+ * Sort and deduplicate hashes from the saved sketches, then record the
+ * counts and checksum. Return immediately if validation is already complete.
+ * @throws bioseq::indexing::persisted_minimizer_lookup_error for invalid state
+ * or unavailable memory.
  */
 void batch_processor::finalize_pending_compact_direct_query_set_validation_fallback(
     cpu_prepared_target& prepared_target) {

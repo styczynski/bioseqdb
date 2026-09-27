@@ -1,126 +1,16 @@
 /**
  * @file
- * @brief Declares batch processing for sequence dispatch.
+ * @brief Prepare shared target indexes and dispatch sequence-alignment batches.
  */
-/*-------------------------------------------------------------------------
+/*
+ * Keep alignment templates outside the tuple-buffer interface. The processor
+ * selects the implementation for the sequence alphabet and storage width.
  *
- * scheduler/dispatch_processor/index.cppm
- *
- * Heavy minimap/pipe implementation for batch_processor. Kept out of the
- * dispatch_buffer interface so edits to tuple-buffer or admin code do not
- * force that translation unit to reinstantiate the full supported alphabet x
- * storage-width minimap pipeline.
- *
- * Read/recompute/persist contract for minimizer indexes
- * -----------------------------------------------------
- *
- * There are two separate policy concepts in this file:
- *
- * 1. The active minimizer policy (`scanner_pg_context::active_index`).
- *    - Resolved once for the target column when a user relation is known.
- *      `bioseq.index.sequence_read.enabled` controls whether stored chunks are read;
- *      recompute paths still use this policy to choose transient
- *      minimizer-fragment vs minimizer-sequence storage.
- *    - Default when no enabled active row is found is
- *      `minimizers_per_fragment`.
- *    - The SQL schema has a unique partial index on
- *      `(user_relid, main_relfilenode, column_attno) WHERE is_active_read`, and
- *      `bioseq.set_active_read_index()` clears old active rows before setting
- *      the new one. Therefore more than one active read index is not a normal
- *      state. If an old/corrupt catalog ever exposes more than one, the resolver
- *      uses `LIMIT 1` with no ordering; treat that as unsupported.
- *
- * 2. The deferred recompute persistence choice.
- *    - Used only when `can_defer_recompute_minimizer_persist()` is true:
- *      `bioseq.index.recompute_async_persistence.enabled = on`,
- *      `bioseq.index.async_persistence.enabled = on`, a user relation is known, and the
- *      effective minimizer parameters are the persisted-index pair `k=15,w=10`.
- *    - It ignores `active_index` and scans `k_minimizer_index_names` in persistence
- *      preference order: `minimizers_per_fragment`, then
- *      `minimizers_per_sequence`.
- *    - If both minimizer indexes are enabled for UPDATE_ON_INSERT,
- *      `minimizers_per_fragment` wins. If neither is enabled, no deferred
- *      minimizer persist target is selected.
- *
- * GUC meanings in this dispatch path:
- *
- * - `bioseq.index.insert_maintenance.enabled`: write/load-time policy gate. When off,
- *   INSERT/load does not build UPDATE_ON_INSERT indexes. It does not by itself
- *   change the read path except by making stored indexes absent.
- *
- * - `bioseq.index.sequence_read.enabled`: read-time gate for stored-index reuse. When
- *   on, each row tries to assemble the active stored index if chunks exist.
- *   When off, no stored minimizer index is read even if chunks are present;
- *   rows go to recompute/transient paths that still honor the active
- *   minimizer-fragment/minimizer-sequence policy shape.
- *
- * - `bioseq.index.async_persistence.enabled`: global async persistence gate. If off, async
- *   staging functions refuse to enqueue/write opportunistically built indexes.
- *   It does not pick an index by itself.
- *
- * - `bioseq.index.recompute_async_persistence.enabled`: no-index recompute gate. It allows a
- *   recompute path to consult UPDATE_ON_INSERT minimizer policy and stage or
- *   otherwise handle a deferred minimizer target, but only together with
- *   `bioseq.index.async_persistence.enabled` and only for persisted parameters `k=15,w=10`.
- *
- * - `bioseq.index.memory_cap_mb`: memory-admission cap for resident targets,
- *   assembled indexes, sorted runs, and opportunistic RAM-first builds. `0`
- *   means use the live process/system memory budget. A larger or smaller cap
- *   can admit or reject resident/parallel paths, but it does not force
- *   persistence and it does not choose the active index.
- *
- * - `bioseq.scheduler.pipeline.mode` and
- *   `bioseq.scheduler.backend.max_concurrency`: enable task-parallel segment work when
- *   mode is `task_parallel` and effective concurrency is greater than one.
- *   These affect speed and resident materialization attempts, not the logical
- *   persistence policy.
- *
- * Stored-index present:
- *
- * - Active read index = `minimizers_per_fragment`.
- *   If the row has fragment-index chunks, assemble the required full/segment
- *   index from stored chunks and search with it. No new persistence is staged.
- *   If chunks are missing, fall through to recompute.
- *
- * - Active read index = `minimizers_per_sequence`.
- *   If the row has minimizer-sequence chunks, assemble a query-specific index
- *   from the stored minimizer-sequence representation and search with it.
- *   Logical-fragment-backed minimizer-sequence chunks remain supported. No new
- *   persistence is staged. If chunks are
- *   missing, fall through to recompute.
- *
- * - No active read row.
- *   The resolver defaults to `minimizers_per_fragment` when reads are enabled.
- *   If `bioseq.index.sequence_read.enabled` is off, no stored index is read; the
- *   resolved policy still chooses the transient recompute shape.
- *
- * Stored-index missing or reads disabled:
- *
- * - Active read index = `minimizers_per_fragment`.
- *   Recompute the search index. If RAM-first opportunistic build is admitted,
- *   the computed fragment chunks may be staged under
- *   `minimizers_per_fragment` when `bioseq.index.async_persistence.enabled` is on.
- *   In later resident recompute paths, if deferred choice also selects
- *   `minimizers_per_fragment`, the recomputed fragment index is written to a
- *   temp payload and staged for async persistence.
- *
- * - Active read index = `minimizers_per_sequence`.
- *   First, the RAM-first opportunistic branch may build fragment-shaped chunks
- *   and stage them under the minimizer-sequence name if memory admission succeeds and
- *   `bioseq.index.async_persistence.enabled` is on. If that is not admitted, the transient
- *   no-index minimizer-sequence branch can run when the deferred recompute gates are on
- *   and the UPDATE_ON_INSERT minimizer choice is minimizer-sequence. That branch materializes
- *   the target in memory when admitted, builds query-filtered transient segment
- *   indexes, searches, and logs `persisted=false`. This is an intentional
- *   semantic exception: the GUCs are used as eligibility gates, but no durable
- *   minimizer-sequence rows are staged by that fast path.
- *
- * - No UPDATE_ON_INSERT minimizer choice.
- *   Recompute and search normally. If `bioseq.index.recompute_async_persistence.enabled` was on
- *   but no eligible minimizer policy exists, the code logs that async-persist
- *   was skipped.
- *
- *-------------------------------------------------------------------------
+ * active_index chooses the stored or temporary minimizer layout. The read
+ * requirement separately controls whether a stored index is allowed, forbidden,
+ * or required. Missing required indexes raise an error. Background persistence
+ * has its own settings and write policy. Memory permits bound the indexes
+ * and query sketches kept across batches.
  */
 module;
 
@@ -130,9 +20,8 @@ module;
 extern "C" {
 #include "postgres_ext.h"
 
-// Match PostgreSQL's lightweight ABI declaration without importing its heavy
-// server headers into this scheduler facade. PG19 makes Datum uint64_t.
-// Use the selected server target, not a libpq dependency's pg_config.h.
+// Declare Datum for the selected PostgreSQL server version without pulling
+// server headers into this interface. PostgreSQL 19 uses uint64_t.
 #if POSTGRESQL_VERSION_MAJOR >= 19
 typedef uint64_t Datum;
 #else
@@ -199,34 +88,22 @@ export using ::bioseq::minimizers::minimap_sketch_data;
 /** @brief Maximum number of rows processed by one scheduler dispatch batch. */
 export constexpr size_t dispatch_batch_capacity = 8192;
 
-/**
- * @brief Selects whether a batch is the primary query or an additional query.
- */
+/** @brief Distinguish the primary alignment from an extra mmsearch filter. */
 export enum class batch_invocation_role : std::uint8_t {
     primary,
     extra_query,
 };
 
 /**
- * @brief Prepares and executes typed minimap2 work for one scheduler batch.
- *
- * `batch_processor` drives minimap_port across a batch of query and target
- * pairs that all share the same (alphabet_code, storage_unit_byte_width) typmod. The
- * caller hands us the already-detoasted query varlena (captured at
- * BeginCustomScan — see columnar_customscan.cppm) and an array of per-row
- * target varlenas (captured at submit_scan — see tuple_dispatch_buffer).
- *
- * Dispatch: we branch on (alphabet_code, storage_unit_byte_width) exactly once, then
- * inside the matching arm all eight compact_sequence_range<p_sequence>
- * specialisations compile down to their own minimap_port instantiation.
- * No std::variant, no runtime type erasure on the hot path.
- *
- * Execution validation is owned by the target-independent canonical value in
- * bioseq::pipeline_stats. Do not reintroduce a Highway-local stats owner.
+ * @brief Run alignment batches for one alphabet and storage width.
+ * Inputs can be flat sequences, storage locators, or saved slices. The
+ * scanner context supplies PostgreSQL readers and optional prepared targets.
+ * Shared targets keep indexes and query sketches alive across batches.
+ * Execution counters use the common pipeline statistics types.
  */
 export class batch_processor {
   public:
-    /** @brief Selects the retained representation of a prepared CPU query union. */
+    /** @brief Choose whether preparation saves minimizer records, hashes, or per-query sketches. */
     enum class cpu_query_union_storage : std::uint8_t {
         minimizer_sketch,
         canonical_hashes,
@@ -234,17 +111,13 @@ export class batch_processor {
         retained_sketch_only,
     };
 
-    /** @brief Owns one independently prepared query sketch and its admission. */
+    /** @brief Own one query's minimizer records and the permit covering their memory. */
     struct cpu_prepared_query_sketch {
         std::uint64_t query_ordinal = 0;
         std::uint64_t query_bp_size = 0;
-        /* During parallel preparation each query owns an independent permit.
-         * The backend thread absorbs it into the target aggregate before
-         * publication.  It is declared before minimizers so exceptional
-         * teardown deallocates both the concrete vector payload and its shared
-         * control/vector-object allocation before releasing admission. The
-         * erased owner is backed by a generated record tag and never by a
-         * no-op deleter. */
+        /* Each worker initially owns a permit for its query. The backend merges
+         * those permits before saving the complete query set. Declare the permit
+         * first so record storage is destroyed before its reservation is released. */
         std::optional<bioseq::parallelism::memory_permit> parallel_preparation_permit{};
         ::bioseq::minimizers::minimizer_physical_batch_owner minimizers{};
         pipe::minimizer_range_execution_stats execution_stats{};
@@ -275,8 +148,7 @@ export class batch_processor {
 
         cpu_prepared_query_sketch& operator=(cpu_prepared_query_sketch&& other) noexcept {
             if (this != std::addressof(other)) {
-                // The destination's physical storage must disappear while its
-                // old adjacent permit (or enclosing aggregate permit) is live.
+                // Free the old records before releasing the permit that covers them.
                 minimizers.reset();
                 parallel_preparation_permit.reset();
                 query_ordinal = std::exchange(other.query_ordinal, 0u);
@@ -292,7 +164,7 @@ export class batch_processor {
         }
     };
 
-    /** @brief Reports the terminal state of independent CPU query preparation. */
+    /** @brief Preparation state, including pending work and the reason a query failed. */
     enum class cpu_preparation_status : std::uint8_t {
         pending,
         ready,
@@ -304,7 +176,7 @@ export class batch_processor {
         unsupported_typmod,
     };
 
-    /** @brief Function signature for appending a flat query into a union. */
+    /** @brief Append minimizers from a flat query to a shared collection. */
     template <class p_destination>
     using cpu_append_header_function =
         void (*)(const bioseq::pg_types::seq&,
@@ -321,7 +193,7 @@ export class batch_processor {
                  bioseq::parallelism::memory_permit*,
                  std::uint64_t*);
 
-    /** @brief Function signature for appending a recipe-backed query into a union. */
+    /** @brief Append minimizers from an expanded query using its sequence read session. */
     template <class p_destination>
     using cpu_append_recipe_function =
         void (*)(Datum,
@@ -341,7 +213,7 @@ export class batch_processor {
                  bioseq::parallelism::memory_permit*,
                  std::uint64_t*);
 
-    /** @brief Function signature for preparing one independent query sketch. */
+    /** @brief Prepare one query sketch with its own memory permit. */
     using cpu_prepare_independent_function =
         cpu_preparation_status (*)(const bioseq::pg_types::seq&,
                                    std::uint64_t,
@@ -353,12 +225,12 @@ export class batch_processor {
                                    const ::bioseq::simd_dispatch::highway_kernel_table*,
                                    cpu_prepared_query_sketch&);
 
-    /** @brief Function signature for selecting one typmod-owned query layout. */
+    /** @brief Select a query record format for the bound alphabet and storage width. */
     using cpu_select_query_layout_function =
         ::bioseq::minimizers::minimizer_physical_layout_selection (*)(
             minimizer_algorithm, std::uint64_t, std::int32_t, std::int32_t);
 
-    /** @brief Binds typmod-specific query preparation callables without runtime erasure. */
+    /** @brief Query-preparation functions compiled for one alphabet and storage width. */
     struct cpu_preparation_typmod_operations final {
         std::uint8_t alphabet_code = 0;
         std::uint8_t storage_unit_byte_width = 0;
@@ -371,7 +243,7 @@ export class batch_processor {
         cpu_append_recipe_function<std::uint64_t> append_recipe_u64 = nullptr;
         cpu_prepare_independent_function prepare_independent = nullptr;
 
-        /** @brief Returns whether every required typmod callable is bound. */
+        /** @return Whether the width is a power of two and every required function is present. */
         [[nodiscard]] constexpr bool complete() const noexcept {
             return std::has_single_bit(storage_unit_byte_width) &&
                    select_query_layout != nullptr && append_header_sketch != nullptr &&
@@ -391,7 +263,7 @@ export class batch_processor {
     static_assert(std::is_standard_layout_v<cpu_preparation_typmod_operations>);
     static_assert(std::is_trivially_copyable_v<cpu_preparation_typmod_operations>);
 
-    /** @brief Owns one prepared CPU index parameter group for a shared target. */
+    /** @brief Queries and a shared target index for one set of minimizer parameters. */
     struct cpu_prepared_index_group {
         std::int32_t kmer_size = 0;
         std::int32_t window_size = 0;
@@ -399,56 +271,43 @@ export class batch_processor {
         minimizer_sketch_backend sketch_backend = minimizer_sketch_backend::scalar;
         ::bioseq::minimizers::minimizer_physical_layout_selection execution_layout{};
         std::vector<minimap_sketch_data> query_hash_union{};
-        /* Persisted readers borrow this exact sorted-unique canonical image for their
-         * complete lifetime.  It is mutually exclusive with query_hash_union:
-         * publication is authenticated before the scheduler chooses which
-         * representation to construct, so there is never a second Q-sized
-         * conversion owner or sort.  Declaring it before the reader makes
-         * reverse destruction release the borrowing reader first. */
+        /* Sorted unique query hashes in their selected width. Some readers borrow
+         * these arrays, so declare them before the readers. Use one width at
+         * a time, and keep query_hash_union empty while this form is active. */
         std::vector<std::uint32_t> canonical_query_hash_union_u32{};
         std::vector<std::uint64_t> canonical_query_hash_union_u64{};
         std::uint8_t canonical_query_hash_width = 0u;
-        /* Canonical preparation retains the exact generated-record sketch produced
-         * while filling the active-width hash union. Every published ordinal has
-         * a concrete owner; typed row execution never substitutes a narrower record. */
+        /* Keep each query's original generated records alongside its hash union
+         * so row execution can reuse the same sketch format. */
         std::vector<cpu_prepared_query_sketch> retained_query_sketches{};
-        /* Declared before target_index so destruction releases the owned
-         * index storage before returning its admission reservation. */
+        /* Destroy target_index before returning the memory covered by its permit. */
         std::optional<bioseq::parallelism::memory_permit> target_index_permit{};
         std::shared_ptr<bioseq::indexing::minimizer_hashmap_fragment_index> target_index{};
-        /* Production minimizer-fragment grouped-SoA keeps every physical-fragment index
-         * independent. Its only target-wide state is query-specific global
-         * occurrence counts required by max-occ pruning; no posting owner,
-         * span federation, or hash-to-fragment lookup index is retained. */
-        /* Declared before the borrowing reader so reverse destruction drops
-         * every mapped span consumer before the backend-thread guard promptly
-         * forgets, unmaps and closes its PostgreSQL ResourceOwner lease. */
+        /* The MPF reader probes stored fragment indexes or their direct-lookup
+         * image and applies the query's occurrence limit. */
+        /* Keep the mapping alive until the borrowing reader has been destroyed.
+         * The mapping owner then releases its PostgreSQL resource lease. */
         std::optional<bioseq::storage::indexing::mapped_minimizer_fragment_lease_guard>
             persisted_fragment_mapping_guard{};
         std::optional<bioseq::indexing::prepared_minimizer_fragment_reader>
             persisted_fragment_reader{};
-        /* Captured once when the persisted reader is opened.  Production call
-         * sites must pass this explicitly: compact_h32_direct is fail-closed and
-         * must never silently take the default grouped-SoA control-scan route. */
+        /* Keep the lookup route selected when the reader opened. Callers pass it
+         * explicitly so direct lookup cannot silently become a control scan. */
         bioseq::indexing::minimizer_fragment_lookup_route persisted_fragment_lookup_route =
             bioseq::indexing::minimizer_fragment_lookup_route::grouped_soa_control_scans;
-        /* Minimizer-sequence grouped-SoA retains its sequence-wide query-selected image.
-         * It is separate from the minimizer-fragment mmap reader above: minimizer-sequence consumes
-         * the authenticated PostgreSQL payload scan and must never borrow the
-         * minimizer-fragment-only sidecar or fragment-native ownership validation. */
+        /* The MPS reader owns positions selected from a complete PostgreSQL
+         * payload scan. Its storage is separate from the mapped MPF reader. */
         std::optional<bioseq::indexing::prepared_grouped_soa_query_reader>
             persisted_grouped_soa_reader{};
-        /* No-index minimizer-sequence generation publishes one authenticated,
-         * query-union-filtered reader for the statement group. It owns copied
-         * selected positions and never borrows the temporary encoded payload. */
+        /* Temporary MPS reader for this query group. It keeps selected positions
+         * alive after the temporary encoded index has been released. */
         std::optional<bioseq::indexing::prepared_grouped_soa_query_reader>
             transient_grouped_soa_reader{};
         std::optional<bioseq::indexing::hash_major_minimizer_selective_reader>
             persisted_hash_major_reader{};
 #if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS) || defined(BIOSEQ_TEST_INDEXES)
-        /* Campaign and private test builds retain the producer receipt beside the shared
-         * target that consumed its spill. Ordinary builds pay no proof-owner
-         * storage or receipt-copy cost. */
+        /* Benchmark and test builds save the target producer's execution record
+         * beside the reader that consumed its temporary output. */
         std::optional<bioseq::indexing::minimizer_sequence_generation_execution_receipt>
             transient_target_generation_receipt{};
 #endif
@@ -462,28 +321,25 @@ export class batch_processor {
         std::uint64_t persisted_reader_queries = 0;
         std::uint64_t persisted_reader_load_host_wall_ns = 0;
         std::uint64_t persisted_generation_id = 0;
-        /* Correctness authority for hash-major. The diagnostic u64 field below
-         * is retained only for the existing pipeline stats ABI and must never
-         * be used to authenticate a hash-major source. */
+        /* Use all 128 bits to check a hash-major source. The 64-bit field below
+         * is only a diagnostic token for that layout. */
         std::array<std::byte, 16> persisted_hash_major_source_identity{};
         bool persisted_hash_major_source_identity_present = false;
         std::uint64_t persisted_source_identity = 0;
         bioseq::storage::indexing::minimizer_generation_read_stats persisted_read_stats{};
         bool build_set_checksum_present = false;
         std::uint64_t build_set_checksum = 0;
-        /* Compact-direct full-batch preparation already constructs the exact
-         * sorted unique query set needed by the reader.  While this is true the
-         * prepared/build checksum is deliberately unpublished; the
-         * backend thread must resolve it exactly once before worker fanout or
-         * materialize the admitted slow fallback before row execution. */
+        /* Query-set counts and checksums are pending until the complete parallel
+         * batch validates them. A smaller execution batch must first derive
+         * them from the saved sketches. */
         bool compact_direct_query_set_validation_pending = false;
 #if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS) || defined(BIOSEQ_TEST_INDEXES)
         bool transient_target_generation_stats_published = false;
 #endif
 
         /**
-         * @brief Finds a retained sketch by query ordinal.
-         * @return The borrowed sketch or null when it was not retained.
+         * @brief Find a saved sketch by query ordinal.
+         * @return The borrowed sketch, or null when no sketch has that ordinal.
          */
         [[nodiscard]] const cpu_prepared_query_sketch*
         find_retained_query_sketch(const std::uint64_t query_ordinal) const noexcept {
@@ -500,7 +356,7 @@ export class batch_processor {
                        : nullptr;
         }
 
-        /** Return the one active canonical hash width, or zero for none/ambiguous. */
+        /** Return the selected hash width, or zero if the stored arrays disagree with it. */
         [[nodiscard]] std::uint8_t canonical_query_hash_width_bytes() const noexcept {
             const bool valid_u32 = canonical_query_hash_width == sizeof(std::uint32_t) &&
                                    canonical_query_hash_union_u64.capacity() == 0u;
@@ -512,7 +368,7 @@ export class batch_processor {
             return canonical_query_hash_width;
         }
 
-        /** Borrow the active width-tagged canonical hash image. */
+        /** Borrow the query hashes with their width and optional storage-profile digest. */
         [[nodiscard]] bioseq::indexing::canonical_query_hash_view
         canonical_query_hash_view(
             const std::array<std::byte, 32>& storage_profile_digest = {}) const noexcept {
@@ -527,21 +383,17 @@ export class batch_processor {
     };
 
     /**
-     * @brief Owns one MPF source and its query-independent Vulkan resident.
-     *
-     * A persisted owner retains the mmap lease and the source-only grouped-SoA
-     * reader until the resident has been materialized after physical minimizer
-     * selection.  A no-index owner starts as metadata-only and builds its
-     * complete target resident from the real target view exactly once.  Neither
-     * form owns a CPU hashmap or a host query sketch.
+     * @brief Keep one MPF source and its reusable Vulkan index.
+     * Stored targets keep a mapped fragment reader until the GPU index is
+     * ready. A temporary target starts with source metadata and builds from
+     * the target sequence. Queries share the completed GPU index.
      */
     struct gpu_prepared_mpf_target {
         pipe::statement_execution_plan_owner execution_plan{};
         std::int64_t target_rowno = -1;
         std::uint64_t target_bp_size = 0;
         std::uint64_t query_count = 0;
-        /* Reverse destruction releases the borrowing reader before its mmap
-         * and PostgreSQL ResourceOwner lease. */
+        /* Destroy the reader before releasing the mapped file and resource lease. */
         std::optional<bioseq::storage::indexing::mapped_minimizer_fragment_lease_guard>
             persisted_fragment_mapping_guard{};
         std::optional<bioseq::indexing::prepared_minimizer_fragment_reader>
@@ -556,17 +408,14 @@ export class batch_processor {
         std::uint64_t dispatched_query_count = 0;
         std::uint64_t dispatch_waves = 0;
 #if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
-        /* The no-index MPF producer remains Vulkan only through bounded target
-         * minimizer collection. Spill replay and exact sorted-dense construction
-         * are host work, so their receipts remain distinct and cannot be relabelled
-         * as the removed all-GPU index builder. */
+        /* Vulkan collects target minimizers. The CPU replays temporary runs and
+         * builds the sorted dense index, so keep their execution records separate. */
         std::optional<bioseq::indexing::minimizer_sequence_generation_execution_receipt>
             transient_target_spill_receipt{};
         std::optional<bioseq::indexing::minimizer_sequence_generation_execution_receipt>
             transient_target_replay_receipt{};
-        /* Present for either persisted or transient nonempty source-direct
-         * materialization. The resident owns the live buffers/permit; this is its
-         * immutable physical receipt retained through whole-wave publication. */
+        /* Record the completed GPU allocation while the resident owns its buffers
+         * and memory permit. Used for stored and temporary nonempty targets. */
         std::optional<bioseq::indexing::gpu_source_direct_materialization_stats>
             resident_materialization_stats{};
 #endif
@@ -583,17 +432,16 @@ export class batch_processor {
         gpu_prepared_mpf_target(gpu_prepared_mpf_target&&) noexcept = default;
         gpu_prepared_mpf_target& operator=(gpu_prepared_mpf_target&& other) noexcept {
             if (this != std::addressof(other)) {
-                // Default memberwise assignment would release the mapping guard
-                // before assigning (and therefore destroying) its borrowing
-                // reader. Rebuild through the move constructor so ordinary
-                // reverse destruction drops resident/cache/reader first.
+                // Destroy the current object in reverse member order before moving in
+                // its replacement. This keeps the mapping alive through reader
+                // destruction.
                 std::destroy_at(this);
                 std::construct_at(this, std::move(other));
             }
             return *this;
         }
 
-        /** @return True when immutable statement and persisted-source identities are complete. */
+        /** @return Whether the plan, row identity, cache, and stored-index IDs are consistent. */
         [[nodiscard]] bool identity_ready() const noexcept {
             if (!execution_plan || target_rowno < 0 || target_bp_size == 0u ||
                 query_count == 0u || operation_identity == 0u || resident_cache == nullptr) {
@@ -604,7 +452,7 @@ export class batch_processor {
                 : persisted_generation_id == 0u && persisted_source_identity == 0u;
         }
 
-        /** @return True when the statement may materialize this source once. */
+        /** @return Whether the target has the source state needed to build its GPU index. */
         [[nodiscard]] bool source_ready() const noexcept {
             if (!identity_ready())
                 return false;
@@ -616,7 +464,7 @@ export class batch_processor {
                    persisted_fragment_reader->gpu_source_ready();
         }
 
-        /** @return True after one complete resident or authenticated empty proof was committed. */
+        /** @return Whether a complete GPU index or checked empty result matches this request. */
         [[nodiscard]] bool completed_resident_ready() const noexcept {
             if (!identity_ready())
                 return false;
@@ -711,15 +559,15 @@ export class batch_processor {
 #endif
         }
 
-        /** @return True only after committed proof no longer borrows the persisted mmap. */
+        /** @return Whether the completed GPU target has released its mapped source reader. */
         [[nodiscard]] bool sealed_resident_ready() const noexcept {
             return completed_resident_ready() && !persisted_fragment_reader &&
                    !persisted_fragment_mapping_guard;
         }
 
         /**
-         * Seal a completed persisted target and release its source in borrowing order.
-         * A failed precondition leaves both reader and mapping guard live for unwinding.
+         * Release the stored source after its GPU index is complete. Destroy the
+         * reader before the mapping. Failed checks leave both objects intact.
          */
         [[nodiscard]] bool seal_persisted_resident_and_release_source() noexcept {
             if (!persisted || !source_ready() || !completed_resident_ready())
@@ -729,27 +577,22 @@ export class batch_processor {
             return sealed_resident_ready();
         }
 
-        /** @return True after exactly one sealed resident or authenticated empty result exists. */
+        /** @return Whether the GPU target is complete and its source reader is released. */
         [[nodiscard]] bool ready() const noexcept {
             return sealed_resident_ready();
         }
     };
 
     /**
-     * @brief Owns CPU preparation shared by all query waves for one target row.
-     *
-     * One object per physical target row survives every 8192-query wave
-     * in tuple_dispatch_buffer and may contain one parameter group per effective
-     * (k,w,max_occ) shape.  GPU locator execution never consumes this object. */
+     * @brief Reuse CPU target preparation across query batches for one target row.
+     * Keep an index group for each minimizer configuration used by those queries.
+     */
     struct cpu_prepared_target {
         std::int64_t target_rowno = -1;
         std::uint64_t target_bp_size = 0;
         std::uint64_t query_count = 0;
-        /* CPU preparation runs beneath the same public Highway selection
-         * boundary as ordinary batch execution.  The selected table has static
-         * storage duration; retaining its neutral pointer and exact plan here
-         * lets every later query wave prove that it is reusing, rather than
-         * reconstructing, that target binding. */
+        /* Keep the statement plan and selected Highway kernels with the target.
+         * Later query batches check this binding before reusing its preparation. */
         pipe::statement_execution_plan_owner execution_plan{};
         const ::bioseq::simd_dispatch::highway_kernel_table* highway_kernels = nullptr;
         ::bioseq::simd_dispatch::highway_dispatch_plan highway_dispatch{};
@@ -762,11 +605,9 @@ export class batch_processor {
         bool unions_ready = false;
         bool query_union_prepare_host_wall_published = false;
         bool persisted_read_stats_published = false;
-        /* The aggregate permit belongs to the target-wide object, not to an
-         * individual parameter group.  It is deliberately declared after
-         * groups: default move-assignment replaces old union storage
-         * before releasing the old permit.  The explicit destructor enforces
-         * the corresponding deallocate-before-release order at destruction. */
+        /* These permits cover all groups. Default move assignment replaces the
+         * old groups first, and the destructor explicitly frees group storage
+         * before releasing their permits. */
         std::uint64_t query_union_admission_bytes = 0;
         std::optional<bioseq::parallelism::memory_permit> query_union_permit{};
         std::uint64_t query_sketch_cache_admission_bytes = 0;
@@ -778,14 +619,7 @@ export class batch_processor {
         cpu_prepared_target(cpu_prepared_target&&) noexcept = default;
         cpu_prepared_target& operator=(cpu_prepared_target&&) noexcept = default;
 
-        /**
-         * @brief Compares the complete Highway dispatch identity retained by a target.
-         * @param[in] lhs First dispatch plan.
-         * @param[in] lhs_target Executed target for the first plan.
-         * @param[in] rhs Second dispatch plan.
-         * @param[in] rhs_target Executed target for the second plan.
-         * @return True when both plans and executed targets are identical.
-         */
+        /** @return Whether both Highway plans and selected CPU targets match. */
         [[nodiscard]] static constexpr bool
         same_highway_dispatch_identity(const ::bioseq::simd_dispatch::highway_dispatch_plan& lhs,
                                        const std::int64_t lhs_target,
@@ -797,11 +631,7 @@ export class batch_processor {
                    lhs.planned_target == rhs.planned_target && lhs_target == rhs_target;
         }
 
-        /**
-         * @brief Checks whether this target retains the dispatch selected by parameters.
-         * @param[in] requested_plan Owner carrying the statement's selected Highway table and plan.
-         * @return True when the retained binding matches every dispatch field.
-         */
+        /** @return Whether this target shares the requested statement plan and CPU kernel binding. */
         [[nodiscard]] bool
         highway_binding_matches(const pipe::statement_execution_plan_owner& requested_plan) const noexcept {
             if (!execution_plan || !requested_plan ||
@@ -819,9 +649,9 @@ export class batch_processor {
         }
 
         /**
-         * @brief Binds a valid Highway dispatch or validates the existing binding.
-         * @param[in] params Parameters carrying the selected Highway table and plan.
-         * @return True when a valid binding was installed or already matched.
+         * @brief Save the selected Highway plan on first use.
+         * @param[in] requested_plan Statement plan with valid CPU kernels.
+         * @return True if the binding was installed or already matches this plan.
          */
         [[nodiscard]] bool bind_highway_dispatch_once(pipe::statement_execution_plan_owner requested_plan) noexcept {
             if (!requested_plan) {
@@ -852,7 +682,7 @@ export class batch_processor {
             return true;
         }
 
-        /** @brief Releases query-union storage before returning its admission permits. */
+        /** @brief Free query groups and their storage before releasing the memory permits. */
         void release_query_union_state_noexcept() noexcept {
             std::vector<cpu_prepared_index_group>{}.swap(groups);
             query_union_admission_bytes = 0;
@@ -862,9 +692,8 @@ export class batch_processor {
         }
 
         /**
-         * @brief Releases a group's native sketch union and shrinks target admission.
-         * @param[in,out] group Prepared group whose native union is no longer needed.
-         * @return True when ownership and admission were consistent and released.
+         * @brief Free a group's legacy sketch union and reduce its memory reservation.
+         * @return False if the stored representation or accounting is inconsistent.
          */
         [[nodiscard]] bool
         release_group_query_hash_union_noexcept(cpu_prepared_index_group& group) noexcept {
@@ -880,16 +709,15 @@ export class batch_processor {
                 group.canonical_query_hash_width != 0u) {
                 return false;
             }
-            // The native persisted reader owns its canonical hash image now.
-            // Deallocate the target-wide sketch union before shrinking the
-            // aggregate permit so memory authority never trails ownership.
+            // The reader has copied the hashes it needs. Free this sketch array
+            // before reducing the permit that covers it.
             std::vector<minimap_sketch_data>{}.swap(group.query_hash_union);
             query_union_admission_bytes -= released_bytes;
             query_union_permit->shrink_to(query_union_admission_bytes);
             return true;
         }
 
-        /** Release one width-tagged canonical query image after a copying reader opens. */
+        /** Free query-hash arrays after a reader has copied them, then shrink their permit. */
         [[nodiscard]] bool release_group_canonical_query_hashes_noexcept(
             cpu_prepared_index_group& group) noexcept {
             const std::uint64_t u32_bytes = bioseq::common::saturating_mul(
@@ -929,10 +757,7 @@ export class batch_processor {
                    std::int32_t max_occ,
                    minimizer_sketch_backend sketch_backend) noexcept;
 
-        /**
-         * @brief Checks whether every compact-direct query-set receipt is resolved.
-         * @return True when no prepared group awaits validation.
-         */
+        /** @return Whether every prepared group has finished query-set validation. */
         [[nodiscard]] bool query_set_validation_ready() const noexcept {
             return std::ranges::none_of(groups, [](const cpu_prepared_index_group& group) noexcept {
                 return group.compact_direct_query_set_validation_pending;
@@ -941,11 +766,9 @@ export class batch_processor {
     };
 
     /**
-     * @brief Retains one authenticated grouped-SoA generation for a GPU target.
-     *
-     * The resident owns the three Vulkan buffers for the complete batch join
-     * lifecycle. `resident_view` contains stable pointers into that object and
-     * has no independent publication or cache authority.
+     * @brief Keep a grouped-SoA GPU target alive across query batches.
+     * The resident owns descriptor, control, and position buffers. resident_view
+     * borrows those buffers for dispatch.
      */
     struct gpu_prepared_grouped_soa_target {
         pipe::statement_execution_plan_owner execution_plan{};
@@ -979,17 +802,14 @@ export class batch_processor {
         gpu_prepared_grouped_soa_target&
         operator=(gpu_prepared_grouped_soa_target&&) noexcept = default;
 
-        /**
-         * @brief Validates retained ownership, buffer views, and source identity.
-         * @return True when the target is ready for grouped-SoA GPU dispatch.
-         */
+        /** @return Whether the target has a plan and source identity for GPU preparation. */
         [[nodiscard]] bool source_ready() const noexcept {
             return execution_plan && target_rowno >= 0 && target_bp_size != 0u &&
                    query_count != 0u && operation_identity != 0u &&
                    (persisted ? resident != nullptr : true);
         }
 
-        /** @brief Validates the completed transient or persisted target owner. */
+        /** @brief Check that the GPU buffer views match the completed target and its identity. */
         [[nodiscard]] bool ready() const noexcept {
 #if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
             const bool generation_proof = persisted
@@ -1023,17 +843,13 @@ export class batch_processor {
     };
 
     /**
-     * @brief Exercises the deallocate-before-permit reprepare contract.
-     *
-     * It deliberately populates one cpu_prepared_target object twice instead of
-     * constructing a later scan object, so stale outer or nested capacity is
-     * observable.  No PostgreSQL state is touched.
-     *
-     * @return True when move, validation, release, and reprepare checks pass.
+     * @brief Test moving, clearing, and preparing the same CPU target twice.
+     * Check that borrowed hash views survive moves and that releasing storage
+     * also releases its memory reservation. PostgreSQL calls are unnecessary.
+     * @return True when all ownership and query-validation checks pass.
      */
     [[nodiscard]] static bool cpu_prepared_target_same_object_reprepare_probe() {
-        /* A moved query-cache element must not retain receipt geometry or an
-         * engaged moved-empty permit in its source object. */
+        /* Moving a query sketch must clear the source's metadata and permit. */
         {
             bioseq::parallelism::memory_admission_controller admission;
             auto permit = admission.try_reserve(0u);
@@ -1061,9 +877,7 @@ export class batch_processor {
                 return false;
             }
         }
-        /* The same existing SQL probe also guards the hash-major borrowed-view
-         * lifetime: moving the target must transfer the group allocation
-         * without moving or duplicating its canonical hash image. */
+        /* Moving the target must preserve the array borrowed by its hash view. */
         {
             cpu_prepared_target source;
             source.groups.emplace_back();
@@ -1084,9 +898,8 @@ export class batch_processor {
                 return false;
             }
         }
-        /* The retained-sketch receipt is fail-closed, one-shot, and leaves no
-         * canonical owner behind.  Exercise both direct publication and the
-         * admitted sort/dedup fallback through the existing SQL seam. */
+        /* Reject inconsistent query counts and a second publication. Also test
+         * deriving the same checksums through the synchronous fallback. */
         {
             cpu_prepared_target validation_target;
             validation_target.unions_ready = true;
@@ -1230,10 +1043,7 @@ export class batch_processor {
                !target.query_union_permit.has_value() && admission.reserved_bytes() == 0u;
     }
 
-    /**
-     * @brief Checks that exactly one persisted native reader was selected.
-     * @return True when exactly one reader flag is set.
-     */
+    /** @return Whether exactly one stored-index reader was selected. */
     [[nodiscard]] static constexpr bool exactly_one_native_persisted_reader(
         const bool fragment, const bool grouped_soa, const bool hash_major) noexcept {
         return static_cast<unsigned>(fragment) + static_cast<unsigned>(grouped_soa) +
@@ -1241,10 +1051,7 @@ export class batch_processor {
                1u;
     }
 
-    /**
-     * @brief Checks whether grouped-SoA may replace hash-major before stream I/O.
-     * @return True only before I/O when the head is absent or inapplicable.
-     */
+    /** @return Whether to try grouped-SoA after an absent or inapplicable hash-major index, before payload reads. */
     [[nodiscard]] static constexpr bool
     hash_major_grouped_soa_fallback_allowed(const bool head_absent,
                                             const bool profile_applicable,
@@ -1253,19 +1060,18 @@ export class batch_processor {
     }
 
     /**
-     * @brief Derives length-adjusted minimap2 parameters for one query pair.
-     * @param[in] base Base parameters selected for the statement.
-     * @param[in] min_bp Shorter sequence length in base pairs.
-     * @return Effective parameters for the pair.
+     * @brief Adjust unchanged minimizer defaults for a short sequence pair.
+     * @param[in] base Statement parameters.
+     * @param[in] min_bp Length of the shorter sequence in bases.
+     * @return The parameters to use for this pair.
      */
     [[nodiscard]] static minimap2_parameters
     effective_params_for_pair(const minimap2_parameters& base, std::size_t min_bp) noexcept;
 
     /**
-     * @brief Prepares admitted CPU query unions shared by every target wave.
-     *
-     * Flat and recipe-backed queries use the supplied typmod operations and
-     * publish only after all retained storage has matching admission authority.
+     * @brief Combine query minimizers for reuse by a shared CPU target.
+     * Flat sequences and expanded slices use the same typed preparation
+     * functions. Saved arrays must fit their memory permits.
      */
     void prepare_cpu_shared_query_unions(
         std::uint8_t alphabet_code,
@@ -1284,10 +1090,9 @@ export class batch_processor {
         cpu_prepared_target& prepared_target);
 
     /**
-     * @brief Opens and validates one persisted native CPU target representation.
-     *
-     * The selected reader remains bound to the executor snapshot and the prepared
-     * query unions retained by `prepared_target`.
+     * @brief Open a compatible stored index and save its CPU reader.
+     * Check it against the source visible to the executor snapshot and the
+     * statement's minimizer settings. Prepare query hashes for that reader.
      */
     void prepare_cpu_persisted_native_target(
         Oid database_oid,
@@ -1312,23 +1117,19 @@ export class batch_processor {
         cpu_prepared_target& prepared_target);
 
     /**
-     * @brief Publishes one authenticated compact-direct query-set receipt.
-     * @return True when the pending group accepted the complete receipt.
+     * @brief Record deferred compact-direct query counts and checksums.
+     * @return True if the pending group accepted the complete query-set result.
      */
     [[nodiscard]] static bool publish_compact_direct_query_set_stats(
         cpu_prepared_target& prepared_target,
         cpu_prepared_index_group& group,
         const bioseq::indexing::compact_direct_query_set_stats& query_set_stats) noexcept;
 
-    /**
-     * @brief Resolves pending compact-direct validation from admitted query unions.
-     */
+    /** @brief Finish pending query-set validation from the saved query sketches. */
     static void finalize_pending_compact_direct_query_set_validation_fallback(
         cpu_prepared_target& prepared_target);
 
-    /**
-     * @brief Opens one authenticated persisted grouped-SoA target for Vulkan use.
-     */
+    /** @brief Read and upload a compatible stored MPS index for Vulkan seeding. */
     void prepare_gpu_persisted_grouped_soa_target(
         Oid database_oid,
         Oid tablespace_oid,
@@ -1345,9 +1146,7 @@ export class batch_processor {
         const bioseq::storage::indexing::borrowed_executor_read_context& executor_read,
         gpu_prepared_grouped_soa_target& prepared_target);
 
-    /**
-     * @brief Opens one authenticated persisted MPF mmap source for later typed GPU materialization.
-     */
+    /** @brief Map a compatible stored MPF index for later upload to Vulkan. */
     void prepare_gpu_persisted_mpf_target(
         Oid database_oid,
         Oid tablespace_oid,
@@ -1365,24 +1164,22 @@ export class batch_processor {
         gpu_prepared_mpf_target& prepared_target);
 
     /**
-     * @brief Carries statement-owned PostgreSQL resources into per-row dispatch.
-     *
-     * When present, locator targets remain source-backed while query literals use
-     * resident facades. A null context selects the in-memory baseline stage.
+     * @brief Carry PostgreSQL readers and shared target state into alignment.
+     * Locators and expanded slices are read through this context. Flat queries
+     * can use their resident bytes directly.
      */
     struct scanner_pg_context {
-        /// Retain the executor's exact immutable request across admitted waves.
+        /// Keep the same statement plan across all groups of dispatched rows.
         pipe::statement_execution_plan_owner execution_plan{};
         using gpu_mpf_target_owner = gpu_prepared_mpf_target;
         using gpu_mps_target_owner = gpu_prepared_grouped_soa_target;
         /**
-         * @brief Describes one synchronous cold-preparation callback.
-         *
-         * The scheduler root installs it and `process_sequences` consumes it after
-         * selecting parameters but before profiling or typed execution.
+         * @brief Prepare a shared CPU target after Highway kernel selection.
+         * The dispatch buffer installs this synchronous callback so query
+         * preparation uses the same kernels as later alignment.
          */
         struct highway_preparation_hook final {
-            /** @brief Function signature for statement-root cold preparation. */
+            /** @brief Callback for preparing the statement's shared CPU target. */
             using callback_function = void (*)(void*,
                                                scanner_pg_context&,
                                                pipe::statement_execution_plan_owner,
@@ -1403,15 +1200,10 @@ export class batch_processor {
         };
 
         /**
-         * @brief Creates one row-local Vulkan target owner for an ordinary scan.
-         *
-         * BatchJoin supplies one statement target through the dedicated prepared
-         * pointers below.  An ordinary scan has a different logical target per
-         * row, so it instead installs these synchronous callbacks.  Each callback
-         * fills a caller-owned target object and returns only after all PostgreSQL
-         * resources needed by that object have been retained.  The caller keeps
-         * the object through canonical seed consumption and the complete host
-         * suffix, then destroys it before advancing to the next row.
+         * @brief Prepare a separate Vulkan target for each ordinary scan row.
+         * Each callback fills a caller-owned object and keeps the storage it
+         * needs. The caller keeps that object through alignment of the row.
+         * Batch joins instead pass one prepared target shared by many queries.
          */
         struct ordinary_vulkan_target_preparation_hook final {
             using mpf_callback_function = void (*)(
@@ -1455,7 +1247,7 @@ export class batch_processor {
 #endif
             }
 
-            /** @return True when the state and both layout callbacks are installed. */
+            /** @return Whether the state and all callbacks required by this build are present. */
             [[nodiscard]] constexpr bool valid() const noexcept {
 #if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
                 return state != nullptr && prepare_mpf != nullptr && prepare_mps != nullptr &&
@@ -1468,13 +1260,10 @@ export class batch_processor {
 
         highway_preparation_hook highway_preparation{};
         ordinary_vulkan_target_preparation_hook ordinary_vulkan_target_preparation{};
-        /* Optional statement-root async ownership observer.  It is generic at
-         * the pipeline boundary; the PostgreSQL trace owner supplies the
-         * concrete enrollment/state-machine adapter. */
+        /* Track asynchronous jobs under the statement's slice owner. */
         bioseq::parallelism::tracked_job_observer async_job_observer{};
-        /* Stable for the complete process_sequences call. Views copy only a
-         * pointer to these records; every tracked task joins/drains before
-         * scanner_pg_context leaves its owning dispatch frame. */
+        /* Sequence views borrow these allocation observers. Keep them alive until
+         * process_sequences returns and all tracked tasks have finished. */
         bioseq::storage::sequence_payload_allocation_observer mmsearch_target_payload_observer{};
         bioseq::storage::sequence_payload_allocation_observer mmsearch_query_payload_observer{};
         Oid db_oid = InvalidOid;
@@ -1486,48 +1275,38 @@ export class batch_processor {
         std::uint8_t query_storage_unit_byte_width = 0;
         bioseq::storage::seq_caches* caches = nullptr;
         MemoryContext parent_mctx = nullptr;
-        /* Wave-owned and borrowed. The dispatch buffer closes it only after
-         * process_sequences and every synchronous GPU fence have returned. */
+        /* Borrow the current group's read session until alignment and GPU work finish. */
         pg_sequence_read_session* read_session = nullptr;
-        // Borrowed statement snapshot owned by the executor/admin caller.
-        // The facade adapter validates registered MVCC state and never
-        // changes its registration count.
+        // The executor owns this registered MVCC snapshot. Dispatch borrows it
+        // without changing its registration.
         Snapshot snapshot = nullptr;
-        // Borrowed beside `snapshot` for synchronous ordinary-scan Vulkan
-        // target preparation.  The dispatch buffer owns it through every wave,
-        // and no prepared target or callback retains this pointer after return.
+        // Borrowed storage-read context for ordinary-scan Vulkan preparation.
+        // Its owner keeps it alive until the preparation callbacks return.
         const bioseq::storage::indexing::borrowed_executor_read_context*
             executor_read_context = nullptr;
-        // Borrowed from the bioseq scan that owns this dispatch. Locator-backed
-        // targets must be promoted through this exact statement provider;
-        // scanner_pg_context never closes or retains it independently.
+        // The scan owns this provider. Use it to read locator-backed targets.
         bioseq::storage::pg_sequence_source_provider* source_provider = nullptr;
-        // Borrowed statement-root sink. It is required only by the accepted
-        // persisted grouped-SoA Vulkan route and never owns through hot stats.
+        // Borrowed statement counters for GPU operations on stored indexes.
         ::bioseq::pipeline_stats::persisted_gpu_operation_accumulator*
             persisted_gpu_operation_stats_sink = nullptr;
-        // Borrowed from the same statement root and shared by every query,
-        // segment, wave, and worker until executor publication.
+        // Shared statement timer used by queries and workers.
         downstream_active_wall_tracker* downstream_active_wall = nullptr;
-        // Per-row optional locator. nullopt means "use the inline bioseq::pg_types::seq at
-        // target_hdrs[i]" — the target then uses an in-memory facade.
+        // Optional target locators. Rows without a locator use a flat header
+        // or an expanded slice supplied below.
         std::array<std::optional<bioseq::storage::sequence_locator>, dispatch_batch_capacity>
             target_locators{};
-        // Same-relation per-row query locators. These use the target scan's
-        // exact provider but retain their own physical attno and storage width.
+        // Query-column locators use the scan provider with their own attribute
+        // number and storage width.
         std::array<std::optional<bioseq::storage::sequence_locator>, dispatch_batch_capacity>
             query_locators{};
-        /* Borrowed, batch-arena-owned expanded wrappers captured by
-         * tuple_dispatch_buffer.  A nonzero Datum is always paired with its
-         * validated descriptor.  Typed dispatch adapts these through the same
-         * alphabet-only lazy_sequence_view ABI as locator and flat
-         * inputs; it never owns or flattens the wrappers on CPU/SIMD paths. */
+        /* Expanded slice wrappers saved by the batch buffer. Each nonzero
+         * Datum has a checked descriptor. CPU dispatch reads these through
+         * lazy sequence views while the batch keeps the wrappers alive. */
         std::array<Datum, dispatch_batch_capacity> target_recipe_datums{};
         std::array<Datum, dispatch_batch_capacity> query_recipe_datums{};
         std::array<pg_sequence_descriptor, dispatch_batch_capacity> target_recipe_descriptors{};
         std::array<pg_sequence_descriptor, dispatch_batch_capacity> query_recipe_descriptors{};
-        // Per-row columnar rowno (== index query_key) and the
-        // user relation oid, so the stored per-fragment index can be assembled.
+        // Physical sequence row numbers used to locate stored target indexes.
         std::array<std::int64_t, dispatch_batch_capacity> target_rownos{};
         std::array<std::uint64_t, dispatch_batch_capacity> query_ordinals{};
         bool explicit_query_ordinals = false;
@@ -1536,8 +1315,7 @@ export class batch_processor {
         std::shared_ptr<cpu_prepared_target> cpu_prepared_target{};
         gpu_prepared_mpf_target* gpu_prepared_mpf_target = nullptr;
         gpu_prepared_grouped_soa_target* gpu_prepared_grouped_soa_target = nullptr;
-        // Explicit per-row outcome written by the scanner helper. Match
-        // production and index-source accounting must never infer one another.
+        // Record the index source separately from whether alignment found a match.
         std::array<::bioseq::pipeline_stats::target_index_source, dispatch_batch_capacity>
             target_index_sources{};
         std::array<std::uint64_t, dispatch_batch_capacity> persisted_generation_ids{};
@@ -1548,31 +1326,18 @@ export class batch_processor {
         bool read_index_active = false;
         bool index_async_persist_active = false;
         bool recompute_async_persist_active = false;
-        // The table's ACTIVE read index for the target
-        // column. The source is retained separately so a configured catalog row
-        // can never be laundered into an indistinguishable no-row default.
+        // Selected index layout for this target column. Record whether it came
+        // from a catalog row or the default so statistics can distinguish them.
         std::string active_index;
         bioseq::storage::indexing::active_read_policy_source active_index_policy_source =
             bioseq::storage::indexing::active_read_policy_source::unresolved;
     };
     /**
-     * @brief Runs the minimap2 pipeline across a fixed scheduler batch.
-     *
-     * For each target row, the loop assembles the table's active per-sequence
-     * minimizer index from chunked storage when enabled and present. Otherwise it
-     * recomputes the index. Both strategies can be mixed within one batch.
-     *
-     * `scanner_pg_ctx` carries the batch identity and the optional locator decoded
-     * at submit_scan time. Unless the in-memory scanner is forced, targets with a
-     * locator use a source-backed facade and inline targets use an in-memory
-     * facade. Queries use an in-memory facade over the batch literal. Algorithms
-     * see only the alphabet-specialized erased view.
-     *
-     * `target_hdrs` and `query_ids` are full-size
-     * `dispatch_batch_capacity`-element arrays passed by const reference. The call
-     * does not copy them. The result map is returned by value.
-     *
-     * @return Match rows grouped by scheduler query identifier.
+     * @brief Align the first batch_size rows with the selected statement plan.
+     * Use one shared query or a per-row query array. The optional scanner
+     * context supplies deferred inputs and index readers. Stored-index use
+     * follows its explicit read requirement.
+     * @return Matches grouped by the identifiers in query_ids.
      */
     [[nodiscard]] match_result_map process_sequences(
         size_t batch_size,
@@ -1589,7 +1354,7 @@ export class batch_processor {
         scanner_pg_context* scanner_pg_ctx = nullptr);
 };
 
-/** Narrow typmod-specialized callable-table boundary used by generated roots. */
+/** Query-preparation functions specialized for the generated dispatch types. */
 export namespace cpu_preparation_detail {
 
 template <class p_alphabet, std::size_t p_width>
