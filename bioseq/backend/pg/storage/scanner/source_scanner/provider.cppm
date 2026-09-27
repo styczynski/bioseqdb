@@ -1,6 +1,6 @@
 /**
  * @file scanner/source_scanner/provider.cppm
- * @brief Source-provider and registry-lease lifecycle.
+ * @brief Open sequence source providers and manage counted registry references.
  */
 module;
 
@@ -33,18 +33,18 @@ import bioseq.common.logging;
 import bioseq.common.checked_arithmetic;
 import bioseq.postgres.configuration.core;
 import bioseq.postgres.support;
-import bioseq.common.seqan_adapter;     // seq::dna4 in static_assert below
-import bioseq.postgres.storage.manager; // seq_caches + open_sub_table_for_locator
-import bioseq.storage.scanner;          // scanner concepts
-import bioseq.storage.lazy_sequence;    // lazy_sequence + with_postgres_lazy_sequence
+import bioseq.common.seqan_adapter;     
+import bioseq.postgres.storage.manager; 
+import bioseq.storage.scanner;          // Source provider and read-session types.
+import bioseq.storage.lazy_sequence;    
 import bioseq.storage.coordinates;
 import bioseq.storage.layout;
 import bioseq.postgres.storage.physical;
-import bioseq.storage.size;              // sequence_size_t
-import bioseq.postgres.storage.metadata; // stripe_metadata/find_stripe_by_row_number
-import bioseq.sequences;                 // compact_sequence_range, compact_sequence_stdc_instance
+import bioseq.storage.size;              
+import bioseq.postgres.storage.metadata; 
+import bioseq.sequences;                 
 import bioseq.postgres.types.compact_sequence;
-import bioseq.postgres.table.io; // begin_column_read/read_column_row_by_number
+import bioseq.postgres.table.io; 
 import bioseq.parallelism.pool;
 import bioseq.postgres.storage.scanner.fragment_scanner;
 import :source_registry;
@@ -52,13 +52,12 @@ import :source_registry;
 export import :source_scanner_entry;
 
 export namespace bioseq::storage {
-/// Create a source provider owned by a table scan.
-/// @param owning_relation Open relation whose physical identity is copied.
-/// @param authoritative_registered_snapshot Registered MVCC snapshot that must
-/// remain registered until the provider and all derived leases are closed.
-/// @return Backend-local provider that must be passed to
-/// `close_pg_sequence_source_provider`.
-/// @throws PostgreSQL ERROR when relation or snapshot preconditions fail.
+/// Open a sequence source provider for a table scan.
+/// @param owning_relation Open table whose identifiers are copied.
+/// @param authoritative_registered_snapshot Keep this MVCC snapshot registered
+/// until the provider and all counted registry references have closed.
+/// @return Provider to release with `close_pg_sequence_source_provider`.
+/// @throws C++ exception if validation or allocation fails.
 [[nodiscard]] inline pg_sequence_source_provider*
 create_pg_sequence_source_provider(Relation owning_relation,
                                    Snapshot authoritative_registered_snapshot) {
@@ -71,11 +70,8 @@ create_pg_sequence_source_provider(Relation owning_relation,
 }
 
 /**
- * Create a scan-owned provider through the scanner owner's out-of-line ABI.
- *
- * The ordinary inline API above remains available to scanner-local callers.
- * Narrow cross-module factories use this boundary so their implementation
- * units do not instantiate the registry and PostgreSQL exception bridge.
+ * Open a scan provider through an out-of-line function. Other modules can
+ * call it without compiling registry and PostgreSQL exception-handling code.
  */
 [[nodiscard]] pg_sequence_source_provider*
 create_pg_sequence_source_provider_owner_boundary(
@@ -86,13 +82,12 @@ create_pg_sequence_source_provider_owner_boundary(
                                               authoritative_registered_snapshot);
 }
 
-/// Create a source provider owned by standalone index administration.
-/// @param owning_relation Open relation whose physical identity is copied.
-/// @param authoritative_registered_snapshot Registered MVCC snapshot that must
-/// remain registered until the provider and all derived leases are closed.
-/// @return Backend-local provider that must be passed to
-/// `close_pg_sequence_source_provider`.
-/// @throws PostgreSQL ERROR when relation or snapshot preconditions fail.
+/// Open a sequence source provider for a standalone index operation.
+/// @param owning_relation Open table whose identifiers are copied.
+/// @param authoritative_registered_snapshot Keep this MVCC snapshot registered
+/// until the provider and all counted registry references have closed.
+/// @return Provider to release with `close_pg_sequence_source_provider`.
+/// @throws C++ exception if validation or allocation fails.
 [[nodiscard]] inline pg_sequence_source_provider*
 create_standalone_pg_sequence_source_provider(Relation owning_relation,
                                               Snapshot authoritative_registered_snapshot) {
@@ -105,10 +100,11 @@ create_standalone_pg_sequence_source_provider(Relation owning_relation,
         });
 }
 
-/// Acquire an independent upper-owner lease from another live lease.
-/// @param parent Live lease owned by the current backend thread.
-/// @return Independently owned lease that the caller must release.
-/// @throws PostgreSQL ERROR when the lease is stale or its reference count overflows.
+/// Acquire another counted reference to a live source registry.
+/// @param parent Live reference owned by the current backend thread.
+/// @return Reference the caller must release, or an empty reference when
+/// called from the wrong backend thread.
+/// @throws PostgreSQL ERROR for a stale reference or count overflow.
 [[nodiscard]] inline pg_sequence_source_registry_lease
 acquire_pg_sequence_source_registry_lease(const pg_sequence_source_registry_lease& parent) {
     using namespace sequence_source_detail;
@@ -145,10 +141,10 @@ acquire_pg_sequence_source_registry_lease(const pg_sequence_source_registry_leas
     };
 }
 
-/// Acquire an independent upper-owner lease from an open provider.
+/// Acquire a registry reference from an open provider.
 /// @param provider Open provider owned by the current backend thread.
-/// @return Independently owned lease that the caller must release.
-/// @throws PostgreSQL ERROR when the provider or its lease is not live.
+/// @return Reference the caller must release, or an empty reference on the wrong thread.
+/// @throws PostgreSQL ERROR if the provider is closed or its reference is invalid.
 [[nodiscard]] inline pg_sequence_source_registry_lease
 acquire_pg_sequence_source_registry_lease(const pg_sequence_source_provider* provider) {
     if (provider == nullptr || !provider->open) {
@@ -159,12 +155,12 @@ acquire_pg_sequence_source_registry_lease(const pg_sequence_source_provider* pro
     return acquire_pg_sequence_source_registry_lease(provider->lease);
 }
 
-/// Release one lease, sweep at the named boundary and report thread validity.
-/// @param lease Owned lease cleared on a valid release attempt.
-/// @param boundary Lifecycle boundary recorded for domain reclamation.
-/// @param is_commit Whether checked commit cleanup is permitted.
-/// @return Whether lease accounting and backend-thread validation succeeded.
-/// @throws PostgreSQL ERROR when commit-mode domain cleanup fails.
+/// Release a registry reference and clean up unused read domains.
+/// @param lease Token cleared after release. A wrong-thread call leaves it intact.
+/// @param boundary Cleanup event, including rescan where readers may be reused.
+/// @param is_commit Report cleanup errors when true. Suppress them during abort.
+/// @return Whether the reference count and backend-thread checks passed.
+/// @throws PostgreSQL ERROR if commit cleanup fails.
 [[nodiscard]] inline bool
 release_pg_sequence_source_registry_lease(pg_sequence_source_registry_lease& lease,
                                           pg_sequence_source_sweep_boundary boundary,
@@ -200,9 +196,11 @@ release_pg_sequence_source_registry_lease(pg_sequence_source_registry_lease& lea
     return true;
 }
 
-/// Abort-release one lease without propagating PostgreSQL failures.
-/// @param lease Owned lease cleared by the abort path.
-/// @param boundary Lifecycle boundary accepted for API symmetry.
+/// Release a registry reference during abort, suppressing PostgreSQL errors.
+/// Clear the token even on the wrong thread, leaving backend cleanup to
+/// reclaim its resources.
+/// @param lease Reference cleared by the abort path.
+/// @param boundary Unused.
 inline void release_pg_sequence_source_registry_lease_noexcept(
     pg_sequence_source_registry_lease& lease, pg_sequence_source_sweep_boundary boundary) noexcept {
     using namespace sequence_source_detail;
@@ -230,11 +228,10 @@ inline void release_pg_sequence_source_registry_lease_noexcept(
     maybe_destroy_registry_control(registry);
 }
 
-/// Close one provider through the checked or abort cleanup route.
-/// @param provider Provider to close, or null for no work. The pointer is
-/// invalid after this call.
-/// @param is_commit Whether checked commit cleanup is permitted.
-/// @throws PostgreSQL ERROR when commit-mode cleanup detects invalid state.
+/// Close and free a source provider. A null pointer does nothing.
+/// @param is_commit Report cleanup errors when true. Suppress them during abort.
+/// @throws PostgreSQL ERROR if commit cleanup fails or detects invalid state.
+/// @param provider Provider to close, or null. Invalid after a successful return.
 inline void close_pg_sequence_source_provider(pg_sequence_source_provider* provider,
                                               bool is_commit) {
     if (provider == nullptr) {
@@ -247,11 +244,11 @@ inline void close_pg_sequence_source_provider(pg_sequence_source_provider* provi
     }
 }
 
-/// Sweep reclaimable domains while retaining the caller's registry lease.
-/// @param lease Live lease retained by the caller.
-/// @param boundary Lifecycle boundary governing reclamation telemetry.
-/// @param is_commit Whether checked commit cleanup is permitted.
-/// @throws PostgreSQL ERROR when the lease is stale or commit cleanup fails.
+/// Clean up unused read domains while keeping this registry reference.
+/// @param boundary Cleanup event. A rescan can keep matching readers for reuse.
+/// @param is_commit Report cleanup errors when true. Suppress them during abort.
+/// @throws PostgreSQL ERROR for an invalid reference or failed commit cleanup.
+/// @param lease Live registry reference held by the caller.
 inline void
 sweep_reclaimable_pg_sequence_source_domains(const pg_sequence_source_registry_lease& lease,
                                              pg_sequence_source_sweep_boundary boundary,

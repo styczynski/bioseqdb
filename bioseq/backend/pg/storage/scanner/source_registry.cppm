@@ -1,6 +1,6 @@
 /**
  * @file scanner/source_registry.cppm
- * @brief Transaction-scoped source registry and domain ownership.
+ * @brief Keep sequence readers alive and clean them up with their transaction.
  */
 module;
 
@@ -40,39 +40,36 @@ import bioseq.common.logging;
 import bioseq.common.checked_arithmetic;
 import bioseq.postgres.configuration.core;
 import bioseq.postgres.support;
-import bioseq.common.seqan_adapter;              // seq::dna4 in static_assert below
-import bioseq.postgres.storage.manager;     // seq_caches + open_sub_table_for_locator
-import bioseq.storage.scanner;              // scanner concepts
-import bioseq.storage.lazy_sequence;        // lazy_sequence + with_postgres_lazy_sequence
+import bioseq.common.seqan_adapter;              
+import bioseq.postgres.storage.manager;     // Fragment reader caches.
+import bioseq.storage.scanner;              
+import bioseq.storage.lazy_sequence;        // Lazy sequence source types and test counters.
 import bioseq.storage.coordinates;
 import bioseq.storage.layout;
 import bioseq.postgres.storage.physical;
-import bioseq.storage.size;        // sequence_size_t
-import bioseq.postgres.storage.metadata;    // stripe_metadata/find_stripe_by_row_number
-import bioseq.sequences;           // compact_sequence_range, compact_sequence_stdc_instance
+import bioseq.storage.size;        
+import bioseq.postgres.storage.metadata;    
+import bioseq.sequences;           
 import bioseq.postgres.types.compact_sequence;
-import bioseq.postgres.table.io;            // begin_column_read/read_column_row_by_number
+import bioseq.postgres.table.io;            
 import bioseq.parallelism.pool;
 
 export namespace bioseq::storage {
 
-// ---------------------------------------------------------------------------
-// Shared PostgreSQL source registry and transaction-scoped source domains.
-// ---------------------------------------------------------------------------
+// Sequence sources shared by readers in this transaction.
 
 #ifdef BIOSEQ_TEST_INDEXES
-/// Clear source-domain and facade failure injection state.
+/// Disable source and lazy-view test failures.
 inline void disarm_pg_sequence_source_failure() noexcept {
   g_pg_sequence_source_failure = sequence_source_failure::none;
   disarm_pg_sequence_facade_test_poison();
 }
 
-/// Return a snapshot of source-domain lifetime counters.
-/// @return Stored counters combined with current live-object cardinalities.
+/// @return Test counters, including the numbers of objects currently alive.
 [[nodiscard]] inline sequence_source_stats
 pg_sequence_source_stats() noexcept;
 
-/// Reset source-domain and facade counters for an isolated test scenario.
+/// Clear source and lazy-view counters before a test.
 inline void reset_pg_sequence_source_stats() noexcept {
   g_pg_sequence_source_stats = {};
   reset_pg_sequence_facade_test_counters();
@@ -81,35 +78,35 @@ inline void reset_pg_sequence_source_stats() noexcept {
 
 namespace sequence_source_detail {
 
-/// Type-erased scanner cached by one source-read session.
+/// Scanner kept by a read session, with callbacks for its concrete type.
 struct source_scanner_entry {
-    /// Retained domain supplying snapshot and fragment caches.
+    /// Read domain held by this entry, supplying its snapshot and fragment cache.
     pg_sequence_source_domain* domain = nullptr;
-    /// Representation-specific scanner owned by the entry context.
+    /// Scanner allocated in this entry's memory context.
     void* concrete_scanner = nullptr;
-    /// Type-erased logical-rank read callback.
+    /// Read decoded ranks, applying the requested sequence transformation.
     void (*read_ranks)(source_scanner_entry&, sequence_transform,
                        std::uint64_t, std::span<std::uint8_t>) = nullptr;
-    /// Type-erased identity-oriented native packed-unit read callback.
+    /// Read packed units in the stored sequence order.
     void (*read_packed_units)(source_scanner_entry&, std::uint64_t,
                               std::span<std::uint8_t>) = nullptr;
-    /// Checked successful-finalization callback.
+    /// Release resources after a successful read. May report an error.
     void (*finish)(source_scanner_entry&) = nullptr;
     /// Failure cleanup callback that does not propagate errors.
     void (*abort_noexcept)(source_scanner_entry&) noexcept = nullptr;
     /// Whether the concrete scanner's constructor completed.
     bool constructed = false;
-    /// Whether this entry owns one domain retain.
+    /// Whether this entry holds a counted reference to the domain.
     bool domain_retained = false;
 };
 
-/// Validated domain and locator input used to construct a scanner entry.
+/// Source details used to construct a scanner entry.
 struct source_scanner_factory_argument {
-    /// Domain borrowed for construction and retained by the resulting entry.
+    /// Domain borrowed for construction. The resulting entry holds a counted reference.
     pg_sequence_source_domain* domain = nullptr;
     /// Locator that selects the physical fragment range.
     sequence_locator locator{};
-    /// Representation used for scanner dispatch.
+    /// Alphabet and packed-unit width used to select a scanner type.
     compact_sequence_stdc_type_params stored_type{};
 };
 
@@ -119,8 +116,8 @@ inline std::uint64_t next_generation = 1u;
 inline bool callbacks_registered = false;
 
 #ifdef BIOSEQ_TEST_INDEXES
-/// Combine stored counters with the currently live registry graph.
-/// @return Counter snapshot for the current backend thread.
+/// Combine test counters with counts from the live registry and provider lists.
+/// @return Counters for the current backend.
 [[nodiscard]] inline sequence_source_stats
 collect_pg_sequence_source_stats() noexcept {
   sequence_source_stats result = g_pg_sequence_source_stats;
@@ -160,16 +157,15 @@ collect_pg_sequence_source_stats() noexcept {
 }
 #endif
 
-/// Compare every canonical locator field as one fixed-layout value.
-/// @return Whether all canonical locator bytes are equal.
+/// @return Whether every byte of the two fixed-size locators matches.
 [[nodiscard]] inline bool same_locator(
         const sequence_locator& left, const sequence_locator& right) noexcept {
     return std::memcmp(&left, &right, sizeof(sequence_locator)) == 0;
 }
 
-/// Allocate a nonzero backend-local generation for registries and domains.
-/// @return Unique generation below the unsigned 64-bit maximum.
-/// @throws PostgreSQL ERROR when generation space is exhausted.
+/// Allocate a distinct nonzero generation number in this backend.
+/// @throws PostgreSQL ERROR before the counter reaches the unsigned 64-bit limit.
+/// @return Distinct nonzero generation below the unsigned 64-bit maximum.
 [[nodiscard]] inline std::uint64_t allocate_generation() {
     if (next_generation == 0u
         || next_generation == std::numeric_limits<std::uint64_t>::max()) {
@@ -180,9 +176,9 @@ collect_pg_sequence_source_stats() noexcept {
     return next_generation++;
 }
 
-/// Check that a source domain retains every resource required for reads.
-/// @param domain Domain whose lifecycle and owned resources are inspected.
-/// @return Whether reads may enter the domain.
+/// @return Whether the domain is live, has valid reference accounting and
+/// still holds its registry reference, snapshot, ResourceOwner and read cache.
+/// @param domain Domain whose state and resources are checked.
 [[nodiscard]] inline bool domain_is_readable(
         const pg_sequence_source_domain& domain) noexcept {
     return domain.lifecycle == domain_lifecycle::live
@@ -193,10 +189,9 @@ collect_pg_sequence_source_stats() noexcept {
         && domain.read_caches != nullptr;
 }
 
-/// Retain a live source domain through the type-erased backend contract.
-/// @param opaque Domain pointer, or null for no work.
-///
-/// Overflow faults the domain instead of acquiring a reference.
+/// Add a reference to a domain. A null pointer does nothing.
+/// A zero or overflowing count marks the domain as failed and prevents reads.
+/// @param opaque Domain pointer, or null.
 inline void retain_domain(void* opaque) noexcept {
     auto* domain = static_cast<pg_sequence_source_domain*>(opaque);
     if (domain == nullptr) {
@@ -214,11 +209,10 @@ inline void retain_domain(void* opaque) noexcept {
     ++domain->refcount;
 }
 
-/// Release a source-domain reference and destroy only a fully detached domain.
-/// @param opaque Domain pointer, or null for no work.
-///
-/// The final reference may free the control object only after registry
-/// ownership has been detached and cleanup marked it invalid or released.
+/// Release a domain reference. A null pointer does nothing.
+/// The last reference frees the domain only after registry removal and
+/// resource cleanup. Inconsistent counts mark the domain as failed.
+/// @param opaque Domain pointer, or null.
 inline void release_domain(void* opaque) noexcept {
     auto* domain = static_cast<pg_sequence_source_domain*>(opaque);
     if (domain == nullptr) {
@@ -258,9 +252,8 @@ inline void release_domain(void* opaque) noexcept {
     pfree(domain);
 }
 
-/// Return the authenticated control address and generation for a domain.
+/// @return Domain address and generation, or an empty identity for null.
 /// @param opaque Domain pointer, or null.
-/// @return Empty identity for null, otherwise control address and generation.
 [[nodiscard]] inline pg_sequence_source_identity domain_identity(
         const void* opaque) noexcept {
     auto const* domain = static_cast<const pg_sequence_source_domain*>(opaque);
@@ -271,17 +264,17 @@ inline void release_domain(void* opaque) noexcept {
         };
 }
 
-/// Report that PostgreSQL source domains never cross backend threads.
-/// @return Always `false`.
+/// @return False. PostgreSQL read domains stay on their backend thread.
 [[nodiscard]] inline bool domain_worker_shareable(const void*) noexcept {
     return false;
 }
 
-/// Match one readable domain against its column, packed type and binding.
-/// @param domain Candidate registry-owned domain.
-/// @param column_attno One-based sequence attribute number.
-/// @param stored_type Persisted alphabet and packed-unit width.
-/// @return Whether the domain is readable and has the exact binding key.
+/// Check for a usable reader for this column and packed type.
+/// The domain's storage generation must still match its registry.
+/// @param domain Domain to check.
+/// @param column_attno One-based sequence column number.
+/// @param stored_type Stored alphabet and packed-unit width.
+/// @return Whether the domain is readable and matches the requested source.
 [[nodiscard]] inline bool domain_key_matches(
         const pg_sequence_source_domain& domain,
         AttrNumber column_attno,
@@ -298,7 +291,7 @@ inline void release_domain(void* opaque) noexcept {
 } // namespace sequence_source_detail
 
 #ifdef BIOSEQ_TEST_INDEXES
-/// Return source-domain counters with current live-object cardinalities.
+/// @return Test counters and the numbers of source objects currently alive.
 [[nodiscard]] inline sequence_source_stats
 pg_sequence_source_stats() noexcept {
     return sequence_source_detail::collect_pg_sequence_source_stats();
@@ -307,7 +300,8 @@ pg_sequence_source_stats() noexcept {
 
 namespace sequence_source_detail {
 
-/// Close and destroy read caches during abort without propagating ERROR.
+/// Close and destroy a read cache during abort, suppressing PostgreSQL errors.
+/// Clear the pointer even if closing the cache fails.
 /// @param caches Owned cache pointer cleared on every path.
 inline void abort_close_caches_noerror(seq_caches*& caches) noexcept {
     if (caches == nullptr) {
@@ -335,8 +329,9 @@ inline void abort_close_caches_noerror(seq_caches*& caches) noexcept {
     PG_END_TRY();
 }
 
-/// Unregister a domain snapshot under its ResourceOwner during abort.
-/// @param domain Domain whose registered snapshot pointer is cleared.
+/// Unregister the domain's snapshot during abort and clear its pointer.
+/// Restore the caller's ResourceOwner even if PostgreSQL reports an error.
+/// @param domain Domain whose snapshot pointer is cleared.
 inline void abort_unregister_snapshot_noerror(
         pg_sequence_source_domain& domain) noexcept {
     if (domain.registered_snapshot == nullptr
@@ -366,10 +361,11 @@ inline void abort_unregister_snapshot_noerror(
     PG_END_TRY();
 }
 
-/// Run one abort-mode ResourceOwner release stage at most once.
-/// @param domain Domain owning the child `ResourceOwner`.
-/// @param postgres_stage PostgreSQL release phase to execute.
-/// @param stage_flag Stored bit marking the attempted phase.
+/// Attempt one ResourceOwner cleanup stage during abort.
+/// Record the attempt even if it fails, so later cleanup does not repeat it.
+/// @param postgres_stage PostgreSQL release stage.
+/// @param stage_flag Bit used to record this stage.
+/// @param domain Domain that owns the child ResourceOwner.
 inline void abort_release_owner_stage_noerror(
         pg_sequence_source_domain& domain,
         ResourceReleasePhase postgres_stage,
@@ -403,15 +399,16 @@ inline void abort_release_owner_stage_noerror(
     PG_CATCH();
     {
         FlushErrorState();
-        /* Mark the attempted cleanup stage. PostgreSQL's parent abort cleanup is
-         * the final owner of a resource whose release callback itself failed. */
+        /* Leave resources whose release failed to PostgreSQL's parent cleanup.
+         * Record this attempt so the domain will not repeat the failed callback. */
         domain.released_owner_stages |= stage_bit(stage_flag);
     }
     PG_END_TRY();
 }
 
-/// Delete a fully released child ResourceOwner during abort cleanup.
-/// @param domain Domain whose owner pointer is cleared before deletion.
+/// Delete the child ResourceOwner during abort, suppressing PostgreSQL errors.
+/// Clear the pointer before deletion.
+/// @param domain Domain whose ResourceOwner pointer is cleared.
 inline void abort_delete_owner_noerror(
         pg_sequence_source_domain& domain) noexcept {
     if (domain.resource_owner == nullptr) {
@@ -430,8 +427,9 @@ inline void abort_delete_owner_noerror(
     PG_END_TRY();
 }
 
-/// Delete a domain payload context during abort without propagating ERROR.
-/// @param domain Domain whose payload-context pointer is cleared before deletion.
+/// Delete the domain's memory context during abort, suppressing PostgreSQL errors.
+/// Clear the pointer before deletion.
+/// @param domain Domain whose payload-context pointer is cleared.
 inline void abort_delete_payload_noerror(
         pg_sequence_source_domain& domain) noexcept {
     if (domain.payload_context == nullptr) {
@@ -450,9 +448,9 @@ inline void abort_delete_payload_noerror(
     PG_END_TRY();
 }
 
-/// Complete every remaining abort cleanup step for one source domain.
-/// @param domain Domain made invalid after caches, snapshot, owner, and payload
-/// context have received abort cleanup.
+/// Attempt all remaining resource cleanup and mark this domain invalid.
+/// Abort cleanup suppresses PostgreSQL errors so the original failure survives.
+/// @param domain Domain made invalid after all cleanup attempts.
 inline void abort_cleanup_domain_noerror(
         pg_sequence_source_domain& domain) noexcept {
     if (domain.lifecycle == domain_lifecycle::invalid
@@ -479,12 +477,11 @@ inline void abort_cleanup_domain_noerror(
     domain.lifecycle = domain_lifecycle::invalid;
 }
 
-/// Close one source domain at a success or abort sweep boundary.
-/// @param domain Domain whose resources and locks are released in PostgreSQL's
-/// `BEFORE_LOCKS`, `LOCKS`, and `AFTER_LOCKS` order.
-/// @param is_commit Whether ResourceOwner callbacks receive commit semantics.
-/// @throws PostgreSQL ERROR when cache, snapshot, ResourceOwner, or context
-/// cleanup fails.
+/// Release a domain's readers, snapshot and remaining PostgreSQL resources.
+/// ResourceOwner cleanup runs before locks, for locks, then after locks.
+/// @param is_commit Whether cleanup callbacks should use commit behavior.
+/// @throws PostgreSQL ERROR if a cleanup step fails.
+/// @param domain Domain whose readers and resources are released.
 inline void cleanup_domain(
         pg_sequence_source_domain& domain, bool is_commit) {
     if (domain.lifecycle == domain_lifecycle::invalid
@@ -585,9 +582,9 @@ inline void cleanup_domain(
     domain.lifecycle = domain_lifecycle::invalid;
 }
 
-/// Remove one domain from its registry without changing its reference count.
-/// @param registry Registry whose intrusive list owns the link.
-/// @param domain Domain detached when present.
+/// Remove a domain from the registry list without releasing its reference.
+/// @param registry Registry whose list is searched.
+/// @param domain Domain to unlink if present.
 inline void unlink_domain(
         pg_sequence_source_registry& registry,
         pg_sequence_source_domain& domain) noexcept {
@@ -602,8 +599,8 @@ inline void unlink_domain(
     }
 }
 
-/// Drop the registry-owned domain reference after unlinking.
-/// @param domain Detached domain whose registry token is consumed.
+/// Release the registry's reference after removing the domain from its list.
+/// @param domain Domain already removed from its registry list.
 inline void drop_registry_token_noexcept(
         pg_sequence_source_domain& domain) noexcept {
     if (!domain.registry_token_owned) {
@@ -620,11 +617,12 @@ inline void drop_registry_token_noexcept(
     release_domain(&domain);
 }
 
-/// Reclaim every eligible domain at one explicit ownership boundary.
-/// @param registry Registry whose unretained domains may be removed.
-/// @param boundary Ownership boundary controlling rescan reuse.
-/// @param is_commit Whether checked cleanup receives commit semantics.
-/// @throws PostgreSQL ERROR when any eligible domain cannot be cleaned.
+/// Clean up domains whose only remaining reference belongs to this registry.
+/// A rescan keeps matching read resources for reuse while the provider stays open.
+/// @param boundary Event that triggered this cleanup.
+/// @param is_commit Whether resource cleanup uses commit behavior.
+/// @throws PostgreSQL ERROR if cleanup fails.
+/// @param registry Registry whose unused domains may be removed.
 inline void sweep_registry(
         pg_sequence_source_registry& registry,
         pg_sequence_source_sweep_boundary boundary,
@@ -639,12 +637,8 @@ inline void sweep_registry(
             && domain->refcount == 1u
             && !domain->refcount_fault
             && domain->lifecycle == domain_lifecycle::live;
-        /* A parameterized rescan starts a fresh callback/read session but may
-         * retain the registry's current verified binding.  Keeping that one
-         * bounded domain preserves its snapshot/cache and lets the next row
-         * hit the matching (attribute,type,binding-generation) key. A stale
-         * generation and every terminal/provider boundary still reclaim in
-         * the ordinary owner-first order below. */
+        /* A rescan can reuse the registered snapshot and reader cache while the
+         * provider remains open and the table's storage ID is unchanged. */
         const bool reusable_after_rescan =
             boundary == pg_sequence_source_sweep_boundary::rescan
             && !registry.provider_closed && registry.accepting_lookups
@@ -662,9 +656,9 @@ inline void sweep_registry(
     }
 }
 
-/// Reclaim all registry domains during transaction abort.
-/// @param registry Registry whose eligible domains receive abort cleanup.
-/// @param all_domains Whether retained domains are also detached.
+/// Clean up unused or failed domains during abort.
+/// @param all_domains Also invalidate and detach domains still held by readers.
+/// @param registry Registry whose domains receive abort cleanup.
 inline void abort_sweep_registry_noerror(
         pg_sequence_source_registry& registry,
         bool all_domains) noexcept {
@@ -702,9 +696,9 @@ inline void remove_registry_from_global(
     }
 }
 
-/// Destroy a detached registry control after every lease is released.
-/// @param registry Candidate control object. It is freed only when detached,
-/// domain-free, and lease-free.
+/// Unlink and free a registry that has no domains or counted references.
+/// A null pointer or a registry still in use does nothing.
+/// @param registry Registry to check, or null.
 inline void destroy_registry_control(
         pg_sequence_source_registry* registry) noexcept {
     if (registry == nullptr || registry->domains != nullptr
@@ -719,8 +713,8 @@ inline void destroy_registry_control(
     pfree(registry);
 }
 
-/// Destroy a closed registry once its final lease disappears.
-/// @param registry Candidate control object, or null.
+/// Free a closed registry once its domains and references are gone.
+/// @param registry Registry to check, or null.
 inline void maybe_destroy_registry_control(
         pg_sequence_source_registry* registry) noexcept {
     if (registry != nullptr && registry->domains == nullptr
@@ -745,7 +739,7 @@ inline void remove_provider_from_global(
     }
 }
 
-/// Destroy one detached provider control object.
+/// Unlink and free a provider. A null pointer does nothing.
 /// @param provider Provider to unlink and free, or null.
 inline void destroy_provider_control(
         pg_sequence_source_provider* provider) noexcept {
@@ -759,9 +753,10 @@ inline void destroy_provider_control(
     pfree(provider);
 }
 
-/// Release an authenticated registry lease without propagating ERROR.
-/// @param lease Lease cleared on every path.
-/// @return Whether generation, count, and backend-thread accounting were valid.
+/// Release a registry reference and clear its token.
+/// @return False if its generation, count or backend thread is wrong.
+/// Invalid accounting marks the registry as failed. No error is raised here.
+/// @param lease Reference cleared on every path.
 inline bool release_lease_token_noexcept(
         pg_sequence_source_registry_lease& lease) noexcept {
     if (!lease.owned || lease.registry == nullptr) {
@@ -787,8 +782,9 @@ inline bool release_lease_token_noexcept(
     return true;
 }
 
-/// Close a provider during abort and preserve parent cleanup authority.
-/// @param provider Provider made invalid and freed before return.
+/// Close and free a provider during abort. Stop new lookups and clean up
+/// unused or failed domains, leaving resources still in use for later cleanup.
+/// @param provider Provider closed and freed before return.
 inline void close_provider_abort_noerror(
         pg_sequence_source_provider& provider) noexcept {
     auto* registry = provider.lease.registry;
@@ -811,11 +807,12 @@ inline void close_provider_abort_noerror(
     destroy_provider_control(&provider);
 }
 
-/// Close a provider on success and sweep reclaimable domains.
-/// @param provider Provider made invalid and freed before return.
-/// @param is_commit Whether domain cleanup receives commit semantics.
-/// @throws PostgreSQL ERROR for stale provider state, corrupt lease accounting,
-/// or domain cleanup failure.
+/// Close and free a provider, then release unused read domains.
+/// References held by parent plan nodes allow those nodes to keep reading.
+/// @param is_commit Whether domain cleanup uses commit behavior.
+/// @throws PostgreSQL ERROR for an invalid provider, broken reference counts
+/// or a cleanup failure.
+/// @param provider Provider closed and freed on success.
 inline void close_provider_checked(
         pg_sequence_source_provider& provider, bool is_commit) {
     auto* registry = provider.lease.registry;
@@ -848,10 +845,11 @@ inline void close_provider_checked(
     destroy_provider_control(&provider);
 }
 
-/// Finalize a registry at successful transaction end.
-/// @param registry Registry detached after all domains are cleaned.
-/// @param is_commit Whether domain cleanup receives commit semantics.
-/// @throws PostgreSQL ERROR when domain cleanup fails.
+/// Clean all domains and detach the registry at transaction end.
+/// Counted references can keep its control object alive after resources close.
+/// @param is_commit Whether cleanup uses commit behavior.
+/// @throws PostgreSQL ERROR if domain cleanup fails.
+/// @param registry Registry detached after cleaning its domains.
 inline void cleanup_registry_at_xact(
         pg_sequence_source_registry& registry, bool is_commit) {
     registry.accepting_lookups = false;
@@ -870,7 +868,8 @@ inline void cleanup_registry_at_xact(
     maybe_destroy_registry_control(&registry);
 }
 
-/// Tear down a registry at aborted transaction end.
+/// Invalidate all domains and detach the registry during transaction abort.
+/// Cleanup errors are suppressed.
 /// @param registry Registry detached after abort cleanup.
 inline void abort_registry_at_xact_noerror(
         pg_sequence_source_registry& registry) noexcept {
@@ -883,10 +882,11 @@ inline void abort_registry_at_xact_noerror(
     maybe_destroy_registry_control(&registry);
 }
 
-/// Dispatch top-level transaction lifecycle events to source registries.
+/// Clean up source registries when a transaction commits or aborts.
+/// Reject PREPARE TRANSACTION while any read domains remain, since their
+/// PostgreSQL resources cannot survive as prepared transaction state.
+/// @throws PostgreSQL ERROR for live domains at prepare or failed commit cleanup.
 /// @param event PostgreSQL transaction event.
-/// @throws PostgreSQL ERROR when prepared transactions still have live domains
-/// or successful cleanup fails.
 inline void xact_callback(XactEvent event, void*) {
     switch (event) {
         case XACT_EVENT_PRE_COMMIT:
@@ -934,10 +934,11 @@ inline void xact_callback(XactEvent event, void*) {
     }
 }
 
-/// Promote or discard source ownership at a subtransaction boundary.
+/// On subtransaction commit, transfer its registries and domains to the parent.
+/// On abort, invalidate those created by the ending subtransaction.
+/// @param my_subid Subtransaction that is ending.
+/// @param parent_subid Parent that takes ownership after commit.
 /// @param event PostgreSQL subtransaction event.
-/// @param my_subid Ending or current subtransaction identity.
-/// @param parent_subid Parent identity used for successful promotion.
 inline void subxact_callback(
         SubXactEvent event,
         SubTransactionId my_subid,
@@ -998,9 +999,7 @@ inline void subxact_callback(
     }
 }
 
-/// Register backend-local transaction callbacks exactly once.
-///
-/// Registration is process-backend local and persists for the backend lifetime.
+/// Register transaction and subtransaction cleanup callbacks once per backend.
 inline void ensure_callbacks_registered() {
     if (callbacks_registered) {
         return;
@@ -1010,14 +1009,16 @@ inline void ensure_callbacks_registered() {
     callbacks_registered = true;
 }
 
-/// Validate a catalog source row against one registry identity.
-/// @param registry Authenticated relation, storage, and snapshot binding.
-/// @param column_attno One-based sequence attribute number.
-/// @param locator Locator decoded from the parent row.
-/// @param stored_type Persisted alphabet and packed-unit width.
+/// Check that a visible, ready source row describes this table column and locator.
+/// Its storage generation, alphabet, packed-unit width and padding must match
+/// the reader's expected values.
+/// @param registry Expected table, storage and snapshot details.
+/// @param column_attno One-based sequence column number.
+/// @param locator Locator read from the parent row.
+/// @param stored_type Stored alphabet and packed-unit width.
 /// @param last_padding_letters Unused letters in the final packed unit.
-/// @param row Snapshot-visible immutable source row.
-/// @return Whether every binding, locator, type, and ready-state field matches.
+/// @param row Source row already read under the required snapshot.
+/// @return Whether every source field and the ready state match.
 [[nodiscard]] inline bool source_row_matches_registry(
         const pg_sequence_source_registry& registry,
         AttrNumber column_attno,
@@ -1041,13 +1042,16 @@ inline void ensure_callbacks_registered() {
         && row.padding_letters == last_padding_letters;
 }
 
-/// Construct one transaction-owned source domain from a catalog row.
-/// @param registry Live registry whose authoritative snapshot is registered on
-/// a new child `ResourceOwner`.
-/// @param column_attno One-based sequence attribute number.
-/// @param stored_type Persisted alphabet and packed-unit width.
-/// @return Registry-owned live domain whose read cache acquires `AccessShareLock`.
-/// @throws PostgreSQL ERROR when context, owner, snapshot, or cache creation fails.
+/// Create shared read resources for one column and packed type.
+/// Register the registry's snapshot on a child ResourceOwner and create a
+/// fragment cache that opens tables with AccessShareLock. The registry holds
+/// the initial reference to the domain.
+/// @throws PostgreSQL ERROR if resource creation fails. Partial allocations
+/// are cleaned up before the error is rethrown.
+/// @param registry Registry supplying the snapshot and table details.
+/// @param column_attno One-based sequence column number.
+/// @param stored_type Stored alphabet and packed-unit width.
+/// @return Live domain held by the registry.
 [[nodiscard]] inline pg_sequence_source_domain* create_domain(
         pg_sequence_source_registry& registry,
         AttrNumber column_attno,
@@ -1142,9 +1146,9 @@ inline void ensure_callbacks_registered() {
     return const_cast<pg_sequence_source_domain*>(result);
 }
 
-/// Reuse a matching readable domain or create one under the registry.
-/// @return Borrowed domain pointer owned by the registry and any active retains.
-/// @throws PostgreSQL ERROR when new-domain construction fails.
+/// Reuse a live domain for this column, type and storage generation, or create it.
+/// @return Borrowed domain held by the registry.
+/// @throws PostgreSQL ERROR if creation fails.
 [[nodiscard]] inline pg_sequence_source_domain* find_or_create_domain(
         pg_sequence_source_registry& registry,
         AttrNumber column_attno,
@@ -1161,13 +1165,14 @@ inline void ensure_callbacks_registered() {
     return create_domain(registry, column_attno, stored_type);
 }
 
-/// Allocate a provider, registry and initial authenticated lease.
-/// @param owning_relation Open relation whose physical identity is copied.
+/// Create a provider and registry with one counted reference.
+/// @param owning_relation Open table whose identifiers and storage ID are copied.
 /// @param authoritative_registered_snapshot Borrowed registered MVCC snapshot
-/// that must remain valid for registry lookups.
-/// @param kind Executor lifecycle owning the provider.
-/// @return Backend-local provider allocated in `TopMemoryContext`.
-/// @throws PostgreSQL ERROR when prerequisites, storage identity, or allocation fail.
+/// that must remain alive for source lookups.
+/// @param kind Operation responsible for closing the provider.
+/// @return Provider allocated in TopMemoryContext for this backend.
+/// @throws An error if the table or snapshot is invalid, the storage ID is
+/// missing, or allocation fails.
 [[nodiscard]] inline pg_sequence_source_provider* create_provider(
         Relation owning_relation,
         Snapshot authoritative_registered_snapshot,

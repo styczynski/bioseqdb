@@ -1,6 +1,6 @@
 /**
  * @file scanner/source_scanner/promotion.cppm
- * @brief Locator promotion through authenticated source routes.
+ * @brief Turn stored locators into sequence values that can read their fragments.
  */
 module;
 
@@ -33,18 +33,18 @@ import bioseq.common.logging;
 import bioseq.common.checked_arithmetic;
 import bioseq.postgres.configuration.core;
 import bioseq.postgres.support;
-import bioseq.common.seqan_adapter;     // seq::dna4 in static_assert below
-import bioseq.postgres.storage.manager; // seq_caches + open_sub_table_for_locator
-import bioseq.storage.scanner;          // scanner concepts
-import bioseq.storage.lazy_sequence;    // lazy_sequence + with_postgres_lazy_sequence
+import bioseq.common.seqan_adapter;     
+import bioseq.postgres.storage.manager; // Source version catalog lookup.
+import bioseq.storage.scanner;          // Source registry and read-domain interfaces.
+import bioseq.storage.lazy_sequence;    // Expanded values that read sequence fragments on demand.
 import bioseq.storage.coordinates;
 import bioseq.storage.layout;
 import bioseq.postgres.storage.physical;
-import bioseq.storage.size;              // sequence_size_t
-import bioseq.postgres.storage.metadata; // stripe_metadata/find_stripe_by_row_number
-import bioseq.sequences;                 // compact_sequence_range, compact_sequence_stdc_instance
+import bioseq.storage.size;              
+import bioseq.postgres.storage.metadata; 
+import bioseq.sequences;                 
 import bioseq.postgres.types.compact_sequence;
-import bioseq.postgres.table.io; // begin_column_read/read_column_row_by_number
+import bioseq.postgres.table.io; 
 import bioseq.parallelism.pool;
 import bioseq.postgres.storage.scanner.fragment_scanner;
 import :source_registry;
@@ -52,20 +52,18 @@ import :source_registry;
 export import :source_scanner_routes;
 
 export namespace bioseq::storage {
-/// Check whether a registry lease belongs to the current backend thread.
-/// @param lease Lease whose backend token is inspected.
-/// @return Whether it names a registry bound to this thread.
+/// @return Whether this reference points to a registry on the current thread.
+/// This checks the thread only, not whether the reference is still live.
+/// @param lease Reference whose backend thread is checked.
 [[nodiscard]] inline bool pg_sequence_source_registry_is_current_thread(
     const pg_sequence_source_registry_lease& lease) noexcept {
     return lease.registry != nullptr && lease.registry->backend_thread.is_current();
 }
 
 /**
- * Validate the exact statement provider identity required by typed dispatch.
- *
- * This is deliberately out of line in the scanner owner so importing
- * scheduler modules do not instantiate the scanner's PostgreSQL bridge and
- * standard-library implementation details.
+ * Check that a scan provider matches the requested table and statement snapshot.
+ * Keep this out of line so scheduler modules can call it without compiling
+ * the scanner's PostgreSQL error handling code.
  */
 [[gnu::noinline]] void
 validate_exact_pg_sequence_source_provider(pg_sequence_source_provider* provider,
@@ -100,20 +98,20 @@ validate_exact_pg_sequence_source_provider(pg_sequence_source_provider* provider
     }
 }
 
-/// Validate a locator against its immutable source and return a source-backed
-/// value allocated in the requested result context.
-/// @param lease Live authenticated registry lease for the parent relation.
-/// @param column_attno One-based sequence attribute number.
-/// @param locator_datum Locator-stub datum to validate.
-/// @param result_context Memory context that owns the returned expanded datum.
-/// @param trace Optional trace attachment forwarded to the expanded value.
-/// @param producer_value_id Optional trace identity for the source value.
-/// @return Source-backed PostgreSQL datum owned by `result_context`.
-/// @throws PostgreSQL ERROR when lease, locator geometry, snapshot-visible
-/// source identity, or physical storage identity fails validation.
+/// Validate a stored locator and create a value that reads its fragments on demand.
+/// Look up its source version using the registry's snapshot, then check the
+/// table, column, storage ID and sequence metadata against that catalog row.
+/// @param lease Live reference to the parent table's source registry.
+/// @param column_attno One-based sequence column number.
+/// @param locator_datum Stored locator stub.
+/// @param result_context Context owning the returned expanded sequence value.
+/// @param trace Optional trace attached to that value.
+/// @param producer_value_id Optional trace ID for the source value.
+/// @return Expanded sequence value owned by `result_context`.
 ///
-/// The expanded datum retains its source domain, but reads remain confined to
-/// the registry's backend thread and authoritative transaction snapshot.
+/// The result holds a counted read-domain reference. Use it on the registry's
+/// backend thread while its transaction and snapshot remain valid.
+/// @throws An error if source validation or value creation fails.
 [[nodiscard]] inline Datum
 promote_pg_sequence_locator_impl(const pg_sequence_source_registry_lease& lease,
                                  AttrNumber column_attno,
@@ -190,9 +188,9 @@ promote_pg_sequence_locator_impl(const pg_sequence_source_registry_lease& lease,
     });
 }
 
-/// Promote a locator through one authenticated registry lease.
-/// @return Source-backed datum owned by `result_context`.
-/// @throws PostgreSQL ERROR when promotion validation fails.
+/// Create a sequence value from a locator using a counted registry reference.
+/// @return Expanded value owned by `result_context`.
+/// @throws C++ exception if validation or creation fails.
 [[nodiscard]] inline Datum
 promote_pg_sequence_locator(const pg_sequence_source_registry_lease& lease,
                             AttrNumber column_attno,
@@ -207,10 +205,10 @@ promote_pg_sequence_locator(const pg_sequence_source_registry_lease& lease,
         });
 }
 
-/// Promote a locator through an open source provider.
-/// @param provider Open provider owned by the current backend thread.
-/// @return Source-backed datum owned by `result_context`.
-/// @throws PostgreSQL ERROR when the provider is closed or promotion fails.
+/// Create a sequence value from a locator using an open provider.
+/// @return Expanded value owned by `result_context`.
+/// @throws C++ exception if the provider is closed or source validation fails.
+/// @param provider Open provider on the current backend thread.
 [[nodiscard]] inline Datum promote_pg_sequence_locator(pg_sequence_source_provider* provider,
                                                        AttrNumber column_attno,
                                                        Datum locator_datum,
@@ -233,10 +231,7 @@ promote_pg_sequence_locator(const pg_sequence_source_registry_lease& lease,
         });
 }
 
-/**
- * Promote through an open provider without exposing the inline scanner body to
- * cross-module coordinators.
- */
+/** Open a locator as a sequence value without compiling scanner code in the caller. */
 [[nodiscard]] [[gnu::noinline]] Datum
 promote_pg_sequence_source_provider_locator(pg_sequence_source_provider* provider,
                                             AttrNumber column_attno,
@@ -246,8 +241,8 @@ promote_pg_sequence_source_provider_locator(pg_sequence_source_provider* provide
 }
 
 /**
- * Promote through an already validated provider using the canonical scanner
- * implementation, without exporting its inline implementation to the caller.
+ * Open a locator through a provider already checked by the caller.
+ * Source validation still runs when the expanded sequence value is created.
  */
 [[nodiscard]] [[gnu::noinline]] Datum
 promote_validated_pg_sequence_source_provider_locator(pg_sequence_source_provider* provider,
@@ -257,12 +252,12 @@ promote_validated_pg_sequence_source_provider_locator(pg_sequence_source_provide
     return promote_pg_sequence_locator(provider, column_attno, locator_datum, result_context);
 }
 
-/// Promote a locator through the route selected by relation and generation.
-/// @param routes Borrowed authenticated route set.
-/// @param relation_oid Parent relation identity.
-/// @param provider_generation Exact scan-binding generation.
-/// @return Source-backed datum owned by `result_context`.
-/// @throws PostgreSQL ERROR when no exact live route exists or promotion fails.
+/// Open a locator through the route for this table and provider generation.
+/// @param provider_generation Distinguishes separate scans of the same table.
+/// @return Expanded sequence value owned by `result_context`.
+/// @throws C++ exception if the route is missing, invalid or source validation fails.
+/// @param routes Set of source registry references.
+/// @param relation_oid Parent table OID.
 [[nodiscard]] inline Datum promote_pg_sequence_locator(const pg_sequence_source_route_set& routes,
                                                        Oid relation_oid,
                                                        std::uint64_t provider_generation,
@@ -295,12 +290,11 @@ promote_validated_pg_sequence_source_provider_locator(pg_sequence_source_provide
     });
 }
 
-/// Promote a locator only when its relation has one unambiguous live route.
-/// @param routes Borrowed authenticated route set.
-/// @param relation_oid Parent relation identity.
-/// @return Source-backed datum owned by `result_context`.
-/// @throws PostgreSQL ERROR when the relation has zero or multiple live routes
-/// or promotion fails.
+/// Open a locator when exactly one source registry matches its table.
+/// @return Expanded sequence value owned by `result_context`.
+/// @throws C++ exception if there is no unique live route or source validation fails.
+/// @param routes Set of source registry references.
+/// @param relation_oid Parent table OID.
 [[nodiscard]] inline Datum promote_pg_sequence_locator(const pg_sequence_source_route_set& routes,
                                                        Oid relation_oid,
                                                        AttrNumber column_attno,
