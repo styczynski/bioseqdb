@@ -11,21 +11,17 @@ import bioseq.codegen.website.postgres;
 import bioseq.codegen.website.model;
 import bioseq.codegen.support;
 
-// Compiler-checked module contract (§7). This consumer TU imports every website
-// primary/partition it depends on and uses its promised API, so the module DAG
-// is verified by the compiler rather than only by a textual test. The runtime
-// half drives the integration smoke.
+// Import the website modules and call their APIs so compilation checks
+// the declared dependencies. The test entrypoint also runs the website
+// pipeline checks.
 namespace bioseq::codegen::website {
 
-/// @brief Runs the website contract self-tests.
-///
-/// Compile-time: this TU importing and naming the partition APIs proves the DAG
-/// links. Run-time: the integration smoke exercises each dependency.
+/// @brief Checks the imported website APIs and runs the pipeline tests.
 void run_website_contract_self_tests() {
-    // Name the postgres facade type to prove the executor contract compiles.
+    // Check that the PostgreSQL executor provides the required operations.
     static_assert(sql_example_executor<postgres_tutorial_executor>,
                   "postgres executor must model the tutorial executor concept");
-    // Name the canonical-ID helper to prove reference_index is importable.
+    // Exercise the reference-ID API through its module import.
     const std::string probe = make_reference_entity_id(reference_entity{
         .domain = entity_domain::cpp, .qualified_name = "bioseq::probe"});
     (void)probe;

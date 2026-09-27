@@ -8,9 +8,9 @@ module;
 #include <utility>
 #include <vector>
 
-// Narrow link boundary to the RTTI-enabled renderer module. Its BMI cannot
-// be imported into LLVM's no-RTTI graph; both objects use the same host STL.
-// No repository-owned production header or textual implementation is needed.
+// Call the Jinja renderer through linked functions because its module
+// enables RTTI and cannot be imported into an LLVM build without RTTI.
+// Both sides use the same host standard library.
 namespace bioseq::codegen::website::detail {
 extern "C" int bioseq_render_inline_template(const std::string&,
     const std::vector<std::pair<std::string, std::string>>&, std::string&, std::string&);
@@ -28,10 +28,10 @@ import bioseq.codegen.support;
 namespace bioseq::codegen::website {
 
 
-/// @brief Renders a template against a flat string binding map.
+/// @brief Renders Jinja text using string-valued variables.
 /// @param template_text Jinja template source.
-/// @param bindings String-valued bindings.
-/// @return The rendered output, throwing on any template/render error.
+/// @param bindings Variable names and values.
+/// @return Rendered text. Throws if loading or rendering fails.
 [[nodiscard]] std::string
 render_inline_template(std::string_view template_text,
                        const std::map<std::string, std::string, std::less<>>& bindings) {
@@ -50,11 +50,11 @@ render_inline_template(std::string_view template_text,
     return result;
 }
 
-/// @brief Renders a named template from a templates root against a JSON context.
-/// @param templates_dir Filesystem root of the template set.
-/// @param template_name Logical template name (for example "landing.html.j2").
-/// @param json_context A JSON object serialized as text (page data).
-/// @return The rendered output; throws on any load/context/render error.
+/// @brief Renders a template file using JSON page data.
+/// @param templates_dir Directory containing the templates.
+/// @param template_name Template name, such as "landing.html.j2".
+/// @param json_context Page data as a JSON object string.
+/// @return Rendered text. Throws if loading, JSON parsing, or rendering fails.
 [[nodiscard]] std::string render_page_template(std::string_view templates_dir,
                                                std::string_view template_name,
                                                std::string_view json_context) {
@@ -71,10 +71,10 @@ render_inline_template(std::string_view template_text,
     return result;
 }
 
-/// @brief Renders a template against a structured JSON object context.
+/// @brief Renders Jinja text using a JSON object as its variables.
 /// @param template_text Jinja template source.
-/// @param json_context A JSON object serialized as text (page data).
-/// @return The rendered output, throwing on any template/context/render error.
+/// @param json_context Page data as a JSON object string.
+/// @return Rendered text. Throws if the template or context is invalid.
 [[nodiscard]] std::string render_inline_json_template(std::string_view template_text,
                                                       std::string_view json_context) {
     std::string result;
