@@ -1,6 +1,6 @@
 /**
  * @file hash_major_minimizer_index/planner.cppm
- * @brief Canonical query-hash images and admitted selective-read plans.
+ * @brief Query hash storage and read-plan records for the stored hash index.
  */
 module;
 
@@ -21,7 +21,7 @@ import :codec;
 
 export namespace bioseq::indexing {
 
-/** @brief Width-tagged borrowed canonical query hashes. */
+/** @brief Borrowed sorted query hashes, their integer width, and storage profile digest. */
 struct canonical_query_hash_view {
     std::span<const std::uint32_t> values32{};
     std::span<const std::uint64_t> values64{};
@@ -29,21 +29,21 @@ struct canonical_query_hash_view {
     std::uint8_t storage_width_bytes = 0u;
     std::array<std::byte, 32> storage_profile_digest{};
 
-    /// Return the number of canonical hashes in the active width-specific span.
+    /// Return the number of hashes in the active span.
     [[nodiscard]] std::size_t size() const noexcept {
         return storage_width_bytes == sizeof(std::uint32_t)
             ? values32.size() : values64.size();
     }
 
-    /// Read one canonical hash as a width-independent value.
-    /// @pre `ordinal < size()`.
+    /// Read one hash as a 64-bit value.
+    /// @pre ordinal < size().
     [[nodiscard]] std::uint64_t at(std::size_t ordinal) const noexcept {
         return storage_width_bytes == sizeof(std::uint32_t)
             ? static_cast<std::uint64_t>(values32[ordinal])
             : values64[ordinal];
     }
 
-    /// Check that exactly one backing span matches the declared persisted hash width.
+    /// Check that the declared hash width matches the active span and the other span is empty.
     [[nodiscard]] bool storage_matches_width() const noexcept {
         return width_bytes == storage_width_bytes
             && ((storage_width_bytes == sizeof(std::uint32_t)
@@ -52,9 +52,9 @@ struct canonical_query_hash_view {
                     && values32.empty()));
     }
 
-    /// Locate the first canonical hash not less than `hash` in a sorted subrange.
-    /// @pre `first <= last && last <= size()`.
-    /// @return The absolute ordinal in the active span, or `last` when none qualifies.
+    /// Find the first hash at least as large as hash in the sorted subrange.
+    /// @pre first <= last and last <= size().
+    /// @return Its index in the full span, or last if no value qualifies.
     [[nodiscard]] std::size_t lower_bound(
             std::size_t first,
             std::size_t last,
@@ -81,11 +81,11 @@ struct canonical_query_hash_view {
     }
 };
 
-/// Owning query-hash storage selected by the persisted hash width.
+/// Query hashes stored in a vector of the same width as the persisted hashes.
 using canonical_query_hash_storage = std::variant<
     std::vector<std::uint32_t>, std::vector<std::uint64_t>>;
 
-/** @brief Move-only canonical query hashes with their storage-profile identity. */
+/** @brief Move-only storage for sorted query hashes and the digest of their storage settings. */
 struct canonical_query_hash_image {
     canonical_query_hash_storage values{};
     std::uint8_t width_bytes = 0u;
@@ -98,8 +98,8 @@ struct canonical_query_hash_image {
     canonical_query_hash_image& operator=(canonical_query_hash_image&&) noexcept =
         default;
 
-    /// Borrow the active canonical hash vector with its authenticated profile digest.
-    /// @return A view valid until this image is moved, mutated, or destroyed.
+    /// Borrow the hash vector and its storage profile digest.
+    /// @return A view to use while this image remains alive and unchanged.
     [[nodiscard]] canonical_query_hash_view view() const noexcept {
         return std::visit(
             [this](const auto& value) {
@@ -121,7 +121,7 @@ struct canonical_query_hash_image {
     }
 };
 
-/** @brief Exact generation identity required before a reader is admitted. */
+/** @brief Source and storage identity that the reader must find when opening a generation. */
 struct expected_hash_major_minimizer_generation {
     std::uint64_t generation_id = 0u;
     std::uint64_t query_key = 0u;
@@ -131,7 +131,7 @@ struct expected_hash_major_minimizer_generation {
     hash_major_minimizer_storage_profile storage_profile{};
 };
 
-/** @brief Exact count replacing one saturated compact count. */
+/** @brief Exact occurrence count of 65,535 or more for one query hash. */
 struct exact_global_count_exception {
     std::uint32_t query_ordinal = 0;
     std::uint32_t reserved_zero = 0;
@@ -139,7 +139,7 @@ struct exact_global_count_exception {
 };
 static_assert(sizeof(exact_global_count_exception) == 16u);
 
-/** @brief Authorized posting interval for one query hash. */
+/** @brief Stored position interval selected for one query hash. */
 struct posting_request {
     std::uint64_t posting_byte_offset = 0;
     std::uint64_t exact_count = 0;
@@ -148,7 +148,7 @@ struct posting_request {
 };
 static_assert(sizeof(posting_request) == 24u);
 
-/** @brief Admission, retention, checksum, and delivery counters for one open. */
+/** @brief Memory, selection, and validation counts recorded while opening a reader. */
 struct hash_major_minimizer_memory_stats {
     std::uint64_t directory_stage_peak_admitted_bytes = 0u;
     std::uint64_t control_stage_peak_admitted_bytes = 0u;

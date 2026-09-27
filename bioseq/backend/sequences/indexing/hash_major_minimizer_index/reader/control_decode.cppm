@@ -1,6 +1,6 @@
 /**
  * @file hash_major_minimizer_index/reader/control_decode.cppm
- * @brief Authenticated control-block validation and canonical query selection.
+ * @brief Check control blocks and select the hashes requested by the query.
  */
 module;
 
@@ -30,10 +30,12 @@ import bioseq.parallelism.memory_admission;
 
 export namespace bioseq::indexing {
 
-/// Consume one authorized control block in source order and select matching query hashes.
+/// Check the next control block and record counts for matching query hashes.
 ///
-/// The callback verifies directory authority, block authentication, count accounting, and
-/// monotone hash order before it records posting offsets. Any mismatch is latched in `opaque`.
+/// Check the block contents against their checksum and directory entry. Counts
+/// at most max_occ receive posting offsets for later reads. Larger counts stay
+/// available to lookup, with their positions marked unavailable. A failure
+/// stops further delivery.
 [[nodiscard]] inline bool hash_major_minimizer_selective_reader::consume_control_block_(
     void* opaque, std::uint32_t range_ordinal, std::span<const std::byte> encoded_control) {
     using namespace hash_major_minimizer_detail;

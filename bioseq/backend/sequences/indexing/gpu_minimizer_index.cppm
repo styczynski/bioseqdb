@@ -1,6 +1,6 @@
 /**
  * @file gpu_minimizer_index.cppm
- * @brief Stable facade for GPU minimizer-index ingestion and caching.
+ * @brief Public module for loading and caching GPU minimizer indexes.
  */
 export module bioseq.indexing.gpu_minimizer_index;
 
