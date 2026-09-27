@@ -1,6 +1,6 @@
 /**
  * @file shader_variants.cppm
- * @brief Device-free Vulkan shader variant keys and selector helpers.
+ * @brief Choose shader parameters and identify compiled shaders in the cache.
  */
 module;
 
@@ -12,20 +12,19 @@ import bioseq.gpu.vulkan.abi;
 
 export namespace bioseq::gpu::vulkan {
 
-/// @brief Grouped-SoA shader-layout revision encoded in serialized cache keys.
+/// @brief Grouped-index layout version stored in shader cache keys.
 inline constexpr std::uint32_t k_grouped_soa_seed_cache_abi_revision = 6u;
 
-/// @brief Process-independent ordered-sketch capacity families sealed into the AOT cache.
-///
-/// The established W=10 key remains exact. Other supported runtime windows use the
-/// smallest bounded family that can hold their ring, so PostgreSQL session GUCs never
-/// change the supervisor/backend manifest membership contract.
+/// @brief Window capacities included in the precompiled sketch cache.
+/// Pick the smallest capacity that holds the requested minimizer window.
+/// Keeping this list fixed lets the supervisor and backend agree on cache
+/// contents even when PostgreSQL sessions use different window settings.
 inline constexpr std::array<std::uint32_t, 6> k_ordered_sketch_window_capacities{
     10u, 16u, 32u, 64u, 128u, 256u};
 
-/// @brief Selects the smallest sealed ordered-sketch ring capacity for a runtime window.
-/// @param[in] window_size Runtime minimizer window length.
-/// @return A sealed capacity, or zero when the runtime window is unsupported.
+/// @brief Choose the smallest precompiled ring capacity for a minimizer window.
+/// @param[in] window_size Number of k-mers in the runtime window.
+/// @return A supported capacity, or zero if the window is empty or too large.
 [[nodiscard]] inline constexpr std::uint32_t
 choose_ordered_sketch_window_capacity(std::uint32_t window_size) noexcept {
     for (const std::uint32_t capacity : k_ordered_sketch_window_capacities) {
@@ -35,20 +34,19 @@ choose_ordered_sketch_window_capacity(std::uint32_t window_size) noexcept {
     return 0u;
 }
 
-/// @brief Pipeline selector result for the tiled-DP chaining shader.
+/// @brief Compile-time tile and workgroup sizes for anchor chaining.
 struct chaining_pipeline_key {
     std::uint32_t tile_size = 384;
     std::uint32_t local_size = 128;
 
-    /// @brief Compare both compile-time pipeline selectors.
+    /// @brief Compare the tile and workgroup sizes.
     [[nodiscard]] bool operator==(const chaining_pipeline_key&) const = default;
 };
 
-/// @brief Converts a serialized shader-kind value to its registered shader family.
-///
-/// @param[in] raw Serialized shader-kind discriminator.
-/// @return The validated shader kind.
-/// @throws shader_compile_error When `raw` is not a registered discriminator.
+/// @brief Read a shader kind from its stored numeric value.
+/// @param[in] raw Value read from a shader key.
+/// @return The registered shader kind.
+/// @throws shader_compile_error If the value is unknown.
 [[nodiscard]] inline shader_kind checked_shader_kind(std::uint32_t raw) {
     switch (raw) {
     case static_cast<std::uint32_t>(shader_kind::chain_tiled_dp_u64):
@@ -102,23 +100,21 @@ struct chaining_pipeline_key {
     }
 }
 
-/// @brief Shared shader-cache compile-request identity. Depending on shader_kind, a
-/// field may be an established selector/sentinel rather than the reflected
-/// SPIR-V execution geometry. Use `expected_shader_workgroup_size(key)` for the
-/// latter.
+/// @brief Shader kind and compile-time parameters used as a cache key.
+/// Some shaders use fixed workgroup sizes regardless of local_size.
+/// Use expected_shader_workgroup_size() to get their compiled dimensions.
 struct shader_variant_key {
     std::uint32_t kind = 0;
     std::uint32_t tile_size = 384;
     std::uint32_t local_size = 128;
     std::uint32_t max_span = 0;
 
-    /// @brief Compare every cache-identity selector.
+    /// @brief Compare all fields of the cache key.
     [[nodiscard]] bool operator==(const shader_variant_key&) const = default;
 
-    /// @brief Materialize the compiler request represented by this cache key.
-    ///
-    /// @return A validated shader compilation request.
-    /// @throws shader_compile_error when `kind` is not registered.
+    /// @brief Turn this cache key into a compiler request.
+    /// @return A request with the same parameters. Only the shader kind is checked here.
+    /// @throws shader_compile_error If kind is unknown.
     [[nodiscard]] shader_compile_request to_request() const {
         shader_compile_request request{};
         request.kind = checked_shader_kind(kind);
@@ -131,16 +127,15 @@ struct shader_variant_key {
 static_assert(sizeof(shader_variant_key) == 16);
 static_assert(std::is_standard_layout_v<shader_variant_key>);
 
-/// @brief Inputs for selectors that must run without a Vulkan device object.
+/// @brief Device limits needed to choose a shader without a Vulkan device object.
 struct vulkan_static_variant_inputs {
     std::uint32_t max_workgroup_invocations = 0;
     std::uint32_t max_shared_memory_bytes = 0;
 };
 
-/// @brief Select the fixed subgroup-owned tiled-chaining variant.
-///
-/// @param[in] inputs Device-independent selector inputs reserved for capability checks.
-/// @return The cache identity selectors for the chaining workgroup.
+/// @brief Choose the 32-lane shader used for anchor chaining.
+/// @param[in] inputs Reserved for capability checks. Currently ignored.
+/// @return A tile size and workgroup size of 32.
 [[nodiscard]] inline constexpr chaining_pipeline_key
 choose_chaining_variant(const vulkan_static_variant_inputs& inputs) noexcept {
     // Exactly one 32-lane subgroup owns each range. A larger local size would
@@ -149,10 +144,9 @@ choose_chaining_variant(const vulkan_static_variant_inputs& inputs) noexcept {
     return chaining_pipeline_key{32u, 32u};
 }
 
-/// @brief Compute the largest supported bitonic anchor-sort workgroup.
-///
-/// @param[in] inputs Device-independent workgroup and shared-memory limits.
-/// @return The largest power-of-two capacity accepted by both limits, or zero.
+/// @brief Find the largest bitonic anchor-sort capacity allowed by the device.
+/// @param[in] inputs Workgroup-size and shared-memory limits.
+/// @return A power of two up to 1024, or zero if even one lane will not fit.
 [[nodiscard]] inline constexpr std::uint32_t
 anchor_sort_capacity(const vulkan_static_variant_inputs& inputs) noexcept {
     constexpr std::uint32_t per_lane_shared_bytes = 28u;
@@ -169,13 +163,12 @@ anchor_sort_capacity(const vulkan_static_variant_inputs& inputs) noexcept {
     return capacity;
 }
 
-/// @brief Construct the serialized cache identity for one shader compilation.
-///
-/// @param[in] kind Shader family.
-/// @param[in] tile_size Compile-time tile selector.
-/// @param[in] local_size Compile-time workgroup-size selector.
-/// @param[in] max_span Compile-time algorithm-bound selector.
-/// @return The corresponding shader variant key.
+/// @brief Build the cache key for a shader compilation.
+/// @param[in] kind Shader to compile.
+/// @param[in] tile_size Compile-time tile parameter.
+/// @param[in] local_size Compile-time workgroup parameter.
+/// @param[in] max_span Extra bound or layout version used by the shader.
+/// @return The key with these values.
 [[nodiscard]] inline constexpr shader_variant_key make_shader_key(shader_kind kind,
                                                                   std::uint32_t tile_size,
                                                                   std::uint32_t local_size,
@@ -183,18 +176,17 @@ anchor_sort_capacity(const vulkan_static_variant_inputs& inputs) noexcept {
     return shader_variant_key{static_cast<std::uint32_t>(kind), tile_size, local_size, max_span};
 }
 
-/// @brief Resolve the compiled workgroup geometry represented by a cache key.
-///
-/// @param[in] key Shader cache identity.
-/// @return The workgroup dimensions encoded in the compiled shader.
+/// @brief Get the workgroup dimensions a compiled shader will use.
+/// @param[in] key Shader cache key.
+/// @return The shader's x, y and z workgroup sizes.
 [[nodiscard]] inline shader_workgroup_size
 expected_shader_workgroup_size(const shader_variant_key& key) {
     return expected_shader_workgroup_size(key.to_request());
 }
 
-/// @brief Reports whether a key is the exact tiled-chaining shader identity.
-/// @param[in] key Shader cache identity.
-/// @return `true` only for the supported tiled-chaining key.
+/// @brief Check whether a key selects the supported anchor-chaining shader.
+/// @param[in] key Shader cache key.
+/// @return true for the chaining kind with its required parameters.
 [[nodiscard]] inline constexpr bool is_chain_key(const shader_variant_key& key) noexcept {
     if (key.kind != static_cast<std::uint32_t>(shader_kind::chain_tiled_dp_u64)) {
         return false;
@@ -202,10 +194,9 @@ expected_shader_workgroup_size(const shader_variant_key& key) {
     return key.tile_size == 32u && key.local_size == 32u && key.max_span == 0u;
 }
 
-/// @brief Validate the complete selector tuple for a registered shader family.
-///
-/// @param[in] key Shader cache identity to validate.
-/// @return True only when every selector is accepted by the shader family.
+/// @brief Check whether a shader key uses a supported set of parameters.
+/// @param[in] key Shader cache key to check.
+/// @return true if the kind and all parameters are accepted.
 [[nodiscard]] inline constexpr bool
 is_shader_variant_key_valid(const shader_variant_key& key) noexcept {
     if (key.tile_size == 0 || key.tile_size > 1024 || key.local_size == 0) {
@@ -237,8 +228,7 @@ is_shader_variant_key_valid(const shader_variant_key& key) noexcept {
         return key.tile_size == 384u && key.local_size == 128u && key.max_span == 1u;
     case shader_kind::grouped_soa_seed_count:
     case shader_kind::grouped_soa_seed_emit:
-        // max_span selects the grouped-SoA layout in the serialized cache
-        // identity. It is not a biological seed span.
+        // For grouped indexes, max_span stores the shader layout version.
         return key.tile_size == 384u && key.local_size == 128u &&
                key.max_span == k_grouped_soa_seed_cache_abi_revision;
     case shader_kind::chain_range_build:
@@ -285,10 +275,9 @@ is_shader_variant_key_valid(const shader_variant_key& key) noexcept {
     }
 }
 
-/// @brief Format the stable filename stem for a shader cache key.
-///
-/// @param[in] key Shader cache identity.
-/// @return The fixed-width hexadecimal cache filename stem.
+/// @brief Make the filename stem used for a cached shader.
+/// @param[in] key Shader cache key.
+/// @return The shader kind and parameters in hexadecimal, prefixed with sh_.
 [[nodiscard]] inline std::string cache_file_stem(const shader_variant_key& key) {
     char buffer[32]{};
     std::snprintf(buffer,
@@ -301,16 +290,15 @@ is_shader_variant_key_valid(const shader_variant_key& key) noexcept {
     return std::string(buffer);
 }
 
-/// @brief Visit every shader variant published by the static production cache.
-///
-/// @tparam p_visitor Callable accepting one `shader_variant_key`.
-/// @param[in] inputs Device-independent selector inputs.
-/// @param[in] visitor Callable invoked once per valid key.
+/// @brief Visit the fixed list of precompiled shader variants.
+/// @tparam p_visitor Callable accepting a shader_variant_key.
+/// @param[in] inputs Reserved for device limits. Currently ignored.
+/// @param[in] visitor Called once for each supported key in the list.
 template <class p_visitor>
 inline void for_each_static_shader_variant(const vulkan_static_variant_inputs& inputs,
                                            p_visitor&& visitor) {
     (void)inputs;
-    // Publishes only selector tuples accepted by the shared cache-key validator.
+    // Pass only supported keys to the visitor.
     const auto emit = [&visitor](shader_variant_key key) {
         if (is_shader_variant_key_valid(key)) {
             visitor(key);
