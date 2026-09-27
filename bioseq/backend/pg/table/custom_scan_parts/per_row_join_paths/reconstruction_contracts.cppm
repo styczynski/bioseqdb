@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Declares per-row path reconstruction diagnostics without importing implementations.
+ * @brief Declares inner-join reconstruction and its rejection counters.
  */
 module;
 #include <bioseq/pg_compat.h>
@@ -9,7 +9,7 @@ export module bioseq.postgres.table:custom_scan_per_row_join_paths_reconstructio
 
 import std;
 
-/** @brief Accumulates per-stage rejection and reconstruction counts for path admission. */
+/** @brief Counts reconstruction outcomes and records the last examined path types. */
 export struct per_row_reconstruction_rejections {
     std::size_t incumbents = 0u;
     std::size_t unsupported_path = 0u;
@@ -33,7 +33,7 @@ export struct per_row_reconstruction_rejections {
     const char* last_inner_custom_name = "none";
 };
 
-/** @brief Rebuild an inner join after transferring one owned predicate. */
+/** @brief Rebuilds an inner join after moving its mmsearch predicate to the parent scan. */
 export [[nodiscard]] Path* per_row_reconstruct_inner_join_path(
     PlannerInfo* root,
     RelOptInfo* joinrel,
@@ -45,5 +45,5 @@ export [[nodiscard]] Path* per_row_reconstruct_inner_join_path(
     Index target_relid,
     per_row_reconstruction_rejections& rejects);
 
-/** @brief Record a deterministic transformed-path admission decline. */
+/** @brief Returns false at a named admission check. The stage argument is currently unused. */
 export [[nodiscard]] bool per_row_decline_transformed_path(const char* stage);

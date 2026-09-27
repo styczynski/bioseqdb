@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Reconstructs the exact per-row inner join path.
+ * @brief Rebuilds an inner join after moving mmsearch execution to its parent scan.
  */
 module;
 #include <bioseq/pg_compat.h>
@@ -47,8 +47,13 @@ export {
     }
 
     /**
-     * @brief Rebuilds an inner join path after transferring one owned predicate to BatchJoin.
-     * @return A planner-owned replacement path, or null when reconstruction cannot preserve metadata.
+     * @brief Rebuilds an inner join whose mmsearch predicate will run in the parent scan.
+     *
+     * Replace children that still execute the predicate or lack a Bioseq sequence
+     * source. Preserve required columns and external parameters, then rebuild the
+     * original join kind with usable merge or hash conditions.
+     *
+     * @return The replacement path, or null if these requirements cannot be met.
      */
     [[nodiscard]] Path*
     per_row_reconstruct_inner_join_path(PlannerInfo* root,
@@ -101,7 +106,7 @@ export {
                 return nullptr;
             }
         } else if (!join_owns) {
-            /* Merge/Hash cannot legally push the join predicate into one child. */
+            /* This merge or hash join must own the predicate at the join node. */
             ++rejects.missing_owned_identity;
             return nullptr;
         }
@@ -115,18 +120,17 @@ export {
             outer_is_target && !slice_project_path_tree_has_bioseq_scan(outer_path);
         const bool inner_needs_source =
             inner_is_target && !slice_project_path_tree_has_bioseq_scan(inner_path);
-        /* Only a nested loop can push the exact join RestrictInfo into a
-         * parameterized child.  Provider-only replacement is also valid for
-         * Merge/Hash: their reconstruction below retains the required sort/hash
-         * clauses while swapping an IndexPath for a source-owning BioseqScan. */
+        /* A nested loop may have pushed mmsearch into a parameterized child.
+         * Merge and hash joins can still need a child replacement to provide
+         * sequence data. Keep their remaining merge or hash conditions. */
         if ((outer_owns || inner_owns) && !IsA(incumbent, NestPath)) {
             ++rejects.invalid_join;
             return nullptr;
         }
         if (outer_owns || inner_owns || outer_needs_source || inner_needs_source) {
-            /* Rebuild each affected side from a legal path whose complete descendant
-             * tree does not own the predicate; unrelated LATERAL parameters remain
-             * valid and are checked against the incumbent frontier below. */
+            /* Choose replacement children that leave this mmsearch call to the
+             * parent. Keep unrelated LATERAL parameters and check their dependencies
+             * against the original join below. */
             if (outer_owns || outer_needs_source)
                 outer_path = per_row_path_without_owned_qual(
                     join->outerjoinpath->parent, owned, outer_is_target);
@@ -161,10 +165,9 @@ export {
                                              inner_path->parent->relids,
                                              PATH_REQ_OUTER(inner_path));
             Relids required_outer = bms_copy(PATH_REQ_OUTER(&join->path));
-            /* Removing the owned predicate can remove an internal nestloop
-             * dependency, but it must never introduce a new dependency outside
-             * the join.  Preserve the incumbent's exact external parameter ABI so
-             * LATERAL/partition rescans remain attached to the same frontier. */
+            /* Removing mmsearch may remove a dependency between the join inputs.
+             * Keep the original external parameter set for rescans and reject
+             * replacement paths that need an additional external parameter. */
             if (!bms_is_subset(calculated_required_outer, required_outer)) {
                 ++rejects.new_external_parameter;
                 bms_free(calculated_required_outer);
@@ -204,12 +207,10 @@ export {
                 ++rejects.unusable_algorithm_clause;
                 return nullptr;
             }
-            /* A provider-only replacement can swap a presorted IndexPath for an
-             * unordered BioseqScan.  NIL in the incumbent's sort-key fields means its
-             * original child already supplies the effective order; it does not mean
-             * an arbitrary replacement is ordered.  Capture that validated contract,
-             * validate it still covers every retained merge clause, and request an
-             * explicit sort exactly where a replacement no longer satisfies it. */
+            /* A replacement BioseqScan may lose the order supplied by an index
+             * scan. Recover the original merge input order, check it covers the
+             * remaining merge clauses, and request a sort wherever the replacement
+             * no longer supplies that order. */
             List* effective_outer_pathkeys =
                 merge->outersortkeys != NIL ? merge->outersortkeys : join->outerjoinpath->pathkeys;
             List* effective_inner_pathkeys =
@@ -242,8 +243,8 @@ export {
                     : effective_inner_pathkeys;
             filtered_extra.mergeclause_list = ordered_mergeclauses;
 #if PG_VERSION_NUM >= 180000
-            // Replacements may lose the incumbent's ordering. Preserve the
-            // explicit full-sort policy above; do not reuse its prefix count.
+            // Use a full sort when needed. The replacement may not preserve the
+            // sorted prefix of the original path.
             constexpr int outer_presorted_keys = 0;
 #endif
             initial_cost_mergejoin(root,
@@ -310,7 +311,7 @@ export {
         return result;
     }
 
-    /** @brief Provides a labeled fail-closed exit for transformed-path admission checks. */
+    /** @brief Returns false at a named admission check. The stage argument is currently unused. */
     [[nodiscard]] bool per_row_decline_transformed_path(const char* stage) {
         (void)stage;
         return false;
