@@ -1,6 +1,6 @@
 /**
  * @file external/providers/ucsc.cppm
- * @brief UCSC provider planning, retrieval, and sequence response parsing.
+ * @brief Read UCSC assembly metadata and nucleotide sequences.
  */
 module;
 
@@ -37,7 +37,7 @@ import bioseq.common.context;
 import bioseq.parallelism.pool;
 import bioseq.common.templating.compile_time_string;
 
-/// UCSC Genome Browser metadata adapter.
+/// UCSC Genome Browser metadata and sequence adapter.
 export namespace bioseq::external::providers {
 
 namespace prov = bioseq::external::provider;
@@ -48,18 +48,18 @@ using prov::external_error_kind;
 using prov::make_external_error;
 using prov::provider_id;
 
-/// Returns the normalized UCSC provider identity.
+/// Return the provider ID used for UCSC rows and errors.
 inline prov::provider_id ucsc_provider_id() noexcept {
     return {.value = "ucsc"};
 }
 
-/// Copies an identifier into the provider-wide bounded representation.
+/// Copy an identifier, truncating it at the shared byte limit.
 inline prov::bounded_string<prov::maximum_identifier_bytes>
 ucsc_bounded_id(std::string_view value) {
     return prov::bounded_string<prov::maximum_identifier_bytes>::make_truncated(value);
 }
 
-/// Validated UCSC request plan containing no credentials.
+/// UCSC operation and optional genome region to request.
 struct ucsc_plan {
     prov::query_target target{prov::query_target::catalog};
     std::string operation_id{"listUcscGenomes"};
@@ -70,16 +70,17 @@ struct ucsc_plan {
     std::string free_text;
     std::optional<std::uint64_t> limit;
 
-    /// Returns fixed and retained dynamic storage in bytes.
+    /// Estimate storage for the plan and its strings.
     [[nodiscard]] std::size_t measure_deep_size_bytes() const noexcept {
         return sizeof(ucsc_plan) + operation_id.capacity() + genome.capacity() + chrom.capacity() +
                free_text.capacity();
     }
 
-    /// Returns the deterministic execution identity for this plan.
+    /// Hash the operation and text fields for plan identification.
+    /// Coordinates, target, and row limit are excluded.
     [[nodiscard]] prov::external_execution_key execution_fingerprint() const noexcept {
         std::uint64_t hash = 1469598103934665603ULL;
-        // Mix one plan component into the stable execution fingerprint.
+        // Add one text field to the plan hash.
         const auto mix = [&hash](std::string_view text) {
             for (const char symbol : text) {
                 hash ^= static_cast<unsigned char>(symbol);
@@ -99,10 +100,10 @@ struct ucsc_plan {
     }
 };
 
-/// Executes one validated UCSC request plan.
+/// Fetch one UCSC response and send its rows to a consumer.
 class ucsc_session {
   public:
-    /// Opens a session over borrowed runtime services and an owning plan.
+    /// Own the plan while borrowing the memory context and worker pool.
     ucsc_session(const context::context& memory,
                  const bioseq::parallelism::global_pool& pool,
                  ucsc_plan plan)
@@ -112,7 +113,7 @@ class ucsc_session {
     ucsc_session(ucsc_session&&) noexcept = default;
     ucsc_session& operator=(ucsc_session&&) noexcept = default;
 
-    /// Runs the request and emits normalized provider messages.
+    /// Fetch assembly metadata or DNA and emit the corresponding provider rows.
     std::expected<prov::provider_statistics, external_error>
     run(prov::provider_message_sink_ref sink, std::stop_token stop) {
         prov::provider_statistics stats;
@@ -169,7 +170,7 @@ class ucsc_session {
         return stats;
     }
 
-    /// Requests cooperative session cancellation.
+    /// Ask the catalog row-emission loop to stop.
     void request_stop() noexcept {
         if (stop_) {
             stop_->store(true);
@@ -177,7 +178,8 @@ class ucsc_session {
     }
 
   private:
-    /// Parses a UCSC sequence response with its zero-based half-open coordinates.
+    /// Emit DNA and its zero-based, half-open coordinates from a UCSC response.
+    /// Missing response coordinates fall back to the requested region.
     std::expected<void, external_error> emit_sequence(std::string_view body,
                                                       prov::provider_message_sink_ref sink,
                                                       prov::provider_statistics& stats,
@@ -247,7 +249,7 @@ class ucsc_session {
         return sink.push_fn(sink.object, prov::owning_provider_message{std::move(payload)});
     }
 
-    /// Normalizes UCSC genome-list or genome-search payloads into catalog rows.
+    /// Convert a genome listing or search response into assembly catalog rows.
     std::expected<void, external_error> emit_catalog_rows(std::string_view body,
                                                           prov::provider_message_sink_ref sink,
                                                           prov::provider_statistics& stats,
@@ -261,9 +263,8 @@ class ucsc_session {
                                                        "UCSC JSON did not parse"));
         }
 
-        // Both endpoints nest assemblies under a top-level object keyed by the
-        // UCSC database name. /list/ucscGenomes -> "ucscGenomes". /findGenome ->
-        // "data". Fall back to the document's own object members.
+        // Read genomes from ucscGenomes or data, depending on the endpoint.
+        // If neither wrapper is present, try the response object itself.
         const json::value* genomes = nullptr;
         for (std::string_view container : {"ucscGenomes", "data"}) {
             if (const json::value* node = document->find_member(container);
@@ -345,7 +346,7 @@ class ucsc_session {
 
 static_assert(prov::external_api_session_compatible<ucsc_session>);
 
-/// UCSC adapter implementing the external provider contract.
+/// Provider adapter for UCSC assembly metadata and DNA.
 struct ucsc_provider {
     static constexpr auto id = bioseq::common::templating::compile_time_string("ucsc");
     static constexpr auto name = bioseq::common::templating::compile_time_string("UCSC");
@@ -356,7 +357,7 @@ struct ucsc_provider {
     /// Session executing a prepared request plan.
     using session_type = ucsc_session;
 
-    /// Returns statically available UCSC capabilities.
+    /// Return the UCSC features advertised by this adapter.
     static prov::provider_capabilities make_potential_capabilities() {
         prov::provider_capabilities caps;
         caps.flags.set(static_cast<std::size_t>(prov::provider_capability::catalog_search));
@@ -367,17 +368,17 @@ struct ucsc_provider {
         return caps;
     }
 
-    /// Returns the request-policy profiles owned by this adapter.
+    /// Return an empty list of request-policy profiles.
     static std::span<const prov::request_policy_profile_view> list_request_policy_profiles() {
         return {};
     }
 
-    /// Returns the locator-policy profiles owned by this adapter.
+    /// Return an empty list of URL-policy profiles.
     static std::span<const prov::locator_policy_profile_view> list_locator_policy_profiles() {
         return {};
     }
 
-    /// Estimates the bounded resources required by one UCSC plan.
+    /// Estimate plan and buffer sizes for a UCSC request.
     static std::expected<prov::provider_plan_estimate, external_error>
     estimate(const prov::normalized_external_query& query,
              const prov::provider_capability_snapshot&,
@@ -390,7 +391,8 @@ struct ucsc_provider {
         return estimate;
     }
 
-    /// Lowers a normalized query into a validated UCSC plan.
+    /// Choose a genome listing or DNA request from the query target.
+    /// DNA requests take their region from equality filters.
     static std::expected<ucsc_plan, external_error>
     plan(const prov::normalized_external_query& query,
          const prov::provider_capability_snapshot&,
@@ -401,9 +403,8 @@ struct ucsc_provider {
         if (query.target == prov::query_target::sequence ||
             query.target == prov::query_target::sequence_chunk) {
             plan.operation_id = "getDnaSequence";
-            // Fill the region from the pushed equality predicates: assembly
-            // database -> UCSC genome, chromosome, and the 0-based half-open
-            // [start0, end0) window that UCSC /getData/sequence consumes as-is.
+            // Copy the assembly, chromosome, and region into the DNA request.
+            // UCSC uses the same zero-based interval with an exclusive end.
             for (const prov::predicate_node& node : query.predicates) {
                 const auto* cmp = std::get_if<prov::comparison_predicate>(&node.leaf);
                 if (cmp == nullptr || cmp->operation != prov::predicate_operator::equal ||
@@ -453,7 +454,7 @@ struct ucsc_provider {
         return plan;
     }
 
-    /// Opens an execution session for a validated plan.
+    /// Open a session that owns a copy of the plan.
     static std::expected<ucsc_session, external_error>
     open(context::context& worker_memory,
          const bioseq::parallelism::global_pool& pool,

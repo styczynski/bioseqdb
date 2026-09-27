@@ -1,6 +1,6 @@
 /**
  * @file external/runtime.cppm
- * @brief Process-lifetime initialization for the Oat++ runtime.
+ * @brief Initialize Oat++ once and clean it up at process exit.
  */
 module;
 
@@ -11,9 +11,9 @@ export module bioseq.external.runtime;
 
 namespace bioseq::external::detail {
 
-/** Process-lifetime guard for the Oat++ environment. */
+/** Keeps Oat++ initialized for this object's lifetime. */
 struct oatpp_runtime_lifetime {
-    /** Starts the process-wide Oat++ environment for the guard's lifetime. */
+    /** Initialize the Oat++ environment. */
     oatpp_runtime_lifetime() {
         oatpp::Environment::init();
     }
@@ -21,7 +21,7 @@ struct oatpp_runtime_lifetime {
     oatpp_runtime_lifetime(const oatpp_runtime_lifetime&) = delete;
     oatpp_runtime_lifetime& operator=(const oatpp_runtime_lifetime&) = delete;
 
-    /** Stops Oat++ when the process-local static guard is destroyed. */
+    /** Stops Oat++ when the process-local static object is destroyed. */
     ~oatpp_runtime_lifetime() {
         oatpp::Environment::destroy();
     }

@@ -1,6 +1,6 @@
 /**
  * @file external/swiss_model.cppm
- * @brief SWISS-MODEL OpenAPI descriptor consumed by external client codegen.
+ * @brief OpenAPI description used to generate the SWISS-MODEL client.
  */
 module;
 
@@ -377,5 +377,5 @@ x-bioseq-integration:
         - '"structures"'
 )bioseq_openapi";
 
-/** @brief Code-generation anchor for the SWISS-MODEL client. */
+/** @brief Generate the SWISS-MODEL client from spec. */
 [[bioseq::api_client(spec)]] export struct bioseq_external_api_client;
