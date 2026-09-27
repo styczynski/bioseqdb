@@ -1,6 +1,6 @@
 /**
  * @file external/ncbi/virus_paths.cppm
- * @brief NCBI virus summary and table endpoint fragments.
+ * @brief NCBI package summaries and metadata tables for viruses.
  */
 module;
 
@@ -10,7 +10,7 @@ export module bioseq.external.ncbi:virus_paths;
 
 export namespace bioseq::external::ncbi::descriptor {
 
-/** @brief Virus genome and protein summary and table path entries. */
+/** @brief Virus genome and SARS-CoV-2 protein summaries and metadata tables. */
 inline constexpr std::string_view virus_summary_paths =
     R"bioseq_openapi(  /virus/taxon/{taxon}/genome:
     get:
