@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Neutralizes only ancestor-owned finalized helper carriers.
+ * @brief Removes dummy helper calls whose results will be supplied by an ancestor join.
  */
 module;
 #include <bioseq/pg_compat.h>
@@ -37,7 +37,14 @@ export import :custom_scan_match_analysis_descendant_neutralization_contracts;
 using namespace bioseq::postgres::support;
 
 export {
-    /** @brief Replaces base-scan dummy helper carriers owned solely by an ancestor with NULLs. */
+    /**
+     * @brief Replaces dummy helper calls with typed NULLs when an ancestor supplies their results.
+     *
+     * Leave helpers owned by this base scan in place. An inherited helper must be a
+     * whole target-list entry with exactly one ancestor owner. Reject executable
+     * helper calls in filters and preserve the output column's metadata when
+     * replacing its expression.
+     */
     void neutralize_bioseq_scan_ancestor_helper_carriers(CustomScan* scan,
                                                          List* ancestor_stack,
                                                          const bioseq_stub_oids& oids) {
@@ -108,9 +115,8 @@ export {
                              local_base_matches,
                              ancestor_matches)));
             }
-            /* A finalized base owner executes this helper at the leaf.  Only raw
-             * carriers owned exclusively by an enclosing Batch/PerRow node are
-             * non-executable dummy target columns. */
+            /* This base scan fills its own match helpers. A helper supplied only
+             * by an ancestor join occupies a dummy output column here. */
             if (local_base_matches == 1u)
                 continue;
             if (!dummy_match_helper_is_unique_ancestor_carrier(local_base_matches,
@@ -196,7 +202,7 @@ export {
         }
     }
 
-    /** @brief Traverses one query scope while tracking finalized ancestor match owners. */
+    /** @brief Walks the plan and tracks ancestor joins that can supply dummy helper results. */
     void
     neutralize_ancestor_owned_dummy_match_helpers_plan(Plan* plan,
                                                        std::span<match_owner_finalization> owners,
@@ -206,8 +212,8 @@ export {
             return;
         check_stack_depth();
         if (IsA(plan, SubqueryScan)) {
-            /* A SubqueryScan is a hard query-scope boundary.  An owner above it can
-             * never justify neutralizing an equal local helper spelling below it. */
+            /* Helpers inside a subquery belong to that query. Start a fresh
+             * ancestor list before visiting its plan. */
             neutralize_ancestor_owned_dummy_match_helpers_plan(
                 reinterpret_cast<SubqueryScan*>(plan)->subplan, owners, NIL, oids);
             return;
@@ -243,7 +249,7 @@ export {
                 list_free(child_ancestors);
             return;
         }
-        // Applies neutralization to one PostgreSQL plan-child list.
+        // Visit each child with the same ancestor match owners.
         auto visit_plan_list = [owners, ancestor_stack, &oids](List* plans) {
             for (Plan* child : postgres_list<Plan>(plans)) {
                 neutralize_ancestor_owned_dummy_match_helpers_plan(
@@ -274,7 +280,7 @@ export {
         }
     }
 
-    /** @brief Neutralizes ancestor-owned dummy helpers in the main plan and every subplan. */
+    /** @brief Replaces ancestor-supplied dummy helpers throughout the statement and its subplans. */
     void neutralize_ancestor_owned_dummy_match_helpers(PlannedStmt* statement,
                                                        std::span<match_owner_finalization> owners) {
         if (statement == nullptr || statement->planTree == nullptr)
@@ -286,7 +292,13 @@ export {
         }
     }
 
-    /** @brief Checks that every helper in a dummy target list has exactly one finalized owner. */
+    /**
+     * @brief Checks that each dummy helper column has exactly one source for its result.
+     *
+     * The helper must occupy a whole target-list entry in a plan that does not
+     * project expressions. Count matching owners in its children and the current
+     * parent join. A subquery has its own helper bindings.
+     */
     [[nodiscard]] bool dummy_targetlist_has_only_unique_finalized_owner_helpers(
         Plan* plan, const bioseq_stub_oids& oids, CustomScan* current_parent) {
         if (plan == nullptr || is_projection_capable_plan(plan))
@@ -306,7 +318,7 @@ export {
                     ? 0u
                     : finalized_batch_owner_matching_site_count(current_parent, identity, oids);
             std::size_t descendant_matches = 0u;
-            // Merges one child subtree's owner count with saturation at ambiguity.
+            // Count child owners only up to 2, since multiple owners are ambiguous.
             auto count_child = [&descendant_matches, identity, &oids](Plan* child) {
                 const std::size_t additional =
                     finalized_descendant_match_owner_site_count(child, identity, oids);
