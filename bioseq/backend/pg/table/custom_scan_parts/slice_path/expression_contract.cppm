@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Defines lightweight expression-shape contracts for lazy sequence projection.
+ * @brief Recognizes sequence operations that SliceProject can track.
  */
 module;
 #include <bioseq/pg_compat.h>
@@ -32,7 +32,7 @@ import :custom_scan_oid_expression_support_oid_catalog_contracts;
 using namespace bioseq::postgres::support;
 
 export {
-    /** @brief Opcode tag for one node in the lazy SliceProject expression tree. */
+    /** @brief Operation recorded for a node in the SliceProject expression graph. */
     enum class slice_project_opcode : std::uint8_t {
         source_expr = 1,
         literal_expr = 2,
@@ -57,7 +57,7 @@ export {
                oid == oids.seq_concat_letter_array_oid || oid == oids.letter_array_concat_seq_oid;
     }
 
-    /** @brief Maps a FuncExpr to a slice opcode when it implements a known lazy operator. */
+    /** @brief Identify a supported sequence function by its registered OID. */
     [[nodiscard]] std::optional<slice_project_opcode>
     slice_project_function_opcode(FuncExpr* function,
                                   const bioseq_stub_oids& oids) noexcept {
@@ -90,7 +90,7 @@ export {
         return std::nullopt;
     }
 
-    /** @brief Maps an expression node to a slice opcode when shape and OIDs match. */
+    /** @brief Identify a supported sequence function, operator, or subscript expression. */
     [[nodiscard]] std::optional<slice_project_opcode>
     slice_project_node_opcode(Node* node, const bioseq_stub_oids& oids) noexcept {
         if (node == nullptr)
@@ -100,10 +100,9 @@ export {
             if (subscript->refcontainertype != oids.bioseq_seq_type_oid) {
                 return std::nullopt;
             }
-            /* A valid one-dimensional PG17 bound coordinate is NIL or exactly
-             * one cell (whose payload may be nullptr for an omitted bound).
-             * Leave wider/corrupt shapes opaque so the native subscript path
-             * raises its normative unsupported-shape error. */
+            /* PG17 represents an omitted bound as NIL or a single null cell. Leave
+             * lists with multiple bounds to the sequence subscript code, which reports
+             * the unsupported shape. */
             if ((subscript->reflowerindexpr != NIL &&
                  list_length(subscript->reflowerindexpr) != 1) ||
                 (subscript->refupperindexpr != NIL &&
@@ -117,11 +116,8 @@ export {
             return slice_project_function_opcode(function, oids);
         }
         if (OpExpr* operation = try_cast_pg_node<OpExpr>(node)) {
-            /* PostgreSQL represents SQL operator syntax as OpExpr, even when the
-             * implementation is one of the exact registered concat functions.  Do
-             * not recognize an arbitrary operator merely because opfuncid happens
-             * to be populated: validate the binary catalog operator/function identity
-             * and the sequence result shape first. */
+            /* SQL concatenation uses OpExpr. Check its catalog operator/function pair,
+             * result type, and two arguments before treating it as sequence concat. */
             if (OidIsValid(operation->opno) && OidIsValid(operation->opfuncid) &&
                 get_opcode(operation->opno) == operation->opfuncid &&
                 slice_project_concat_oid(operation->opfuncid, oids) &&
@@ -144,11 +140,10 @@ export {
         return NIL;
     }
 
-    /* PostgreSQL wraps INSERT projection values in the registered same-type
-     * typmod cast.  The cast preserves logical length and the child lazy recipe;
-     * the destination slot is still the one unavoidable heap boundary.  Admit
-     * only the exact implicit, planner-constant cast shape.  Explicit calls and
-     * unrelated sequence-returning functions remain opaque producer leaves. */
+    /* INSERT can wrap a sequence in an implicit typmod cast. With constant cast
+     * arguments, trace the source expression through that wrapper so the plan
+     * records the lazy sequence work before the value is packed for storage.
+     * Explicit casts and other function calls keep their own expression node. */
     [[nodiscard]] inline Node*
     slice_project_typmod_cast_source(Node* node, const bioseq_stub_oids& oids) noexcept {
         FuncExpr* function = try_cast_pg_node<FuncExpr>(node);
