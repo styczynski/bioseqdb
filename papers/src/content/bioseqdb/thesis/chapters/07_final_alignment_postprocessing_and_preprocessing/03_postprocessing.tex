@@ -28,13 +28,14 @@ low MAPQ, because both alignments may match well and we cannot be confident enou
 The maximum MAPQ in minimap2 is 60 and it's similar to usual phred score scale used in base calling (for example in SAM formats), where $P=10^{-Q/10}$~\autocite{sam_format_specification}
 equal to 60 means 1 in million chance for error.
 
-BioseqDB uses directly ported minimap2's heuristic~\autocite{minimap2_mapq_implementation} (there are some edge cases for example if there's no secondary chain for given primary chain, I assume MAPQ is zero)
+BioseqDB uses a direct port of minimap2's heuristic~\autocite{minimap2_mapq_implementation}.
+The equation is given below. Please note that alignment score is different to score given by chaining stage:
 \begin{equation}
   \begin{aligned}
     \mathrm{MAPQ}\approx\operatorname{clip}_{C_{\min},C_{\max}}\Bigl(
       &\min\!\left\{
-        C_1Ip(1-\rho^{C_{\mathrm{power}}})\ln\frac{D}{a},\,
-        C_2I^{C_{\mathrm{power}}}\frac{D-D_{\mathrm{alt}}}{a}
+        C_1Ip(1-\rho^{C_{\mathrm{power}}})\ln\frac{D_{\mathrm{pri}}}{a},\,
+        C_2I^{C_{\mathrm{power}}}\frac{D_{\mathrm{pri}}-D_{\mathrm{sec}}}{a}
       \right\}\\
       &{}-C_3\ln(N+1)
     \Bigr).
@@ -42,26 +43,28 @@ BioseqDB uses directly ported minimap2's heuristic~\autocite{minimap2_mapq_imple
   \label{eq:mapq-final}
 \end{equation}
 \begin{itemize}
-  \item \(D,D_{\mathrm{alt}}\): maximum DP scores of the primary mapping and
-    its strongest alternative.
+  \item \(D_{\mathrm{pri}}\): best DP score returned by the aligner for the
+    primary chain.
+  \item \(D_{\mathrm{sec}}\): highest DP score returned by the aligner among
+    secondary chains competing with the primary chain for an overlapping
+    region of the query.
   \item \(a\): reward for one matching base.
-  \item \(I\): matching bases divided by alignment block length.
-  \item \(p\): support penalty between zero and \(1\), reduced by weak
-    chains, few seeds or repetitive query regions.
-  \item \(\rho=(D_{\mathrm{alt}}/D)
-    \max(s_{\mathrm{alt}},s_{\min})/s_{\mathrm{orig}}\): ratio combining
-    alignment and chaining scores. Here \(s_{\mathrm{alt}}\) is the strongest
-    secondary chaining score, \(s_{\min}\) is the minimum chaining-score
-    threshold, and \(s_{\mathrm{orig}}\) is the primary mapping's original
-    chaining score before later adjustments.
-  \item \(N\): number of competitive secondary mappings.
-  \item \(\ln\): natural logarithm.
-  \item \(\operatorname{clip}_{C_{\min},C_{\max}}\): leaves values inside
-    \([C_{\min},C_{\max}]\) unchanged and replaces values outside this interval
-    with the nearest endpoint.
-  \item \(C_1=40\), \(C_2=6.02\), \(C_3=4.343\),
+  \item \(I\): factor of how many bases we matched (matching bases divided by alignment block length)
+  \item \(p\): MAPQ multiplier factor calculated as $p=\operatorname{clip}_{1,\infty}(\frac{s_{\pathrm{pri}}}{100}, \frac{{N}_{\pathrm{pri}}}{10})$, where ${s}_{\pathrm{pri}}$ is the chaining score of primary chain and ${N}_{\pathrm{pri}}$ number of anchors in that chain.
+  It's used to penalize short or repetitive chains.
+  \item \(\rho=(D_{\mathrm{sec}}/D_{\mathrm{pri}})
+    \max(s_{\mathrm{sec}},s_{\min})/s_{\mathrm{orig}}\): ratio combining alignment and chaining scores. 
+    Here \(s_{\mathrm{sec}}\) is the best secondary chaining score, \(s_{\min}\) is the configurable fixed parameter used by floor for the secondary chaining score and \(s_{\mathrm{pri}}\) is
+    the primary chaining score.
+  \item \(N\): number of secondary chains for that fragment.
+  \item \(\operatorname{clip}_{C_{\min},C_{\max}}\) shorthand notation for $min(max(x, C_{\min}), C_{\max})$
+  \item BisoeqDB defaults to minimap2's defaults: \(C_1=40\), \(C_2=6.02\), \(C_3=4.343\),
     \(C_{\mathrm{power}}=2\), \(C_{\min}=0\), \(C_{\max}=60\).
 \end{itemize}
-BioseqDB applies rounding offsets and converts intermediate values to integers
-by discarding their fractional parts. Primary mappings receive at least \(1\)
-if \(D>D_{\mathrm{alt}}\). Secondary mappings receive zero.
+
+\info{MAPQ implementation details}{
+  In minimap2 it's possible to disable base alignment and when that happens certain adjustments happen, for example $D_{\mathrm{sec}}/D_{\mathrm{pri}}$ becomes one,
+  instead of $D$ we use $s$ where possible.
+  The origin of the formula is empirical and unfortunately I didn't go into details understanding completely its structure. 
+  Some details can be found in original minimap2 paper~\autocite{minimap2_paper}.
+}
