@@ -287,9 +287,10 @@ The algorithm state matrix can be used to retrieve the edit path as CIGAR string
 the standard compact representation of gapped alignments described in chapter 1\cite{sam_format_specification}
 
 Affine model is some scenarios might not be enough as it doesn't distinguish between short and long gaps. The two-piece affine model can support such feature without complicating the scoring function too much:
-\[
+\begin{equation}
   g_2(\ell)=\min(q_1+\ell e_1,\ q_2+\ell e_2)
-\]
+\label{eq:two-piece-affine-model}
+\end{equation}
 This model permits different cost slopes for short and long gaps. In our software we use single affine model for the fastest alignment modes (adaptive block), while KSW2 variants support dual affine model.
 
 For large datasets evaluating entire large \(O(nm)\) matrix can make significant practical difference:
@@ -298,6 +299,7 @@ For large datasets evaluating entire large \(O(nm)\) matrix can make significant
     \item In case of features that do not require traceback (CIGAR construction requires traceback, but score or coordinates of best match do not) we can just store relevant slice in memory and avoid allocating large memory region.
     \item We can introduce X-drop stop condition: stop when score falls below best score seen so far by more than X
     \item We can introduce Z-drop stop condition: the same as X-drop, but if the distance from diagonal is too high then stop as well (this means that we stop when there are too many gaps cummulatively)
+\label{lst:xdrop-zdrop-strategies}
 \end{itemize}
 
 Smart evaluation startegy can combine all these approaches. KSW2 and Block aligner for example use all of them. Block aligner \cite{block_aligner_paper} evaluates only the most promising rectangular region in the matrix while KSW2 \cite{suzuki_kasahara_2018} focuses on diagonal-centered evaluation.

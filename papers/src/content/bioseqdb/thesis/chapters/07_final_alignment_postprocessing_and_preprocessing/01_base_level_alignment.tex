@@ -2,16 +2,21 @@
 \label{sec:final-alignment-role}
 \label{sec:final-alignment-cpu-contracts}
 
-A chain suggests where two sequences match. The base aligner resolves the
-symbols between anchors and extends their flanks, producing a score and an
-alignment path (Section~\ref{sec:exact-dp}). BioseqDB uses local ports of KSW2
-from minimap2 and Block Aligner~\cite{minimap2_paper,block_aligner_paper}.
-Both use SIMD. I use these existing algorithms without proposing a new base
-aligner.
+In this short chapter I want to discuss last parts of the pipeline's algorithms. The first one is the base-level alignment.
+Chaining will tell us approximetely where two sequences match, but it isn't sufficient to tell which exact symbols correspond to which. The base-level alignment performs the dynamic programming specified in the introductory sections~\ref{sec:exact-dp} as
+now instead of matching entire target, we can just process target subsequence of size similar to the query size.
 
-Table~\ref{tab:final-aligner-comparison} compares their search and scoring.
-For a gap of length \(\ell\), \(q\) is the opening penalty and \(e\) the
-cost per symbol. KSW2's two affine penalties distinguish short and long gaps.
+\info{Conditional CIGAR execution}{
+BioseqDB doesn't call base-level alignment if no \path{bioseq.cigar()} is requested~\ref{lst:xdrop-zdrop-strategies}, so
+then \path{bioseq.score()} only reflects the chaining score. If \path{bioseq.cigar()} call is present in the SQL query, then score represents results of the final alignment (thus score can differ  depending on the query).
+This is explained in the walkthrough appendix~\ref{app:sql-walkthrough}.
+}
+
+In BioseqDB I used existing implementation of KSW2 (the algorithm by the author of minimap2 that uses AVX SIMD C intrinsics to implement DP calculations)
+from minimap2 and Block Aligner~\cite{minimap2_paper,block_aligner_paper}.
+The DP formulations follow what was described already easlier~\ref{sec:exact-dp}, where KSW2 provides various flavours of functions in its API primarily left/right extension and local mode~\ref{fig:alignment-boundary-modes}.
+KSW2 uses banded alignment where the maximum distances are fixed (for more details on that see chaining for maximum diagonal distance (bandwith)~\ref{fig:chaining-dotplot})
+The block aligner is more complex and uses moving square blocks to adaptively set this size of "bandwith", where we compute scores in the score matrix.
 
 \begin{table}[H]
 \centering
@@ -25,37 +30,37 @@ cost per symbol. KSW2's two affine penalties distinguish short and long gaps.
 \toprule
  & \textbf{KSW2} & \textbf{Block Aligner}\\
 \midrule
-DP region & Fixed diagonal band & Moving square that grows and shrinks\\
-Gap cost & \(\min(q_1+e_1\ell,q_2+e_2\ell)\) & \(q_1+e_1\ell\)\\
-Flank stopping & Z-drop & X-drop after two consecutive low-scoring steps\\
-Search limits & Band width and Z-drop threshold
- & Block size, currently 16--32 in the CPU pipeline\\
+DP matrix where scores are calculated & Fixed diagonal band & Moving square that grows and shrinks repeatedly \\
+Gap cost function (single-affine/dual-affine)& \(\min(q_1+e_1\ell,q_2+e_2\ell)\) & \(q_1+e_1\ell\)\\
+Special stop conditions (see below) & Z-drop & X-drop after two consecutive low-scoring steps\\
+Parameters that affect sizes of searched regions & "bandwith" is the maximum distance from the diagonal for the diagonal band
+ & Block size, which is the initial size of the square \\
 \bottomrule
 \end{tabularx}
 \end{table}
 
-If \(S^\star\) is the best score reached at \((i^\star,j^\star)\), a later
-score \(S\) at \((i,j)\) is tested against
+I previously introduced X-drop and Z-drop concepts~\ref{lst:xdrop-zdrop-strategies}, but formally they can be formulated as follows.
+Let's say \(S^\star\) is the best score reached at \((i^\star,j^\star)\) and we test this best score against the
+current score \(S\) at \((i,j)\) (meaning that we are matching $i$th symbol of target vs. $j$th symbol of query):
 \begin{equation}
 \begin{aligned}
   \text{X-drop:}\quad&S^\star-S>X,\\
-  \text{Z-drop:}\quad&S^\star-S>Z+e\left|(i-i^\star)-(j-j^\star)\right|.
+  \text{Z-drop:}\quad&S^\star-S>Z+e_{g}\left|(i-i^\star)-(j-j^\star)\right|.
 \end{aligned}
 \label{eq:zdrop}
 \end{equation}
-Z-drop allows extra score loss when crossing a gap changes the diagonal.
-Here \(e\) is its gap-extension penalty. BioseqDB supplies the same configured
-threshold as \(Z\) to KSW2 and as \(X\) to Block, despite their different rules.
-Block fills between anchors globally and uses X-drop on the flanks.
-KSW2 can stop a fill under Z-drop, but disables both banding and Z-drop for
-mandatory fills when an exact edit predicate is requested.
+$e_{g}$ here is gap-extension penalty, which in this context means that we can disard all symbols from the best score to the current position by introducing a gap. This means 
+that effectively we just stop earlier if the distance from the diagonal gets to large, so practically Z-drop is more restrictive for correct setup.
 
 \clearpage
 \section{How Block Aligner follows the alignment}
 \label{sec:final-alignment-block}
 
 Block Aligner moves a \(B\times B\) square through the scoring matrix,
-computing strips of width \(s=8\). Border scores guide its direction;
+and internally compute strips of width \(s=8\) visible on the figure~\ref{fig:block-adaptive-reconstruction} below. 
+
+
+Border scores guide its direction;
 stalled progress triggers a return to a checkpoint and a larger block
 (Figure~\ref{fig:block-adaptive-reconstruction}). The following formulation
 adapts the paper's Algorithm~1 to BioseqDB's sequence-to-sequence port;
