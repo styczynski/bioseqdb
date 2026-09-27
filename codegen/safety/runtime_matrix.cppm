@@ -18,7 +18,7 @@ import :validation;
 
 export namespace bioseq::codegen::safety {
 
-/// Reviewed runtime coverage obligations beyond ledger-derived coverage.
+/// Reviewed coverage requirements that must still appear in the safety reports.
 struct runtime_coverage_policy {
     std::uint32_t schema_revision{2};
     std::vector<coverage_key> reviewed_coverage;
@@ -126,7 +126,7 @@ inline void add_site_coverage(
 
 }  // namespace runtime_matrix_detail
 
-/// Derives every runtime coverage key supported by one static ERROR site.
+/// Lists the runtime coverage properties recorded for an error site.
 [[nodiscard]] inline std::vector<coverage_key>
 derive_runtime_site_coverage(
     compilation_profile profile,
@@ -142,7 +142,8 @@ derive_runtime_site_coverage(
     return result;
 }
 
-/// Derives the exact two-profile runtime coverage contract.
+/// Collects required test coverage from both build configurations.
+/// Every reviewed policy requirement must appear in those safety reports.
 [[nodiscard]] inline std::vector<coverage_key>
 derive_required_runtime_coverage(
     const safety_ledger& production,
@@ -175,7 +176,11 @@ derive_required_runtime_coverage(
     return result;
 }
 
-/// Validates deterministic runtime ERROR evidence against both exact ledgers.
+/// Checks runtime tests against the safety reports for both build configurations.
+///
+/// Tests must cover the required error paths, preserve the PostgreSQL error,
+/// and observe the expected destructors and cleanup events. Recorded hashes
+/// must match the supplied reports, binaries, and test programs.
 inline void validate_runtime_matrix(
     const runtime_matrix& matrix,
     const safety_ledger& production,

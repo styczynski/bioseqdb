@@ -2350,7 +2350,7 @@ runtime_probe_inventory_entry_json(
 
 }  // namespace serialization_detail
 
-/// Parses one PostgreSQL provenance bundle without changing wire values.
+/// Reads reviewed PostgreSQL source records from the provenance JSON format.
 [[nodiscard]] inline provenance_bundle parse_provenance_bundle_json(
     std::string_view text) {
     const json_value document = parse_json(text);
@@ -2510,8 +2510,7 @@ runtime_probe_inventory_entry_json(
     return result;
 }
 
-/// Parses compiler facts for the current semantic contract and rejects unknown
-/// root fields.
+/// Reads the current compiler-analysis JSON format and rejects unknown root fields.
 [[nodiscard]] inline compiler_analysis_facts
 parse_compiler_analysis_facts_json(std::string_view text) {
     const json_value document = parse_json(text);
@@ -2756,7 +2755,7 @@ parse_compiler_analysis_facts_json(std::string_view text) {
     return result;
 }
 
-/// Parses and validates a canonical runtime-probe inventory.
+/// Reads a runtime probe inventory and checks its fields and visit/trigger order.
 [[nodiscard]] inline runtime_probe_inventory
 parse_runtime_probe_inventory_json(std::string_view text) {
     const json_value document = parse_json(text);
@@ -2867,7 +2866,7 @@ parse_runtime_probe_inventory_json(std::string_view text) {
     return result;
 }
 
-/// Parses the exact current safety-ledger wire schema.
+/// Reads the current safety-report JSON format.
 [[nodiscard]] inline safety_ledger parse_safety_ledger_json(
     std::string_view text) {
     const json_value document = parse_json(text);
@@ -3138,7 +3137,7 @@ render_runtime_probe_inventory_json(
     });
 }
 
-/// Renders the exact current safety-ledger schema.
+/// Renders a safety report in the current JSON format.
 [[nodiscard]] inline std::string render_safety_ledger_json(
     const safety_ledger& ledger) {
     if (ledger.schema_revision != 2) {
