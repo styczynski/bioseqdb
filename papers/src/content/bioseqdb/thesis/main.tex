@@ -110,33 +110,21 @@
     \vfilneg
     % Keep the Polish-title label and its two-line value on this title page.
     \enlargethispage{4\baselineskip}
-    Genomic workflows commonly connect specialized programs through files.
-    This arrangement separates sequences from relational metadata, repeats
-    parsing and indexing work, and prevents the database planner from
-    representing the cost of alignment. This thesis presents BioSeqDB, a
-    PostgreSQL extension that stores compact biological sequences and runs a
-    minimap2-derived seeding, chaining, and extension pipeline during database
-    scans.
+The field of bioinformatics and genomic data analysis is growing rapidly, however, many tools for fundamental tasks such as alignment calculation and clustering remain 
+either outdated or difficult to use. Finding a user-friendly system that supports essential bioinformatics workflows is still a major challenge. 
+Current solutions are often outdated, hard to use, and lack integration capabilities that would allow them to work seamlessly 
+with other tools in the research ecosystem. 
+The most popular tool remains the Blast+ toolkit maintained by the National Library of Medicine.
+ At the same time, there is a large number of open-source aligners available, such as minimap, mmseqs, bwa, and Kraken. 
+ Many of these tools suffer from significant technical debt, use incompatible data formats, and are generally difficult to deploy and operate at scale.
 
-    BioSeqDB provides alphabet-generic packed sequence views, scalar and
-    single instruction, multiple data (SIMD) minimizer extraction, and Vulkan
-    implementations for selected sketching and chaining operations. Bounded
-    CPU dynamic-programming kernels and GPU alignment routes perform final
-    extension. Optional SneakySnake
-    and GateKeeper filters reject unsuitable candidate regions before that
-    stage. The database layer adds persistent minimizer indexes, bounded
-    ingestion, external-provider relation definitions, coordinated caching,
-    and generated PostgreSQL boundary declarations.
+I created BioseqDB to address this shortcominds. BisoeqDB is Postgres extension that provides performant columnar storage with compression for storing very large sequences of any sizes, without the need to preprocess the data.
+BioseqDB offers efficient scalar CPU algorithms and optimised SIMD algorithms as well as experimental portable Vulkan kernels for GPU.
 
-    Alignment is not evaluated as an independent scalar function for every
-    row. Planner support introduces custom paths whose execution nodes batch
-    sequences, execute the explicitly selected implementation when the input
-    and hardware pass admission, and place alignment results into planned
-    expressions. The same
-    operation can therefore participate in joins, filtering, metadata
-    projection, and persistent storage. The thesis describes how the mapper's
-    data and control flow become a database execution primitive while retaining
-    explicit resource bounds and support for heterogeneous processors.
+BioseqDB enable research labs to upload FASTA/FASTQ files directly into the database and perform alignments that in the worst cases can offer up to 120x speedup when RAM is very limited.
+In average case for very long sequences, the speedup was up to 10x for indexed queries.
+
+In the implemetation I provide multi-platform implementations that can execute on almost any architectures and custom optimisations which benchmarked comparisons.
 \end{abstract}
 
 \makeatletter
@@ -150,122 +138,9 @@
 
 \chapter*{Introduction}
     \addcontentsline{toc}{chapter}{Introduction}
-    Sequencing instruments turn biological material into collections of
-    strings.  The useful interpretation of those strings rarely exists
-    in isolation.  A read has an instrument and sample provenance.  A
-    reference interval belongs to an assembly and annotation release.
-    An alignment has a score, a strand, a position, an edit path, and a
-    relationship to experimental metadata.  Conventional workflows keep
-    the strings in FASTA and FASTQ sequence files, Sequence Alignment/Map
-    (SAM) and Binary Alignment/Map (BAM) alignment files, or mapper-specific
-    index files
-    while keeping much of the surrounding information in tables or
-    ad-hoc scripts.  Each tool sees only the portion of the workflow
-    represented by its command-line arguments.
 
-    Relational database systems solve a different part of the problem.
-    PostgreSQL provides durable storage, transactions, typed values,
-    indexing, joins, extensible operators, and a cost-based planner.  It
-    does not, by itself, provide the representations or execution kernels
-    required for billions of packed symbols and computationally
-    expensive sequence searches.  A naive user-defined function is not
-    sufficient.  Evaluating one alignment function independently for
-    every row prevents batching, hides accelerator opportunities, and
-    gives the planner little information about a predicate that can
-    dominate the query.
-
-    BioSeqDB investigates the boundary between these two systems.  It is
-    implemented as a PostgreSQL extension whose non-database core is
-    written in C++26.  Biological symbols are represented by generic
-    compact ranges rather than by a deoxyribonucleic acid (DNA)-only byte
-    string.  The alignment
-    path is derived from minimap2: representative $k$-mers are extracted
-    as minimizers, matching minimizers become anchors, compatible anchors
-    are chained, and CPU or GPU alignment routes extend the selected regions.
-    The port is not a line-for-line translation.  The
-    implementation introduces template-selected alphabets and layouts,
-    Highway SIMD kernels, task-based parallel execution, Vulkan compute
-    paths, persistent PostgreSQL-backed indexes, and prefilters for
-    candidate regions.  These changes must preserve the semantics that
-    make minimap2 useful while operating on data that may be lazy,
-    fragmented, cached, or obtained from an external provider.
-
-    The database boundary is equally important.  An SQL expression such
-    as \texttt{mmsearch(a, b)} has a conventional function definition so
-    that PostgreSQL can type and plan it.  The ordinary function body is not
-    an alignment fallback: it fails closed if no BioSeqDB custom executor
-    owns the expression.  Its planner-support function assigns the unowned
-    expression a high startup cost, while structural planner hooks can
-    construct an owning custom path with explicit nonnegative costs.  The
-    resulting custom scan batches input,
-    invokes the alignment pipeline, and makes its results available to
-    planned expressions through injected PostgreSQL nodes.  This is what
-    permits alignment to participate in filters, projections, and joins
-    while retaining the execution structure required by central processing
-    unit (CPU) vector units
-    and graphics processing units (GPUs).
-
-    The central research question is therefore not whether an existing
-    aligner can be called from SQL.  It is whether the aligner's data and
-    control flow can become a database execution primitive without
-    losing algorithmic fidelity, resource bounds, or the ability to
-    exploit modern processors.  The investigation is organized around
-    four supporting questions:
-
-    \begin{enumerate}
-        \item[\textbf{RQ1.}] Which parts of seeding, chaining, and extension can be expressed
-        over a common compact sequence abstraction without eager conversion?
-        \item[\textbf{RQ2.}] Which stages admit SIMD or GPU implementations, and
-        which input and resource constraints govern their selection?
-        \item[\textbf{RQ3.}] How can PostgreSQL plan and execute a set-valued,
-        batch-oriented search while presenting an ordinary typed SQL
-        interface?
-        \item[\textbf{RQ4.}] How should sequences, indexes, ingestion, external data,
-        caches, and generated boundary code fit around the kernels so
-        that the resulting system remains inspectable and reliable?
-    \end{enumerate}
-
-    This thesis answers these questions through implementation and analysis of
-    algorithmic and execution contracts. Historical designs appear only when they explain a
-    constraint or a rejected optimization. They are not presented as
-    simultaneous production architectures. Comparisons with minimap2,
-    SIMD-Minimizers, the G3SA GPU seed-chain-extend system, Block Aligner, SneakySnake,
-    GateKeeper, and Citus
-    Columnar distinguish inherited mechanisms from BioSeqDB-specific
-    changes.
-
-    The main contributions developed in the following chapters are:
-
-    \begin{enumerate}
-        \item[\textbf{C1.}] An alphabet-generic sequence representation that supports
-        packed, fragmented, lazily composed, and PostgreSQL-backed data
-        through a common range contract.
-        \item[\textbf{C2.}] A staged minimap2-derived mapper with scalar, SIMD, and
-        Vulkan components and explicit runtime dispatch.
-        \item[\textbf{C3.}] Optional GPU-capable SneakySnake and GateKeeper candidate
-        filters integrated without changing the meaning of an accepted
-        alignment.
-        \item[\textbf{C4.}] Persistent sequence and minimizer-index storage derived from
-        a columnar PostgreSQL access method, with bounded loading,
-        caching, and selective cold-index reads.
-        \item[\textbf{C5.}] A planner and custom-scan interface that connects SQL
-        expressions and joins to batch-oriented alignment.
-        \item[\textbf{C6.}] Structural generation and validation of SQL installation
-        definitions and PostgreSQL function-manager boundary declarations
-        from annotated C++ sources.
-    \end{enumerate}
-
-    The document first
-    establishes the biological and algorithmic context, then states the
-    shortcomings that motivate an integrated system.  The algorithm chapters
-    follow data through minimizer extraction and chaining.  They then describe
-    the expensive downstream alignment stage before stepping back to the
-    prefilter that guards that stage.  This expository inversion makes the
-    filter's safety and cost contract concrete without changing the runtime
-    order, which remains chaining, prefiltering, and alignment.
-    It then moves outward through sequence abstractions, PostgreSQL
-    planning, physical storage, persistent indexes, ingestion, external
-    providers, and generated SQL boundary code.
+    The thesis is structured in the way that each stage of pipeline prosecessing is discussed in chronological order, while the Postgres storage details are addressed later.
+    At the end of the thesis I provide samples of usage to demonstrate all the features and unprocessed benchmark results for different scenarios and machines.
 
     % Keep the chapter roadmap together before the development timeline.
     \begin{itemize}
@@ -276,20 +151,16 @@
         }
     \end{itemize}
 
-    \clearpage
-    \section*{Timeline}
-    \phantomsection
-    \addcontentsline{toc}{section}{Timeline}
-    \label{sec:introduction-timeline}
-
     This thesis required several years of exploration and experiments.
-    I began without a formal background in computational biology, so
+    I began without a formal background in computational biology, thus
     learning the field was part of the research. I proposed the database
-    idea and prepared the initial design for our internal team. I directed
-    the 2022 prototype, whose implementation was written by colleagues.\footnote{\fontsize{7.5}{9}\selectfont The current BioSeqDB is a separate project, designed and written by me. It contains no code or intellectual property from the early BWA-MEM integration experiments.}
-    The MMseqs2 discussions did not lead to a collaboration. The Python
-    prototypes that led to the implementation studied here began in
-    December 2023.
+    idea and prepared the initial design, when I was still working for my funded startup.
+    I directed the 2022 prototype, whose implementation was written by colleagues and plugged BWA-MEM call directly into Postgres via C bindings.\footnote{\fontsize{7.5}{9}\selectfont 
+    The current BioSeqDB is a separate project, designed and written by me.
+    It contains no code or intellectual property from the early BWA-MEM integration experiments.}
+    The early prototype was to simplistic as technically I still didn't understand how aligners work internally.
+
+    The idea of writing my own alignment software was my long standing dream. I explored the field hobbistically and this thesis stands as the final result of all that work. 
 
     \begin{center}
     \begin{tikzpicture}[x=1cm,y=1cm,font=\small,
@@ -389,10 +260,9 @@
         {Debugging, final end-to-end benchmarks and thesis writing\\
          \textit{Ongoing in September 2026}};
     \end{tikzpicture}
+    \label{sec:introduction-timeline}
     \end{center}
-    {\small\noindent Selected milestones from my project history.
-    Spacing is not proportional to elapsed time. Linked entries point to
-    the related discussion and prototype repositories.\par}
+    {\small\noindent Project history\par}
     \footnotetext{\fontsize{7.5}{9}\selectfont I was a co-founder (shareholder) until 15 July 2022 (KRS update on 3 Jun 2022) in Covid Genomics Sp. z o.o. (registered in Poland in Jun 2020, KRS 0000846289) which then changed its legal name to CGen Sp. z o.o. (on 3 Jun 2022) and then changed its branding name to Deepflare (on Jul 2022). I was also a Chief Engineering Officer from 1 Apr 2020 till 31 Aug 2022.}
 
 \foreachdata{chapters}{\chapteri} {
