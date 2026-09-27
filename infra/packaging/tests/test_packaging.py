@@ -1063,10 +1063,11 @@ class CatalogAndProvenanceTests(unittest.TestCase):
 
 
 class CliAndContainerTests(unittest.TestCase):
-    def test_source_projection_excludes_only_the_sealed_papers_location(self) -> None:
+    def test_source_projection_excludes_current_and_legacy_papers_locations(self) -> None:
         self.assertTrue(workspace.is_source_excluded("main/papers"))
         self.assertTrue(workspace.is_source_excluded("main/papers/private/file.txt"))
-        self.assertFalse(workspace.is_source_excluded("papers"))
+        self.assertTrue(workspace.is_source_excluded("papers"))
+        self.assertTrue(workspace.is_source_excluded("papers/private/file.txt"))
         self.assertFalse(workspace.is_source_excluded("bioseq/papers"))
 
     def test_cli_requires_provenance_and_has_no_legacy_binary_override(self) -> None:
@@ -1197,6 +1198,10 @@ class FormatPlanTests(unittest.TestCase):
                         "BIOSEQ_SOURCE_PROJECTION_EXCLUDES"
                     ].splitlines()
                 ),
+            )
+            self.assertIn(
+                "/papers/",
+                config.SOURCE_PROJECTION_EXCLUDES,
             )
             self.assertIn(
                 "/main/papers/",

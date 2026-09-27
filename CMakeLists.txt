@@ -1110,7 +1110,7 @@ if(BIOSEQ_BUILD_WEBSITE)
 endif()
 
 if(BIOSEQ_BUILD_PAPERS)
-  add_subdirectory(main/papers)
+  add_subdirectory(papers)
 endif()
 #add_subdirectory(h3_postgis)
 

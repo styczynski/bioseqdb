@@ -75,6 +75,7 @@ SOURCE_PROJECTION_EXCLUDES = (
     ".terraform/",
     "*.tfstate*",
     "/DOCS/",
+    "/papers/",
     "/main/papers/",
     "/website/",
     "__pycache__/",

@@ -172,7 +172,7 @@ _CMAKE_HELPER_DIR = REPOSITORY_ROOT / "cmake"
 
 PAPERS_BUILD_STATE_KEY = "papers-build"
 
-PAPERS_DIR = REPOSITORY_ROOT / "main" / "papers"
+PAPERS_DIR = REPOSITORY_ROOT / "papers"
 
 PAPERS_BUILD_DIR = PAPERS_DIR / "build"
 
@@ -1483,6 +1483,8 @@ _BUILD_OPERATIONAL_PATHS = frozenset({
 })
 
 _PAPERS_EXCLUDED_PATHSPECS = (
+    ":(top,exclude,literal)papers",
+    ":(top,exclude,glob)papers/**",
     ":(top,exclude,literal)main/papers",
     ":(top,exclude,glob)main/papers/**",
 )

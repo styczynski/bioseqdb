@@ -44,6 +44,8 @@ def plan(paths):
             target = 'research_benchmarks/paper/chaining/' + name
             if path != target:
                 moved[path] = target
+        elif path.startswith('main/papers/'):
+            moved[path] = path.removeprefix('main/')
         elif (len(parts) > 1 and (top in REMOVE_DIRS or top.endswith(('-main', '-master')))) or path.startswith('SEAL/seal-master/'):
             removed.append(path)
         elif len(parts) == 1 and not (top in KEEP_FILES or top.lower().startswith('cmake') or top.startswith('.clang')):

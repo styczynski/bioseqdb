@@ -3964,7 +3964,7 @@ def committed_source_tree_sha256(revision: str) -> str:
         if not separator or len(parts) != 3:
             raise PackageBuilderError("Git returned a malformed source-tree entry")
         _mode, object_type, _object_id = parts
-        if path == "main/papers" or path.startswith("main/papers/"):
+        if path in ("papers", "main/papers") or path.startswith(("papers/", "main/papers/")):
             continue
         if object_type != "blob":
             raise PackageBuilderError(
@@ -4099,6 +4099,8 @@ def sync_committed_source(builder: Builder, key_path: Path, revision: str) -> st
         revision,
         "--",
         ".",
+        ":(top,exclude,literal)papers",
+        ":(top,exclude,glob)papers/**",
         ":(top,exclude,literal)main/papers",
         ":(top,exclude,glob)main/papers/**",
     ]

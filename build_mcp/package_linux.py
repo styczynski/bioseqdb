@@ -97,7 +97,7 @@ _SOURCE_SNAPSHOT_DIRECTORIES = (
 )
 # Public, immutable authority for the committed package source closure.  It is
 # deliberately explicit: unrelated repository-root material and the sealed
-# main/papers tree are unreachable rather than included and then filtered.
+# papers tree is unreachable rather than included and then filtered.
 SOURCE_SNAPSHOT_PATHS: tuple[str, ...] = (
     *_SOURCE_SNAPSHOT_FILES,
     *_SOURCE_SNAPSHOT_DIRECTORIES,

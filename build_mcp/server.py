@@ -58,7 +58,7 @@ def main() -> int:
         default=False,
         help=(
             "(internal) run the detached CMake worker for the "
-            "main/papers bioseqdb_thesis target"
+            "papers bioseqdb_thesis target"
         ),
     )
     parser.add_argument(

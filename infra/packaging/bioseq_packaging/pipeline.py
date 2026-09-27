@@ -122,11 +122,11 @@ def _validate_provenance(
             f"--source-dir must name the BioSeq repository source root: {source_dir}"
         )
 
-    sealed_papers = source_dir / "main" / "papers"
-    if sealed_papers.exists() or sealed_papers.is_symlink():
-        raise PackageBuildError(
-            "sealed papers must be absent from the committed package source archive"
-        )
+    for sealed_papers in (source_dir / "papers", source_dir / "main" / "papers"):
+        if sealed_papers.exists() or sealed_papers.is_symlink():
+            raise PackageBuildError(
+                "sealed papers must be absent from the committed package source archive"
+            )
 
     revision_file = source_dir / ".bioseq-source-revision"
     if revision_file.is_symlink() or not revision_file.is_file():

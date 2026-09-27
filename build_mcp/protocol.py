@@ -723,9 +723,9 @@ TOOL_DEFINITIONS = [
     {
         "name": "papers-build",
         "description": (
-            "Configure `main/papers/CMakeLists.txt` with CMake and build only "
+            "Configure `papers/CMakeLists.txt` with CMake and build only "
             "the `bioseqdb_thesis` target sourced from "
-            "`main/papers/src/content/bioseqdb/thesis`. The build runs in a "
+            "`papers/src/content/bioseqdb/thesis`. The build runs in a "
             "detached worker so a clean TeX environment can finish after the "
             "MCP request returns. Call with action='start' to schedule a new "
             "build (or get the currently-running build), then poll with "

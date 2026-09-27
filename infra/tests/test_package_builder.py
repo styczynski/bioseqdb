@@ -148,6 +148,7 @@ class SourceArchiveContractTests(unittest.TestCase):
             "100755 blob " + "2" * 40 + "\ttools/build\0"
             "100644 blob " + "1" * 40 + "\tCMakeLists.txt\0"
             "100644 blob " + "3" * 40 + "\tmain/papers/secret.tex\0"
+            "100644 blob " + "4" * 40 + "\tpapers/secret.tex\0"
         )
         included = sorted(
             (
@@ -227,6 +228,8 @@ class SourceArchiveContractTests(unittest.TestCase):
             revision,
             "--",
             ".",
+            ":(top,exclude,literal)papers",
+            ":(top,exclude,glob)papers/**",
             ":(top,exclude,literal)main/papers",
             ":(top,exclude,glob)main/papers/**",
         ])

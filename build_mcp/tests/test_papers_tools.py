@@ -8,6 +8,7 @@ import unittest
 from unittest import mock
 
 import build_worker
+import process_state
 import protocol
 
 
@@ -74,7 +75,7 @@ class PapersBuildTests(unittest.TestCase):
                 mock.patch.object(build_worker, "PAPERS_DIR", papers_dir),
                 mock.patch.object(build_worker, "PAPERS_BUILD_DIR", build_dir),
                 mock.patch.object(build_worker, "PAPERS_PDF_PATH", pdf_path),
-                mock.patch.object(build_worker, "STATE_FILE", state_path),
+                mock.patch.object(process_state, "STATE_FILE", state_path),
                 mock.patch.object(
                     build_worker, "_refuse_root_build_identity",
                     return_value=None,
@@ -85,9 +86,10 @@ class PapersBuildTests(unittest.TestCase):
                     build_worker.shutil, "which", return_value="/usr/bin/cmake"),
                 mock.patch.object(
                     build_worker, "_stream_subprocess", side_effect=run_command),
+                mock.patch.object(process_state, "LOCK_FILE", root / "state.lock"),
             )
             with patches[0], patches[1], patches[2], patches[3], \
-                    patches[4], patches[5], patches[6], patches[7]:
+                    patches[4], patches[5], patches[6], patches[7], patches[8]:
                 result = build_worker._run_papers_build_worker()
 
             self.assertEqual(result, 0)
