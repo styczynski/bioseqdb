@@ -1,11 +1,10 @@
 /**
  * @file external/tests/io/streaming_live_test.cpp
- * @brief Deterministic local-server tests for remote streaming policy.
+ * @brief Check URL rules locally and stream live NCBI FASTA responses.
  */
 
-// Exercise the libcurl pull source and locator policy with deterministic local
-// checks and live NCBI E-utilities requests. Streaming cases select the network
-// resource explicitly.
+// Check URL rejection locally, then test libcurl reads against NCBI.
+// Streaming cases carry the resource:network tag.
 
 #include <array>
 #include <catch2/catch_test_macros.hpp>
@@ -28,8 +27,7 @@ namespace tx = bioseq::external::transport;
 
 namespace {
 
-// An NCBI E-utilities locator policy: HTTPS only, host under ncbi.nlm.nih.gov,
-// public addresses only.
+// Allow HTTPS hosts below ncbi.nlm.nih.gov and apply the public-address filter.
 prov::locator_policy_profile_view ncbi_policy() {
     static constexpr std::array<prov::locator_scheme, 1> schemes{prov::locator_scheme::https};
     static constexpr std::array<prov::locator_host_suffix_view, 1> suffixes{
@@ -56,13 +54,12 @@ prov::candidate_transfer_request_view efetch_candidate(const std::string& url) {
     return candidate;
 }
 
-// Count FASTA letters streamed from a validated request with a small carry cap,
-// tracking the maximum single read to prove memory is bounded.
+// Counts and buffer measurements from a FASTA download.
 struct stream_counts {
     std::uint64_t letters = 0;
     std::uint64_t records = 0;
     std::size_t max_read = 0;
-    std::size_t peak_carry_bytes = 0; // real peak carry-buffer occupancy
+    std::size_t peak_carry_bytes = 0; // Largest unread carry-buffer size.
     std::size_t carry_capacity_bytes = 0;
     bool error = false;
     std::string error_message;
@@ -111,7 +108,7 @@ stream_counts stream_once(tx::validated_transfer_request request, std::size_t ca
     return counts;
 }
 
-// Validate and stream with backoff for NCBI's shared public endpoint.
+// Validate and stream the URL, retrying HTTP 429 responses with increasing delays.
 stream_counts stream_fasta_letters(const std::string& url,
                                    const prov::locator_policy_profile_view& policy,
                                    prov::provider_id provider,
@@ -181,31 +178,29 @@ TEST_CASE(
     SECTION("NC_012920.1 human mitochondrion = 16569 bp") {
         const std::string url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi"
                                 "?db=nuccore&id=NC_012920.1&rettype=fasta&retmode=text";
-        // A 64 KiB carry cap while the record is 16.5 kB proves the whole body
-        // is never held. max_read stays under the cap.
+        // Use a 64 KiB buffer limit for the mitochondrial record.
+        // This record is small enough to fit in that buffer.
         const std::size_t carry_cap = 64 * 1024;
         stream_counts counts = stream_fasta_letters(url, policy, ncbi, carry_cap);
         INFO("stream error: " << counts.error_message);
         REQUIRE_FALSE(counts.error);
         REQUIRE(counts.records == 1);
         REQUIRE(counts.letters == 16569);
-        // The carry buffer never exceeds its cap (here the whole 16.5 kB body
-        // fits, so no pause is needed).
+        // Check that unread bytes stay within the configured limit.
         REQUIRE(counts.peak_carry_bytes <= carry_cap);
     }
 
     SECTION("NC_000913.3 E. coli K-12 = 4641652 bp under a 256 KiB carry cap") {
         const std::string url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi"
                                 "?db=nuccore&id=NC_000913.3&rettype=fasta&retmode=text";
-        // The genome is 4.6 Mbp but the carry cap is 256 KiB: bounded streaming.
+        // The 4.6-million-base genome is larger than the 256 KiB buffer limit.
         const std::size_t carry_cap = 256 * 1024;
         stream_counts counts = stream_fasta_letters(url, policy, ncbi, carry_cap);
         INFO("stream error: " << counts.error_message);
         REQUIRE_FALSE(counts.error);
         REQUIRE(counts.records == 1);
         REQUIRE(counts.letters == 4641652);
-        // The libcurl write callback pauses before the carry buffer exceeds its
-        // cap, so the genome body is never fully buffered.
+        // Pausing the transfer should keep unread data within the buffer limit.
         REQUIRE(counts.peak_carry_bytes <= carry_cap);
         REQUIRE(counts.peak_carry_bytes < 512u * 1024u);
         REQUIRE(counts.letters > 8u * counts.peak_carry_bytes);
