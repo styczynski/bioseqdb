@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Target-neutral query-sketch Highway planning used by execution and EXPLAIN.
+ * @brief Shares query-sketch kernel planning between execution and EXPLAIN.
  */
 export module bioseq.pipeline.query_sketch_plan_contract;
 
@@ -12,7 +12,12 @@ import bioseq.pipeline.runtime_contract;
 
 export namespace bioseq::simd::pipe {
 
-/** Resolve the exact query-sketch Highway function set for one route. */
+/**
+ * Return the Highway kernels needed by the selected query-sketch route.
+ * An empty mask means the route needs no Highway minimizer kernel.
+ * Return nullopt for an unknown route or algorithm, or unsupported k/w values
+ * when bounded ntHash is selected.
+ */
 [[nodiscard]] constexpr std::optional<::bioseq::simd_dispatch::highway_kernel_mask>
 planned_query_minimizer_highway_kernels(const ::bioseq::simd::minimap2_parameters& params,
                                         const query_sketch_route route) noexcept {
@@ -114,7 +119,7 @@ static_assert(
     }(),
     "query-sketch Highway planning must remain route- and algorithm-exact");
 
-/** Number of semantic query-sketch owners in a structured description. */
+/** Count query-sketch stages that include an algorithm description. */
 [[nodiscard]] inline std::size_t
 query_sketch_stage_owner_count(const pipeline_description& description) noexcept {
     return static_cast<std::size_t>(

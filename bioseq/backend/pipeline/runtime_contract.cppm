@@ -1,6 +1,6 @@
 /**
  * @file runtime_contract.cppm
- * @brief Target-neutral runtime algorithm and dispatch identities.
+ * @brief Shared algorithm choices and pipeline descriptions.
  */
 module;
 
@@ -18,17 +18,17 @@ export module bioseq.pipeline.runtime_contract;
 export namespace bioseq::simd_dispatch {
 
 /**
- * @brief Kernel families bound by one fixed Highway target.
+ * @brief Kernel families available through a selected Highway target.
  *
- * Each enumerator owns one bit in highway_kernel_mask. The `count` sentinel is
- * excluded from the mask and is never a runnable kernel.
+ * Each family has one bit in highway_kernel_mask. The count value sizes the
+ * mask and does not identify a callable kernel.
  */
 enum class highway_kernel : std::uint8_t {
     /** Minimap2 reference minimizer extraction. */
     minimizer_minimap2_reference,
-    /** Two-stack ntHash minimizer extraction. */
+    /** Exact SIMD minimizer extraction selected by two_stack_nthash. */
     minimizer_two_stack_nthash,
-    /** Bounded-window ntHash minimizer extraction. */
+    /** SIMD minimizer extraction using bounded 32-bit ntHash values. */
     minimizer_bounded_nthash,
     /** SIMD dynamic-programming anchor chaining. */
     chaining_chain_anchors_simd,
@@ -36,30 +36,30 @@ enum class highway_kernel : std::uint8_t {
     prefilter_sneaky_snake_simd_batch,
     /** Single-region KSW2 alignment. */
     alignment_ksw2,
-    /** Cross-region batched KSW2 alignment. */
+    /** KSW2 alignment with fills grouped across regions. */
     alignment_ksw2_batched,
-    /** Block-based global alignment. */
+    /** Adaptive block alignment. */
     alignment_block_aligner,
     /** Number of kernel families. */
     count,
 };
 
-/** @brief Number of callable kernel families represented by the dispatch mask. */
+/** @brief Number of kernel families in the dispatch mask. */
 inline constexpr std::size_t highway_kernel_count =
     static_cast<std::size_t>(highway_kernel::count);
 
-/** @brief Bit mask over all callable Highway kernel families. */
+/** @brief One bit per callable Highway kernel family. */
 using highway_kernel_mask = std::bitset<highway_kernel_count>;
 
-/// Target-neutral masks selected by the single registered Highway dispatcher.
+/// Available Highway targets and the target selected for this execution.
 struct highway_dispatch_plan final {
-    /// Highway targets present in the linked runtime.
+    /// Targets compiled into the linked runtime.
     std::int64_t compiled_targets = 0;
-    /// Compiled targets supported by the current CPU.
+    /// Targets supported by the current CPU.
     std::int64_t cpu_supported_targets = 0;
-    /// Supported targets admitted by the runtime contract.
+    /// Targets both compiled and supported by the CPU.
     std::int64_t runnable_targets = 0;
-    /// Single target selected for this dispatch plan.
+    /// Preferred runnable target, or zero when none is available.
     std::int64_t planned_target = 0;
 };
 
@@ -70,15 +70,15 @@ static_assert(std::is_trivially_copyable_v<highway_dispatch_plan>);
 
 export namespace bioseq::prefilter {
 
-/// Backend that executed a completed prefilter batch.
+/// Requested prefilter backend, or the backend recorded after execution.
 enum class prefilter_backend : std::uint8_t {
-    /// Resolve the backend from the active execution policy.
+    /// Choose the backend from the current execution settings.
     automatic = 0,
-    /// Execute the scalar rank prefilter.
+    /// Run the scalar prefilter on sequence ranks.
     scalar = 1,
-    /// Execute the selected Highway rank prefilter.
+    /// Run the prefilter with the selected Highway target.
     simd = 2,
-    /// Execute the Vulkan rank prefilter.
+    /// Run the prefilter through Vulkan.
     vulkan = 3,
 };
 
@@ -86,59 +86,48 @@ enum class prefilter_backend : std::uint8_t {
 
 export namespace bioseq::simd {
 
-/// Seed-chaining implementation selected for one alignment operation.
+/// Algorithm used to join matching seed positions into chains.
 enum class chaining_algorithm : std::uint8_t {
-    /// Minimap2 dynamic programming on the scalar CPU route.
+    /// Scalar minimap2 dynamic programming.
     scalar_minimap2 = 0,
-    /// Minimap2 dynamic programming through the selected Highway target.
+    /// SIMD chaining with the selected exact or bounded predecessor policy.
     simd_minimap2 = 1,
-    /// Range-minimum-query chaining on the CPU route.
+    /// CPU chaining with a tree for range-minimum queries.
     range_minimum_query = 2,
-    /// Tiled dynamic-programming score generation on Vulkan.
+    /// Compute chaining scores and predecessors through Vulkan.
     vulkan_tiled_dynamic_programming = 3,
 };
 
-/// Base-level alignment algorithm selected for one alignment operation.
-/// Ordinals match `bioseq.aligner.base_alignment.algorithm`.
+/// Algorithm used to align individual bases. Codes 0 and 1 match
+/// bioseq.aligner.base_alignment.algorithm. Batched KSW2 is C++ only.
 enum class base_alignment_algorithm : std::uint8_t {
-    /// KSW2 dual-affine dynamic programming.
+    /// KSW2 alignment with two gap-penalty choices.
     ksw2 = 0,
-    /// Highway-vectorised single-affine block alignment.
+    /// SIMD adaptive block alignment with one gap-penalty choice.
     block_aligner = 1,
-    /// Inter-region batched KSW2. Packs many small KSW2
-    /// gap-fills across regions into SIMD lanes and runs an inter-sequence
-    /// DP. Long fills (q_max > 256 || t_max > 256) fall through to the
-    /// intra-sequence striped KSW2 kernel via the same trait surface.
+    /// Group KSW2 fills from several regions by size and orientation.
+    /// Each fill currently runs through the single-fill kernel before its
+    /// CIGAR is joined back into the corresponding region.
     ksw2_batched = 2,
 };
 
-/// Minimizer-extraction algorithm. Selected at runtime. The
-/// `minimap_port` entry point dispatches on this enum with a runtime
-/// branch (cannot use constexpr-if because both paths instantiate the
-/// same templates, just with the simd_hash vs scalar_hash inner type,
-/// and the kmer index module's `requires` clauses already enforce the
-/// correct concept).
+/// Minimizer algorithm selected for index construction or query sketching.
+/// Stored indexes and query sketches must use compatible minimizer rules.
 enum class minimizer_algorithm : std::uint8_t {
-    /// Scalar minimizer collector.
+    /// Collect minimizers with the scalar minimap2 algorithm.
     scalar = 0,
-    /// Highway-vectorised minimap2-compatible reference collector.
-    /// Its running-min rescan is retained as a correctness oracle and has
-    /// been measured to be slower than the scalar baseline on the
-    /// long-input cost because any lane can invalidate the saved minimum.
+    /// SIMD version of the minimap2 running-minimum algorithm.
+    /// When any lane loses its saved minimum, the window is searched again.
     simd_minimap2_reference = 1,
-    /// Production minimizer collector. Two-stack / prefix-suffix-min
-    /// sliding-window with dual-stream interleaved per-step body
-    /// (mirrors the SIMD-Minimizers paper) and ntHash-style mix +
-    /// deferred minimap-integer scramble.
+    /// Exact SIMD minimizer collection. The selected resident or streaming
+    /// implementation must agree with the index used by the query.
     two_stack_nthash = 2,
-    /// Vulkan minimap-integer minimizer path. Requires a
-    /// usable Vulkan runtime when selected by the pipeline.
+    /// Collect minimap-integer minimizers through Vulkan.
+    /// Selecting this algorithm requires a usable Vulkan runtime.
     vulkan_minimap_integer = 3,
-    /// Bounded-memory SIMD implementation of the u32 seq-hash ntHash scheme
-    /// used by the SIMD-Minimizers work: R=7 rolling hashes, wrapping
-    /// forward+reverse canonical sum, and an eight-logical-stream two-stack
-    /// window. This has a distinct persisted scheme identity from the
-    /// minimap-int/ExactSimd paths and must never consume their indexes.
+    /// Collect minimizers using 32-bit ntHash and eight logical streams.
+    /// Scratch space is bounded by the window size. Its stored indexes use
+    /// a separate scheme from the minimap-integer algorithms.
     bounded_nthash_simd = 4,
 };
 
@@ -146,13 +135,13 @@ enum class minimizer_algorithm : std::uint8_t {
 
 export namespace bioseq::simd::pipe {
 
-/** @brief One stable name/value property rendered in pipeline descriptions. */
+/** @brief A name and value shown in a pipeline description. */
 struct named_property {
     std::string name;
     std::string value;
 };
 
-/** @brief Algorithm identity and resolved properties for one pipeline stage. */
+/** @brief An algorithm name, its parameters and its computed properties. */
 struct stage_algorithm_description {
     std::string name;
     std::vector<named_property> parameters;
@@ -161,34 +150,30 @@ struct stage_algorithm_description {
     ::bioseq::simd_dispatch::highway_kernel_mask highway_kernels{};
 };
 
-/** @brief Stable EXPLAIN description of one executable pipeline stage. */
+/** @brief Description of one pipeline stage for EXPLAIN. */
 struct stage_description {
     std::string stage_name;
     std::optional<stage_algorithm_description> algorithm;
     std::optional<std::string> extra_description;
 
     /**
-     * @brief Pre-allocation upper bound the stage reserves before driving its
-     * kernel ( — "reserve correctness").
+     * @brief Optional output-capacity estimate shown as [reserved: N].
      *
-     * Populated by every stage that opens an `arena_slab<p_element>` of bounded size
-     * (minimizer_stage, seed_hit_stage, chain_stage, region_stage). Set to
-     * `std::nullopt` for stages that mutate in-place or whose output size
-     * is `0` (index_stage, sink_stage, etc.). The EXPLAIN renderer surfaces
-     * this as a per-stage `[reserved: N]` line so a reader can verify
-     * `actual ≤ reserved` against the runtime instrumentation log.
+     * A stage supplies this when it can estimate the allocation while building
+     * its description. Stages whose capacity depends on runtime input, such as
+     * chaining, leave it empty. This field does not enforce an allocation limit.
      */
     std::optional<std::size_t> estimated_batch_size;
 };
 
-/** @brief Ordered description of the exact executable pipeline. */
+/** @brief Pipeline stages in execution order. */
 struct pipeline_description {
     std::vector<stage_description> stages;
 };
 
 inline constexpr std::string_view query_sketch_stage_name = "QuerySketchStage";
 
-/** Cold EXPLAIN-only query-sketch route. Never a dispatch-chain dimension. */
+/** Select the query-sketch description for EXPLAIN without dispatching a kernel. */
 enum class query_sketch_route : std::uint8_t {
     recompute_capable,
     compatible_persisted_only,
