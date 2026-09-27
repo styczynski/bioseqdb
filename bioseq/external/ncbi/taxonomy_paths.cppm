@@ -1,6 +1,6 @@
 /**
  * @file external/ncbi/taxonomy_paths.cppm
- * @brief NCBI taxonomy endpoint fragments.
+ * @brief NCBI taxonomy report, download, and lookup requests.
  */
 module;
 
@@ -10,7 +10,7 @@ export module bioseq.external.ncbi:taxonomy_paths;
 
 export namespace bioseq::external::ncbi::descriptor {
 
-/** @brief Taxonomy download path entries. */
+/** @brief Requests for taxonomy data packages by taxon ID. */
 inline constexpr std::string_view taxonomy_download_paths =
     R"bioseq_openapi(  /taxonomy/taxon/{tax_ids}/download:
     get:
@@ -120,7 +120,7 @@ inline constexpr std::string_view taxonomy_download_paths =
           default: ncbi_dataset.zip
 )bioseq_openapi";
 
-/** @brief Taxonomy report and related-data path entries. */
+/** @brief Taxonomy reports and names, tree relationships, links, and images. */
 inline constexpr std::string_view taxonomy_report_paths =
     R"bioseq_openapi(  /taxonomy/taxon/{taxons}:
     get:

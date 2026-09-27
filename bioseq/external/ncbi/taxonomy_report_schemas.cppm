@@ -1,6 +1,6 @@
 /**
  * @file external/ncbi/taxonomy_report_schemas.cppm
- * @brief NCBI sequence, taxonomy, and virus report schema fragments.
+ * @brief Data types for NCBI sequence, taxonomy, and virus reports.
  */
 module;
 

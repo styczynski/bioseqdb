@@ -1,6 +1,6 @@
 /**
  * @file external/ncbi/value_schemas.cppm
- * @brief NCBI enumeration and status schema fragments.
+ * @brief Named options and status types used by the NCBI API.
  */
 module;
 
@@ -10,7 +10,7 @@ export module bioseq.external.ncbi:value_schemas;
 
 export namespace bioseq::external::ncbi::descriptor {
 
-/** @brief Enumeration, protobuf value, and RPC status schemas. */
+/** @brief Allowed option values, protobuf Any values, and RPC error status. */
 inline constexpr std::string_view value_schemas = R"bioseq_openapi(    v2AnnotationForAssemblyType:
       type: string
       enum:
