@@ -68,9 +68,10 @@ namespace bioseq::codegen::external {
     return current;
 }
 
-/// @brief Maps an OpenAPI parameter location into generator metadata.
+/// @brief Reads an OpenAPI parameter's location.
 /// @param value OpenAPI `in` value.
-/// @return Supported parameter location.
+/// @return Path, query or header location.
+/// @throws std::runtime_error For an unsupported location.
 [[nodiscard]] parameter_location parse_location(std::string_view value) {
     if (value == "path") return parameter_location::path;
     if (value == "query") return parameter_location::query;
@@ -78,9 +79,10 @@ namespace bioseq::codegen::external {
     throw std::runtime_error("unsupported OpenAPI parameter location: " + std::string(value));
 }
 
-/// @brief Maps an OpenAPI scalar type into generator metadata.
-/// @param value OpenAPI schema type.
-/// @return Supported scalar kind.
+/// @brief Reads an OpenAPI parameter's scalar type.
+/// @param value OpenAPI schema type. An empty type means string.
+/// @return String, integer, number or boolean kind.
+/// @throws std::runtime_error For an unsupported type.
 [[nodiscard]] parameter_kind parse_kind(std::string_view value) {
     if (value == "string" || value.empty()) return parameter_kind::string;
     if (value == "integer") return parameter_kind::integer;
@@ -107,10 +109,10 @@ namespace bioseq::codegen::external {
     return equals("accept") || equals("content-type") || equals("authorization");
 }
 
-/// @brief Resolves and lowers one OpenAPI parameter definition.
+/// @brief Reads one parameter definition, resolving local references when needed.
 /// @param document Root OpenAPI node.
 /// @param unresolved Parameter node or reference.
-/// @return Normalized parameter metadata.
+/// @return Parameter name, location, type and required/array flags.
 [[nodiscard]] openapi_parameter parse_parameter(
     const YAML::Node& document,
     const YAML::Node& unresolved) {
@@ -145,10 +147,12 @@ namespace bioseq::codegen::external {
     };
 }
 
-/// @brief Merges path- or operation-level parameters by location and name.
+/// @brief Adds parameters, replacing an earlier entry with the same name and location.
 /// @param document Root OpenAPI node.
-/// @param list Parameter sequence to merge.
-/// @param destination Accumulated normalized parameters.
+/// @param list Parameters from a path or operation.
+/// @param destination Parameters collected so far.
+/// @details Operation parameters override path parameters. Accept, Content-Type
+/// and Authorization header parameters are skipped.
 void append_parameters(
     const YAML::Node& document,
     const YAML::Node& list,
@@ -175,10 +179,12 @@ void append_parameters(
     }
 }
 
-/// @brief Selects the preferred successful response media type.
+/// @brief Chooses an Accept header from the operation's response types.
 /// @param document Root OpenAPI node.
 /// @param operation Operation containing response definitions.
-/// @return Preferred Accept value, falling back to `*/*`.
+/// @return Preferred media type, or `*/*` if none is listed.
+/// @details Response 200 takes priority, followed by other successful responses
+/// and then the remaining responses. JSON types are preferred within each group.
 [[nodiscard]] std::string preferred_response_media_type(
     const YAML::Node& document,
     const YAML::Node& operation) {
@@ -219,9 +225,9 @@ void append_parameters(
             }
             if (normalized == "application/json" || normalized.ends_with("+json")
                 || normalized == "application/x-ndjson") {
-                // A charset parameter has no semantics for application/json and EBI
-                // rejects the spelling it publishes. Preserve all other parameters,
-                // including versioned vendor media types.
+                // EBI rejects application/json with the charset parameter from its own
+                // specification. Drop a lone charset parameter for this media type. Keep
+                // other parameters, including versions on vendor media types.
                 if (normalized == "application/json") {
                     const auto separator = media_type.find(';');
                     if (separator == std::string::npos) return media_type;
@@ -256,10 +262,11 @@ struct api_key_requirement {
     parameter_location location;
 };
 
-/// @brief Resolves the effective supported API-key security requirement.
+/// @brief Reads the operation's API-key requirement, falling back to document security.
 /// @param document Root OpenAPI node.
-/// @param operation Operation whose security overrides document security.
-/// @return Header/query API-key metadata when one applies.
+/// @param operation Operation whose security setting overrides the document.
+/// @return Header or query API-key settings, or std::nullopt when none apply.
+/// @throws std::runtime_error For unsupported or conflicting security schemes.
 [[nodiscard]] std::optional<api_key_requirement> effective_api_key_requirement(
     const YAML::Node& document,
     const YAML::Node& operation) {
@@ -329,9 +336,9 @@ struct api_key_requirement {
     return selected;
 }
 
-/// @brief Extracts a stable provider label from an OpenAPI title.
-/// @param title Human-readable `info.title` value.
-/// @return First significant title token, skipping a leading English article.
+/// @brief Uses the first title word as the provider name.
+/// @param title OpenAPI info.title value.
+/// @return First word after an optional leading "The" or "the".
 [[nodiscard]] std::string provider_name_from_title(std::string_view title) {
     std::size_t begin = title.find_first_not_of(" \t");
     if (begin == std::string_view::npos) {
@@ -350,10 +357,10 @@ struct api_key_requirement {
     return std::string(token);
 }
 
-/// @brief Rejects unknown keys in generator-owned OpenAPI extension metadata.
-/// @param node Mapping to validate.
-/// @param allowed Accepted key spellings.
-/// @param context Diagnostic context.
+/// @brief Rejects unexpected fields in Bioseq OpenAPI extensions.
+/// @param node Mapping to check.
+/// @param allowed Accepted field names.
+/// @param context Description used in errors.
 void validate_metadata_keys(
     const YAML::Node& node,
     std::initializer_list<std::string_view> allowed,
@@ -372,11 +379,11 @@ void validate_metadata_keys(
     }
 }
 
-/// @brief Parses a bounded integer from scalar extension metadata.
-/// @param node Scalar YAML node.
+/// @brief Reads an integer within the allowed range.
+/// @param node Scalar YAML value.
 /// @param minimum Inclusive minimum.
 /// @param maximum Inclusive maximum.
-/// @param context Diagnostic context.
+/// @param context Description used in errors.
 /// @return Parsed integer.
 [[nodiscard]] std::int64_t parse_metadata_integer(
     const YAML::Node& node,
@@ -398,10 +405,10 @@ void validate_metadata_keys(
     return value;
 }
 
-/// @brief Parses one fixture value according to normalized OpenAPI schema kind.
-/// @param node Fixture `value` node.
-/// @param kind Expected OpenAPI scalar kind.
-/// @return Strongly typed fixture scalar.
+/// @brief Reads a test parameter value using the operation's declared type.
+/// @param node Fixture value node.
+/// @param kind Expected scalar type.
+/// @return Value stored in the matching integration_scalar alternative.
 [[nodiscard]] integration_scalar parse_integration_scalar(
     const YAML::Node& node,
     parameter_kind kind) {
@@ -438,9 +445,11 @@ void validate_metadata_keys(
     throw std::runtime_error("invalid integration parameter kind");
 }
 
-/// @brief Parses and validates ordered live-test cases from an OpenAPI extension.
+/// @brief Reads and validates the x-bioseq-integration test cases.
 /// @param document Root OpenAPI node.
-/// @param result Normalized document whose operations have already been parsed.
+/// @param result API description with its operations already parsed.
+/// @details Each case must name an existing operation and supply its required
+/// parameters. Expected status, body text and header values become test checks.
 void parse_integration_cases(const YAML::Node& document, openapi_document& result) {
     const YAML::Node cases = document["x-bioseq-integration"];
     if (!cases || !cases.IsSequence() || cases.size() == 0) {
@@ -632,9 +641,9 @@ struct parsed_https_server {
     std::string base_path;
 };
 
-/// @brief Derives a stable identifier for a GET operation that omits operationId.
-/// @param path Validated OpenAPI path template.
-/// @return Lowercase `get_<path>` identifier with punctuation collapsed.
+/// @brief Builds the readable part of an identifier for a GET without operationId.
+/// @param path OpenAPI path template.
+/// @return Lowercase name starting with get_, with punctuation replaced by separators.
 [[nodiscard]] std::string synthesized_get_operation_id(std::string_view path) {
     std::string result{"get"};
     bool needs_separator = true;
@@ -655,9 +664,9 @@ struct parsed_https_server {
     return result;
 }
 
-/// @brief Encodes an exact path into an identifier-safe stable suffix.
-/// @param path OpenAPI path that owns the synthesized identifier.
-/// @return Reversible lowercase hexadecimal spelling of every path byte.
+/// @brief Encodes the path as a suffix so synthesized operation names stay unique.
+/// @param path Exact OpenAPI path.
+/// @return `_path_` followed by the path bytes in lowercase hexadecimal.
 [[nodiscard]] std::string synthesized_path_suffix(std::string_view path) {
     constexpr std::string_view digits = "0123456789abcdef";
     std::string result{"_path_"};
@@ -669,9 +678,11 @@ struct parsed_https_server {
     return result;
 }
 
-/// @brief Parses the fixed HTTPS server subset supported by the transport.
+/// @brief Reads a fixed HTTPS server URL supported by the transport.
 /// @param server_url OpenAPI server URL.
-/// @return Validated host, port, and path prefix.
+/// @return Validated DNS host, port and path prefix.
+/// @details User information, IP literals, query strings and template variables
+/// are unsupported. The path prefix is stored without trailing slashes.
 [[nodiscard]] parsed_https_server parse_https_server(std::string_view server_url) {
     constexpr std::string_view scheme = "https://";
     if (!server_url.starts_with(scheme)) {
@@ -738,9 +749,11 @@ struct parsed_https_server {
     return result;
 }
 
-/// @brief Parses and validates the OpenAPI subset consumed by the renderer.
-/// @param yaml Embedded OpenAPI YAML text.
-/// @return Normalized service and GET-operation metadata.
+/// @brief Reads the supported OpenAPI fields and the generated client's test cases.
+/// @param yaml Embedded OpenAPI YAML.
+/// @return Server settings, GET operations and integration tests.
+/// @details Operations are sorted by identifier. Missing identifiers are derived
+/// from the exact request path, and conflicting identifiers are rejected.
 [[nodiscard]] openapi_document parse_openapi(std::string_view yaml) {
     const YAML::Node document = YAML::Load(std::string(yaml));
     if (!document["openapi"] || !document["info"] || !document["paths"]
