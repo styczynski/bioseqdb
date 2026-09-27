@@ -1,6 +1,6 @@
 /**
  * @file scheduler/supervisor/highway_binding.cppm
- * @brief Exact-target Highway rebinding for PostgreSQL background workers.
+ * @brief Find the queued job's selected SIMD kernels in the worker process.
  */
 module;
 
@@ -14,10 +14,10 @@ import bioseq.highway.dispatch_contract;
 namespace bioseq::postgres::scheduler {
 
 /**
- * @brief Resolves minimizer kernels for the target selected before queueing.
- * @param[in] backend_value Serialized minimizer backend selector.
- * @param[in] highway_executed_target Exact Highway target bit selected by the scheduler.
- * @return Process-local kernels, or null for scalar and Vulkan backends.
+ * Find this worker's minimizer kernels for the Highway target saved with the job.
+ * @param backend_value Saved minimizer backend selector.
+ * @param highway_executed_target Saved Highway target bit.
+ * @return Kernel table, or null for scalar and Vulkan backends.
  * @throws std::logic_error The selected target lacks the requested kernel.
  */
 const bioseq::minimizers::minimizer_kernels*

@@ -1,6 +1,6 @@
 /**
  * @file scheduler/supervisor/direct_minimizer_materialization.cppm
- * @brief Heavy asynchronous minimizer-sequence worker implementation.
+ * @brief Build a queued minimizer-sequence index in a PostgreSQL worker.
  */
 module;
 
@@ -50,11 +50,12 @@ import bioseq.postgres.storage.indexing.handles;
 namespace bioseq::postgres::scheduler {
 
 /**
- * @brief Executes one materialization primitive inside a PostgreSQL error bridge.
- * @tparam p_function Callable returning the leaf result.
- * @param[in] point Boundary counter and failure selector for the primitive.
- * @param[in,out] function Callable invoked once.
- * @return The callable result.
+ * Call a PostgreSQL operation through the C++ error bridge. Count the call
+ * and any PostgreSQL failure for the worker diagnostics.
+ * @tparam p_function Callable returning the operation result.
+ * @param point Operation being counted.
+ * @param function Operation to run once.
+ * @return The operation's result.
  */
 template <class p_function>
 auto invoke_async_minimizer_sequence_materialization_pg_leaf(
@@ -69,9 +70,8 @@ auto invoke_async_minimizer_sequence_materialization_pg_leaf(
     }
 }
 
-/**
- * @brief Owns an admitted resident target and its packed byte count.
- * @tparam p_alphabet Sequence alphabet preserved by materialization.
+/** Hold a packed target in memory with its memory reservation and byte count.
+ * @tparam p_alphabet Sequence alphabet preserved by the copy.
  */
 template <sequence_alphabet p_alphabet> struct async_minimizer_sequence_resident_target {
     bioseq::storage::admitted_packed_sequence<p_alphabet> owner;
@@ -79,13 +79,16 @@ template <sequence_alphabet p_alphabet> struct async_minimizer_sequence_resident
 };
 
 /**
- * @brief Materializes a lazy target only when parallel work and memory are available.
- * @tparam p_alphabet Source alphabet.
- * @param[in] seq Lazy sequence view backed by PostgreSQL storage.
- * @param[in] requested_width Packed storage width in bytes.
- * @param[in] sequence_rowno Stable sequence row used in diagnostics.
- * @param[in] index_name Stable index name used in diagnostics.
- * @return An admitted resident owner, or absence when the streaming route remains selected.
+ * Copy the target into memory so worker threads can read it.
+ * Return no owner when parallel work is disabled, the target is already
+ * in memory, or the memory budget cannot cover the copy. The caller can then
+ * keep reading through the original sequence view.
+ * @tparam p_alphabet Sequence alphabet.
+ * @param seq Borrowed view of the source sequence.
+ * @param requested_width Packed storage width in bytes.
+ * @param sequence_rowno Sequence row used in diagnostics.
+ * @param index_name Index name used in diagnostics.
+ * @return Packed sequence owner, or no value when the original view should be used.
  */
 template <sequence_alphabet p_alphabet>
 [[nodiscard]] std::optional<async_minimizer_sequence_resident_target<p_alphabet>>
@@ -169,11 +172,12 @@ try_materialize_async_minimizer_sequence_worker_target(
 }
 
 /**
- * @brief Rebuilds one claimed direct minimizer index from its durable locator.
- * @param[in] claim Claimed queue identity.
- * @param[in] base Start of the mapped metadata DSM.
- * @param[in] mapped Accessible metadata bytes.
- * @param[in] registered_snapshot Snapshot owned by the worker transaction.
+ * Build the index described by a claimed queue entry. Read its sequence
+ * through the worker transaction's snapshot and skip stale or invalid jobs.
+ * @param claim Claimed queue entry identifying the target.
+ * @param base Start of the mapped shared-memory job metadata.
+ * @param mapped Number of accessible metadata bytes.
+ * @param registered_snapshot Snapshot owned by the worker transaction.
  */
 void process_minimizer_sequence_build_claim_cpp(const persist_claim& claim,
                                                 const char* base,
@@ -236,9 +240,9 @@ void process_minimizer_sequence_build_claim_cpp(const persist_claim& claim,
         bioseq::minimizers::minimizer_sketch_backend_name(worker_backend));
     const auto abandon_pg_resources_noexcept = [&caches, &work]() noexcept {
         if (caches != nullptr) {
-            // PostgreSQL owns every relation/read-state after an ERROR. Null
-            // those borrowed handles, but still run the vector destructor so
-            // its ordinary heap allocation cannot leak until backend exit.
+            // PostgreSQL will clean up these handles after the error. Clear the
+            // borrowed pointers before destroying the C++ cache container, whose
+            // heap allocations still need to be freed here.
             for (auto& [key, entry] : caches->entries) {
                 (void)key;
                 entry.rel = nullptr;
@@ -458,19 +462,21 @@ void process_minimizer_sequence_build_claim_cpp(const persist_claim& claim,
 }
 
 /**
- * @brief Converts worker exceptions into the original PostgreSQL error or one terminal error.
- * @param[in] claim Claimed queue identity.
- * @param[in] base Start of the mapped metadata DSM.
- * @param[in] mapped Accessible metadata bytes.
- * @param[in] registered_snapshot Snapshot owned by the worker transaction.
- * @pre The C++ implementation unwinds every owner and restores sort and admission state.
+ * Run a queued index build and report failures after C++ cleanup. Preserve
+ * the original PostgreSQL error when available, otherwise report the C++
+ * exception as a PostgreSQL error.
+ * @param claim Claimed queue entry identifying the target.
+ * @param base Start of the mapped shared-memory job metadata.
+ * @param mapped Number of accessible metadata bytes.
+ * @param registered_snapshot Snapshot owned by the worker transaction.
  */
 void process_minimizer_sequence_build_claim(const persist_claim& claim,
                                             const char* base,
                                             Size mapped,
                                             Snapshot registered_snapshot) {
     ErrorData* exact_error = nullptr;
-    // Keep the fixed C buffer at the strlcpy and PostgreSQL varargs boundary.
+    // Copy the error text before leaving the catch block, then pass this
+    // fixed buffer to PostgreSQL after C++ cleanup.
     char cpp_error_detail[512] = "unknown C++ exception";
     try {
         process_minimizer_sequence_build_claim_cpp(claim, base, mapped, registered_snapshot);
