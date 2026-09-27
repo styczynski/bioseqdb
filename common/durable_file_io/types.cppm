@@ -1,6 +1,6 @@
 /**
  * @file common/durable_file_io/types.cppm
- * @brief Public durable-file types and descriptor ownership.
+ * @brief File handles, read limits and results for durable file operations.
  */
 module;
 
@@ -20,7 +20,7 @@ export module bioseq.common.durable_file_io:types;
 
 export namespace bioseq::common::durable_file_io {
 
-/** The syscall/checkpoint at which a durable-file operation failed. */
+/** The file operation being attempted, also used as a test failure point. */
 enum class file_operation : std::uint8_t {
     none,
     open_regular_file,
@@ -40,7 +40,7 @@ enum class file_operation : std::uint8_t {
     close_directory,
 };
 
-/** Stable, source-neutral error categories for durable-file consumers. */
+/** File errors reported independently of the operating system's errno values. */
 enum class file_error_code : std::uint8_t {
     invalid_argument,
     unsupported_platform,
@@ -69,11 +69,10 @@ enum class file_error_code : std::uint8_t {
 };
 
 /**
- * Visibility/durability state accompanying an error.
+ * How far a file publication got.
  *
- * `visible_not_durable` is deliberately not success: the destination name is
- * visible after the atomic namespace operation, but its directory fsync did
- * not complete. Callers must not issue a success receipt for that state.
+ * With visible_not_durable, the destination name is already visible, but the
+ * required directory syncs have not all completed. Report this as a failure.
  */
 enum class publication_state : std::uint8_t {
     unchanged,
@@ -82,13 +81,12 @@ enum class publication_state : std::uint8_t {
 };
 
 /**
- * Trivially copyable durable-file failure.
+ * A file failure and the operation that reported it.
  *
- * `system_error` is the captured POSIX errno, or zero when the failure is a
- * semantic invariant violation. `offset` is populated only for positional
- * I/O failures. `publication` records whether a destination name became
- * visible before the failure, so a caller never mistakes visibility for
- * durability.
+ * The record is trivially copyable. system_error holds an errno value when
+ * available and may be zero for a failed metadata check. Positional I/O fills
+ * in offset. publication records whether the destination was already visible
+ * or synced before the failure.
  */
 struct file_error {
     file_error_code code{file_error_code::invalid_argument};
@@ -101,10 +99,11 @@ struct file_error {
 static_assert(std::is_trivially_copyable_v<file_error>);
 
 /**
- * Optional syscall callbacks for complete positional I/O.
+ * Optional replacements for offset-based reads and writes, plus a poll callback.
  *
- * `poll` may invoke PostgreSQL's CHECK_FOR_INTERRUPTS. The complete-I/O
- * functions keep only trivially destructible state live while invoking it.
+ * The complete-I/O loops may call poll to check PostgreSQL interrupts. Their
+ * local state needs no destructors, so an interrupt can leave the loop through
+ * PostgreSQL's error handling.
  */
 struct positional_io_callbacks {
     using read_at_callback = ssize_t (*)(
@@ -120,11 +119,10 @@ struct positional_io_callbacks {
 };
 
 /**
- * Explicit fault-injection hook used by deterministic contract tests.
- *
- * Returning zero allows the real syscall. Returning an errno value injects a
- * failure before it. A hook may also mutate its own fixture at a checkpoint.
- * Production callers leave this empty.
+ * Let tests fail a chosen file operation before its system call runs.
+ * Return a positive errno to inject a failure, or zero to continue normally.
+ * The callback can also change the test fixture at that point. Production
+ * callers leave the hook empty.
  */
 struct fault_injection_hooks {
     using before_operation_callback = int (*)(
@@ -135,10 +133,9 @@ struct fault_injection_hooks {
 };
 
 /**
- * Stable regular-file snapshot used to detect replacement and mutation.
- *
- * Device/inode identify the file object; size, link count, ownership, mode,
- * and timestamps detect mutations relevant to safe publication and reads.
+ * File metadata used to detect replacement or changes.
+ * Device and inode identify the file. Readers also compare its size, link
+ * count, owner, permissions and timestamps before and after an operation.
  */
 struct regular_file_identity {
     std::uint64_t device{};
@@ -156,17 +153,16 @@ struct regular_file_identity {
         const regular_file_identity&) const noexcept = default;
 };
 
-/** Bytes plus the identity proven unchanged over their complete read. */
+/** Read bytes and the matching file metadata checked before and after the read. */
 struct stable_regular_file {
     std::vector<std::byte> bytes;
     regular_file_identity identity{};
 };
 
 /**
- * Bounds for a symlink-safe stable regular-file read.
- *
- * When `require_exact_size` is true, `exact_bytes` must lie within the
- * inclusive minimum/maximum range and the file must match it exactly.
+ * Allowed file size for a read that rejects a symlink at the final name.
+ * If require_exact_size is set, the file must contain exactly exact_bytes,
+ * which must also lie within the inclusive minimum and maximum.
  */
 struct stable_read_options {
     std::uint64_t minimum_bytes{};
@@ -176,7 +172,7 @@ struct stable_read_options {
     bool require_exact_size{};
 };
 
-/** How a successful durable namespace publication completed. */
+/** How the destination was created, reused, replaced or renamed. */
 enum class publication_disposition : std::uint8_t {
     created,
     already_present_identical,
@@ -184,48 +180,46 @@ enum class publication_disposition : std::uint8_t {
     renamed,
 };
 
-/** Namespace replacement policy for `durable_publish_file`. */
+/** Whether durable_publish_file may replace an existing destination. */
 enum class publication_policy : std::uint8_t {
     exclusive_no_replace,
     replace_existing,
 };
 
-/** Result of inode-conditional staging-name removal. */
+/** Whether cleanup removed the name, found it absent or found a different file. */
 enum class conditional_remove_disposition : std::uint8_t {
     removed,
     already_absent,
     identity_mismatch,
 };
 
-/** Durable namespace publication outcome. */
+/** The publication state and what happened to the destination name. */
 struct publication_result {
     publication_state publication{publication_state::unchanged};
     publication_disposition disposition{
         publication_disposition::created};
 };
 
-/** Maximum requested permissions; the process umask may remove bits. */
+/** Requested file permissions. The process umask can remove permission bits. */
 struct publication_options {
     mode_t mode{S_IRUSR | S_IWUSR};
 };
 
 /*
- * Namespace concurrency contract.
+ * Callers must control the affected names for the whole operation, including
+ * directory names that do not exist yet. Use external locking if necessary.
  *
- * Pathname publication, conditional cleanup, and directory creation pin
- * directory descriptors, reject final symlinks, and safely arbitrate
- * cooperating callers. POSIX does not provide an inode-conditional unlink, an
- * inode-bound mkdirat/openat pair, or a transaction spanning post-publication
- * identity verification and directory fsync. Callers must therefore own the
- * affected names (including a missing directory suffix) or externally
- * serialize uncooperative writers to those entries for the complete operation.
+ * These helpers keep directories open and reject final symlinks. Cooperating
+ * callers can run concurrently. An outside writer can still replace a name
+ * between its identity check and unlink, between mkdirat and openat, or
+ * before the final directory fsync.
  */
 
 /**
- * Move-only descriptor owner.
+ * Own a file descriptor and close it on destruction. Ownership can be moved.
  *
- * PostgreSQL code must not retain this object across a raw PG_TRY boundary;
- * use raw descriptors plus explicit PG_CATCH cleanup there.
+ * A PostgreSQL error can skip this destructor. Across raw PG_TRY error
+ * boundaries, keep a raw descriptor and close it explicitly in PG_CATCH.
  */
 class file_descriptor {
 public:
