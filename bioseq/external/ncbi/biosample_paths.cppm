@@ -1,6 +1,6 @@
 /**
  * @file external/ncbi/biosample_paths.cppm
- * @brief NCBI BioSample endpoint fragments.
+ * @brief OpenAPI definition for retrieving NCBI BioSample reports.
  */
 module;
 
@@ -10,7 +10,7 @@ export module bioseq.external.ncbi:biosample_paths;
 
 export namespace bioseq::external::ncbi::descriptor {
 
-/** @brief BioSample accession report path entry. */
+/** @brief BioSample report request by accession, with supported response formats. */
 inline constexpr std::string_view biosample_report_path =
     R"bioseq_openapi(  /biosample/accession/{accessions}/biosample_report:
     get:

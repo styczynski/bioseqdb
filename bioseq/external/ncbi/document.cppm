@@ -1,6 +1,6 @@
 /**
  * @file external/ncbi/document.cppm
- * @brief NCBI OpenAPI metadata and service-version path fragments.
+ * @brief NCBI Datasets API metadata and service-version request.
  */
 module;
 
@@ -10,7 +10,7 @@ export module bioseq.external.ncbi:document;
 
 export namespace bioseq::external::ncbi::descriptor {
 
-/** @brief OpenAPI metadata, servers, security, and the paths mapping prefix. */
+/** @brief Starts the OpenAPI document with API metadata and the paths section. */
 inline constexpr std::string_view document_preamble = R"bioseq_openapi(
 openapi: 3.0.1
 info:
@@ -94,7 +94,7 @@ security:
 paths:
 )bioseq_openapi";
 
-/** @brief Service-version path entry. */
+/** @brief GET /version request and its response type. */
 inline constexpr std::string_view version_path = R"bioseq_openapi(  /version:
     get:
       summary: Retrieve service version

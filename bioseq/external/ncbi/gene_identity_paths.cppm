@@ -1,6 +1,6 @@
 /**
  * @file external/ncbi/gene_identity_paths.cppm
- * @brief NCBI gene identity report endpoint fragments.
+ * @brief Older NCBI gene metadata request definitions.
  */
 module;
 
@@ -10,7 +10,7 @@ export module bioseq.external.ncbi:gene_identity_paths;
 
 export namespace bioseq::external::ncbi::descriptor {
 
-/** @brief Deprecated gene-report paths keyed by GeneID, accession, symbol, or taxon. */
+/** @brief Deprecated gene reports by GeneID or accession, by taxon, and by gene symbol within a taxon. */
 inline constexpr std::string_view gene_identity_paths =
     R"bioseq_openapi(  /gene/id/{gene_ids}:
     get:
