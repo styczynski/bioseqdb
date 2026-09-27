@@ -1,6 +1,6 @@
 /**
  * @file packing.cppm
- * @brief Exact-size flattening, expanded ownership, and persistent sequence edits.
+ * Convert sequence trees to flat values and manage trees used by SQL sequence edits.
  */
 module;
 
@@ -64,25 +64,23 @@ export [[nodiscard]] inline Size checked_size_cast(std::uint64_t value)
     return static_cast<Size>(value);
 }
 
-/// Multiply PostgreSQL sizes with program-limit error reporting.
+/// Multiply allocation sizes and report overflow as a PostgreSQL error.
 export [[nodiscard]] inline Size checked_mul_size(Size left, Size right)
 {
     return mul_size(left, right);
 }
 
-/// Add PostgreSQL sizes with program-limit error reporting.
+/// Add allocation sizes and report overflow as a PostgreSQL error.
 export [[nodiscard]] inline Size checked_add_size(Size left, Size right)
 {
     return add_size(left, right);
 }
 
-/* PostgreSQL's palloc accepts Size, but rejects requests above MaxAllocSize
- * with an internal allocation error.  Every concrete sequence conversion
- * must turn that condition into the public PROGRAM_LIMIT_EXCEEDED contract
- * before it asks a varlena, StringInfo, array, or flat pgseq allocator to
- * grow.  Comparing the uint64 payload before narrowing also covers size_t /
- * Size overflow on narrower PostgreSQL builds. */
-/// Validate an allocation including its varlena header and terminator.
+/* Check the public allocation limit before calling palloc or growing an
+ * output buffer. Oversized sequences should report PROGRAM_LIMIT_EXCEEDED.
+ * Compare the uint64 payload before narrowing it so smaller Size types cannot
+ * truncate an invalid request into an apparently valid allocation. */
+/// Check the total output allocation, including caller-supplied overhead.
 export [[nodiscard]] inline Size checked_materialization_allocation_size(
     std::uint64_t payload_bytes,
     Size overhead_bytes,
@@ -99,7 +97,7 @@ export [[nodiscard]] inline Size checked_materialization_allocation_size(
     return overhead_bytes + static_cast<Size>(payload_bytes);
 }
 
-/// Round a byte count up to uint64 alignment without exceeding MaxAllocSize.
+/// Round a byte count up to uint64 alignment without overflowing Size.
 export [[nodiscard]] inline Size checked_round_up_to_uint64(Size value)
 {
     constexpr Size alignment = sizeof(std::uint64_t);
@@ -111,7 +109,7 @@ export [[nodiscard]] inline Size checked_round_up_to_uint64(Size value)
     return round_up_to_uint64(value);
 }
 
-/// Return the flat varlena size for one alphabet/storage instance.
+/// Compute a flat sequence's header and aligned packed data size, checking limits.
 export template<class p_instance>
 [[nodiscard]] inline Size bound_flat_size(std::uint64_t bp_length)
 {
@@ -163,7 +161,7 @@ namespace {
     return size;
 }
 
-/// Emit an unbound logical tree interval into a bounded byte span.
+/// Copy an unbound tree interval [from, to) into an exactly sized byte span.
 [[nodiscard]] bool emit_unbound_ascii(
     piece_edge edge,
     std::uint64_t from,
@@ -255,7 +253,7 @@ namespace {
     __builtin_unreachable();
 }
 
-/// Pack a logical rank view into an exact-size flat compact-sequence payload.
+/// Pack the view's letters into the caller's flat sequence buffer.
 template<class p_instance, class p_view>
 void pack_view_into(bioseq::pg_types::seq& destination, p_view view, std::uint64_t length)
 {
@@ -305,7 +303,7 @@ inline void pg_sequence_expanded_reset(void* argument) noexcept
 
 } // namespace
 
-/// Stream an unbound expanded value as ASCII bytes in logical content order.
+/// Copy an unbound tree interval as ASCII in its logical letter order.
 export [[nodiscard]] inline bool emit_pg_unbound_ascii(
     piece_edge root,
     std::uint64_t from,
@@ -323,16 +321,16 @@ export [[nodiscard]] inline Size pg_sequence_get_flat_size(
     return expanded_flat_size(*value);
 }
 
-/// Flatten an expanded value into caller-provided varlena storage.
+/// Write an expanded sequence into caller-provided flat PostgreSQL storage.
 export inline void pg_sequence_flatten_into(
     ExpandedObjectHeader* header,
     void* result,
     Size allocated_size)
 {
     auto& value = *reinterpret_cast<pg_sequence_expanded*>(header);
-    /* Persistent concat validates only its newly allocated AVL path.  A flat
-     * payload is already O(total symbols), so retain the independent full-tree
-     * audit at this external materialization boundary. */
+    /* Concatenation checks the new path through the balanced tree. Before
+     * writing a flat value, validate the whole tree as well. Reading all its
+     * letters already requires work proportional to the sequence length. */
     validate_tree_and_limits(
         value.root, value.type_params, value.bp_length,
         value.alphabet_bound);
@@ -473,7 +471,7 @@ pg_sequence_expanded_methods() noexcept
     return methods;
 }
 
-/// Allocate an empty compact-sequence expanded object in a child memory context.
+/// Create an empty expanded sequence with its own child memory context.
 export [[nodiscard]] inline pg_sequence_expanded* make_pg_sequence_expanded(
     compact_sequence_stdc_type_params params,
     bool alphabet_bound)
@@ -508,7 +506,7 @@ export [[nodiscard]] inline Datum pg_sequence_ro_datum(
     return EOHPGetRODatum(&value->hdr);
 }
 
-/// Return the trace attachment carried by an expanded-object Datum.
+/// Borrow the trace attachment from an expanded sequence, or return nullptr.
 export [[nodiscard]] inline slice_trace_attachment*
 pg_sequence_trace_attachment_for_datum(Datum input)
 {
@@ -516,7 +514,7 @@ pg_sequence_trace_attachment_for_datum(Datum input)
     return expanded == nullptr ? nullptr : expanded->trace;
 }
 
-/// Memory-context callback state for one unpublished piece-tree root.
+/// Cleanup state for a new root until it is installed in an expanded sequence.
 export struct pending_root_cleanup {
     MemoryContextCallback callback;
     piece_tree_arena* destination_arena;
@@ -526,7 +524,7 @@ export struct pending_root_cleanup {
     bool armed;
 };
 
-/// Release a pending root when PostgreSQL resets its construction context.
+/// Release the unfinished root and its tracked allocations when its context resets.
 export inline void pending_root_reset(void* argument) noexcept
 {
     auto* guard = static_cast<pending_root_cleanup*>(argument);
@@ -541,21 +539,21 @@ export inline void pending_root_reset(void* argument) noexcept
     guard->destination_arena = nullptr;
 }
 
-/// Invoke a root builder and verify that its result is ledger-owned.
+/// Call a root builder that returns an edge registered for cleanup.
 template<class p_build>
 [[nodiscard]] inline tracked_piece_edge invoke_piece_root_build(
     p_build&& build,
     piece_tree_arena& arena,
     piece_edge_cleanup_ledger& ledger)
 {
-    /* A root builder must publish every returned owning edge to the reset
-     * callback's ledger before it may perform another PostgreSQL operation.
-     * Requiring the tracked return type makes that contract structural. */
+    /* Register every new owning edge with the reset callback before another
+     * PostgreSQL operation can fail. The builder returns the edge together
+     * with its cleanup handle. */
     tracked_piece_edge built = std::forward<p_build>(build)(arena, ledger);
     return built;
 }
 
-/// Transfer one built root from its cleanup ledger into pending publication.
+/// Move the completed root out of its construction cleanup list.
 inline void transfer_built_root_from_ledger(
     pending_root_cleanup& guard)
 {
@@ -574,7 +572,8 @@ inline void transfer_built_root_from_ledger(
     }
 }
 
-/// Replace an expanded root while keeping old and new ownership error-safe.
+/// Build and validate a replacement tree before changing the current root.
+/// A PostgreSQL error releases the new tree and leaves the old value intact.
 export template<class p_build>
 inline void replace_root_error_safe(
     pg_sequence_expanded& value,
@@ -598,8 +597,8 @@ inline void replace_root_error_safe(
             build_context, &guard->callback);
         MemoryContextSwitchTo(saved_context);
 
-        /* Arena storage is independent of both caller and EOH contexts so a
-         * second EOH can retain/share it after this EOH is reset. */
+        /* Tree storage has its own lifetime so another expanded value can keep
+         * sharing it after this value's memory context is reset. */
         guard->destination_arena = make_piece_tree_arena();
         const tracked_piece_edge built = invoke_piece_root_build(
             std::forward<p_build>(build), *guard->destination_arena,
@@ -629,12 +628,11 @@ inline void replace_root_error_safe(
     PG_END_TRY();
 }
 
-/* Error-safe publication for the one operation whose existing inputs are
- * immutable, previously validated roots.  The destination arena contains only
- * the height-guided concat path, so validation remains O(log pieces) while
- * preserving the same publish-after-validation and unwind ownership contract
- * as replace_root_error_safe. */
-/// Publish a join after bounded validation of its newly allocated closure.
+/* Both input trees are immutable and already validated. A concatenation
+ * copies only their joining path, so check those new nodes in O(log pieces).
+ * Install the root after validation and keep the same cleanup guarantees as
+ * replace_root_error_safe. */
+/// Install a joined root after validating the newly created tree path.
 template<class p_build>
 inline void replace_root_trusted_join_error_safe(
     pg_sequence_expanded& value,
@@ -747,7 +745,7 @@ namespace {
     };
 }
 
-/// Retain shared concat provenance only when both inputs name the same live trace.
+/// Keep trace attribution when the inputs provide one unambiguous producer.
 inline void reconcile_concat_trace_provenance_noexcept(
     pg_sequence_expanded& result,
     pg_sequence_expanded const& right) noexcept
@@ -771,9 +769,8 @@ inline void reconcile_concat_trace_provenance_noexcept(
         selected_trace = result.trace;
         selected_producer = result.producer_value_id;
     }
-    /* Two different live producer identities cannot be attributed to one
-     * result without its planned result id.  Clear the observation metadata;
-     * BioseqSliceProject installs the exact result provenance after evaluation. */
+    /* Two different producers need a new result ID. Clear their attribution
+     * here so BioseqSliceProject can attach the planned result after evaluation. */
     if (result.trace != selected_trace) {
         retain_slice_trace_attachment(selected_trace);
         auto* previous = result.trace;
@@ -785,7 +782,9 @@ inline void reconcile_concat_trace_provenance_noexcept(
 
 } // namespace
 
-/// Acquire writable expanded ownership, copying or binding only when required.
+/// Obtain a writable expanded sequence, reusing a writable input when possible.
+/// A read-only tree is shared through a new wrapper. Flat input is copied into
+/// a tree-owned literal so the result outlives the input buffer.
 export [[nodiscard]] inline acquired_sequence acquire_writable_pg_sequence(
     Datum input,
     slice_trace_attachment const* trace = nullptr,
@@ -853,7 +852,9 @@ export [[nodiscard]] inline acquired_sequence acquire_writable_pg_sequence(
     return {result, false};
 }
 
-/// Acquire a read handle without changing the input Datum's ownership.
+/// Obtain a read handle without taking ownership of the input.
+/// Expanded input is borrowed. Flat input is copied into an expanded value
+/// owned by the current memory context.
 export [[nodiscard]] inline pg_sequence_read_handle acquire_sequence_for_read(
     Datum input,
     slice_trace_attachment const* trace = nullptr,
@@ -880,7 +881,7 @@ export [[nodiscard]] inline pg_sequence_read_handle acquire_sequence_for_read(
     };
 }
 
-/// Add two logical sequence lengths within the signed-bigint limit.
+/// Add sequence lengths, rejecting results beyond PostgreSQL bigint.
 export [[nodiscard]] inline std::uint64_t checked_add_bp_lengths(
     std::uint64_t left,
     std::uint64_t right)
@@ -897,7 +898,8 @@ export [[nodiscard]] inline std::uint64_t checked_add_bp_lengths(
 }
 
 
-/// Resolve the single compatible output type for sequence concatenation.
+/// Choose the concatenation alphabet and width. Bound alphabets must agree.
+/// Use the left bound type when available, then the right, or leave both unset.
 export [[nodiscard]] inline compact_sequence_stdc_type_params
 resolve_concat_type(
     pg_sequence_expanded const* left,
@@ -934,7 +936,8 @@ resolve_concat_type(
     };
 }
 
-/// Concatenate two compact-sequence Datums without changing logical content order.
+/// Join the left and right sequences in order, sharing existing tree pieces.
+/// If only one alphabet is bound, validate and pack the other side using it.
 export [[nodiscard]] Datum concat_pg_sequences(
     Datum left_datum,
     Datum right_datum)
@@ -952,8 +955,8 @@ export [[nodiscard]] Datum concat_pg_sequences(
     const std::uint64_t left_length = left.value->bp_length;
     const std::uint64_t right_length = right.bp_length();
     if (bind_left || bind_right) {
-        /* Adopting an alphabet necessarily visits the unbound literal side and
-         * retains the full validator for that type-changing operation. */
+        /* Binding an alphabet visits and packs the unbound letters. Validate the
+         * resulting whole tree before replacing the old root. */
         replace_root_error_safe(
             *left.value, result_type, result_length, bound,
             [bind_left, bind_right, result_type,
@@ -980,9 +983,9 @@ export [[nodiscard]] Datum concat_pg_sequences(
             [left_root, right_root](
                 piece_tree_arena& arena,
                 piece_edge_cleanup_ledger& ledger) {
-                /* Existing subtrees remain immutable.  The tracked join
-                 * retains both borrowed operands and every local intermediate
-                 * before any operation capable of PostgreSQL ERROR. */
+                /* Keep existing subtrees unchanged. Register input references and new
+                 * intermediate edges for cleanup before any PostgreSQL call can raise
+                 * an error. */
                 return join_edges_error_atomic(
                     arena, ledger, left_root, right_root);
             });
@@ -992,7 +995,7 @@ export [[nodiscard]] Datum concat_pg_sequences(
     return pg_sequence_rw_datum(left.value);
 }
 
-/// Return a half-open logical slice of one compact-sequence Datum.
+/// Return the zero-based slice [from, to), sharing the pieces it needs.
 export [[nodiscard]] Datum slice_pg_sequence(
     Datum input,
     std::uint64_t from,
@@ -1016,7 +1019,7 @@ export [[nodiscard]] Datum slice_pg_sequence(
     return pg_sequence_rw_datum(acquired.value);
 }
 
-/// Apply a logical sequence transform without repacking the source tree.
+/// Record reversal or complementation on the tree without repacking its letters.
 export [[nodiscard]] Datum transform_pg_sequence(
     Datum input,
     bioseq::storage::sequence_transform transform)
@@ -1041,7 +1044,7 @@ export [[nodiscard]] Datum transform_pg_sequence(
     return pg_sequence_rw_datum(acquired.value);
 }
 
-/// Report whether every alphabet rank has a defined complement.
+/// Check that every valid rank in the alphabet has a valid complement.
 export [[nodiscard]] bool alphabet_has_complete_complement(
     std::uint8_t alphabet_code)
 {
@@ -1072,9 +1075,9 @@ export [[nodiscard]] bool alphabet_has_complete_complement(
     return complete;
 }
 
-/* Table-AM promotion entrypoint.  The caller has already acquired a retained
- * source-domain handle from the verified binding registry. */
-/// Create an expanded value backed by one retained table-storage source.
+/* The table reader has checked that the locator belongs to this source.
+ * The new tree holds a source reference so it can read the letters later. */
+/// Create a read-only expanded sequence that keeps its table-storage source alive.
 export [[nodiscard]] inline Datum make_source_backed_pg_sequence(
     pg_sequence_source_handle source,
     bioseq::storage::sequence_locator locator,

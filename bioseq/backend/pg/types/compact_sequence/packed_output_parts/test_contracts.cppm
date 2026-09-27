@@ -1,6 +1,6 @@
 /**
  * @file test_contracts.cppm
- * @brief Deterministic trace, packing, and expanded-ownership contracts.
+ * Tests for sequence-copy counters, asynchronous cleanup, and tree size limits.
  */
 module;
 
@@ -75,9 +75,8 @@ inline void run_slice_async_contention_test(void *argument) {
   auto cancelled = std::atomic_ref<std::uint8_t>{
       task->submission->cancel_requested};
   while (cancelled.load(std::memory_order_acquire) == 0u) {
-    /* The production cancel callback owns this byte.  An atomic poll keeps the
-     * worker observably live until backend-thread Shutdown invokes that exact
-     * callback; no test-only release can let it escape before quiesce. */
+    /* Stay in the worker until the production cancellation callback changes
+     * this byte. The test can then verify that shutdown really stops live work. */
     std::atomic_signal_fence(std::memory_order_seq_cst);
   }
   task->cancel_observed->fetch_add(1u, std::memory_order_release);
@@ -164,9 +163,9 @@ run_slice_async_shutdown_end_reset_contention_test_noexcept() noexcept {
   const bool submitted = first_submitted && statuses[1]
       == bioseq::parallelism::tracked_submit_status::submitted;
 
-  /* These are the exact executor lifecycle calls: Shutdown quiesces under
-   * live/queued worker contention, End makes ownership terminal, and the
-   * query-context callback is then harmlessly repeated. */
+  /* Follow executor shutdown order with work still running or queued.
+   * Shutdown drains jobs, End releases the owner, and a later memory-context
+   * reset must leave that finished cleanup unchanged. */
   quiesce_slice_async_owner_noexcept(
       std::addressof(guard), slice_shutdown_disposition::complete);
   const bool shutdown_valid = submitted
@@ -205,9 +204,9 @@ run_slice_async_shutdown_end_reset_contention_test_noexcept() noexcept {
 
 } // namespace
 
-/* Integration seam for the pure fixed-record/state-machine invariants.  It
- * uses only stack-owned POD and never installs query-visible trace state. */
-/// Exercise fixed-record tracing and asynchronous-owner state transitions.
+/* Test tracing and job cleanup with small local records and real pool jobs.
+ * These trace records are used only by the test. */
+/// Test trace counters, job completion, cancellation, and slot reuse.
 export [[nodiscard]] inline bool slice_trace_self_test_noexcept() noexcept {
   bool valid = sizeof(slice_dsm_counter) == 64u;
 
@@ -296,10 +295,9 @@ export [[nodiscard]] inline bool slice_trace_self_test_noexcept() noexcept {
       scope_equal(get_current_slice_materialization_scope(), original_scope);
   reset_slice_dsm_counter_noexcept(cumulative);
 
-  /* One producer may fan out into several independently-accounted consumers.
-   * Exercise the production admission token rather than mutating counters as
-   * a test shortcut: success publishes once, while ERROR/cancel abandonment
-   * and a repeated terminal callback publish nothing. */
+  /* One expression value can be copied by several consumers. Use the real
+   * publication token to check that success counts once. Abandoned attempts
+   * and repeated completion callbacks must leave counters unchanged. */
   constexpr std::uint32_t shared_producer_value_id = 77u;
   constexpr std::array<slice_materialization_boundary, 5>
       consumer_boundaries{{
@@ -357,8 +355,8 @@ export [[nodiscard]] inline bool slice_trace_self_test_noexcept() noexcept {
     auto admission = admit_slice_materialization_noexcept(
         std::addressof(consumer_attachment), shared_producer_value_id,
         consumer.mechanism, consumer.reason);
-    /* Publication remains attached to the admitted stable boundary even when
-     * an intervening caller temporarily restores the ambient TLS scope. */
+    /* Changing the current thread scope must not change the trace entry
+     * captured when this copy attempt began. */
     const auto admitted_scope = exchange_slice_materialization_scope({});
     const bool published = publish_slice_materialization_success_noexcept(
         admission, 100u + index, 10u + index, initial_bytes[index], false,
@@ -374,11 +372,10 @@ export [[nodiscard]] inline bool slice_trace_self_test_noexcept() noexcept {
             consumer_counters[index].bytes == initial_bytes[index];
   }
 
-  /* Table-AM index build/validation cannot attach a plan-owned boundary, so
-   * it installs the classification-only scope used by FormIndexDatum and the
-   * index callback.  Prove the generic EOH packed-full observer is redirected
-   * from executor_copy to the unique index_tuple consumer and that restoration
-   * leaves the caller's ambient scope byte-exact. */
+  /* Index construction has no plan-owned trace entry to install. Its scope
+   * identifies the copy as index_tuple, so the general flattening callback
+   * must charge that consumer. Also check that restoring the scope preserves
+   * every field of the caller's previous scope. */
   constexpr std::size_t index_consumer = 1u;
   const auto index_calls_before = consumer_counters[index_consumer].calls;
   const auto index_bytes_before = consumer_counters[index_consumer].bytes;
@@ -443,7 +440,7 @@ export [[nodiscard]] inline bool slice_trace_self_test_noexcept() noexcept {
   valid = valid && exercise_abandoned_admission(1u) &&
           exercise_abandoned_admission(2u);
 
-  /* A rescan contributes only its fresh delta to the same stable boundary. */
+  /* A rescan adds only its new work to the same trace entry. */
   const auto &rescan_consumer = consumer_boundaries.front();
   const slice_materialization_scope rescan_scope{
       .attachment = std::addressof(consumer_attachment),
@@ -644,10 +641,9 @@ export [[nodiscard]] inline bool slice_trace_self_test_noexcept() noexcept {
           attachment.refcount == 32u && cumulative.calls == 128u &&
           cumulative.bytes == 1024u;
 
-  /* The scheduler has accepted/enqueued this task, but publication of the
-   * scheduled transition is injected to fail.  Drain must treat the enrolled
-   * record as incomplete, release all retained state, and make its generation
-   * stale without merging any tentative counter prefix. */
+  /* Reject the state update after the scheduler accepts the task. Cleanup
+   * must mark the job incomplete and release its resources. Advance the slot
+   * generation and discard counters from the unfinished attempt. */
   auto rejecting_observer =
       make_slice_async_pool_observer_noexcept(std::addressof(guard));
   rejecting_observer.mark_scheduled =
@@ -678,8 +674,8 @@ export [[nodiscard]] inline bool slice_trace_self_test_noexcept() noexcept {
       && cumulative.calls == 128u && cumulative.bytes == 1024u
       && publication_generation_advanced;
 
-  /* Reuse the exact slot, then deliver both an early-generation completion
-   * and error.  Neither stale publication may mutate the current use. */
+  /* Reuse the slot, then report completion and an error for its old
+   * generation. Both reports must leave the new job unchanged. */
   slice_async_completion_handle reused_handle{};
   const bool reused_enrolled = enroll_slice_async_job_noexcept(
       std::addressof(guard), {}, std::addressof(reused_handle));
@@ -720,10 +716,9 @@ export [[nodiscard]] inline bool slice_trace_self_test_noexcept() noexcept {
       && guard.enrolled_jobs == 0u && attachment.refcount == 32u
       && cumulative.calls == 129u && cumulative.bytes == 1040u;
 
-  /* A slot generation must fail closed instead of wrapping to zero.  The
-   * completed delta is merged once, cleanup still releases the job, and every
-   * subsequent enrollment is rejected while the saturated identity remains
-   * distinguishable from a fresh slot. */
+  /* At the maximum generation, finish the job and count its completed work
+   * once. Keep the generation at its maximum and reject new jobs so an old
+   * handle can never become valid again through wraparound. */
   slice_async_job_slot *overflow_job = reused_slot_valid
       ? std::addressof(jobs[reused_handle.slot_index]) : nullptr;
   if (overflow_job != nullptr) {
@@ -838,7 +833,7 @@ enum class materialization_size_probe : std::uint8_t {
 
 } // namespace
 
-/** Expose this contract to the packed-output SQL facade. */
+/** Test accepted sizes and PROGRAM_LIMIT_EXCEEDED errors at allocation limits. */
 [[nodiscard]] bool run_materialization_size_guardrail_matrix() {
   Size zero_flat_size = 0u;
   bioseq::pg_types::seq::dispatch_instance(
@@ -903,7 +898,7 @@ namespace {
 
 } // namespace
 
-/** Expose this contract to the packed-output SQL facade. */
+/** Test concatenation lengths at and beyond the PostgreSQL bigint limit. */
 [[nodiscard]] inline bool run_concat_length_guardrail_matrix() {
   constexpr auto max_logical_length =
       static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max());
@@ -963,7 +958,7 @@ read_synthetic_lazy_source(void const *, pg_sequence_read_session &,
 
 } // namespace
 
-/** Expose this contract to the packed-output SQL facade. */
+/** Return a process-lifetime test source that generates DNA4 A letters on demand. */
 [[nodiscard]] inline pg_sequence_source_handle
 synthetic_lazy_source_handle() noexcept {
   static synthetic_lazy_source_state state{};
@@ -982,20 +977,16 @@ synthetic_lazy_source_handle() noexcept {
 
 namespace {
 
-/* Exercise the public SQL concat implementation in two complementary shapes.
- * A 4,096-step append chain proves deterministic per-generation O(log n)
- * construction *and validation* work.  A second public-path construction uses
- * immutable power-of-two roots to reach exactly one million logical pieces in
- * O(log n) calls, then runs the independent full validator once at that
- * explicit probe boundary.  The separate :tree_ops test still supplies one
- * million distinct physical nodes and the hard metadata ceiling.
+/* Build a 4,096-piece append chain through SQL's concatenation function and
+ * check that each join's construction and validation work follows tree height.
+ * Then share power-of-two trees to reach one million logical pieces in
+ * O(log n) calls and validate the full result. The tree_ops test also covers
+ * one million distinct nodes and the metadata limit.
  *
- * No wall clock participates in the verdict: join, cleanup-ledger,
- * retirement, and bounded-validator step counters plus exact arena accounting
- * make super-logarithmic construction work fail deterministically. */
+ * Operation counts and arena byte totals determine success. Timing is unused. */
 } // namespace
 
-/** Expose this contract to the packed-output SQL facade. */
+/** Check that public concatenation copies bounded tree paths and releases all arenas. */
 [[nodiscard]] inline bool run_public_concat_path_copy_probe() {
   constexpr std::uint32_t piece_count = 4'096u;
   constexpr std::uint64_t piece_length = 4'097u;
@@ -1247,9 +1238,9 @@ namespace {
       return joined;
     };
 
-    /* Power roots are read-only snapshots, so concatenating a root with itself
-     * exercises the real EOH copy/publish path without mutating the saved
-     * operand.  Binary decomposition then reaches exactly 1,000,000 pieces. */
+    /* Save each doubled tree as read-only so joining it with itself exercises
+     * wrapper copying while preserving the saved input. Combine those powers
+     * of two to obtain exactly 1,000,000 logical pieces. */
     std::array<Datum, million_power_count> powers{};
     powers[0] = MakeExpandedObjectReadOnly(right, false, -1);
     for (std::size_t power = 1u; power < powers.size(); ++power) {
