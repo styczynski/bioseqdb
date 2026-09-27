@@ -1,6 +1,6 @@
 /**
  * @file external/uniprot/document.cppm
- * @brief UniProt OpenAPI metadata fragments.
+ * @brief Header of the UniProt OpenAPI document.
  */
 module;
 
@@ -10,7 +10,7 @@ export module bioseq.external.uniprot:document;
 
 export namespace bioseq::external::uniprot::descriptor {
 
-/** @brief OpenAPI metadata, server definition, description, and paths mapping prefix. */
+/** @brief API metadata and server URL, followed by the paths section header. */
 inline constexpr std::string_view document_preamble = R"bioseq_openapi(
 ---
 openapi: 3.0.1

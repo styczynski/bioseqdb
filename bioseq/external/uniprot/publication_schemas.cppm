@@ -1,6 +1,6 @@
 /**
  * @file external/uniprot/publication_schemas.cppm
- * @brief UniProt publication schema fragments.
+ * @brief UniProt publication schemas for client generation.
  */
 module;
 
@@ -10,7 +10,7 @@ export module bioseq.external.uniprot:publication_schemas;
 
 export namespace bioseq::external::uniprot::descriptor {
 
-/** @brief Literature, citation, author, and journal schemas. */
+/** @brief Schemas for cited publications and submissions. */
 inline constexpr std::string_view publication_schemas = R"bioseq_openapi(    Literature:
       type: object
       properties:
