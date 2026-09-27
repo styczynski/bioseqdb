@@ -1,10 +1,9 @@
 /**
  * @file
- * @brief Target-neutral ABI for the one-shot Highway dispatch root.
+ * @brief Selects and looks up Highway implementations supported by this CPU.
  *
- * The interface excludes Highway declarations so fixed-target implementations
- * cannot expose target-local vector or descriptor types through module
- * boundaries.
+ * Public signatures use ordinary C++ types so Highway vectors and tags
+ * stay inside the modules compiled for each instruction set.
  */
 module;
 
@@ -28,35 +27,32 @@ import bioseq.chaining.simd;
 export namespace bioseq::simd_dispatch {
 
 /**
- * @brief Build a dispatch plan from an exact compiled-target mask.
- * @param compiled_targets Mask of fixed targets present in the registry.
- * @return Plan intersecting the compiled mask with the current CPU and OS
- * capabilities and selecting the highest-priority runnable target.
+ * @brief Selects the highest-priority compiled target that this CPU can run.
+ * @param compiled_targets Bit mask of targets included in the build.
+ * @return Compiled, supported and runnable masks, plus the selected target bit.
+ * The selected bit is zero when none are runnable.
  */
 [[nodiscard]] auto make_highway_dispatch_plan(std::int64_t compiled_targets) noexcept
     -> highway_dispatch_plan;
 
 /**
- * @brief Return metadata for the registered fixed-target inventory.
- * @return Dispatch plan for the process registry.
+ * @brief Returns target availability and selection for the current build.
  */
 [[nodiscard]] auto registered_highway_dispatch_plan() noexcept -> highway_dispatch_plan;
 
 /**
- * @brief Resolve an already-selected target bit in the current process.
+ * @brief Looks up the functions for an already selected Highway target.
  *
- * The lookup is direct and never invokes another dynamic dispatch root.
- *
- * @param exact_target Exact single-bit Highway target identity.
- * @return Registered binding for `exact_target`.
+ * This lookup keeps the requested target and performs no new selection.
+ * @param exact_target One compiled target bit supported by the current CPU.
+ * @throws std::logic_error If the bit is invalid, unavailable or cannot run.
  */
 [[nodiscard]] auto registered_highway_target_binding(std::int64_t exact_target)
     -> const highway_target_binding&;
 
 /**
- * @brief Format target bits in Highway priority order.
- * @param mask Target mask to enumerate.
- * @return TargetName strings ordered from highest to lowest priority.
+ * @brief Returns target names from highest to lowest Highway priority.
+ * @param mask Target bits to name.
  */
 [[nodiscard]] auto highway_target_names(std::int64_t mask) -> std::vector<std::string_view>;
 

@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Target-neutral callable table for one fixed Highway target.
+ * @brief Function table for one Highway CPU target, using shared C++ types.
  */
 module;
 
@@ -22,11 +22,11 @@ export import bioseq.chaining.simd;
 
 export namespace bioseq::simd {
 
-/** @brief Type-erased entry for one alphabet-specific alignment table. */
+/** @brief Stores an alignment table pointer together with its alphabet code. */
 struct alignment_table_entry final {
     /** Scheduler-owned packed alphabet code. */
     std::uint8_t alphabet_code = 0;
-    /** Completeness result computed while the table retains its static type. */
+    /** Whether all functions were set when the typed table was built. */
     bool typed_table_complete = false;
     /** Pointer to alignment_kernels for alphabet_code. */
     const void* typed_table = nullptr;
@@ -39,13 +39,13 @@ static_assert(std::is_trivially_copyable_v<alignment_table_entry>);
 
 export namespace bioseq::simd_dispatch {
 
-/** @brief Neutral ABI for one fixed-target SneakySnake batch implementation. */
+/** @brief Function signature for a SneakySnake batch on one CPU target. */
 using sneaky_snake_simd_batch_kernel =
     std::vector<::bioseq::prefilter::prefilter_result> (*)(
         const ::bioseq::prefilter::prefilter_batch_input&,
         ::bioseq::prefilter::sneaky_snake_options);
 
-/** @brief Fixed-target functions shared by multiple scheduler families. */
+/** @brief Functions shared by several pipeline schedulers on one CPU target. */
 struct highway_common_kernels final {
     /** Fixed-target SneakySnake batch implementation. */
     sneaky_snake_simd_batch_kernel sneaky_snake_simd_batch = nullptr;
@@ -54,7 +54,7 @@ struct highway_common_kernels final {
 static_assert(std::is_standard_layout_v<highway_common_kernels>);
 static_assert(std::is_trivially_copyable_v<highway_common_kernels>);
 
-/** @brief Fixed-target dynamic-programming chaining functions. */
+/** @brief Chaining functions for one CPU target. */
 struct highway_chaining_kernels final {
     /** Fixed-target SIMD anchor-chaining implementation. */
     ::bioseq::chaining::chain_anchors_simd_kernel
@@ -62,10 +62,10 @@ struct highway_chaining_kernels final {
 };
 
 /**
- * @brief Empty indexing-family record in the generated Highway source record.
+ * @brief Placeholder for indexing functions in generated tables.
  *
- * Index construction consumes minimizer_kernels directly, so this family has
- * no independent callable ABI.
+ * Index construction calls the minimizer functions directly, so this
+ * record is empty.
  */
 struct highway_indexing_kernels final {};
 
@@ -75,19 +75,18 @@ static_assert(std::is_standard_layout_v<highway_indexing_kernels>);
 static_assert(std::is_trivially_copyable_v<highway_indexing_kernels>);
 
 /**
- * @brief ODR-stable neutral identity for one concrete alphabet type.
+ * @brief Identifies an alphabet type by an address shared across modules.
  *
- * Fixed-target binders and neutral callers take the address of the same inline
- * variable specialization. The address is therefore stable across module
- * boundaries without a duplicate type-to-code mapping.
+ * Both target-specific code and its callers use the same inline variable
+ * for a given alphabet. This avoids maintaining a second type-to-code map.
  */
 using highway_alphabet_identity = const void*;
 
 namespace highway_alphabet_identity_detail {
 
 /**
- * @brief Address anchor providing one identity per concrete alphabet type.
- * @tparam p_alphabet Concrete alphabet represented by this specialization.
+ * @brief One inline variable per alphabet, identified by its address.
+ * @tparam p_alphabet Alphabet type to identify.
  */
 template <class p_alphabet>
 inline std::byte type_identity_anchor{};
@@ -95,9 +94,8 @@ inline std::byte type_identity_anchor{};
 } // namespace highway_alphabet_identity_detail
 
 /**
- * @brief Return the program-wide identity token for one alphabet type.
- * @tparam p_alphabet Concrete alphabet whose token is requested.
- * @return Address-stable neutral identity for `p_alphabet`.
+ * @brief Returns the shared address that identifies an alphabet type.
+ * @tparam p_alphabet Alphabet type to identify.
  */
 template <class p_alphabet>
 [[nodiscard]] constexpr auto highway_alphabet_identity_for() noexcept -> highway_alphabet_identity {
@@ -105,9 +103,9 @@ template <class p_alphabet>
         p_alphabet>;
 }
 
-/** @brief Scheduler alphabet code paired with its concrete C++ type identity. */
+/** @brief Pairs an alphabet's C++ type identity with its scheduler code. */
 struct highway_alphabet_identity_entry final {
-    /** Address-stable identity of the concrete alphabet type. */
+    /** Address identifying the alphabet type. */
     highway_alphabet_identity type_identity = nullptr;
     /** Scheduler-owned packed alphabet code. */
     std::uint8_t alphabet_code =
@@ -118,10 +116,8 @@ static_assert(std::is_standard_layout_v<highway_alphabet_identity_entry>);
 static_assert(std::is_trivially_copyable_v<highway_alphabet_identity_entry>);
 
 /**
- * @brief Return the stable source-record key for one kernel family.
- * @param kernel Kernel family whose source-record key is requested.
- * @return Byte-stable source-record key, or `unknown` for the sentinel and
- * unsupported values.
+ * @brief Returns the fixed name used for a kernel family in generated records.
+ * @return Kernel name, or "unknown" for an invalid value or the count sentinel.
  */
 [[nodiscard]] constexpr auto highway_kernel_name(const highway_kernel kernel) noexcept
     -> std::string_view {
@@ -149,10 +145,9 @@ static_assert(std::is_trivially_copyable_v<highway_alphabet_identity_entry>);
 }
 
 /**
- * @brief Construct the one-bit mask for a kernel family.
- * @param kernel Kernel family whose bit is requested.
- * @return One-bit mask for a runnable kernel, or an empty mask for the
- * sentinel and unsupported values.
+ * @brief Returns a mask with the selected kernel family's bit set.
+ *
+ * Invalid values and the count sentinel produce an empty mask.
  */
 [[nodiscard]] constexpr auto highway_kernel_mask_for(const highway_kernel kernel) noexcept
     -> highway_kernel_mask {
@@ -165,11 +160,11 @@ static_assert(std::is_trivially_copyable_v<highway_alphabet_identity_entry>);
 }
 
 /**
- * @brief Immutable kernel table selected by the single runtime dispatch.
+ * @brief Functions and alphabet tables for the selected Highway CPU target.
  *
- * The table contains only target-neutral function signatures. Availability,
- * alphabet identity, and typed alignment entries are validated together so a
- * caller cannot combine records from different fixed targets.
+ * Function signatures use shared types. The completeness check verifies
+ * that required functions are present and each alphabet has one matching
+ * alignment table.
  */
 struct highway_kernel_table final {
     /** Kernel families supplied by this target. */
@@ -178,20 +173,18 @@ struct highway_kernel_table final {
     std::span<const highway_alphabet_identity_entry> alphabet_identities{};
     /** Fixed-target minimizer implementations. */
     ::bioseq::minimizers::minimizer_kernels minimizers{};
-    /** Fixed-target functions shared by scheduler families. */
+    /** Functions used by several pipeline schedulers. */
     highway_common_kernels common{};
     /** Fixed-target chaining functions. */
     highway_chaining_kernels chaining{};
-    /** Empty indexing-family source record. */
+    /** Placeholder for indexing, which uses the minimizer table directly. */
     highway_indexing_kernels indexing{};
     /** Alignment tables in the same order as alphabet_identities. */
     std::span<const ::bioseq::simd::alignment_table_entry>
         alignment_by_alphabet{};
 
     /**
-     * @brief Test whether this target binds one kernel family.
-     * @param kernel Kernel family to inspect.
-     * @return `true` when the corresponding availability bit is set.
+     * @brief Checks the availability bit for one kernel family.
      */
     [[nodiscard]] auto has_kernel(const highway_kernel kernel) const noexcept -> bool {
         const auto index = static_cast<std::size_t>(kernel);
@@ -199,19 +192,15 @@ struct highway_kernel_table final {
     }
 
     /**
-     * @brief Test whether every requested kernel family is available.
-     * @param required Kernel-family mask required by the caller.
-     * @return `true` when all requested bits are available.
+     * @brief Checks that every requested kernel bit is available.
      */
     [[nodiscard]] auto has_all_kernels(const highway_kernel_mask& required) const noexcept -> bool {
         return (available_kernels & required) == required;
     }
 
     /**
-     * @brief Resolve an alphabet entry by scheduler code.
-     * @param alphabet_code Scheduler-owned packed alphabet code.
-     * @return The unique matching entry, or `nullptr` when no unique match
-     * exists.
+     * @brief Finds an alphabet by its scheduler code.
+     * @return Matching entry, or nullptr if missing or duplicated.
      */
     [[nodiscard]] auto resolve_alphabet_identity(const std::uint8_t alphabet_code) const noexcept
         -> const highway_alphabet_identity_entry* {
@@ -226,10 +215,8 @@ struct highway_kernel_table final {
     }
 
     /**
-     * @brief Resolve the scheduler entry for a concrete alphabet type.
-     * @tparam p_alphabet Concrete alphabet selected by the caller.
-     * @return The unique matching entry, or `nullptr` when no unique match
-     * exists.
+     * @brief Finds an alphabet by its C++ type.
+     * @return Matching entry, or nullptr if missing or duplicated.
      */
     template <class p_alphabet>
     [[nodiscard]] auto resolve_alphabet_identity() const noexcept
@@ -246,9 +233,11 @@ struct highway_kernel_table final {
     }
 
     /**
-     * @brief Validate the complete fixed-target dispatch table.
-     * @return `true` only when every family is bound and the alphabet and
-     * alignment records form a unique, strictly ordered one-to-one mapping.
+     * @brief Checks required functions and alphabet-to-alignment table mappings.
+     *
+     * Every family must be available. Alphabet codes must increase strictly,
+     * type identities must be unique, and each typed alignment table must
+     * be present and complete.
      */
     // Called both by fixed-target binders and neutral dispatch. Do not allow
     // an out-of-line validation body to inherit another caller's ISA.
@@ -287,7 +276,7 @@ struct highway_kernel_table final {
     }
 };
 
-/** @brief Neutral binding returned by one fixed-target binder. */
+/** @brief Connects one compiled CPU target to its name and function table. */
 struct highway_target_binding final {
     /** Exact single-bit Highway target identity. */
     std::int64_t target = 0;

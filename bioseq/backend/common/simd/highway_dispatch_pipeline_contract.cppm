@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Target-neutral scheduler and alignment contracts for Highway dispatch.
+ * @brief Alignment data and function tables shared across Highway CPU targets.
  */
 module;
 
@@ -31,10 +31,10 @@ using bioseq::chaining::simd_chaining_policy;
 using bioseq::storage::sequence_size_t;
 
 /**
- * @brief Mutable chaining region and optional base-alignment result.
+ * @brief A seed-chain region and its optional base-by-base alignment.
  *
- * Sequence coordinates retain the full sequence_size_t domain. Callers clamp
- * potentially negative intermediate coordinates before assigning them here.
+ * Sequence coordinates use sequence_size_t. Clamp negative intermediate
+ * coordinates before storing them here.
  */
 struct alignment_region {
     /** Region identifier. */
@@ -63,18 +63,18 @@ struct alignment_region {
     /** Whether the region maps to the reverse strand. */
     bool is_reverse = false;
 
-    /** Seeded exact-match length. */
+    /** Match-length estimate from seeds or from CIGAR M and = operations. */
     sequence_size_t match_length = 0;
-    /** Seeded alignment-block length. */
+    /** Alignment-block length estimated from seeds or counted from the CIGAR. */
     sequence_size_t block_length = 0;
     /** Best secondary score competing with this primary region. */
     std::int32_t secondary_score = 0;
-    /** Number of retained suboptimal mappings. */
+    /** Number of competing secondary mappings counted for mapping quality. */
     std::int32_t secondary_count = 0;
 
     /** Dynamic-programming alignment score. */
     std::int32_t dp_score = 0;
-    /** Maximum scoring dynamic-programming segment. */
+    /** Alignment score used for mapping quality, currently copied from dp_score. */
     std::int32_t dp_max_score = 0;
     /** Best secondary dynamic-programming score. */
     std::int32_t secondary_dp_max = 0;
@@ -88,7 +88,7 @@ struct alignment_region {
 
     /** Traceback operations for the aligned region. */
     alignment_result_vector<cigar_operation> cigar;
-    /** Exact unit-cost edit distance represented by cigar. */
+    /** Number of mismatches and gap bases in the chosen alignment. */
     sequence_size_t edit_distance = 0;
 };
 
@@ -98,7 +98,7 @@ static_assert(std::is_nothrow_move_constructible_v<alignment_region>);
 #endif
 
 #if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS) || defined(BIOSEQ_TEST_INDEXES)
-/** Source-derived logical element bounds for the region-to-result tail. */
+/** Element-count limits for converting alignment regions into results. */
 struct alignment_tail_storage_plan {
     std::size_t region_count = 0u;
     std::size_t primary_index_capacity = 0u;
@@ -111,10 +111,10 @@ struct alignment_tail_storage_plan {
 };
 
 /**
- * @brief Bound the unchanged one-region-per-chain tail without allocating.
+ * @brief Plans result and temporary-array capacities from the region count.
  *
- * Region identifiers and parents are signed 32-bit values in the existing
- * algorithms, so a larger count is not representable even when size_t is.
+ * The pipeline produces at most one region per chain. Returns std::nullopt
+ * when the count cannot fit the signed 32-bit region and parent IDs.
  */
 [[nodiscard]] constexpr std::optional<alignment_tail_storage_plan>
 derive_alignment_tail_storage_plan(
@@ -139,7 +139,7 @@ derive_alignment_tail_storage_plan(
 }
 #endif
 
-/** @brief Saturating counters describing scalar minimizer execution. */
+/** @brief Scalar minimizer call counts that stop increasing at UINT64_MAX. */
 struct scalar_minimizer_execution_stats {
     /** Number of scalar minimizer calls. */
     std::uint64_t calls = 0;
@@ -176,8 +176,7 @@ struct scalar_minimizer_execution_stats {
     }
 
     /**
-     * @brief Merge another execution sample into this aggregate.
-     * @param other Execution sample to merge.
+     * @brief Adds another sample's counters and preserves any overflow flag.
      */
     constexpr auto merge(const scalar_minimizer_execution_stats& other) noexcept -> void {
         bool is_saturated = saturated || other.saturated;
@@ -187,10 +186,8 @@ struct scalar_minimizer_execution_stats {
     }
 
     /**
-     * @brief Test whether the counters describe coherent non-saturated work.
-     * @param is_nonempty_work_required Whether at least one input symbol is
-     * required.
-     * @return `true` when the counter relationships are coherent.
+     * @brief Checks that a call was recorded and no counter overflowed.
+     * @param is_nonempty_work_required Also require a positive input-symbol count.
      */
     [[nodiscard]] constexpr auto
     is_coherent(const bool is_nonempty_work_required = true) const noexcept -> bool {
@@ -207,23 +204,23 @@ struct scalar_minimizer_execution_stats {
 static_assert(std::is_standard_layout_v<scalar_minimizer_execution_stats>);
 static_assert(std::is_trivially_copyable_v<scalar_minimizer_execution_stats>);
 
-/** @brief Saturating counters for batched KSW2 region execution. */
+/** @brief Work counts for batched KSW2, capped at UINT64_MAX on overflow. */
 struct ksw2_batched_execution_stats {
-    /** Number of alignment-region entry-point invocations. */
+    /** Number of calls that process alignment regions. */
     std::uint64_t alignment_region_invocations = 0;
     /** Number of regions observed by all invocations. */
     std::uint64_t regions_seen = 0;
-    /** Number of deferred dynamic-programming fills collected. */
+    /** Number of sequence gaps or extensions collected for alignment. */
     std::uint64_t fills_collected = 0;
     /** Number of non-empty fill calls executed. */
     std::uint64_t nonempty_fill_calls = 0;
-    /** Number of short-fill SIMD bucket dispatches. */
+    /** Number of short-fill groups sent to the alignment loop. */
     std::uint64_t short_bucket_dispatches = 0;
-    /** Number of active lanes across short-fill bucket dispatches. */
+    /** Number of fills processed through short-fill groups. */
     std::uint64_t short_bucket_lanes = 0;
     /** Number of long-fill calls executed outside short buckets. */
     std::uint64_t long_fill_calls = 0;
-    /** Sum of query-by-target cell areas across non-empty fills. */
+    /** Sum of query length times target length for all nonempty fills. */
     std::uint64_t input_cell_area = 0;
     /** Whether any counter or area calculation saturated. */
     bool saturated = false;
@@ -249,8 +246,8 @@ struct ksw2_batched_execution_stats {
     }
 
     /**
-     * @brief Record one short-fill bucket dispatch.
-     * @param lane_count Number of active lanes in the bucket.
+     * @brief Counts a short-fill group and its fills.
+     * @param lane_count Number of fills assigned to the group.
      */
     constexpr auto record_short_bucket_dispatch(const std::uint64_t lane_count) noexcept -> void {
         scalar_minimizer_execution_stats::add(
@@ -288,8 +285,7 @@ struct ksw2_batched_execution_stats {
     }
 
     /**
-     * @brief Merge another execution sample into this aggregate.
-     * @param other Execution sample to merge.
+     * @brief Adds another sample's counters and preserves any overflow flag.
      */
     constexpr auto merge(const ksw2_batched_execution_stats& other) noexcept -> void {
         bool is_saturated = saturated || other.saturated;
@@ -315,10 +311,10 @@ struct ksw2_batched_execution_stats {
     }
 
     /**
-     * @brief Test whether all counters form a coherent execution sample.
-     * @param is_nonempty_work_required Whether the sample must include a
-     * non-empty region and fill.
-     * @return `true` when every counter relationship is coherent.
+     * @brief Checks that collected fills, executed fills and group totals agree.
+     *
+     * Rejects overflowed counters and samples with no invocation.
+     * @param is_nonempty_work_required Also require at least one region and fill.
      */
     [[nodiscard]] constexpr auto is_coherent(const bool is_nonempty_work_required) const noexcept
         -> bool {
@@ -353,43 +349,43 @@ static_assert(std::is_standard_layout_v<ksw2_batched_execution_stats>);
 static_assert(std::is_trivially_copyable_v<ksw2_batched_execution_stats>);
 
 /**
- * @brief Fixed-target alignment functions for one logical alphabet.
- * @tparam p_alphabet Logical sequence alphabet accepted by every callable.
+ * @brief Alignment functions for one alphabet and one compiled CPU target.
+ * @tparam p_alphabet Sequence alphabet accepted by these functions.
  */
 template <sequence_alphabet p_alphabet>
 struct alignment_kernels final {
-    /** Lazy sequence view accepted by the target-neutral callables. */
+    /** Lazy sequence view passed to alignment functions. */
     using view_type =
         bioseq::storage::lazy_sequence_view<p_alphabet>;
-    /** Scoring matrix normalized for p_alphabet. */
+    /** Scoring matrix for p_alphabet. */
     using matrix_type = scoring_matrix<p_alphabet>;
 
-    /** Single-affine KSW2 callable. */
+    /** KSW2 function with one affine gap-cost model. */
     using align_ksw2_single_affine_kernel = ksw_alignment_result (*)(
         bool, view_type, view_type,
         std::size_t, std::size_t, std::size_t, std::size_t,
         const matrix_type&, const ksw_single_affine_parameters&);
-    /** Dual-affine KSW2 callable. */
+    /** KSW2 function with two affine gap-cost models. */
     using align_ksw2_dual_affine_kernel = ksw_alignment_result (*)(
         bool, view_type, view_type,
         std::size_t, std::size_t, std::size_t, std::size_t,
         const matrix_type&, ksw_dual_affine_parameters);
-    /** Cross-region batched KSW2 callable. */
+    /** KSW2 function that aligns fills collected from several regions. */
     using align_ksw2_batched_kernel = void (*)(
         std::span<alignment_region>,
         std::span<const bioseq::chaining::anchor>,
         view_type, view_type, const matrix_type&, const minimap2_parameters&,
         ksw2_batched_execution_stats*);
-    /** Block-aligner certificate preparation callable. */
+    /** Prepares bounds for proving that a gap aligns without insertions or deletions. */
     using prepare_block_global_gap_certificate_kernel =
         block_global_gap_certificate_plan (*)(
         const matrix_type&, const block_aligner_parameters&) noexcept;
-    /** Certified block-gap attempt callable. */
+    /** Tries to prove a packed diagonal alignment is optimal. */
     using try_block_certified_gap_kernel = block_packed_certificate_attempt (*)(
         bool, view_type, view_type,
         std::size_t, std::size_t, std::size_t, std::size_t,
         const block_global_gap_certificate_plan&) noexcept;
-    /** Full block-alignment callable. */
+    /** Runs Block Aligner on a pair of sequence ranges. */
     using align_block_kernel = ksw_alignment_result (*)(
         bool, bool, view_type, view_type,
         std::size_t, std::size_t, std::size_t, std::size_t,
@@ -402,18 +398,17 @@ struct alignment_kernels final {
     align_ksw2_dual_affine_kernel align_ksw2_dual_affine = nullptr;
     /** Batched KSW2 implementation for p_alphabet. */
     align_ksw2_batched_kernel align_ksw2_batched = nullptr;
-    /** Block-aligner certificate preparation for p_alphabet. */
+    /** Prepares diagonal-alignment score bounds for p_alphabet. */
     prepare_block_global_gap_certificate_kernel
         prepare_block_global_gap_certificate = nullptr;
-    /** Certified block-gap implementation for p_alphabet. */
+    /** Tests a packed diagonal alignment for p_alphabet. */
     try_block_certified_gap_kernel try_block_certified_gap = nullptr;
     /** Full block-alignment implementation for p_alphabet. */
     align_block_kernel align_block = nullptr;
 };
 
 /**
- * @brief Whether an alphabet table can cross the neutral dispatch boundary.
- * @tparam p_alphabet Logical sequence alphabet represented by the table.
+ * @brief Checks that the alignment table has a standard layout and can be copied as bytes.
  */
 template <sequence_alphabet p_alphabet>
 inline constexpr bool is_alignment_kernel_table_neutral =
@@ -421,10 +416,7 @@ inline constexpr bool is_alignment_kernel_table_neutral =
     && std::is_trivially_copyable_v<alignment_kernels<p_alphabet>>;
 
 /**
- * @brief Test whether every callable in a typed alignment table is bound.
- * @tparam p_alphabet Logical sequence alphabet represented by the table.
- * @param kernels Typed fixed-target alignment table to validate.
- * @return `true` when every callable is non-null.
+ * @brief Returns true when all alignment function pointers are set.
  */
 template <sequence_alphabet p_alphabet>
 // Imported templates can otherwise produce one weak symbol shared by
