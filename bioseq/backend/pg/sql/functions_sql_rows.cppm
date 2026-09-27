@@ -1,6 +1,6 @@
 /**
  * @file functions_sql_rows.cppm
- * @brief Declares result rows returned by generated SQL functions.
+ * @brief SQL result columns for sequence-shard inspection.
  */
 module;
 
@@ -15,7 +15,7 @@ import bioseq.codegen.sql.annotation_model;
 
 export namespace bioseq::sql_functions::result_rows {
 
-/** @brief Describes one sequence storage shard and its sidecar relation. */
+/** One sequence shard, its sidecar table, and its storage usage. */
 struct list_seq_storage_shard final {
     [[bioseq_sql::column({
         .sql_type = bioseq::sql::pg::regclass,

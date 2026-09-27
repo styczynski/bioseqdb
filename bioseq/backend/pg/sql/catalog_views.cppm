@@ -1,6 +1,6 @@
 /**
  * @file catalog_views.cppm
- * @brief Declares public SQL catalog views for Bioseq storage metadata.
+ * @brief SQL views showing Bioseq storage metadata.
  */
 export module bioseq.postgres.sql.catalog_views;
 
@@ -9,9 +9,8 @@ import bioseq.codegen.sql.annotation_model;
 export namespace bioseq::sql_entities::catalog_views {
 
 /**
- * @brief Summarizes physical sequence-shard storage relations.
- * @remark Missing shard relations appear as NULL while concurrent DDL is in
- * flight.
+ * Show sequence shards, their relation names, and stored byte counts.
+ * A missing pg_class entry leaves the corresponding relation name NULL.
  */
 [[bioseq_sql::view({
     .schema = bioseq::sql::fixed_schema<"bioseq">,
@@ -53,9 +52,7 @@ ORDER BY
   bioseq_sql::grant({
     .privileges = bioseq::sql::privileges::select,
 })]]
-/**
- * @brief Bioseq relation ID to storage ID mapping.
- */
+/** Map Bioseq tables to storage IDs when the current user can use their owner role. */
 inline constexpr bioseq::sql::checked_sql storage{R"SQL(
 SELECT
     c.oid::regclass AS relation,
@@ -73,9 +70,7 @@ WHERE c.relam = am.oid
   bioseq_sql::grant({
     .privileges = bioseq::sql::privileges::select,
 })]]
-/**
- * @brief Bioseq options for tables owned by the current user.
- */
+/** Show storage options for tables whose owner role is available to the current user. */
 inline constexpr bioseq::sql::checked_sql options{R"SQL(
 SELECT
     regclass AS relation,
@@ -97,9 +92,7 @@ WHERE o.regclass = c.oid
   bioseq_sql::grant({
     .privileges = bioseq::sql::privileges::select,
 })]]
-/**
- * @brief Bioseq stripe information for tables owned by the current user.
- */
+/** Show stripe sizes and row ranges for the tables visible through bioseq.storage. */
 inline constexpr bioseq::sql::checked_sql stripe{R"SQL(
 SELECT
     relation,
@@ -125,9 +118,7 @@ WHERE stripe.storage_id = storage.storage_id
   bioseq_sql::grant({
     .privileges = bioseq::sql::privileges::select,
 })]]
-/**
- * @brief Bioseq chunk-group information for tables owned by the current user.
- */
+/** Show each stripe's row groups for the tables visible through bioseq.storage. */
 inline constexpr bioseq::sql::checked_sql chunk_group{R"SQL(
 SELECT
     relation,
@@ -148,9 +139,7 @@ WHERE cg.storage_id = storage.storage_id
   bioseq_sql::grant({
     .privileges = bioseq::sql::privileges::select,
 })]]
-/**
- * @brief Bioseq chunk information for tables owned by the current user.
- */
+/** Show column chunk statistics and compression for tables visible through bioseq.storage. */
 inline constexpr bioseq::sql::checked_sql chunk{R"SQL(
 SELECT
     relation,

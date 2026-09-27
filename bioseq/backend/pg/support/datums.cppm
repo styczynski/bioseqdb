@@ -1,9 +1,9 @@
 /**
  * @file datums.cppm
- * @brief Provides zero-cost typed wrappers for PostgreSQL Datum values.
+ * @brief Convert PostgreSQL Datum values and work with tuple fields.
  *
- * Covers scalar conversion, nullable cells, fixed value/null arrays, tuple
- * updates, slot views, detoast ownership, and SPI cell extraction.
+ * Provides nullable values, tuple arrays and updates, slot access, detoasting
+ * helpers and SPI result cells. PostgreSQL memory contexts own allocated data.
  */
 module;
 
@@ -26,7 +26,7 @@ import bioseq.postgres.support;
 
 export namespace bioseq::postgres::support {
 
-/** @brief Defines typed conversion hooks to and from PostgreSQL Datum values. */
+/** Conversions between a C++ type and PostgreSQL Datum. Specialize for supported types. */
 template<class p_value, class p_enable = void>
 struct pg_datum_conversion
 {
@@ -52,7 +52,7 @@ struct pg_datum
 private:
 	Datum value_ = static_cast<Datum>(0);
 
-	/** @return PostgreSQL-owned zeroed storage for the requested byte count. */
+	/** @return Zeroed storage allocated in CurrentMemoryContext. */
 	template<class p_value>
 	[[nodiscard]] static inline p_value *
 	alloc_zeroed_bytes(std::size_t byte_count)
@@ -167,28 +167,37 @@ public:
 		return DatumGetCString(value.value_);
 	}
 
-	/** @return A wrapper owning PostgreSQL text converted from a C string. */
+	/** @return Text copied from a C string into CurrentMemoryContext. */
 	[[nodiscard]] [[gnu::always_inline]] static inline pg_datum
 	from_text_cstring(const char *value)
 	{
 		return pg_datum{CStringGetTextDatum(value)};
 	}
 
-	/** @return A packed detoasted text pointer following PostgreSQL ownership. */
+	/**
+  * @return Text with TOAST compression or external storage removed.
+  * May borrow the input or allocate a copy. A short varlena header may remain.
+  */
 	[[nodiscard]] [[gnu::always_inline]] static inline text *
 	to_text_pp(pg_datum value)
 	{
 		return DatumGetTextPP(value.value_);
 	}
 
-	/** @return A detoasted bytea pointer following PostgreSQL ownership. */
+	/**
+  * @return A fully detoasted bytea. May borrow the input or allocate a copy
+  * in CurrentMemoryContext.
+  */
 	[[nodiscard]] [[gnu::always_inline]] inline bytea *
 	to_bytea_p() const
 	{
 		return DatumGetByteaP(value_);
 	}
 
-	/** @return A packed detoasted bytea pointer following PostgreSQL ownership. */
+	/**
+  * @return A detoasted bytea that may keep its short varlena header.
+  * May borrow the input or allocate a copy in CurrentMemoryContext.
+  */
 	[[nodiscard]] [[gnu::always_inline]] inline bytea *
 	to_bytea_pp() const
 	{
@@ -210,14 +219,14 @@ public:
 		return reinterpret_cast<p_value *>(DatumGetPointer(value.value_));
 	}
 
-	/** @return A wrapper containing the supplied heap tuple. */
+	/** @return A Datum referring to the supplied heap tuple's composite value. */
 	[[nodiscard]] [[gnu::always_inline]] static inline pg_datum
 	from_heap_tuple(HeapTuple value) noexcept
 	{
 		return pg_datum{HeapTupleGetDatum(value)};
 	}
 
-	/** @return The heap tuple header stored in the wrapper. */
+	/** @return The composite tuple header, detoasted if needed. */
 	[[nodiscard]] [[gnu::always_inline]] static inline HeapTupleHeader
 	to_heap_tuple_header(pg_datum value) noexcept
 	{
@@ -231,14 +240,14 @@ public:
 		return pg_datum{NameGetDatum(value)};
 	}
 
-	/** @return A PostgreSQL-owned copy using the supplied type metadata. */
+	/** @return Copy of this value. Referenced data is copied into CurrentMemoryContext. */
 	[[nodiscard]] inline pg_datum
 	copy(bool datum_type_by_value, int datum_type_length) const
 	{
 		return pg_datum{datumCopy(value_, datum_type_by_value, datum_type_length)};
 	}
 
-	/** @brief Appends this Datum using PostgreSQL attribute serialization rules. */
+	/** Append the value's stored bytes and zero padding required by its type alignment. */
 	inline void
 	append_serialized(StringInfo buffer,
 					  bool datum_type_by_value,
@@ -303,7 +312,7 @@ public:
 		return result;
 	}
 
-	/** @return A Datum reconstructed from physical attribute bytes. */
+	/** @return A Datum reconstructed from stored attribute bytes, copying referenced data. */
 	[[nodiscard]] static inline pg_datum
 	from_bytea(bytea *bytes, Form_pg_attribute attr)
 	{
@@ -318,7 +327,7 @@ public:
 	}
 };
 
-/** @brief Converts Boolean values through PostgreSQL's by-value Datum ABI. */
+/** Convert bool to and from PostgreSQL Datum. */
 template<>
 struct pg_datum_conversion<bool>
 {
@@ -326,7 +335,7 @@ struct pg_datum_conversion<bool>
 	[[nodiscard]] [[gnu::always_inline]] static inline bool to(Datum value) noexcept { return DatumGetBool(value); }
 };
 
-/** @brief Converts signed 16-bit values through PostgreSQL's Datum ABI. */
+/** Convert signed 16-bit integers to and from PostgreSQL Datum. */
 template<>
 struct pg_datum_conversion<std::int16_t>
 {
@@ -334,7 +343,7 @@ struct pg_datum_conversion<std::int16_t>
 	[[nodiscard]] [[gnu::always_inline]] static inline std::int16_t to(Datum value) noexcept { return DatumGetInt16(value); }
 };
 
-/** @brief Converts signed 32-bit values through PostgreSQL's Datum ABI. */
+/** Convert signed 32-bit integers to and from PostgreSQL Datum. */
 template<>
 struct pg_datum_conversion<std::int32_t>
 {
@@ -342,7 +351,7 @@ struct pg_datum_conversion<std::int32_t>
 	[[nodiscard]] [[gnu::always_inline]] static inline std::int32_t to(Datum value) noexcept { return DatumGetInt32(value); }
 };
 
-/** @brief Converts signed 64-bit values through PostgreSQL's Datum ABI. */
+/** Convert signed 64-bit integers to and from PostgreSQL Datum. */
 template<>
 struct pg_datum_conversion<std::int64_t>
 {
@@ -350,7 +359,7 @@ struct pg_datum_conversion<std::int64_t>
 	[[nodiscard]] [[gnu::always_inline]] static inline std::int64_t to(Datum value) noexcept { return DatumGetInt64(value); }
 };
 
-/** @brief Covers PostgreSQL's distinct `int64` alias when required by the ABI. */
+/** Also support PostgreSQL's int64 when it differs from std::int64_t. */
 template<class p_value>
 requires (std::same_as<p_value, int64> && !std::same_as<p_value, std::int64_t>)
 struct pg_datum_conversion<p_value>
@@ -359,7 +368,7 @@ struct pg_datum_conversion<p_value>
 	[[nodiscard]] [[gnu::always_inline]] static inline p_value to(Datum value) noexcept { return static_cast<p_value>(DatumGetInt64(value)); }
 };
 
-/** @brief Preserves float object bits across PostgreSQL's by-value Datum ABI. */
+/** Store a float's bits in Datum so conversion preserves its exact value. */
 template<>
 struct pg_datum_conversion<float>
 {
@@ -379,7 +388,7 @@ struct pg_datum_conversion<float>
 	}
 };
 
-/** @brief Preserves double object bits across PostgreSQL's by-value Datum ABI. */
+/** Store a double's bits in Datum so conversion preserves its exact value. */
 template<>
 struct pg_datum_conversion<double>
 {
@@ -399,7 +408,7 @@ struct pg_datum_conversion<double>
 	}
 };
 
-/** @brief Couples one Datum with its PostgreSQL null flag. */
+/** A Datum paired with its SQL NULL flag. */
 struct pg_nullable_datum
 {
 	pg_datum value{};
@@ -451,7 +460,7 @@ struct pg_nullable_datum
 	}
 };
 
-/** @brief Owns fixed-capacity Datum and null arrays for tuple operations. */
+/** Fixed arrays of row values and SQL NULL flags. Referenced data stays borrowed. */
 template<std::size_t p_dimensions>
 struct pg_datum_list
 {
@@ -491,7 +500,7 @@ struct pg_datum_list
 		return static_cast<std::size_t>(attnum - 1);
 	}
 
-	/** @brief Checks that a tuple descriptor fits the fixed array capacity. */
+	/** Assert that the tuple descriptor fits this row's fixed capacity. */
 		static void
 		assert_tuple_desc_fits(TupleDesc tuple_desc) noexcept
 	{
@@ -538,7 +547,7 @@ struct pg_datum_list
 		return nulls[att_index(attnum)];
 	}
 
-	/** @brief Converts and stores one non-null typed attribute. */
+	/** Convert and store a non-null value in the selected column. */
 	template<class p_value>
 	requires is_convertible_to_datum<p_value>
 	void
@@ -558,21 +567,21 @@ struct pg_datum_list
 		nulls[attribute_index] = false;
 	}
 
-	/** @brief Selects one PostgreSQL object-identifier replacement. */
+	/** Store a non-null PostgreSQL object identifier in the selected column. */
 	void
 	set_oid(int attnum, Oid value) noexcept
 	{
 		set_raw(attnum, pg_datum::from_oid(value));
 	}
 
-	/** @brief Selects one unsigned 32-bit replacement. */
+	/** Store a non-null unsigned 32-bit value in the selected column. */
 	void
 	set_uint32(int attnum, std::uint32_t value) noexcept
 	{
 		set_raw(attnum, pg_datum::from_uint32(value));
 	}
 
-	/** @brief Selects one unsigned 64-bit replacement. */
+	/** Store a non-null unsigned 64-bit value in the selected column. */
 	void
 	set_uint64(int attnum, std::uint64_t value) noexcept
 	{
@@ -588,7 +597,7 @@ struct pg_datum_list
 		nulls[attribute_index] = true;
 	}
 
-	/** @brief Fills every null flag and clears values when marking null. */
+	/** Set all NULL flags. When setting them true, also clear the stored values. */
 	void
 	fill_nulls(bool value) noexcept
 	{
@@ -599,7 +608,7 @@ struct pg_datum_list
 		}
 	}
 
-	/** @brief Deforms a heap tuple into this fixed row. */
+	/** Split a heap tuple into this row's value and NULL arrays. */
 	void
 	deform(HeapTuple tuple, TupleDesc tuple_desc) noexcept
 	{
@@ -607,7 +616,7 @@ struct pg_datum_list
 		heap_deform_tuple(tuple, tuple_desc, values.data(), nulls.data());
 	}
 
-	/** @return A fixed row deformed from the supplied heap tuple. */
+	/** @return Value and NULL arrays read from the supplied heap tuple. */
 	[[nodiscard]] static pg_datum_list
 	deformed(HeapTuple tuple, TupleDesc tuple_desc) noexcept
 	{
@@ -633,7 +642,7 @@ struct pg_datum_list
 	}
 };
 
-/** @brief Owns fixed Datum arrays describing selected tuple replacements. */
+/** Values and NULL flags for selected column updates. Unselected columns stay unchanged. */
 template<std::size_t p_dimensions>
 struct pg_datum_update
 {
@@ -656,7 +665,7 @@ struct pg_datum_update
 		return static_cast<std::size_t>(attnum - 1);
 	}
 
-	/** @brief Checks that a tuple descriptor fits the update array capacity. */
+	/** Assert that the tuple descriptor fits the update arrays. */
 	static void
 	assert_tuple_desc_fits(TupleDesc tuple_desc) noexcept
 	{
@@ -665,7 +674,7 @@ struct pg_datum_update
 					 "pg_datum_update dimensions smaller than tuple descriptor natts");
 	}
 
-	/** @brief Converts and selects one non-null typed replacement. */
+	/** Convert a value and mark this column for a non-null update. */
 	template<class p_value>
 	requires is_convertible_to_datum<p_value>
 	void
@@ -677,7 +686,7 @@ struct pg_datum_update
 		replace[attribute_index] = true;
 	}
 
-	/** @brief Selects one non-null raw Datum replacement. */
+	/** Mark this column for replacement with a non-null Datum. */
 	void
 	set_raw(int attnum, pg_datum value) noexcept
 	{
@@ -705,7 +714,7 @@ struct pg_datum_update
 		set_raw(attnum, pg_datum::from_uint64(value));
 	}
 
-	/** @brief Selects a null replacement for one attribute. */
+	/** Mark this column for replacement with SQL NULL. */
 	void
 	set_null(int attnum) noexcept
 	{
@@ -730,7 +739,7 @@ struct pg_slot_datums_view
 {
 	TupleTableSlot *slot = nullptr;
 
-	/** @brief Checks that the borrowed slot and its arrays are present. */
+	/** Assert that the slot, descriptor and value arrays are available. */
 	void
 	assert_slot_arrays() const noexcept
 	{
@@ -749,7 +758,7 @@ struct pg_slot_datums_view
 		return slot->tts_tupleDescriptor;
 	}
 
-	/** @return The attribute count of the borrowed slot. */
+	/** @return Number of columns in the slot's tuple descriptor. */
 	[[nodiscard]] int
 	natts() const noexcept
 	{
@@ -771,7 +780,7 @@ struct pg_slot_datums_view
 		return slot->tts_isnull;
 	}
 
-	/** @brief Materializes every slot attribute into its Datum arrays. */
+	/** Read all slot columns into its value and NULL arrays. */
 	void
 	materialize_all() const noexcept
 	{
@@ -809,7 +818,7 @@ struct pg_slot_datums_view
 		return slot->tts_isnull[attnum - 1];
 	}
 
-	/** @brief Converts and stores one non-null typed slot attribute. */
+	/** Convert and store a non-null value in the slot column. */
 	template<class p_value>
 	requires is_convertible_to_datum<p_value>
 	void
@@ -844,7 +853,7 @@ struct pg_slot_datums_view
 		slot->tts_isnull[attnum - 1] = true;
 	}
 
-	/** @brief Marks the populated arrays as one virtual tuple. */
+	/** Tell PostgreSQL that the populated slot arrays hold a complete virtual tuple. */
 	void
 	store_virtual() const noexcept
 	{
@@ -853,7 +862,11 @@ struct pg_slot_datums_view
 	}
 };
 
-/** @brief Owns a detoasted pointer only when PostgreSQL returned a copy. */
+/**
+ * Track a detoasted pointer and whether PostgreSQL allocated a copy.
+ * Call `free_if_copy()` to release that copy early. Destruction alone does
+ * not free it, so its memory context remains responsible for cleanup.
+ */
 template<class p_value = varlena>
 struct pg_detoasted_ptr
 {
@@ -891,7 +904,7 @@ struct pg_detoasted_ptr
 		return *this;
 	}
 
-	/** @brief Frees a copied detoast result and clears this owner. */
+	/** Free a copied detoast result and clear the pointer and copy flag. */
 	void
 	free_if_copy() noexcept
 	{
@@ -904,7 +917,10 @@ struct pg_detoasted_ptr
 	}
 };
 
-/** @return A typed owner for a fully detoasted Datum. */
+/**
+ * @return Fully detoasted value with a flag indicating whether it is a copy.
+ * Use `free_if_copy()` to release copied storage before its context is reset.
+ */
 template<class p_value = varlena>
 [[nodiscard]] inline pg_detoasted_ptr<p_value>
 detoast_as(pg_datum datum)
@@ -915,7 +931,10 @@ detoast_as(pg_datum datum)
 	return pg_detoasted_ptr<p_value>{detoasted, copied};
 }
 
-/** @return A typed owner for a packed detoasted Datum. */
+/**
+ * @return Detoasted value that may keep a short header, with its copy flag.
+ * Use `free_if_copy()` to release copied storage before its context is reset.
+ */
 template<class p_value = varlena>
 [[nodiscard]] inline pg_detoasted_ptr<p_value>
 detoast_packed_as(pg_datum datum)
@@ -938,8 +957,9 @@ pfree_if_distinct_from(pg_datum original, const void *candidate) noexcept
 }
 
 /**
- * @brief Detoasts extended tuple attributes into a copy-on-first-change array.
- * @return The original array or a PostgreSQL-owned replacement array.
+ * Detoast variable-length fields that use extended storage. Copy the Datum
+ * array only when a field needs detoasting, leaving the original array intact.
+ * @return Original array if unchanged, otherwise an array in CurrentMemoryContext.
  */
 [[nodiscard]] inline Datum *
 detoast_values(TupleDesc tuple_desc, Datum *original_values, bool *nulls)
@@ -969,7 +989,7 @@ detoast_values(TupleDesc tuple_desc, Datum *original_values, bool *nulls)
 	return values;
 }
 
-/** @brief Couples one binary SPI result value with its null flag. */
+/** An SPI result value paired with its SQL NULL flag. */
 struct pg_spi_cell
 {
 	pg_datum value{};
