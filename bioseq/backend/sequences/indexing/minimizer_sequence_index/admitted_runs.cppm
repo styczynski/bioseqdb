@@ -1,6 +1,6 @@
 /**
  * @file minimizer_sequence_index/admitted_runs.cppm
- * @brief Memory-admitted direct minimizer runs and pair sorting.
+ * @brief Reserves memory for minimizer pair runs and sorts them for index construction.
  */
 module;
 
@@ -22,10 +22,10 @@ import bioseq.storage.size;
 namespace bioseq::indexing::detail {
 
 /**
- * @brief Sorts packed minimizer pairs through the selected SIMD policy.
- * @param keys Mutable packed pair keys
- * @param key_count Number of keys
- * @param sort_implementation Stable sorter ordinal
+ * Sort packed hash/position keys in ascending order using the selected SIMD sorter.
+ * @param keys Mutable array of key_count packed keys.
+ * @param key_count Number of keys.
+ * @param sort_implementation Value from pair_run_sort_implementation.
  */
 void sort_minimizer_pair_run_keys(hwy::uint128_t* keys,
                                   std::size_t key_count,
@@ -42,13 +42,13 @@ namespace detail {
 using sorted_pair_t = std::pair<std::uint64_t, std::uint64_t>;
 
 /**
- * @brief Couples vector capacity to its memory-admission permit.
+ * @brief Owns a vector and the memory reservation that covers its allocation.
  * @tparam p_value_type Vector element type
  */
 template <class p_value_type>
 struct admitted_vector_run {
-    // Reverse member destruction is intentional: retained vector elements and
-    // capacity must disappear before the reservation becomes reusable.
+    // Members are destroyed in reverse order. Free the vector before making
+    // its reserved memory available to other work.
     bioseq::parallelism::memory_permit permit;
     std::uint64_t admitted_bytes = 0;
     std::vector<p_value_type> pairs;
@@ -58,8 +58,8 @@ struct admitted_vector_run {
     admitted_vector_run& operator=(const admitted_vector_run&) = delete;
 
     admitted_vector_run(admitted_vector_run&& other) noexcept {
-        // Swap while `other.permit` is still live, then transfer the permit.
-        // This gives the moved-from object provably zero capacity.
+        // Transfer the vector while its reservation is still held. Swapping with
+        // this empty vector leaves the source with no allocated capacity.
         pairs.swap(other.pairs);
         admitted_bytes = std::exchange(other.admitted_bytes, 0u);
         permit = std::move(other.permit);
@@ -75,7 +75,7 @@ struct admitted_vector_run {
         return *this;
     }
 
-    /** @brief Releases retained vector capacity before releasing its permit. */
+    /** Free the vector before releasing its memory reservation. */
     void release_capacity_before_permit() noexcept {
         bioseq::parallelism::release_admitted_vector_capacity_before_permit(
             pairs, permit);
@@ -86,10 +86,8 @@ struct admitted_vector_run {
 using admitted_pair_run = admitted_vector_run<sorted_pair_t>;
 
 /**
- * @brief Returns the retained byte capacity of an admitted vector.
+ * Return the vector's allocated element capacity in bytes, saturating on overflow.
  * @tparam p_value_type Vector element type
- * @param values Vector to inspect
- * @return Retained capacity in bytes, saturated on overflow
  */
 template <class p_value_type>
 [[nodiscard]] std::uint64_t admitted_vector_capacity_bytes(
@@ -100,10 +98,9 @@ template <class p_value_type>
 }
 
 /**
- * @brief Plans conservative preallocation bytes for a vector.
+ * Estimate the reservation for a vector allocation, including extra capacity
+ * the allocator may choose. Return the maximum integer on overflow.
  * @tparam p_value_type Vector element type
- * @param element_count Requested element count
- * @return Admission requirement, saturated on overflow
  */
 template <class p_value_type>
 [[nodiscard]] std::uint64_t admitted_vector_preallocation_bytes(
@@ -116,17 +113,11 @@ template <class p_value_type>
 }
 
 /**
- * @brief Reserves an empty admitted vector while transient bytes remain live.
- *
- * The caller must pre-acquire
- * `preallocation_headroom + transient_bytes`. After reserve we reconcile to
- * exact retained capacity plus the still-live transient budget.
- *
+ * Reserve capacity in an empty vector using an existing memory permit.
+ * The permit must cover the planned capacity and transient_bytes for other
+ * allocations still in use. After allocation, release any unused reservation.
+ * Return false if the vector is not empty or the reservation is insufficient.
  * @tparam p_value_type Vector element type
- * @param run Admitted vector and permit
- * @param element_count Requested element capacity
- * @param transient_bytes Additional live bytes retained during allocation
- * @return `true` when the exact capacity remains admitted
  */
 template <class p_value_type>
 [[nodiscard]] bool reserve_admitted_vector_run_capacity(
@@ -163,10 +154,9 @@ template <class p_value_type>
 }
 
 /**
- * @brief Drops transient admission after vector construction.
+ * Release the reservation for temporary buffers after vector construction.
+ * Return false if the vector's allocated capacity exceeds its permit.
  * @tparam p_value_type Vector element type
- * @param run Admitted vector and permit
- * @return `true` when retained capacity is fully covered
  */
 template <class p_value_type>
 [[nodiscard]] bool finish_admitted_vector_run_transient(
@@ -182,11 +172,9 @@ template <class p_value_type>
 }
 
 /**
- * @brief Grows an admitted vector without exposing an unreserved allocation.
+ * Grow the vector after reserving enough memory for its old and new allocations.
+ * Return false if the current accounting is invalid or memory cannot be reserved.
  * @tparam p_value_type Vector element type
- * @param run Admitted vector and permit
- * @param required_capacity Minimum element capacity
- * @return `true` when the requested capacity is admitted
  */
 template <class p_value_type>
 [[nodiscard]] bool ensure_admitted_vector_run_capacity(
@@ -235,12 +223,9 @@ template <class p_value_type>
 }
 
 /**
- * @brief Reduces over-reserved pair capacity without changing pair order.
- *
- * `std::vector` cannot return capacity in place, so the old allocation plus
- * replacement headroom is admitted before constructing the replacement.  If
- * that transient peak is denied, retaining the original admitted allocation is
- * safe and semantically identical.
+ * Shrink a pair vector that uses at most half its capacity, keeping pair order.
+ * Reserve memory for both allocations while copying. If that reservation or
+ * the replacement allocation fails, keep the existing vector.
  */
 inline void compact_admitted_pair_run_after_sort(admitted_pair_run& run) {
     constexpr std::uint64_t max = (std::numeric_limits<std::uint64_t>::max)();
@@ -289,53 +274,38 @@ inline void compact_admitted_pair_run_after_sort(admitted_pair_run& run) {
             std::make_move_iterator(run.pairs.begin()),
             std::make_move_iterator(run.pairs.end()));
         run.pairs.swap(compact);
-    } // old pair allocation is destroyed while the peak permit remains live.
+    } // The old vector is freed while both allocations are still covered by the permit.
     run.admitted_bytes = replacement_bytes;
     run.permit.shrink_to(replacement_bytes);
 }
 
-/// @brief Process-local pair sorter override used by tests and tuning.
+/// Pair sorter override for this process, used by tests and tuning.
 inline std::optional<pair_run_sort_implementation> pair_run_sort_override{};
 
-/**
- * @brief Returns the active pair-run sorter.
- * @return Configured override or the standard sorter
- */
+/** Return the configured pair sorter, defaulting to std_sort. */
 [[nodiscard]] inline pair_run_sort_implementation pair_run_sort_impl() noexcept {
     return pair_run_sort_override.value_or(
         pair_run_sort_implementation::std_sort);
 }
 
-/**
- * @brief Returns the optional pair-run sorter override.
- * @return Current override
- */
+/** Return the current pair sorter override, if set. */
 [[nodiscard]] inline std::optional<pair_run_sort_implementation>
 current_pair_run_sort_override() noexcept {
     return pair_run_sort_override;
 }
 
-/**
- * @brief Sets the pair-run sorter override.
- * @param implementation Sorter implementation
- */
+/** Select the pair sorter for this process. */
 inline void set_pair_run_sort_impl(pair_run_sort_implementation implementation) noexcept {
     pair_run_sort_override = implementation;
 }
 
-/**
- * @brief Restores an optional pair-run sorter override.
- * @param implementation Override to restore
- */
+/** Restore a saved sorter override, or clear it with nullopt. */
 inline void restore_pair_run_sort_override(
     std::optional<pair_run_sort_implementation> implementation) noexcept {
     pair_run_sort_override = implementation;
 }
 
-/**
- * @brief Returns the diagnostic name of the active pair-run sorter.
- * @return Stable sorter name
- */
+/** Return the diagnostic name of the active pair sorter. */
 [[nodiscard]] inline const char* pair_run_sort_impl_name() noexcept {
     switch (pair_run_sort_impl()) {
     case pair_run_sort_implementation::simd_u128_vqsort:
@@ -353,10 +323,8 @@ inline void restore_pair_run_sort_override(
 }
 
 /**
- * @brief Derives the direct-bucket occurrence threshold for one route.
- * @param max_occ Requested maximum occurrence count
- * @param is_gpu_built Whether the directory came from GPU generation
- * @return Effective unsigned threshold
+ * Convert max_occ to the threshold used by a direct bucket. A negative value
+ * removes the limit. GPU-built buckets add one to a positive threshold.
  */
 [[nodiscard]] constexpr std::uint32_t effective_max_occ_threshold(
     std::int32_t max_occ,
@@ -374,28 +342,19 @@ inline void restore_pair_run_sort_override(
     return threshold == limit ? limit : threshold + 1u;
 }
 
-/**
- * @brief Packs one sortable hash-position pair into an unsigned 128-bit key.
- * @param pair Hash-position pair
- * @return Packed sortable key
- */
+/** Pack the hash above the position so unsigned 128-bit sorting orders both fields. */
 [[nodiscard]] inline hwy::uint128_t pack_pair(sorted_pair_t pair) noexcept {
     return hwy::uint128_t{.lo = pair.second, .hi = pair.first};
 }
 
-/**
- * @brief Unpacks one unsigned 128-bit sort key.
- * @param value Packed key
- * @return Hash-position pair
- */
+/** Recover the hash and position from a packed sort key. */
 [[nodiscard]] inline sorted_pair_t unpack_pair(hwy::uint128_t value) noexcept {
     return sorted_pair_t{value.hi, value.lo};
 }
 
 /**
- * @brief Sorts pairs through an admitted temporary unsigned-128 key vector.
- * @param pairs Hash-position pairs to sort
- * @param implementation SIMD sorter implementation
+ * Sort pairs through a temporary array of packed 128-bit keys. Reserve its
+ * memory first, falling back to std::sort if the reservation is refused.
  */
 inline void sort_pair_run_u128(std::vector<sorted_pair_t>& pairs,
                                pair_run_sort_implementation implementation) {
@@ -433,10 +392,7 @@ inline void sort_pair_run_u128(std::vector<sorted_pair_t>& pairs,
     }
 }
 
-/**
- * @brief Sorts one in-memory pair run with the active implementation.
- * @param pairs Hash-position pairs to sort
- */
+/** Sort hash/position pairs with the active implementation. */
 inline void sort_pair_run(std::vector<sorted_pair_t>& pairs) {
     switch (pair_run_sort_impl()) {
     case pair_run_sort_implementation::simd_u128_vqsort:
@@ -458,11 +414,7 @@ inline void sort_pair_run(std::vector<sorted_pair_t>& pairs) {
     }
 }
 
-/**
- * @brief Clamps a GPU collection span to the packed position field.
- * @param wanted_bp Requested collection size
- * @return Clamped collection size
- */
+/** Limit the collected base count to the range supported by packed GPU positions. */
 [[nodiscard]] inline sequence_size_t clamp_gpu_collected_bp(
     sequence_size_t wanted_bp) noexcept
 {
@@ -472,11 +424,9 @@ inline void sort_pair_run(std::vector<sorted_pair_t>& pairs) {
 }
 
 /**
- * @brief Limits a GPU block by position-field and dispatch geometry.
- * @param scalar_fragments_per_block CPU-derived fragment limit
- * @param frag_bp Bases per fragment
- * @param halo_bp Required collection halo
- * @return Safe fragment count for one GPU block
+ * Choose a GPU block size within the packed-position and dispatch limits,
+ * allowing for halo bases. Return at least one fragment, even if those limits
+ * leave no room for a full fragment.
  */
 [[nodiscard]] inline std::size_t gpu_fragments_per_block(
     std::size_t scalar_fragments_per_block,
