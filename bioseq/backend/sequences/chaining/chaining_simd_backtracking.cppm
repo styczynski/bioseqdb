@@ -1,6 +1,6 @@
 /**
  * @file chaining_simd_backtracking.cppm
- * @brief SIMD predecessor-path ranking and chain materialization.
+ * @brief Follows SIMD predecessor links to produce ranked anchor chains.
  */
 module;
 
@@ -42,16 +42,16 @@ using bioseq::chaining::simd_chaining_status;
 
 namespace chaining_simd_detail {
 
-/// @brief Couples a chain score with its source anchor index.
+/// @brief An anchor index paired with the best chain score ending there.
 struct scored_anchor_index {
     std::int32_t score;
     std::int32_t anchor_index;
 };
 static_assert(sizeof(scored_anchor_index) == 8u);
 
-/// @brief Orders scored anchors by score and then source index.
+/// @brief Sorts endpoints by score, breaking ties by anchor index.
 struct score_ascending {
-    /// @brief Compares two scored indices for ascending processing order.
+    /// @brief Compare score first, then index, in ascending order.
     [[nodiscard]] bool operator()(
         const scored_anchor_index& lhs,
         const scored_anchor_index& rhs) const noexcept
@@ -62,18 +62,16 @@ struct score_ascending {
     }
 };
 
-/// @brief Builds chain paths from SIMD-produced predecessor arrays.
-/// @tparam p_collect_stats Whether this instantiation records counters.
-/// @tparam p_descriptor_type Integer Highway descriptor type.
-/// @param anchors Anchors corresponding to the score and predecessor arrays.
-/// @param best_scores Best score ending at each anchor.
-/// @param predecessors Predecessor index for each anchor.
-/// @param min_score Minimum terminal score to consider.
-/// @param min_seed_count Minimum anchors required for an emitted chain.
-/// @param chains_out Arena-backed destination for chain descriptors.
-/// @param reordered_anchors_out Arena-backed destination for anchors in chain order.
-/// @param stats Optional full execution counters.
-/// @param route_summary Optional lightweight route counters.
+/// @brief Build chains from scores and predecessor links.
+/// Visit endpoints from highest score to lowest. Claim each path until it
+/// reaches a claimed anchor, so higher-ranked chains keep shared anchors.
+/// Claimed anchors stay marked even if a chain fails the output thresholds.
+/// Append qualifying chains with their anchors in forward order.
+///
+/// @param min_score Minimum endpoint and emitted-chain score.
+/// @param min_seed_count Minimum emitted chain length.
+/// @param stats Required when p_collect_stats is true.
+/// @param route_summary Optional execution summary.
 template<bool p_collect_stats, class p_descriptor_type>
 void backtrack_chains_simd(
     p_descriptor_type d,
@@ -124,9 +122,8 @@ void backtrack_chains_simd(
     std::uint64_t route_primary_contiguous_batches = 0;
     std::uint64_t route_all_starts_visited_fast_batches = 0;
 
-    // Lane zero is also the primary path scratch. Reusing the eventual
-    // lane-batched matrix avoids retaining a separate N-element allocation
-    // for the dominant path.
+    // Use the first row of the path matrix for the highest-ranked chain.
+    // This saves a separate allocation for that path.
     const auto matrix_plan = bioseq::chaining::simd_chaining_path_elements(
         anchors.size(), static_cast<std::size_t>(lanes));
     if (!matrix_plan) {
@@ -139,12 +136,9 @@ void backtrack_chains_simd(
     std::int64_t highest_rank =
         static_cast<std::int64_t>(scored_count) - 1;
 
-    // The first ranked path cannot overlap previously accepted work because
-    // visited[] is empty.  Claim it while traversing instead of collecting four
-    // near-identical long paths and replaying all four before the first commit.
-    // Long p[j] == j - 1 runs use full SIMD load/store chunks below; irregular
-    // links retain genuine masked SIMD gather/scatter. Neither route calls the
-    // shared scalar backtracker.
+    // Visit the highest-ranked path first and mark anchors as we go.
+    // The visited set is empty, so this path cannot overlap earlier work.
+    // Claiming it now avoids collecting the same long path in several lanes.
     if (highest_rank >= 0) {
         std::int32_t* const primary_path = paths.data();
         std::int32_t primary_current =
@@ -159,11 +153,8 @@ void backtrack_chains_simd(
             route_path_work = true;
             route_commit_work = true;
 
-            // HiFi primary chains commonly follow p[j] == j - 1 for long
-            // runs. Validate a complete run with one SIMD comparison, then
-            // append and claim all lanes with contiguous vector stores. The
-            // fallback below retains the exact masked gather/scatter path for
-            // every non-contiguous predecessor layout.
+            // Consecutive predecessor links let us copy and mark a whole run with
+            // vector loads and stores. Irregular links use the masked path below.
             if (primary_current >= lanes - 1
                 && primary_length <= anchor_count - lanes)
             {
@@ -220,7 +211,7 @@ void backtrack_chains_simd(
 
             hn::StoreN(
                 current, d, primary_path + primary_length, 1u);
-            // Generic Highway gathers validate masked-off indices too.
+            // Use valid indices even in inactive lanes for Highway gather checks.
             const auto safe_current = hn::IfThenElse(
                 active, current, hn::Zero(d));
             hn::MaskedScatterIndex(
@@ -314,12 +305,9 @@ void backtrack_chains_simd(
                 &simd_chaining_execution_stats::backtrack_overlap_stops,
                 visited_hit_count);
 
-            // After the primary chain is claimed, a ranked batch commonly
-            // starts entirely inside that chain.  The exact path below would
-            // stop all lanes at depth zero, then reject each zero-length,
-            // zero-score chain.  When either threshold rejects that outcome,
-            // preserve the same stats-visible rank/path work and skip the
-            // otherwise empty per-lane commit loop.
+            // Every endpoint in this batch is already claimed. Each would produce
+            // an empty, zero-score chain, so positive output thresholds let us
+            // skip the commit loop while still counting the attempted batch.
             if (depth == 0
                 && visited_hit_count
                     == static_cast<std::uint64_t>(batch_count)
@@ -389,9 +377,9 @@ void backtrack_chains_simd(
             &simd_chaining_execution_stats::backtrack_rank_batches);
         route_rank_work = true;
 
-        // Rank order is semantically observable when paths overlap.  Each
-        // lane therefore commits after all higher-priority lanes in this
-        // batch, but every path prefix is tested and marked in SIMD chunks.
+        // Commit paths from highest rank to lowest. A later path stops where
+        // an earlier path claimed an anchor, including overlaps between lanes
+        // in this batch. Test and mark each path in SIMD-sized chunks.
         for (std::int32_t lane = 0; lane < batch_count; ++lane) {
             const std::int32_t collected_length = length_lanes[lane];
             const std::int32_t* lane_path =

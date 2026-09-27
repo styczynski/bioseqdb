@@ -1,6 +1,6 @@
 /**
  * @file chaining_simd_candidate_scoring.cppm
- * @brief Anchor preparation and SIMD candidate scoring for chaining.
+ * @brief Packs anchor fields for SIMD loads and scores possible chain links.
  */
 module;
 
@@ -42,7 +42,7 @@ using bioseq::chaining::simd_chaining_status;
 
 namespace chaining_simd_detail {
 
-/// @brief Accumulates route counters outside the candidate-scoring hot loop.
+/// @brief Collects a small execution summary alongside optional detailed counters.
 struct simd_chaining_route_stats {
     bool score_vector_work = false;
     bool global_best_vector_work = false;
@@ -68,11 +68,10 @@ struct simd_chaining_route_stats {
     std::uint64_t global_best_rescue_wins = 0;
 };
 
-/// @brief Adds a counter only for instrumented kernel instantiations.
-/// @tparam p_collect_stats Whether this instantiation records counters.
-/// @param stats Optional destination counters.
-/// @param member Counter member to update.
-/// @param value Increment applied when collection is enabled.
+/// @brief Add a counter when this kernel collects detailed statistics.
+/// @param stats Required when p_collect_stats is true.
+/// @param member Counter to update.
+/// @param value Amount to add.
 template<bool p_collect_stats>
 HWY_INLINE void stats_add(
     simd_chaining_execution_stats* stats,
@@ -88,10 +87,9 @@ HWY_INLINE void stats_add(
     }
 }
 
-/// @brief Records a checked rejection and throws its typed runtime error.
-/// @param stats Optional counters updated with the rejection.
-/// @param status Typed rejection status.
-/// @param detail Diagnostic detail appended to the exception.
+/// @brief Record a rejection when counters are present, then throw.
+/// @param status Reason carried by the exception.
+/// @param detail Error details.
 /// @throws simd_chaining_runtime_error Always.
 [[noreturn]] inline void reject(
     simd_chaining_execution_stats* stats,
@@ -107,43 +105,42 @@ HWY_INLINE void stats_add(
     throw simd_chaining_runtime_error(status, detail);
 }
 
-/// @brief Owns arena-backed structure-of-arrays views of anchor coordinates.
+/// @brief Borrows separate coordinate and span arrays from the chaining arena.
 struct soa_anchors {
     std::uint32_t* ref_positions = nullptr;
     std::uint32_t* query_positions = nullptr;
     std::uint32_t* query_spans = nullptr;
     std::size_t count = 0;
 
-    /// @brief Returns mutable packed reference coordinates.
+    /// @brief Return writable reference coordinates stored in 32-bit words.
     [[nodiscard]] std::uint32_t* ref_data() noexcept {
         return ref_positions;
     }
-    /// @brief Returns mutable packed query coordinates.
+    /// @brief Return writable query coordinates.
     [[nodiscard]] std::uint32_t* query_data() noexcept {
         return query_positions;
     }
-    /// @brief Returns mutable query spans.
+    /// @brief Return writable query seed spans.
     [[nodiscard]] std::uint32_t* span_data() noexcept {
         return query_spans;
     }
-    /// @brief Returns immutable packed reference coordinates.
+    /// @brief Return read-only reference coordinates stored in 32-bit words.
     [[nodiscard]] const std::uint32_t* ref_data() const noexcept {
         return ref_positions;
     }
-    /// @brief Returns immutable packed query coordinates.
+    /// @brief Return read-only query coordinates.
     [[nodiscard]] const std::uint32_t* query_data() const noexcept {
         return query_positions;
     }
-    /// @brief Returns immutable query spans.
+    /// @brief Return read-only query seed spans.
     [[nodiscard]] const std::uint32_t* span_data() const noexcept {
         return query_spans;
     }
 };
 
-/// @brief Converts anchors to aligned packed coordinate arrays.
-/// @tparam p_descriptor_type Highway descriptor used to select alignment.
-/// @param anchors Anchor span copied into structure-of-arrays storage.
-/// @return Arena-backed coordinate and span arrays.
+/// @brief Copy anchor fields into separate arrays for contiguous SIMD loads.
+/// Allocate the arrays together in the current chaining arena. The returned
+/// pointers remain valid while that arena keeps the allocation.
 template<class p_descriptor_type>
 [[nodiscard]] soa_anchors create_soa_anchors(
     p_descriptor_type,
@@ -163,8 +160,8 @@ template<class p_descriptor_type>
         .count = count,
     };
     for (std::size_t i = 0; i < count; ++i) {
-        // Bounded same-range deltas are preserved modulo 2^32, including
-        // references crossing the 4-Gbp boundary.
+        // Keep the low 32 bits. Subtraction preserves bounded coordinate
+        // differences even when the reference crosses the 4-Gbp boundary.
         result.ref_positions[i] =
             static_cast<std::uint32_t>(anchors[i].ref_position);
         result.query_positions[i] =
@@ -175,12 +172,11 @@ template<class p_descriptor_type>
     return result;
 }
 
-/// @brief Scores one full or masked predecessor batch with chaining penalties.
-/// @tparam p_full_batch Whether every physical lane contains a candidate.
-/// @tparam p_has_skip_penalty Whether skip-penalty arithmetic is enabled.
-/// @tparam p_descriptor_type Integer Highway descriptor type.
-/// @tparam p_float_descriptor_type Floating-point Highway descriptor type.
-/// @return Per-lane pair scores with invalid lanes set to the score sentinel.
+/// @brief Score possible links from predecessor anchors to the current anchor.
+/// Reward shared query/reference progress and penalize gaps and diagonal
+/// deviation. Invalid candidates and inactive lanes get the minimum int32 score.
+/// p_full_batch skips tail masking. p_has_skip_penalty controls the linear
+/// penalty for distance along the chain.
 template<bool p_full_batch, bool p_has_skip_penalty, class p_descriptor_type, class p_float_descriptor_type>
 HWY_INLINE hn::Vec<p_descriptor_type> vectorized_chaining_score(
     p_descriptor_type d,
@@ -235,17 +231,13 @@ HWY_INLINE hn::Vec<p_descriptor_type> vectorized_chaining_score(
     const auto linear_penalty = [&df, &gap_length, &gap_penalty, &deviation_f, &skip_penalty] {
         if constexpr (p_has_skip_penalty) {
             const auto gap_length_f = hn::ConvertTo(df, gap_length);
-            // Same source ordering as scalar:
-            // gap_penalty * diagonal_deviation
-            //     + skip_penalty * gap_length.
+            // Keep the scalar formula's order when combining the two linear penalties.
             return hn::MulAdd(
                 gap_penalty,
                 deviation_f,
                 hn::Mul(hn::Set(df, skip_penalty), gap_length_f));
         } else {
-            // The common benchmark policy uses an exact zero skip penalty.
-            // Selecting this specialization before the candidate loop avoids
-            // converting gap lengths to float and multiplying them by zero.
+            // A zero skip penalty removes the gap-length conversion and multiply.
             return hn::Mul(gap_penalty, deviation_f);
         }
     }();
@@ -262,12 +254,9 @@ HWY_INLINE hn::Vec<p_descriptor_type> vectorized_chaining_score(
     return hn::Sub(score, penalty_i);
 }
 
-/// @brief Loads predecessor fields and scores one specialized candidate batch.
-/// @tparam p_collect_stats Whether this instantiation records counters.
-/// @tparam p_full_batch Whether every physical lane contains a candidate.
-/// @tparam p_has_skip_penalty Whether skip-penalty arithmetic is enabled.
-/// @tparam p_descriptor_type Integer Highway descriptor type.
-/// @return Per-lane pair scores.
+/// @brief Load one predecessor batch and calculate its link scores.
+/// Full batches use ordinary loads. Tail batches mask unused lanes.
+/// The result also updates detailed counters when p_collect_stats is true.
 template<bool p_collect_stats, bool p_full_batch, bool p_has_skip_penalty, class p_descriptor_type>
 HWY_INLINE hn::Vec<p_descriptor_type> score_candidate_batch_specialized(
     p_descriptor_type d,
@@ -343,10 +332,8 @@ HWY_INLINE hn::Vec<p_descriptor_type> score_candidate_batch_specialized(
     return scores;
 }
 
-/// @brief Selects full or masked scoring for one candidate batch.
-/// @tparam p_collect_stats Whether this instantiation records counters.
-/// @tparam p_descriptor_type Integer Highway descriptor type.
-/// @return Per-lane pair scores.
+/// @brief Choose full or masked loads for a candidate batch.
+/// Return one link score per lane, including the configured skip penalty.
 template<bool p_collect_stats, class p_descriptor_type>
 HWY_INLINE hn::Vec<p_descriptor_type> score_candidate_batch(
     p_descriptor_type d,
@@ -385,11 +372,8 @@ HWY_INLINE hn::Vec<p_descriptor_type> score_candidate_batch(
         stats);
 }
 
-/// @brief Scores a single candidate through the masked vector kernel.
-/// @tparam p_collect_stats Whether this instantiation records counters.
-/// @tparam p_has_skip_penalty Whether skip-penalty arithmetic is enabled.
-/// @tparam p_descriptor_type Integer Highway descriptor type.
-/// @return Pair score or the invalid-score sentinel.
+/// @brief Score one candidate with the same SIMD arithmetic as a full batch.
+/// Use one active lane and return its score, or the invalid-score sentinel.
 template<bool p_collect_stats, bool p_has_skip_penalty = true, class p_descriptor_type>
 [[nodiscard]] std::int32_t score_one_candidate(
     p_descriptor_type d,
@@ -410,12 +394,9 @@ template<bool p_collect_stats, bool p_has_skip_penalty = true, class p_descripto
     return lanes[0];
 }
 
-/// @brief Finds the largest-index maximum score in a bounded interval.
-/// @tparam p_collect_stats Whether this instantiation records counters.
-/// @tparam p_descriptor_type Integer Highway descriptor type.
-/// @param begin Inclusive score index.
-/// @param end Exclusive score index.
-/// @return Largest index whose score is maximal, or negative for an empty interval.
+/// @brief Find the highest-scoring anchor in [begin, end).
+/// Equal scores choose the largest index, matching a newest-first scalar scan.
+/// Return -1 when the interval is empty.
 template<bool p_collect_stats, class p_descriptor_type>
 [[nodiscard]] std::int32_t exact_global_best(
     p_descriptor_type d,
@@ -464,8 +445,7 @@ template<bool p_collect_stats, class p_descriptor_type>
         hn::Eq(lane_best_scores, maximum_score),
         lane_best_indices,
         hn::Set(d, -1));
-    // Scalar scans descending and replaces only on strict improvement, so the
-    // largest index wins every score tie.
+    // A newest-first scalar scan keeps the largest index on a score tie.
     return hn::GetLane(hn::MaxOfLanes(d, tied_indices));
 }
 

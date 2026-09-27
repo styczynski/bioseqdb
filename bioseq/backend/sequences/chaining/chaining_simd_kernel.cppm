@@ -1,10 +1,10 @@
 /**
  * @file chaining_simd_kernel.cppm
- * @brief Stable entry and policy orchestration for SIMD DP chaining.
+ * @brief Select a SIMD chaining policy, score anchors, and recover chains.
  *
- * This generator input owns the public target slot. Companion source
- * partitions retain anchor preparation, forward recurrence, and backtracking
- * within the same fixed-target module graph.
+ * Highway generates an entry point for each supported CPU target from this
+ * module. The imported modules prepare anchors, score possible predecessors,
+ * and follow the chosen predecessors to produce chains.
  */
 module;
 
@@ -48,16 +48,16 @@ using bioseq::chaining::simd_chaining_status;
 
 namespace chaining_simd_detail {
 
-/// @brief Runs policy dispatch, forward scoring, and SIMD backtracking.
-/// @tparam p_collect_stats Whether hot-path counters are collected.
-/// @tparam p_descriptor_type Highway descriptor type for the selected target.
-/// @param d Active Highway descriptor.
-/// @param anchors Canonically ordered anchors to chain.
-/// @param params Scoring, distance, and policy parameters.
-/// @param chains_out Arena-backed destination for chain descriptors.
-/// @param reordered_anchors_out Arena-backed destination for anchors in chain order.
-/// @param stats Optional full execution counters.
-/// @param route_summary Optional lightweight route counters.
+/// @brief Score anchors with the requested SIMD policy and recover their chains.
+/// @tparam p_collect_stats Collect counters inside the scoring loops.
+/// @tparam p_descriptor_type Highway descriptor for the selected CPU target.
+/// @param d Descriptor that determines the SIMD lane type and count.
+/// @param anchors Anchors in canonical_anchor_less order.
+/// @param params Scoring rules, distance limits, and SIMD policy.
+/// @param chains_out Receives chain descriptors in arena storage.
+/// @param reordered_anchors_out Receives anchors grouped in chain order.
+/// @param stats Optional detailed execution counters.
+/// @param route_summary Optional counters collected without tracing each scoring step.
 template<bool p_collect_stats, class p_descriptor_type>
 void run_simd_chaining(
     p_descriptor_type d,
@@ -120,9 +120,8 @@ void run_simd_chaining(
                 "unknown SIMD chaining policy reached forward dispatch");
     }
     {
-        // Keep `backtrack_chains` attached to the rewritten local SIMD
-        // backtracker. A surrounding orchestration scope would preserve the
-        // label while timing unrelated work and could conceal a fallback.
+        // Time the SIMD backtracking call itself so this counter reports only
+        // the work that follows predecessors and writes chains.
         static const auto* backtrack_region_desc =
             bioseq::instrumentation::register_static_region("backtrack_chains");
         auto backtrack_region_scope =
@@ -144,19 +143,19 @@ void run_simd_chaining(
 }  // namespace chaining_simd_detail
 
 /**
- * @brief Runs named SIMD dynamic-programming chaining on the active target.
+ * @brief Chain sorted anchors using SIMD on the selected CPU target.
  *
- * Supplying stats is optional and does not alter the
- * requested policy. Unsupported inputs throw. This entry point never calls a
- * scalar scoring or backtracking implementation.
+ * Both scoring and backtracking use SIMD. Invalid settings, unsupported CPU
+ * targets, and inputs too large for the scratch arrays raise an error.
+ * Counters are optional.
  *
- * @param anchors Canonically ordered anchors to chain.
- * @param params Scoring, distance, and policy parameters.
- * @param chains_out Arena-backed destination for chain descriptors.
- * @param reordered_anchors_out Arena-backed destination for anchors in chain order.
- * @param stats Optional execution counters replaced with this call's values.
- * @param aggregate_stats Collect lightweight route summaries instead of hot-loop counters.
- * @throws simd_chaining_runtime_error If the policy, target shape, or workspace is unsupported.
+ * @param anchors Anchors in canonical_anchor_less order.
+ * @param params Scoring rules, distance limits, and SIMD policy.
+ * @param chains_out Receives chain descriptors in arena storage.
+ * @param reordered_anchors_out Receives anchors grouped in chain order.
+ * @param stats Optional counters, reset at the start of this call.
+ * @param aggregate_stats Collect a shorter set of counters when stats is supplied.
+ * @throws simd_chaining_runtime_error If the settings, CPU target, or scratch size are unsupported.
  */
 void chain_anchors_simd(
     std::span<const anchor> anchors,
@@ -244,8 +243,7 @@ void chain_anchors_simd(
                 ++stats->policy.bounded_batch_approximate_calls;
                 break;
             default:
-                // The policy was validated before all allocation/workspace
-                // checks, so this branch is intentionally unreachable.
+                // The earlier policy check rejects every value outside these two cases.
                 chaining_simd_detail::reject(
                     stats,
                     simd_chaining_status::invalid_policy,
