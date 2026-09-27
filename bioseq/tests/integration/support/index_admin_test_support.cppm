@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Provides metadata-admin fixtures shared by integration cases.
+ * @brief Shared fixtures for index administration tests.
  */
 module;
 #include <libpq-fe.h>
@@ -18,7 +18,7 @@ export namespace bioseq_int_tests::index_admin_test_support {
 /** Table used by metadata administration cases. */
 inline constexpr std::string_view k_table = "index_admin_t";
 
-/** Return the logical row number for the sole sequence column. */
+/** Return the column row number from a table containing exactly one row. */
 [[nodiscard]] long long only_column_row_number(
         const connection_test_context& ctx, std::string_view table) {
     return query_scalar_int(ctx, fmt::format(
@@ -26,7 +26,7 @@ inline constexpr std::string_view k_table = "index_admin_t";
         table, table));
 }
 
-/** Require and return one authenticated hash-major generation. */
+/** Check a ready hash-major generation and return its generation ID. */
 [[nodiscard]] long long require_ready_hash_major_generation(
         const connection_test_context& ctx,
         std::string_view table,
@@ -179,7 +179,7 @@ inline constexpr std::string_view k_table = "index_admin_t";
     return generation_id;
 }
 
-/** Require and return one ready fragment-minimizer generation. */
+/** Check a ready fragment-minimizer generation and return its generation ID. */
 [[nodiscard]] long long require_ready_fragment_minimizer_metadata(
         const connection_test_context& ctx,
         std::string_view table,
@@ -206,8 +206,7 @@ inline constexpr std::string_view k_table = "index_admin_t";
     REQUIRE(inspected[2].value() == std::to_string(target_bp));
     REQUIRE(inspected[3].value() == "15");
     REQUIRE(inspected[4].value() == "10");
-    // These storage-profile fields identify the fragment-minimizer image
-    // accepted by this inspector.
+    // Check the format revisions expected by this fragment-index inspector.
     REQUIRE(inspected[5].value() == "3");
     REQUIRE(inspected[6].value() == "2");
     REQUIRE(inspected[7].value()
@@ -217,7 +216,7 @@ inline constexpr std::string_view k_table = "index_admin_t";
     return generation_id;
 }
 
-/** Require the preload and scheduler state needed by DROP preflight cases. */
+/** Require Bioseq preloading and an attached scheduler supervisor before DROP tests. */
 void require_bioseq_shared_preload(const connection_test_context& ctx) {
     const auto preload_state = query_one(ctx,
         "SELECT EXISTS ("
@@ -234,14 +233,14 @@ void require_bioseq_shared_preload(const connection_test_context& ctx) {
     REQUIRE(preload_state[1].value() == "true");
 }
 
-/** Return the stable sequence literal used by DROP preservation probes. */
+/** Format the shared probe as DNA4/64 for data-preservation checks. */
 [[nodiscard]] std::string drop_preservation_probe_literal() {
     return format_literal(
         k_hoe_probe_sequence,
         seq_typmod{.alphabet = "dna4", .width = 64});
 }
 
-/** Captured catalog and hydration evidence for a preserved Bioseq source. */
+/** Catalog metadata and sequence rows read after a DROP attempt. */
 struct preserved_ready_bioseq_source_evidence {
     long long observed_oid{};
     long long bioseq_relation_count{};
@@ -249,16 +248,14 @@ struct preserved_ready_bioseq_source_evidence {
     rowset_t hydrated;
 };
 
-/** Capture catalog identity and hydrated rows for a preserved source. */
+/** Read the table identity, source metadata, and matching sequence rows. */
 [[nodiscard]] preserved_ready_bioseq_source_evidence
 capture_preserved_ready_bioseq_source(
         const connection_test_context& ctx,
         std::string_view table,
         const long long expected_oid) {
-    // A plain scan of a USING bioseq relation is not a row-preservation
-    // oracle: this AM intentionally emits tuples only for an mmsearch scan.
-    // Pin the original relation identity, then verify its published locator and
-    // physical fragment still exist before exercising real AM hydration.
+    // Check the original table identity and its published fragment metadata.
+    // Then use mmsearch to read the stored sequence bytes.
     const long long observed_oid = query_scalar_int(ctx, fmt::format(
         "SELECT to_regclass('{}')::oid::bigint;", table));
     const long long bioseq_relation_count = query_scalar_int(ctx, fmt::format(
@@ -280,8 +277,8 @@ capture_preserved_ready_bioseq_source(
 
     rowset_t hydrated;
     {
-        // The preservation probe is 29 bp.  Scope its explicit chain admission
-        // to hydration so the surrounding DROP-contract session is restored.
+        // Allow a short probe with one seed to match during this check.
+        // These settings are RESET when the scopes end.
         guc_scope minimum_score{
             ctx, "bioseq.aligner.chaining.minimum_score", "10"};
         guc_scope minimum_seed_count{
@@ -300,7 +297,7 @@ capture_preserved_ready_bioseq_source(
     };
 }
 
-/** Require captured source identity, locator metadata, and hydrated rows. */
+/** Check that the original table, ready source, and expected sequence row survived. */
 void require_preserved_ready_bioseq_source_evidence(
         const preserved_ready_bioseq_source_evidence& evidence,
         const long long expected_oid) {
@@ -325,7 +322,7 @@ void require_preserved_ready_bioseq_source_evidence(
     REQUIRE(hydrated[0][1].value() == k_hoe_probe_sequence);
 }
 
-/** Capture and require one preserved Bioseq source. */
+/** Read and check that the Bioseq table and its stored sequence survived. */
 void require_preserved_ready_bioseq_source(
         const connection_test_context& ctx,
         std::string_view table,

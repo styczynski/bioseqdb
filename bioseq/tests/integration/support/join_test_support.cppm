@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Provides fixtures and audits shared by Bioseq join integration cases.
+ * @brief Shared fixtures and plan checks for Bioseq joins.
  */
 module;
 #include <libpq-fe.h>
@@ -20,12 +20,12 @@ inline constexpr std::string_view k_hoe_join = "hoe_join";
 inline constexpr std::string_view k_hoe_join_left = "hoe_join_left";
 /** Right table used by cross-relation join fixtures. */
 inline constexpr std::string_view k_hoe_join_right = "hoe_join_right";
-/** Target table used by transformed-owner fixtures. */
+/** Target table for joins whose sequence operands are expressions. */
 inline constexpr std::string_view k_transformed_join_target = "transformed_join_target";
-/** Query table used by transformed-owner fixtures. */
+/** Query table for joins whose sequence operands are expressions. */
 inline constexpr std::string_view k_transformed_join_queries = "transformed_join_queries";
 
-/** Select deterministic scalar algorithms for transformed-owner scenarios. */
+/** Select scalar alignment algorithms for joins with transformed sequences. */
 void configure_transformed_join(connection_test_context& ctx) {
     exec_sql(ctx,
              "SET max_parallel_workers_per_gather = 0;"
@@ -37,7 +37,7 @@ void configure_transformed_join(connection_test_context& ctx) {
              "SET bioseq.aligner.chaining.minimum_score = 20;");
 }
 
-/** Seed target and nullable query rows used by transformed-owner scenarios. */
+/** Create alignment targets and a query table containing a NULL operand. */
 void seed_transformed_join_fixture(connection_test_context& ctx) {
     seed_hoe_fixture(ctx, k_transformed_join_target);
     exec_sql(ctx,
@@ -55,7 +55,7 @@ void seed_transformed_join_fixture(connection_test_context& ctx) {
     configure_transformed_join(ctx);
 }
 
-/** Return whether EXPLAIN exposes an executable residual mmsearch qualifier. */
+/** Check whether a standard plan filter or index condition still calls mmsearch. */
 [[nodiscard]] bool plan_has_executable_mmsearch(const std::vector<std::string>& plan) {
     constexpr std::array<std::string_view, 5u> executable_prefixes{"Filter: mmsearch",
                                                                    "Join Filter: mmsearch",
@@ -71,7 +71,7 @@ void seed_transformed_join_fixture(connection_test_context& ctx) {
     return false;
 }
 
-/** Require a plan to have one owner and no residual mmsearch copies. */
+/** Check that mmsearch has no duplicate owners or leftover executable conditions. */
 void require_owned_qual_audit(const std::vector<std::string>& plan) {
     constexpr std::array<std::string_view, 5u> properties{
         "Bioseq Owned RestrictInfo Path Copies",
@@ -89,7 +89,7 @@ void require_owned_qual_audit(const std::vector<std::string>& plan) {
     REQUIRE_FALSE(plan_has_executable_mmsearch(plan));
 }
 
-/** Observable libpq state from one lock-blocked concurrent update. */
+/** Results and lock-wait observations from a concurrent update. */
 struct async_update_outcome {
     /** Whether libpq accepted the asynchronous statement. */
     bool sent = false;
@@ -109,7 +109,7 @@ struct async_update_outcome {
     std::string error;
 };
 
-/** Run an update behind a held row lock and collect its asynchronous result. */
+/** Hold a row lock, start a competing update, then release the lock and collect its result. */
 [[nodiscard]] async_update_outcome run_locked_update(connection_test_context& blocker,
                                                      connection_test_context& worker,
                                                      connection_test_context& observer,
@@ -141,8 +141,8 @@ struct async_update_outcome {
         }
     }
 
-    /* Never leave the worker blocked if a precondition fails.  Commit before
-     * inspecting libpq results so the EvalPlanQual recheck can complete. */
+    /* Release the row lock before reading the worker result so PostgreSQL can
+     * recheck the updated row and finish the waiting statement. */
     exec_sql(blocker, "COMMIT;");
     if (!outcome.sent)
         return outcome;

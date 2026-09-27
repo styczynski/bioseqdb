@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Provides sequence-slicing acceptance fixtures and lifetime guards.
+ * @brief Fixtures for SQL sequence slicing, letter input, and database cleanup.
  */
 module;
 #include <cstdio>
@@ -16,17 +16,17 @@ import bioseq.tests.integration.support;
 
 export namespace bioseq_int_tests::lazy_sequence_slicing_acceptance_test_support {
 
-/// Best-effort cleanup for a database created by a raw libpq acceptance case.
+/// Try to remove a test database when this object leaves scope.
 class database_cleanup_guard {
 public:
-    /// Bind cleanup to an existing connection and DROP statement.
+    /// Borrow the connection and DROP statement until this object is destroyed.
     database_cleanup_guard(PGconn* connection, const char* drop_sql) noexcept
         : connection_(connection), drop_sql_(drop_sql) {}
 
     database_cleanup_guard(const database_cleanup_guard&) = delete;
     database_cleanup_guard& operator=(const database_cleanup_guard&) = delete;
 
-    /// Execute the armed DROP statement during exceptional scope exit.
+    /// Run the DROP statement on scope exit unless cleanup has been released.
     ~database_cleanup_guard() noexcept {
         if (!active_ || connection_ == nullptr || drop_sql_ == nullptr) {
             return;
@@ -52,7 +52,7 @@ struct prepared_letter_result {
     std::optional<std::string> value;
 };
 
-/// Execute one prepared letter parameter with caller-selected wire format.
+/// Prepare and execute a letter parameter in the requested input wire format.
 [[nodiscard]] prepared_letter_result execute_prepared_letter_parameter(
     PGconn* connection,
     const char* name,
@@ -136,7 +136,7 @@ void write_letter_binary_copy_variant(
     REQUIRE(output.good());
 }
 
-/// Repeat the supplied alphabet ranks to an exact sequence length.
+/// Repeat alphabet symbols until the sequence reaches the requested length.
 [[nodiscard]] std::string sequence_acceptance_rank_pattern(
     const std::string& alphabet_symbols,
     std::size_t length) {
@@ -149,7 +149,8 @@ void write_letter_binary_copy_variant(
     return result;
 }
 
-/// Verify lazy concatenation packing for every boundary in one profile.
+/// Check every split of sequences up to one packed unit plus one symbol.
+/// Compare lazy concatenation with direct encoding, both before and after storage.
 void require_sequence_acceptance_sql_packing_profile(
     connection_test_context& ctx,
     const char* alphabet,
@@ -246,7 +247,7 @@ void require_sequence_acceptance_sql_packing_profile(
     REQUIRE(flattened[3] == "t");
 }
 
-/// Build the deterministic high-entropy motif used by binding tests.
+/// Generate a repeatable 128 bp DNA4 sequence for match-binding tests.
 [[nodiscard]] std::string sequence_acceptance_match_binding_motif() {
     constexpr std::string_view alphabet = "ACGT";
     std::string sequence(128u, 'A');
