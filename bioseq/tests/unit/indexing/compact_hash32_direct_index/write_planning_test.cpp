@@ -1,6 +1,6 @@
 /**
  * @file write_planning_test.cpp
- * @brief Tests direct hash32 image planning and replay-safe writing.
+ * @brief Checks compact-index size plans and rejects changed input during the write pass.
  */
 
 #include <cstring>

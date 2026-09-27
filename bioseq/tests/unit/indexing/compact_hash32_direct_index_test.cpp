@@ -1,6 +1,6 @@
 /**
  * @file compact_hash32_direct_index_test.cpp
- * @brief Tests direct hash32 wire formats and bounded or exact open validation.
+ * @brief Checks direct-index formats, corruption detection and opening headers without reading payloads.
  */
 
 #include <cstring>
