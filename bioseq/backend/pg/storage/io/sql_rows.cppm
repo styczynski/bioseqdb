@@ -1,6 +1,6 @@
 /**
  * @file sql_rows.cppm
- * @brief SQL composite-row layouts for streamed sequence loading.
+ * @brief SQL type for mapping input fields to columns during sequence loading.
  */
 module;
 
@@ -15,13 +15,13 @@ import bioseq.codegen.sql.annotation_model;
 
 export namespace bioseq::storage::load_pg::composite_rows {
 
-/// User column name and input-source mapping for a streamed load.
+/// A destination column and the input field used to fill it.
 struct [[bioseq_sql::type({
             .schema = bioseq::sql::fixed_schema<"bioseq">,
         })]] column_mapping {
     /// Destination column name as PostgreSQL text, or SQL NULL.
     std::optional<text*> column_name;
-    /// Identifier-parser source expression as PostgreSQL text, or SQL NULL.
+    /// Input header field or expression to read, stored as PostgreSQL text or SQL NULL.
     std::optional<text*> data_source;
 };
 

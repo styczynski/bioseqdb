@@ -1,10 +1,10 @@
 /**
  * @file stream_dispatch.cppm
- * @brief Dispatches packed sequence streams by alphabet, storage width, and file format.
+ * @brief Choose the sequence reader and stream its records into PostgreSQL storage.
  */
 module;
-// Highway and PostgreSQL declarations precede the module unit because this
-// owner imports Highway-bearing module graphs.
+// Include Highway and PostgreSQL headers before the named module declaration.
+// Imported sequence modules also depend on these declarations.
 #include <bioseq/pg_compat.h>
 #include <boost/container/small_vector.hpp>
 #include <boost/integer.hpp>
@@ -30,7 +30,7 @@ extern "C" {
 #include "access/relation.h"     // index_open / index_close
 #include "access/table.h"        // table_open / table_close
 #include "access/xact.h"         // CommandCounterIncrement
-#include "catalog/namespace.h"   // (parity w/ sample_table_udf; relid arrives as regclass)
+#include "catalog/namespace.h"   
 #include "catalog/pg_type_d.h"   // TEXTOID, VARCHAROID, BPCHAROID
 #include "commands/sequence.h"   // ResetSequenceCaches
 #include "executor/executor.h"   // ExecConstraints, ExecInitExpr, ExecEvalExpr
@@ -42,16 +42,16 @@ extern "C" {
 #include "utils/lsyscache.h"     // getTypeInputInfo, get_typtype, getBaseType
 #include "utils/rel.h"           // RelationGetDescr
 #include "utils/resowner.h"      // CurrentResourceOwner, TopTransactionResourceOwner
-#include "utils/snapmgr.h" // PushActiveSnapshot/PopActiveSnapshot/GetTransactionSnapshot, ActiveSnapshotSet
+#include "utils/snapmgr.h" // Snapshot stack operations.
 #include "utils/typcache.h" // lookup_rowtype_tupdesc
 
 #include "fmgr.h"
 #include "rewrite/rewriteHandler.h" // build_column_default
 }
-// flush_relation_write_state declarations
+
 export module bioseq.postgres.storage.io:stream_dispatch;
 
-import bioseq.common.logging; // bioseq_log<logging_level::debug>(bioseq::settings::diagnostics::logging::enabled)
+import bioseq.common.logging; // Load progress logging.
 import bioseq.codegen.sql.annotation_model;
 import bioseq.postgres.support;
 import bioseq.postgres.support.datums;
@@ -62,40 +62,35 @@ import bioseq.storage.size; // sequence_size_t
 import bioseq.storage.layout;
 import bioseq.common.templating.runtime_dispatch; // dispatch_exact_value_or_default
 import bioseq.common.templating.value_sequence;
-import bioseq.sequences;                       // compact_sequence_stdc_type_params::decode,
-                                               //   dispatch_storage_unit_byte_width, traits
-import bioseq.postgres.types.compact_sequence; // bioseq::pg_types::seq, pgseq_supported_alphabets
-import bioseq.postgres.storage.manager; // alloc_locator_stub_in, alloc_seq_caches, seq_caches,
-                                        //   read_max_sub_table_cap_bytes,
-//   k_sequence_fragment_storage_units, sequence_stream_writer,
-//   flush_seq_cache_write_states, sequence_locator
-import bioseq.postgres.table.io; // write_column_row, get_column_write_per_tuple_context
+import bioseq.sequences;                       // Sequence alphabets and packed storage types.
+                                               
+import bioseq.postgres.types.compact_sequence; // PostgreSQL sequence values and supported alphabets.
+import bioseq.postgres.storage.manager; // Sequence locators, fragment writers and relation caches.
+                                        
+
+import bioseq.postgres.table.io; // Column table row writes and per-row memory contexts.
 import bioseq.io.options;                      // sequence_file_format, reader_options
 import bioseq.io.file_kind;                    // detect_sequence_file_kind, sequence_file_kind
-import bioseq.io.reader;                       // stream_sequences_file, packed_sequence_chunk,
-                                               //   sample_sequence_headers
+import bioseq.io.reader;                       // Stream sequence chunks and sample input headers.
+                                               
 import bioseq.io.identifier_parser.formats;
-import bioseq.io.identifier_parser; // resolve_identifier_mapping, parse_and_route_header
+import bioseq.io.identifier_parser; // Map input header fields to destination columns.
 import bioseq.postgres.storage.metadata;
 import bioseq.postgres.storage.physical;
-// initialize_column_write_state +
-// pop_relation_column_write_state
-// (PostgreSQL support already imported above: bioseq::postgres::support::find_primary_key_oid)
+
 import bioseq.parallelism.mode;
 import bioseq.parallelism.concepts;
 import bioseq.parallelism.pool;
 import bioseq.postgres.scheduler.supervisor;
 import :typed_row_writer;
 
-// --------------------------------------------------------------------------
-// Bounded packed streaming and record loading
-// --------------------------------------------------------------------------
+// Load records one packed chunk at a time.
 
-/** @brief Streams packed records directly into sequence storage and parent rows. */
+/** @brief Write sequence chunks as fragments, then store each record's parent row. */
 /// @tparam p_alphabet Logical sequence alphabet.
 /// @tparam p_column_byte_width Packed storage-unit width in bytes.
 template <sequence_alphabet p_alphabet, std::size_t p_column_byte_width> struct load_stream_sink {
-    /// Column-specific packed sequence configuration.
+    /// Alphabet and packed unit selected by the target column.
     using col_cfg =
         sequence_custom_alphabet<p_alphabet,
                                  typename boost::uint_t<p_column_byte_width * 8>::least>;
@@ -116,12 +111,12 @@ template <sequence_alphabet p_alphabet, std::size_t p_column_byte_width> struct 
     std::string header;
     /// Current logical sequence length in letters.
     sequence_size_t total_bp = 0;
-    /// Incremental fragment writer for the current record.
+    /// Writer that stores fragments as this record arrives.
     bioseq::storage::sequence_stream_writer writer;
 
-    /// Start one record and reserve its source epoch.
+    /// Copy the header and start storing a new sequence version.
     /// @param h Header bytes copied into this sink.
-    /// @throws PostgreSQL ERROR when the header or writer setup is invalid.
+    /// @throws postgres_error If the header is too long or writer setup fails.
     void begin_record(std::string_view h) {
         if (h.size() > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
             raise_load_error_as_cpp(ERRCODE_PROGRAM_LIMIT_EXCEEDED,
@@ -142,9 +137,9 @@ template <sequence_alphabet p_alphabet, std::size_t p_column_byte_width> struct 
                      ctx.caches);
     }
 
-    /// Append one packed reader chunk.
-    /// @param c Borrowed packed units with logical length measured in letters.
-    /// @throws PostgreSQL ERROR when fragment persistence fails.
+    /// Append packed sequence data to the fragment writer.
+    /// @param c Borrowed packed units and their logical length in letters.
+    /// @throws postgres_error If a fragment write fails.
     void chunk(bioseq::io::packed_sequence_chunk<col_unit_t> c) {
         const std::size_t bytes =
             ((static_cast<std::size_t>(c.logical_length) + col_lpu - 1) / col_lpu) *
@@ -154,8 +149,8 @@ template <sequence_alphabet p_alphabet, std::size_t p_column_byte_width> struct 
         total_bp += c.logical_length;
     }
 
-    /// Finish fragment persistence, write the parent row, and publish the source.
-    /// @throws PostgreSQL ERROR when finalization or parent-row insertion fails.
+    /// Finish the fragments and write the parent row before marking its source ready.
+    /// @throws postgres_error If finishing the sequence, writing the row or publication fails.
     void end_record() {
         const std::uint16_t last_pad =
             (total_bp == 0) ? 0
@@ -174,10 +169,10 @@ template <sequence_alphabet p_alphabet, std::size_t p_column_byte_width> struct 
     }
 };
 
-/** @brief Owning producer-to-consumer message for one stream callback. */
-/// @tparam p_storage_unit Packed unit copied across the worker boundary.
+/** @brief A queued record event that owns its header or packed sequence data. */
+/// @tparam p_storage_unit Packed unit passed from the parser to the writer.
 template <typename p_storage_unit> struct queued_load_event {
-    /// Callback operation represented by this message.
+    /// Action the writer performs for this event.
     enum class kind_t : std::uint8_t {
         /// Begin a record using `header`.
         begin_record,
@@ -195,24 +190,24 @@ template <typename p_storage_unit> struct queued_load_event {
     std::vector<p_storage_unit> words{};
     /// Logical letters represented by `words`.
     std::uint64_t bp_count = 0;
-    /// Reader callback's terminal-chunk marker.
+    /// Whether the reader marked this as the final chunk of a record.
     bool end_of_record = false;
 };
 
-/** @brief Bounded blocking queue used by the overlapped load path. */
+/** @brief Pass parsed chunks to the PostgreSQL writer through a queue with limited capacity. */
 /// @tparam p_storage_unit Packed unit owned by each queued event.
 ///
-/// Push, pop, and close are safe to call from different threads. Queue storage
-/// owns every event until it is moved to the consumer.
+/// Push, pop and close may run on different threads. Events own their data
+/// until pop transfers them to the writer.
 template <typename p_storage_unit> class load_event_queue {
   public:
-    /// Construct a queue with a fixed positive event capacity.
-    /// @param capacity Maximum number of queued events.
+    /// Create a queue with a fixed event limit.
+    /// @param capacity Maximum queued events. Must be greater than zero.
     explicit load_event_queue(std::size_t capacity) : capacity_(capacity) {}
 
-    /// Block until an event can be enqueued or the queue is closed.
-    /// @param event Event moved into queue storage on success.
-    /// @return `false` when close prevents the enqueue.
+    /// Wait for queue space, then take ownership of an event.
+    /// @param event Event moved into the queue on success.
+    /// @return False if the queue closes before the event can be added.
     bool push(queued_load_event<p_storage_unit>&& event) {
         std::unique_lock<std::mutex> lock(mu_);
         not_full_.wait(lock, [this] { return closed_ || queue_.size() < capacity_; });
@@ -224,9 +219,9 @@ template <typename p_storage_unit> class load_event_queue {
         return true;
     }
 
-    /// Block until an event is available or a closed queue is drained.
-    /// @param event Receives the next owning event on success.
-    /// @return `false` when no event remains after closure.
+    /// Wait for the next event or the end of the stream.
+    /// @param event Receives ownership of the next queued event.
+    /// @return False once the closed queue is empty.
     bool pop(queued_load_event<p_storage_unit>& event) {
         std::unique_lock<std::mutex> lock(mu_);
         not_empty_.wait(lock, [this] { return closed_ || !queue_.empty(); });
@@ -260,13 +255,13 @@ template <typename p_storage_unit> class load_event_queue {
     bool closed_ = false;
 };
 
-/** @brief Signals that the consumer closed the load queue after a failure. */
+/** @brief Stop the parser after the writer closes the queue on failure. */
 struct load_queue_closed {};
 
-/** @brief Closes a load queue when the producer task leaves its scope. */
+/** @brief Close the queue when the parser task exits, including after an error. */
 /// @tparam p_storage_unit Packed unit stored by the queue.
 template <typename p_storage_unit> struct load_queue_close_scope {
-    /// Queue that outlives this guard.
+    /// Queue that outlives this cleanup object.
     load_event_queue<p_storage_unit>& queue;
     /// Close the queue on every producer exit path.
     ~load_queue_close_scope() noexcept {
@@ -274,7 +269,7 @@ template <typename p_storage_unit> struct load_queue_close_scope {
     }
 };
 
-/** @brief Copies parser callbacks into bounded queue events. */
+/** @brief Turn parser callbacks into events that own their data until the writer reads them. */
 /// @tparam p_alphabet Logical sequence alphabet.
 /// @tparam p_column_byte_width Packed storage-unit width in bytes.
 template <sequence_alphabet p_alphabet, std::size_t p_column_byte_width>
@@ -282,15 +277,15 @@ struct queued_load_stream_sink {
     using col_cfg =
         sequence_custom_alphabet<p_alphabet,
                                  typename boost::uint_t<p_column_byte_width * 8>::least>;
-    /// Packed storage-unit type copied into queue events.
+    /// Packed storage-unit type carried by queue events.
     using col_unit_t = typename col_cfg::storage_unit;
 
     /// Thread-safe queue that outlives this producer sink.
     load_event_queue<col_unit_t>& queue;
 
-    /// Enqueue one event or signal consumer-side closure.
-    /// @param event Owning event transferred to the queue.
-    /// @throws load_queue_closed When the consumer has closed the queue.
+    /// Wait to add an event, or stop if the writer has closed the queue.
+    /// @param event Event transferred to the queue on success.
+    /// @throws load_queue_closed If the queue has closed.
     void push_or_closed(queued_load_event<col_unit_t>&& event) {
         if (!queue.push(std::move(event))) {
             throw load_queue_closed{};
@@ -317,10 +312,10 @@ struct queued_load_stream_sink {
         push_or_closed(std::move(event));
     }
 
-    /// Enqueue an already owned packed chunk.
-    /// @param words Packed units transferred into the event.
-    /// @param bp_count Logical letters represented by `words`.
-    /// @param end_of_record Reader callback's terminal-chunk marker.
+    /// Transfer a packed chunk to the queue without copying its buffer.
+    /// @param words Packed units moved into the event.
+    /// @param bp_count Number of sequence letters in words.
+    /// @param end_of_record Whether this is the record's final chunk.
     void chunk_owned(std::vector<col_unit_t>&& words, std::uint64_t bp_count, bool end_of_record) {
         queued_load_event<col_unit_t> event;
         event.kind = queued_load_event<col_unit_t>::kind_t::chunk;
@@ -330,7 +325,7 @@ struct queued_load_stream_sink {
         push_or_closed(std::move(event));
     }
 
-    /// Enqueue the record-completion callback.
+    /// Tell the writer that the current record is complete.
     void end_record() {
         queued_load_event<col_unit_t> event;
         event.kind = queued_load_event<col_unit_t>::kind_t::end_record;
@@ -338,18 +333,18 @@ struct queued_load_stream_sink {
     }
 };
 
-/** @brief Runs parsing and PostgreSQL writes as a bounded producer/consumer pair. */
-/// @tparam p_alphabet Logical sequence alphabet.
-/// @tparam p_column_byte_width Packed storage-unit width in bytes.
-/// @tparam p_file_format Compile-time FASTA or FASTQ reader format.
-/// @param ctx Active PostgreSQL load context used only on the caller thread.
-/// @param tuple_writer Parent-row sink used only on the caller thread.
-/// @param file_path Null-terminated path borrowed until the producer joins.
-/// @return Number of parent records written.
-/// @throws PostgreSQL ERROR for reader, producer, queue, or persistence failures.
-///
-/// The worker performs file parsing and owns queued copies. All PostgreSQL
-/// operations remain on the calling backend thread.
+/** @brief Parse on a worker while the PostgreSQL thread writes queued sequence chunks. */
+/// The queue limits how far parsing can run ahead of storage writes. After a
+/// write failure, close it and wait for the parser before rethrowing the error.
+/// PostgreSQL calls stay on the caller.
+/// @tparam p_alphabet Sequence alphabet.
+/// @tparam p_column_byte_width Packed unit width.
+/// @tparam p_file_format FASTA or FASTQ.
+/// @param ctx Caller-thread load context.
+/// @param tuple_writer Caller-thread row writer.
+/// @param file_path Path borrowed until parsing finishes.
+/// @return Complete records written.
+/// @throws postgres_error If parsing or writing fails.
 template <sequence_alphabet p_alphabet,
           std::size_t p_column_byte_width,
           bioseq::io::sequence_file_format p_file_format>
@@ -392,9 +387,8 @@ template <sequence_alphabet p_alphabet,
                     result_error = result.error();
                 }
             } catch (const load_queue_closed&) {
-                // The consumer raised a checked PostgreSQL/C++ exception and closed
-                // the queue. Leave producer_exception empty so that exact exception
-                // remains authoritative after the producer joins.
+                // Queue closure means the writer already has an error to report.
+                // Let the caller rethrow it after this parser task finishes.
             } catch (const std::exception& ex) {
                 producer_exception = ex.what();
             } catch (...) {
@@ -455,15 +449,15 @@ template <sequence_alphabet p_alphabet,
     return records;
 }
 
-/** @brief Streams records through the configured direct or overlapped path. */
-/// @tparam p_alphabet Logical sequence alphabet.
-/// @tparam p_column_byte_width Packed storage-unit width in bytes.
-/// @tparam p_file_format Compile-time FASTA or FASTQ reader format.
+/** @brief Stream records, using a parser worker when overlap is enabled and available. */
+/// @tparam p_alphabet Sequence alphabet.
+/// @tparam p_column_byte_width Packed unit width in bytes.
+/// @tparam p_file_format FASTA or FASTQ reader.
 /// @param ctx Active load context.
-/// @param tuple_writer Parent-row sink.
-/// @param file_path Null-terminated input path borrowed for the call.
-/// @return Number of parent records written.
-/// @throws PostgreSQL ERROR for reader or persistence failures.
+/// @param tuple_writer Parent-row writer.
+/// @param file_path Input path borrowed until the call returns.
+/// @return Number of complete records written.
+/// @throws postgres_error If parsing or writing fails.
 template <sequence_alphabet p_alphabet,
           std::size_t p_column_byte_width,
           bioseq::io::sequence_file_format p_file_format>
@@ -514,19 +508,17 @@ load_records(load_context& ctx, pg_identifier_writer& tuple_writer, const char* 
     return records;
 }
 
-// --------------------------------------------------------------------------
-// Runtime-to-compile-time fan-out (alphabet × width × file type)
-// --------------------------------------------------------------------------
+// Choose the reader for the column alphabet, packed unit width and file format.
 
 namespace load_dispatch {
 namespace tpl = bioseq::common::templating;
 
-/** @brief Adapts one compile-time alphabet/width pair to format dispatch. */
+/** @brief Call the file reader for a fixed alphabet and packing width. */
 /// @tparam p_alphabet Logical sequence alphabet.
 /// @tparam p_column_byte_width Packed storage-unit width in bytes.
 template <class p_alphabet, std::size_t p_column_byte_width> struct file_format_adapter {
-    /// Invoke the reader selected by a compile-time file-format tag.
-    /// @tparam p_file_format FASTA or FASTQ reader format.
+    /// Load records using the selected FASTA or FASTQ reader.
+    /// @tparam p_file_format Input file format.
     /// @return Number of records written.
     template <bioseq::io::sequence_file_format p_file_format>
     [[gnu::always_inline]] std::int64_t
@@ -539,7 +531,7 @@ template <class p_alphabet, std::size_t p_column_byte_width> struct file_format_
     }
 };
 
-/** @brief Resolves a runtime file format for one alphabet/width pair. */
+/** @brief Choose FASTA or FASTQ reading for a fixed alphabet and packing width. */
 /// @tparam p_alphabet Logical sequence alphabet.
 /// @tparam p_column_byte_width Packed storage-unit width in bytes.
 template <class p_alphabet, std::size_t p_column_byte_width> struct format_dispatch {
@@ -549,7 +541,7 @@ template <class p_alphabet, std::size_t p_column_byte_width> struct format_dispa
     bioseq::io::sequence_file_format format;
     std::int64_t& out;
 
-    /// Dispatch `format` and store the resulting record count in `out`.
+    /// Run the selected file reader and store its record count in out.
     void run() const {
         file_format_adapter<p_alphabet, p_column_byte_width> adapter{};
         out = tpl::dispatch_exact_value_or_default<std::int64_t,
@@ -566,7 +558,7 @@ template <class p_alphabet, std::size_t p_column_byte_width> struct format_dispa
     }
 };
 
-/** @brief Resolves the encoded storage width for one alphabet. */
+/** @brief Continue reader selection with the column's packing width. */
 /// @tparam p_alphabet Logical sequence alphabet.
 template <class p_alphabet> struct width_dispatch {
     load_context& ctx;
@@ -575,15 +567,15 @@ template <class p_alphabet> struct width_dispatch {
     bioseq::io::sequence_file_format format;
     std::int64_t& out;
 
-    /// Continue dispatch for one supported byte width.
-    /// @tparam p_column_byte_width Packed storage-unit width in bytes.
+    /// Choose the file reader for this packed unit width.
+    /// @tparam p_column_byte_width Packed unit width in bytes.
     template <std::size_t p_column_byte_width> void operator()() const {
         format_dispatch<p_alphabet, p_column_byte_width>{ctx, tuple_writer, file_path, format, out}
             .run();
     }
 };
 
-/** @brief Resolves the encoded sequence alphabet before width dispatch. */
+/** @brief Continue reader selection with the column's sequence alphabet. */
 struct alphabet_dispatch {
     load_context& ctx;
     pg_identifier_writer& tuple_writer;
@@ -591,8 +583,8 @@ struct alphabet_dispatch {
     bioseq::io::sequence_file_format format;
     std::int64_t& out;
 
-    /// Continue dispatch for one registered alphabet.
-    /// @tparam p_alphabet Logical sequence alphabet.
+    /// Select the packing width for this alphabet.
+    /// @tparam p_alphabet Sequence alphabet.
     template <class p_alphabet> void operator()() const {
         dispatch_storage_unit_byte_width(
             ctx.cols.byte_width,
@@ -601,13 +593,13 @@ struct alphabet_dispatch {
 };
 } // namespace load_dispatch
 
-/** @brief Dispatches the resolved alphabet, storage width, and file format once. */
-/// @param ctx Active load context containing resolved sequence encoding.
-/// @param tuple_writer Parent-row sink.
-/// @param file_path Null-terminated input path borrowed for the call.
-/// @param kind Detected runtime file kind.
-/// @return Number of parent records written.
-/// @throws PostgreSQL ERROR for unsupported encoding, reader, or persistence failures.
+/** @brief Select a reader for the column encoding and input format, then load the file. */
+/// @param ctx Load context with the target alphabet and packing width.
+/// @param tuple_writer Parent-row writer.
+/// @param file_path Input path borrowed until the call returns.
+/// @param kind Detected file format and compression information.
+/// @return Number of complete records written.
+/// @throws postgres_error If the encoding is unsupported or parsing or writing fails.
 [[nodiscard]] std::int64_t dispatch_and_stream(load_context& ctx,
                                                pg_identifier_writer& tuple_writer,
                                                const char* file_path,
