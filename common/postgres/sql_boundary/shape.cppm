@@ -1,10 +1,6 @@
-/*-------------------------------------------------------------------------
- *
- * common/postgres/sql_boundary/shape.cppm
- *
- * Owning result-shape markers used by generated PostgreSQL boundaries.
- *
- *-------------------------------------------------------------------------
+/**
+ * @file common/postgres/sql_boundary/shape.cppm
+ * @brief C++ containers for rows returned by generated SQL functions.
  */
 module;
 
@@ -17,7 +13,7 @@ export module bioseq.postgres.sql_boundary:shape;
 
 export namespace bioseq::postgres::support {
 
-/** PostgreSQL result shape owned by a generated callback. */
+/** The SQL result form selected by a generated function wrapper. */
 enum class result_shape {
     set_of,            ///< A SETOF scalar result.
     table,             ///< A RETURNS TABLE row set.
@@ -25,10 +21,10 @@ enum class result_shape {
 };
 
 /**
- * Move-only owning rows for one PostgreSQL result shape.
+ * Own SQL result rows in a move-only container.
  *
- * @tparam p_element_type C++ value stored for each PostgreSQL row.
- * @tparam p_shape PostgreSQL result convention represented by the container.
+ * @tparam p_element_type C++ value for one result row.
+ * @tparam p_shape SQL result form used by the generated wrapper.
  */
 template<class p_element_type, result_shape p_shape>
 class result_rows final {
@@ -81,7 +77,7 @@ public:
         return rows_.size();
     }
 
-    /** Return whether no rows are stored. */
+    /** Return true when there are no rows. */
     [[nodiscard]] bool empty() const noexcept {
         return rows_.empty();
     }

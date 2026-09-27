@@ -1,10 +1,6 @@
-/*-------------------------------------------------------------------------
- *
- * common/postgres/sql_boundary/scalar_conversion.cppm
- *
- * Closed scalar conversion surface used by generated fmgr entrypoints.
- *
- *-------------------------------------------------------------------------
+/**
+ * @file common/postgres/sql_boundary/scalar_conversion.cppm
+ * @brief Convert SQL arguments and results between PostgreSQL Datums and C++ values.
  */
 module;
 
@@ -41,7 +37,7 @@ import :owning_values;
 
 export namespace bioseq::postgres::support {
 
-/** Invalid conversion between a PostgreSQL Datum and an owning C++ value. */
+/** A SQL argument or result cannot be converted to the requested C++ type. */
 class scalar_conversion_error final : public std::runtime_error {
 public:
     using std::runtime_error::runtime_error;
@@ -51,7 +47,7 @@ public:
 
 export namespace bioseq::postgres::support::detail {
 
-/** Largest payload representable by a PostgreSQL varlena allocation. */
+/** Largest payload this converter can allocate after the varlena header. */
 inline constexpr std::size_t maximum_varlena_payload_size =
     static_cast<std::size_t>(MaxAllocSize - VARHDRSZ)
         < static_cast<std::size_t>(
@@ -60,7 +56,7 @@ inline constexpr std::size_t maximum_varlena_payload_size =
     : static_cast<std::size_t>(
           std::numeric_limits<int>::max() - VARHDRSZ);
 
-/** Validate that an fmgr call contains one zero-based argument position. */
+/** Reject a missing call frame or an argument index outside its argument list. */
 inline void require_argument(
         FunctionCallInfo call,
         int argument_index) {
@@ -75,7 +71,7 @@ inline void require_argument(
     }
 }
 
-/** Datum codec specialized for each supported scalar C++ type. */
+/** Conversions to and from Datum for each supported C++ scalar type. */
 template<class p_scalar_type>
 struct scalar_codec;
 
@@ -163,7 +159,7 @@ struct scalar_codec<Oid> final {
     }
 };
 
-/** Codec preserving finite and infinite PostgreSQL timestamptz values. */
+/** Convert timestamptz values while preserving positive and negative infinity. */
 template<>
 struct scalar_codec<timestamp_with_time_zone> final {
     [[nodiscard]] static timestamp_with_time_zone read(
@@ -214,7 +210,7 @@ struct scalar_codec<timestamp_with_time_zone> final {
     }
 };
 
-/** Identity codec for already encoded Datums. */
+/** Pass an already encoded Datum through unchanged. */
 template<>
 struct scalar_codec<Datum> final {
     [[nodiscard]] static Datum read(Datum value) noexcept {
@@ -226,7 +222,7 @@ struct scalar_codec<Datum> final {
     }
 };
 
-/** Borrowed C-string Datum codec. */
+/** Convert a borrowed C-string pointer to or from Datum without copying it. */
 template<>
 struct scalar_codec<const char*> final {
     [[nodiscard]] static const char* read(Datum value) noexcept {
@@ -238,7 +234,7 @@ struct scalar_codec<const char*> final {
     }
 };
 
-/** Mutable borrowed C-string Datum codec. */
+/** Convert a borrowed, mutable C-string pointer without copying its bytes. */
 template<>
 struct scalar_codec<char*> final {
     [[nodiscard]] static char* read(Datum value) noexcept {
@@ -250,7 +246,7 @@ struct scalar_codec<char*> final {
     }
 };
 
-/** Borrowed PostgreSQL StringInfo Datum codec. */
+/** Convert a borrowed StringInfo pointer without copying its buffer. */
 template<>
 struct scalar_codec<StringInfo> final {
     [[nodiscard]] static StringInfo read(Datum value) noexcept {
@@ -263,9 +259,9 @@ struct scalar_codec<StringInfo> final {
 };
 
 /**
- * text, varchar, and bytea share PostgreSQL's varlena C representation.
- * Generated call sites retain their distinct SQL identities when selecting
- * an owning or borrowed conversion.
+ * Borrow a varlena pointer for text, varchar or bytea. These SQL types share
+ * the same C representation, while generated call sites keep their SQL types
+ * distinct. This conversion neither copies nor detoasts the value.
  */
 template<>
 struct scalar_codec<text*> final {
@@ -278,7 +274,7 @@ struct scalar_codec<text*> final {
     }
 };
 
-/** Borrowed pointer Datum codec for PostgreSQL INTERNAL values. */
+/** Pass a borrowed pointer to or from a PostgreSQL INTERNAL value. */
 template<>
 struct scalar_codec<void*> final {
     [[nodiscard]] static void* read(Datum value) noexcept {
@@ -290,7 +286,7 @@ struct scalar_codec<void*> final {
     }
 };
 
-/** Codec for the table access-method handler pseudo-argument marker. */
+/** Ignore the table-handler pseudo-argument and encode its marker as zero. */
 template<>
 struct scalar_codec<table_access_method_handler> final {
     [[nodiscard]] static table_access_method_handler read(
@@ -306,7 +302,7 @@ struct scalar_codec<table_access_method_handler> final {
     }
 };
 
-/** Codec for the subscripting handler pseudo-argument marker. */
+/** Ignore the subscripting-handler pseudo-argument and encode its marker as zero. */
 template<>
 struct scalar_codec<subscript_handler> final {
     [[nodiscard]] static subscript_handler read(
@@ -322,7 +318,7 @@ struct scalar_codec<subscript_handler> final {
     }
 };
 
-/** Borrowed table access-method routine pointer codec. */
+/** Pass a borrowed table access-method callback table through a Datum. */
 template<>
 struct scalar_codec<const TableAmRoutine*> final {
     [[nodiscard]] static const TableAmRoutine* read(
@@ -337,7 +333,7 @@ struct scalar_codec<const TableAmRoutine*> final {
     }
 };
 
-/** Codec for PostgreSQL's fixed-width NameData value. */
+/** Copy PostgreSQL NameData values, allocating SQL storage when writing. */
 template<>
 struct scalar_codec<NameData> final {
     [[nodiscard]] static NameData read(Datum value) noexcept {
@@ -353,7 +349,7 @@ struct scalar_codec<NameData> final {
     }
 };
 
-/** C++ type with a complete scalar Datum codec. */
+/** A C++ type with both read-from-Datum and write-to-Datum conversions. */
 template<class p_scalar_type>
 concept supported_scalar =
     requires(Datum datum, p_scalar_type value) {
@@ -371,17 +367,17 @@ struct is_optional<std::optional<p_element_type>> : std::true_type {
     using value_type = p_element_type;
 };
 
-/** std::optional specialization whose element has a scalar Datum codec. */
+/** An std::optional whose value type supports both Datum conversions. */
 template<class p_candidate_type>
 concept supported_optional_scalar =
     is_optional<p_candidate_type>::value
     && supported_scalar<
         typename is_optional<p_candidate_type>::value_type>;
 
-/** Own a detoasted PostgreSQL text copy when one was allocated. */
+/** Free a detoasted text copy on C++ scope exit when this object owns it. */
 class packed_text_owner final {
 public:
-    /** Retain a packed value and whether this owner must free it. */
+    /** Hold a packed value and record whether this owner must free it. */
     packed_text_owner(
             text* packed,
             bool owns_packed_copy) noexcept
@@ -415,11 +411,10 @@ private:
 };
 
 /**
- * Encode text without mutating an fmgr result slot.
- *
- * Row materialization uses this leaf for individual text fields. Keeping the
- * PostgreSQL allocation behind invoke_pg_as_cpp ensures that an ERROR is
- * translated before control returns to a scope that owns C++ row values.
+ * Copy a C++ string into a PostgreSQL text Datum for a scalar or row field.
+ * Leave the call's null flag unchanged. The allocation goes through
+ * invoke_pg_as_cpp so a PostgreSQL error becomes a C++ exception and row
+ * objects can be destroyed normally.
  */
 [[nodiscard]] inline Datum encode_text(
         const std::string& value) {
@@ -442,13 +437,10 @@ private:
 export namespace bioseq::postgres::support {
 
 /**
- * Copy one PostgreSQL text Datum into an owning C++ string.
- *
- * DatumGetTextPP is invoked behind the PostgreSQL ERROR bridge with a
- * trivially destructible capture.  If PostgreSQL materializes a packed
- * detoast copy, packed_text_owner frees that copy exactly once after the C++
- * string owns the bytes (including when string construction throws).  An
- * inline source Datum remains borrowed and is never freed here.
+ * Copy a text Datum into a C++ string.
+ * If PostgreSQL creates a detoasted copy, free it after copying the bytes or
+ * if string construction throws. Keep the original Datum untouched.
+ * PostgreSQL errors are converted to C++ exceptions before creating the owner.
  */
 [[nodiscard]] inline std::string decode_text(
         Datum source) {
@@ -468,17 +460,16 @@ export namespace bioseq::postgres::support {
 }
 
 /**
- * Call-scoped PostgreSQL array input.
- *
- * PostgreSQL may return either the original array or a detoasted working
- * copy. The guard releases only the latter after the typed owner returns.
+ * Keep a SQL array available during a generated function call.
+ * Free a detoasted copy on C++ scope exit. An array borrowed directly from the
+ * original Datum remains owned by PostgreSQL.
  */
 class array_argument final {
 public:
-    /** Construct an empty nullable-array view. */
+    /** Represent a SQL NULL array with no owned allocation. */
     array_argument() noexcept = default;
 
-    /** Retain a decoded array and record whether detoasting allocated it. */
+    /** Hold a decoded array and track whether detoasting allocated it. */
     array_argument(
             Datum source,
             ArrayType* value) noexcept
@@ -506,7 +497,7 @@ public:
         }
     }
 
-    /** Return the decoded non-null array pointer. */
+    /** Return the array pointer, or nullptr when this owner has no array. */
     [[nodiscard]] ArrayType* get() const noexcept {
         return value_;
     }
@@ -525,8 +516,8 @@ private:
 };
 
 /**
- * Decode one non-null SQL array and retain its detoast copy for the duration
- * of the generated owner call.
+ * Read a required array argument and keep any detoasted copy alive.
+ * Reject SQL NULL. The returned owner must outlive use of its array pointer.
  */
 [[nodiscard]] inline array_argument read_array_argument(
         FunctionCallInfo call,
@@ -544,8 +535,8 @@ private:
 }
 
 /**
- * Decode a nullable SQL array while retaining any detoast copy for the
- * duration of the generated owner call.
+ * Read an array argument, returning an empty owner for SQL NULL.
+ * Keep the returned owner alive while using any detoasted array copy.
  */
 [[nodiscard]] inline array_argument read_nullable_array_argument(
         FunctionCallInfo call,
@@ -565,7 +556,7 @@ private:
 
 export namespace bioseq::postgres::support::detail {
 
-/** Release one PostgreSQL allocation when this scope exits normally. */
+/** Free a PostgreSQL allocation on C++ scope exit, including exception unwinding. */
 class palloc_owner final {
 public:
     /** Take ownership of one palloc allocation. */
@@ -585,7 +576,7 @@ private:
     void* value_;
 };
 
-/** Copy a PostgreSQL JSONB Datum into canonical owning text. */
+/** Copy JSONB into a C++ string using PostgreSQL's JSON output format. */
 [[nodiscard]] inline jsonb_value decode_jsonb(Datum source) {
     char* const encoded = invoke_pg_as_cpp([source] {
         return DatumGetCString(
@@ -595,7 +586,7 @@ private:
     return jsonb_value{std::string{encoded}};
 }
 
-/** Parse canonical owning JSONB text into a PostgreSQL Datum. */
+/** Parse the stored JSON text with PostgreSQL to produce a JSONB Datum. */
 [[nodiscard]] inline Datum encode_jsonb(
         const jsonb_value& value) {
     const char* const encoded = value.encoded().c_str();
@@ -605,7 +596,7 @@ private:
     });
 }
 
-/** Copy an owning byte payload into a PostgreSQL BYTEA Datum. */
+/** Copy the owned bytes into a newly allocated SQL BYTEA value. */
 [[nodiscard]] inline Datum encode_bytea(
         const bytea_value& value) {
     if (value.bytes().size() > maximum_varlena_payload_size) {
@@ -633,7 +624,7 @@ private:
     return PointerGetDatum(encoded);
 }
 
-/** Copy a PostgreSQL BYTEA Datum into an owning byte payload. */
+/** Copy a SQL BYTEA value into a C++ byte vector. */
 [[nodiscard]] inline bytea_value decode_bytea(Datum source) {
     bytea* const packed = invoke_pg_as_cpp([source] {
         return DatumGetByteaPP(source);
@@ -650,7 +641,7 @@ private:
             begin + VARSIZE_ANY_EXHDR(packed)}};
 }
 
-/** Encode an owning int64 sequence as a one-dimensional bigint array. */
+/** Encode integers as a one-dimensional bigint array, or an empty SQL array. */
 [[nodiscard]] inline Datum encode_bigint_array(
         const bigint_array& value) {
     if (value.values().size()
@@ -683,7 +674,7 @@ private:
     return PointerGetDatum(encoded);
 }
 
-/** Encode PostgreSQL's three-part interval representation. */
+/** Copy the time, day and month fields into a SQL INTERVAL value. */
 [[nodiscard]] inline Datum encode_interval(
         const interval_value& value) {
     Interval* const encoded = invoke_pg_as_cpp([value] {
@@ -701,7 +692,7 @@ private:
 
 export namespace bioseq::postgres::support {
 
-/** Decode one required JSONB argument into an owning value. */
+/** Copy a JSONB argument into owned text, rejecting SQL NULL. */
 template<class p_requested_type>
     requires std::same_as<p_requested_type, jsonb_value>
 [[nodiscard]] inline p_requested_type read_argument(
@@ -715,7 +706,7 @@ template<class p_requested_type>
     return detail::decode_jsonb(call->args[argument_index].value);
 }
 
-/** Decode one nullable JSONB argument. */
+/** Copy a JSONB argument, returning std::nullopt for SQL NULL. */
 template<class p_requested_type>
     requires std::same_as<
         p_requested_type,
@@ -728,7 +719,7 @@ template<class p_requested_type>
     return read_argument<jsonb_value>(call, argument_index);
 }
 
-/** Decode one required BYTEA argument into an owning value. */
+/** Copy a BYTEA argument into owned bytes, rejecting SQL NULL. */
 template<class p_requested_type>
     requires std::same_as<p_requested_type, bytea_value>
 [[nodiscard]] inline p_requested_type read_argument(
@@ -742,7 +733,7 @@ template<class p_requested_type>
     return detail::decode_bytea(call->args[argument_index].value);
 }
 
-/** Decode one nullable BYTEA argument. */
+/** Copy a BYTEA argument, returning std::nullopt for SQL NULL. */
 template<class p_requested_type>
     requires std::same_as<
         p_requested_type,
@@ -755,7 +746,7 @@ template<class p_requested_type>
     return read_argument<bytea_value>(call, argument_index);
 }
 
-/** Decode one required PostgreSQL INTERVAL argument. */
+/** Copy an INTERVAL argument's fields, rejecting SQL NULL. */
 template<class p_requested_type>
     requires std::same_as<p_requested_type, interval_value>
 [[nodiscard]] inline p_requested_type read_argument(
@@ -775,7 +766,7 @@ template<class p_requested_type>
     };
 }
 
-/** Decode one nullable PostgreSQL INTERVAL argument. */
+/** Copy an INTERVAL argument, returning std::nullopt for SQL NULL. */
 template<class p_requested_type>
     requires std::same_as<
         p_requested_type,
@@ -788,7 +779,7 @@ template<class p_requested_type>
     return read_argument<interval_value>(call, argument_index);
 }
 
-/** Decode one required PostgreSQL tuple identifier. */
+/** Read a physical row address, rejecting SQL NULL or an invalid item pointer. */
 template<class p_requested_type>
     requires std::same_as<p_requested_type, tuple_identifier>
 [[nodiscard]] inline p_requested_type read_argument(
@@ -810,7 +801,7 @@ template<class p_requested_type>
     };
 }
 
-/** Decode one required scalar from an fmgr call. */
+/** Convert a required SQL argument, rejecting SQL NULL. */
 template<class p_scalar_type>
     requires detail::supported_scalar<p_scalar_type>
 [[nodiscard]] inline p_scalar_type read_argument(
@@ -825,7 +816,7 @@ template<class p_scalar_type>
         call->args[argument_index].value);
 }
 
-/** Decode one nullable scalar without inventing a sentinel value. */
+/** Convert a nullable SQL argument, using std::nullopt for SQL NULL. */
 template<class p_scalar_type>
     requires detail::supported_scalar<p_scalar_type>
 [[nodiscard]] inline std::optional<p_scalar_type> read_argument(
@@ -849,7 +840,7 @@ template<class p_scalar_type>
         call->args[argument_index].value);
 }
 
-/** Decode one supported optional scalar. */
+/** Read an optional scalar through its nullable argument conversion. */
 template<class p_requested_type>
     requires detail::supported_optional_scalar<p_requested_type>
 [[nodiscard]] inline p_requested_type read_argument(
@@ -861,7 +852,7 @@ template<class p_requested_type>
         std::type_identity<p_requested_type>{});
 }
 
-/** Decode one required text argument into an owning string. */
+/** Copy a text argument into a C++ string, rejecting SQL NULL. */
 template<class p_requested_type>
     requires std::same_as<p_requested_type, std::string>
 [[nodiscard]] inline p_requested_type read_argument(
@@ -875,7 +866,7 @@ template<class p_requested_type>
     return decode_text(call->args[argument_index].value);
 }
 
-/** Decode one nullable text argument into an owning string. */
+/** Copy a text argument, returning std::nullopt for SQL NULL. */
 template<class p_requested_type>
     requires std::same_as<
         p_requested_type,
@@ -888,13 +879,13 @@ template<class p_requested_type>
     return read_argument<std::string>(call, argument_index);
 }
 
-/** Construct the injected, non-SQL call-context parameter. */
+/** Give the C++ routine access to its SQL call without adding a SQL argument. */
 [[nodiscard]] inline function_call_context read_call_context(
         FunctionCallInfo call) noexcept {
     return function_call_context::from_call(call);
 }
 
-/** Encode one supported scalar result into the fmgr result slot. */
+/** Encode a scalar return value and mark the SQL result as non-null. */
 template<class p_scalar_type>
     requires detail::supported_scalar<
         std::remove_cvref_t<p_scalar_type>>
@@ -910,7 +901,7 @@ template<class p_scalar_type>
             std::forward<p_scalar_type>(value));
 }
 
-/** Encode one owning text result through PostgreSQL's error bridge. */
+/** Copy a C++ string into the SQL text result, with PostgreSQL errors bridged. */
 [[nodiscard]] inline Datum encode_result(
         FunctionCallInfo call,
         const std::string& value) {
@@ -919,7 +910,7 @@ template<class p_scalar_type>
     return encoded;
 }
 
-/** Return an ArrayType allocated by a typed owner. */
+/** Return an existing PostgreSQL array without copying it. */
 [[nodiscard]] inline Datum encode_result(
         FunctionCallInfo call,
         ArrayType* value) noexcept {
@@ -927,7 +918,7 @@ template<class p_scalar_type>
     return PointerGetDatum(value);
 }
 
-/** Encode one owning JSONB result. */
+/** Parse the owned JSON text and return it as SQL JSONB. */
 [[nodiscard]] inline Datum encode_result(
         FunctionCallInfo call,
         const jsonb_value& value) {
@@ -936,7 +927,7 @@ template<class p_scalar_type>
     return encoded;
 }
 
-/** Encode one owning BYTEA result. */
+/** Copy the owned bytes into the SQL BYTEA result. */
 [[nodiscard]] inline Datum encode_result(
         FunctionCallInfo call,
         const bytea_value& value) {
@@ -945,7 +936,7 @@ template<class p_scalar_type>
     return encoded;
 }
 
-/** Encode one owning bigint-array result. */
+/** Copy the integer elements into the SQL bigint-array result. */
 [[nodiscard]] inline Datum encode_result(
         FunctionCallInfo call,
         const bigint_array& value) {
@@ -954,7 +945,7 @@ template<class p_scalar_type>
     return encoded;
 }
 
-/** Encode one owning INTERVAL result. */
+/** Copy the interval fields into the SQL INTERVAL result. */
 [[nodiscard]] inline Datum encode_result(
         FunctionCallInfo call,
         const interval_value& value) {
