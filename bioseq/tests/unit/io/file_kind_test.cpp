@@ -1,6 +1,6 @@
 /**
  * @file file_kind_test.cpp
- * @brief Verifies sequence file suffix classification.
+ * @brief Checks file extensions for FASTA, FASTQ, and gzip compression.
  */
 #include <catch2/catch_test_macros.hpp>
 
@@ -69,16 +69,15 @@ TEST_CASE("file_utils: gzip suffixes are stripped and flagged",
 
 TEST_CASE("file_utils: unrecognised extension is an error",
           "[component:bioseq][layer:unit][feature:io]") {
-    // Unknown extension.
+    
     REQUIRE_FALSE(detect_sequence_file_kind("a.txt").has_value());
-    // No extension at all.
+    
     REQUIRE_FALSE(detect_sequence_file_kind("a").has_value());
-    // A bare extension with no stem (size == suffix size) is rejected: the
-    // `stem.size() > suffix.size()` guard requires at least one stem char.
+    // A filename needs at least one character before the extension.
     REQUIRE_FALSE(detect_sequence_file_kind(".fasta").has_value());
-    // A gzip suffix on an unknown base is still an error.
+    // Compression does not make an unknown sequence extension valid.
     REQUIRE_FALSE(detect_sequence_file_kind("a.txt.gz").has_value());
-    // The error message names the offending path so the pg caller can ereport.
+    // Include the path in the error so PostgreSQL can report the bad input.
     const auto err = detect_sequence_file_kind("weird.dat");
     REQUIRE_FALSE(err.has_value());
     REQUIRE(err.error().find("weird.dat") != std::string::npos);
