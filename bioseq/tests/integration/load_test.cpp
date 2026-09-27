@@ -1,14 +1,10 @@
 /**
  * @file bioseq/tests/integration/load_test.cpp
- * @brief Integration coverage for bioseq.load(table, file).
+ * @brief Tests loading sequence files into Bioseq tables.
  *
- * Covers: round-trip correctness through the streaming fragment writer (incl. a
- * >2-fragment record so the streaming path runs) + a NON-EMPTY mmsearch hit.
- * Width-agnostic equivalence (dna4/32 == dna4/64). Alphabet/width coverage of
- * the storage-unit-parametric reader (dna5 A/C/G/T/N + dna4 across 8/16/32/64).
- * index parity with bioseq.index.insert_maintenance.enabled on and off,
- * including write-state flushing
- * as a cross-check, plus the column-rule and malformed-file error paths.
+ * Checks that loaded sequences can be read and searched across storage widths,
+ * including records split over several fragments. Also tests index creation,
+ * header fields and defaults, and rollback when loading fails.
  */
 #include <cstdlib>
 #include <fmt/format.h>
@@ -58,7 +54,7 @@ void write_fasta(const std::string& path,
     }
 }
 
-/// Write one generated FASTA record without retaining its complete body.
+/// Write one generated FASTA record without keeping its complete body in memory.
 void write_generated_fasta(const std::string& path,
                            std::string_view header,
                            std::size_t n,
@@ -95,8 +91,7 @@ TEST_CASE(
 
     const std::string small   = gen_bases(4321, 11, /*with_n=*/false);
     const std::string medium  = gen_bases(9000, 22, false);
-    // >2 fragments so the streaming fragment writer emits multiple full
-    // fragments + a partial final fragment.
+    // Exercise two full storage fragments and a partial final fragment.
     const std::string big     = gen_bases(k_dna4_u64_fragment_bp * 2 + 5000, 33, false);
     const std::string path = "/tmp/bioseq_load_roundtrip.fasta";
     write_fasta(path, {{"rec_small", small}, {"rec_medium", medium}, {"rec_big", big}});
@@ -106,8 +101,7 @@ TEST_CASE(
         it::query_scalar_int(ctx, "SELECT bioseq.load('load_roundtrip'::regclass, '" + path + "');");
     REQUIRE(loaded == 3);
 
-    // Decode each row back to ACGT + len; compare to the input. Order by header
-    // so the assertion is deterministic.
+    // Compare decoded sequences and lengths with the input, ordered by header.
     const auto rows = it::query_rows(
         ctx, "SELECT header, seq::text, bioseq.len(seq) FROM load_roundtrip "
              "ORDER BY header");
@@ -164,10 +158,9 @@ TEST_CASE("bioseq.load: write-side sequence cache survives a full-stripe reset",
         ctx, "SELECT bioseq.load('load_stripe_flush'::regclass, '" + path + "');")
         == static_cast<long long>(k_record_count));
 
-    // Loading k_stripe_rows+1 records forces the pending-write flush to reset
-    // the stripe scratch context and then writes one post-reset record.
-    // Source-epoch cardinality verifies that every record published; the final
-    // mmsearch verifies that the post-reset locator resolves to its payload.
+    // Load one record beyond the stripe limit to exercise writing after a
+    // flush. Check that every source was published and the last row can still
+    // be found and decoded.
     REQUIRE(it::query_scalar_int(ctx,
         "SELECT count(*) FROM bioseq_internal.sequence_source_version "
         "WHERE user_relid='load_stripe_flush'::regclass AND state=1")
@@ -197,12 +190,11 @@ TEST_CASE("bioseq.load: width-agnostic equivalence (dna4/32 == dna4/64)",
     REQUIRE(it::query_scalar_int(ctx, "SELECT bioseq.load('load_width_32'::regclass, '" + path + "');") == 1);
     REQUIRE(it::query_scalar_int(ctx, "SELECT bioseq.load('load_width_64'::regclass, '" + path + "');") == 1);
 
-    // Decode parity: the byte-slice streaming path must be width-correct.
+    // Both storage widths must decode to the original sequence.
     REQUIRE(it::query_scalar(ctx, "SELECT seq::text FROM load_width_32") == body);
     REQUIRE(it::query_scalar(ctx, "SELECT seq::text FROM load_width_64") == body);
 
-    // mmsearch must return the IDENTICAL position in both widths (the
-    // logical sequence + minimizers are width-agnostic), not merely non-empty.
+    // Changing the storage width must preserve the alignment start position.
     const std::string query = body.substr(500, 800);
     std::string pos32, pos64;
     for (const char* table_name : {"load_width_32", "load_width_64"}) {
@@ -220,12 +212,11 @@ TEST_CASE("bioseq.load: width-agnostic equivalence (dna4/32 == dna4/64)",
 
 TEST_CASE("bioseq.load: active-profile alphabets round-trip and mmsearch across widths 8/16/32/64",
           "[component:bioseq][layer:integration][feature:io][resource:postgres][resource:filesystem]") {
-    // The storage-unit-parametric streaming reader must be width-correct.
-    // Each width gets its OWN connection so the DROP/CREATE EXTENSION reset is
-    // isolated per typmod. Decoding is checked with a plain projection; mmsearch
-    // is checked separately with an explicit literal query through the SQL pipeline.
+    // Test each supported alphabet at every storage width. Use a fresh
+    // connection for each case so resetting the extension cannot leave cached
+    // type information from the previous case.
 #if defined(BIOSEQ_TEMPLATE_FLATTEN_HAS_ALL_ALPHABETS_UINT64)
-    const std::string body5 = gen_bases(3000, 99, /*with_n=*/true);   // dna5 + sparse N
+    const std::string body5 = gen_bases(3000, 99, /*with_n=*/true);   // dna5 with occasional N bases
     const std::string path5 = "/tmp/bioseq_load_dna5.fasta";
     write_fasta(path5, {{"dna5_record", body5}});
 #endif
@@ -249,14 +240,14 @@ TEST_CASE("bioseq.load: active-profile alphabets round-trip and mmsearch across 
             it::exec_sqlf(ctx, "CREATE TABLE load_active_profile_width (header text, seq bioseq.seq('{}', {})) USING bioseq;",
                           current_case->alpha, width);
             REQUIRE(it::query_scalar_int(ctx, "SELECT bioseq.load('load_active_profile_width'::regclass, '" + current_case->path + "');") == 1);
-            // load + decode round-trips byte-exactly (incl. N).
+            // Loading and decoding must preserve every base, including N.
             const auto rows = it::query_rows(ctx,
                 "SELECT seq::text, bioseq.len(seq) FROM load_active_profile_width");
             REQUIRE(rows.size() == 1);
-            REQUIRE(rows[0][0].value() == current_case->body); // width-correct decode, N preserved
+            REQUIRE(rows[0][0].value() == current_case->body); // all bases preserved
             REQUIRE(rows[0][1].value() == std::to_string(current_case->body.size()));
 
-            // Literal mmsearch is non-empty for every alphabet/width pair.
+            // Each supported alphabet and width must produce an mmsearch hit.
             const std::string query = current_case->body.substr(100, 800);
             const auto hits = it::query_rows(
                 ctx, fmt::format("SELECT header FROM load_active_profile_width WHERE "
@@ -269,16 +260,10 @@ TEST_CASE("bioseq.load: active-profile alphabets round-trip and mmsearch across 
 
 TEST_CASE("bioseq.load: single large record streams without a >MaxAllocSize varlena (memory-bound)",
           "[component:bioseq][layer:integration][feature:io][resource:postgres][resource:filesystem][resource:large_memory]") {
-    // A single-pass streaming invariant: a single record larger than what a non-streaming load
-    // could palloc as ONE varlena (>MaxAllocSize ≈ 1 GiB packed; ~4 Gbp for dna4/64)
-    // must still load via the fragmented streaming path, with bounded backend RSS
-    // (no `_seq_storage`-sized allocation). The large-memory resource tag marks
-    // this heavy case. `BIOSEQ_LOAD_MEMBOUND_GBP` sizes it: the default 0.1 Gbp
-    // fits any host and exercises the single-large-record streaming path; setting
-    // a value of at least 4 verifies the >MaxAllocSize guarantee on a large host (a
-    // non-streaming load would ERROR with "invalid memory alloc request size", and
-    // `seq::text` on the whole record would too — so we verify via `bioseq.len`,
-    // which reads only the stub, never assembling the varlena).
+    // BIOSEQ_LOAD_MEMBOUND_GBP controls the record size in billions of bases.
+    // The default is 0.1. Use a larger value to exercise records that cannot
+    // fit in one PostgreSQL allocation. Verify the stored length without
+    // converting the whole sequence to text.
     const char* env = std::getenv("BIOSEQ_LOAD_MEMBOUND_GBP");
     const double gbp = (env && *env) ? std::atof(env) : 0.1;
     const std::size_t n = static_cast<std::size_t>(gbp * 1e9);
@@ -290,9 +275,7 @@ TEST_CASE("bioseq.load: single large record streams without a >MaxAllocSize varl
     it::reset_extension(ctx, { std::string_view{"load_memory_bound"} });
     it::exec_sql(ctx, "CREATE TABLE load_memory_bound (header text, seq bioseq.seq('dna4', 64)) USING bioseq;");
     it::exec_sql(ctx, "SET bioseq.index.insert_maintenance.enabled = off;");
-    // A non-streaming load would have palloc'd the whole record (>MaxAllocSize at
-    // >=4 Gbp) and errors before returning; success plus the exact bp count verifies
-    // the record streamed through bounded fragments.
+    // The load must succeed and preserve the full length of the record.
     REQUIRE(it::query_scalar_int(ctx, "SELECT bioseq.load('load_memory_bound'::regclass, '" + path + "');") == 1);
     REQUIRE(it::query_scalar(ctx, "SELECT bioseq.len(seq)::text FROM load_memory_bound") == std::to_string(n));
 }
@@ -308,9 +291,8 @@ TEST_CASE("bioseq.load: index parity (on builds index visible same-statement; of
     const std::string path = "/tmp/bioseq_load_index.fasta";
     write_fasta(path, {{"index_record", body}});
 
-    // ON: index built in the batched pass; an mmsearch self-hit returns the
-    // exact {len}M CIGAR in the very next statement, covering the parent and
-    // sub-table write-state flush.
+    // With insert maintenance enabled, loading must create the indexes and
+    // make the sequence immediately searchable as an exact self-match.
     it::exec_sql(ctx, "CREATE TABLE load_index_on (header text, seq bioseq.seq('dna4', 64)) USING bioseq;");
     it::exec_sql(ctx, "SET bioseq.index.insert_maintenance.enabled = on;");
     REQUIRE(it::query_scalar_int(ctx, "SELECT bioseq.load('load_index_on'::regclass, '" + path + "');") == 1);
@@ -325,8 +307,8 @@ TEST_CASE("bioseq.load: index parity (on builds index visible same-statement; of
                                          static_cast<long long>(body.size())));
     }
 
-    // OFF: load builds NO on-insert index; row count stays 0 until an explicit
-    // update_index, after which the self-hit still works.
+    // With insert maintenance disabled, the minimizer index stays empty
+    // until update_index is called.
     it::exec_sql(ctx, "CREATE TABLE load_index_off (header text, seq bioseq.seq('dna4', 64)) USING bioseq;");
     it::exec_sql(ctx, "SET bioseq.index.insert_maintenance.enabled = off;");
     REQUIRE(it::query_scalar_int(ctx, "SELECT bioseq.load('load_index_off'::regclass, '" + path + "');") == 1);
@@ -334,9 +316,8 @@ TEST_CASE("bioseq.load: index parity (on builds index visible same-statement; of
     REQUIRE(it::query_scalar_int(ctx, "SELECT bioseq.update_index('load_index_off'::regclass, 'minimizers_per_fragment');") > 0);
     REQUIRE(it::index_table_row_count(ctx, "minimizers_per_fragment", "load_index_off") > 0);
 
-    // Per-sequence ON: policy-selected batch load must build
-    // minimizers_per_sequence directly and must not leave a residual
-    // per-fragment index behind as an accidental fallback.
+    // The per-sequence policy must create its selected index while leaving
+    // the per-fragment index empty.
     it::exec_sql(ctx, "CREATE TABLE load_index_sequence "
                       "(header text, seq bioseq.seq('dna4', 64)) USING bioseq;");
     it::exec_sql(ctx, "SELECT bioseq.set_index_policy("
@@ -386,8 +367,8 @@ TEST_CASE("bioseq.load: hash-major minimizers_per_sequence uses the post-load lo
         "'minimizers_per_sequence', 'UPDATE_ON_INSERT');",
         table);
     it::exec_sql(ctx, "SET bioseq.index.insert_maintenance.enabled = on;");
-    // The registered production DNA4/15/10 profile publishes hash-major
-    // minimizers_per_sequence data.
+    // Enable hash-major minimizers_per_sequence output for the DNA4/15/10
+    // profile checked below.
     it::exec_sql(ctx,
         "SET bioseq.aligner.grouped_soa_generation.enabled = on;");
     it::exec_sql(ctx, "SET bioseq.index.async_persistence.enabled = off;");
@@ -395,9 +376,8 @@ TEST_CASE("bioseq.load: hash-major minimizers_per_sequence uses the post-load lo
     it::exec_sql(ctx,
         "SET bioseq.aligner.minimizer.algorithm = 'scalar';");
 
-    // load bypasses per-tuple index maintenance, publishes all source
-    // locators, flushes its write states, then intentionally invokes the same
-    // guarded bioseq.update_index route exercised by this scenario.
+    // Loading must publish the sequence and then build a ready index from
+    // its stored location. Check that the index describes that same source.
     REQUIRE(it::query_scalar_int(ctx, fmt::format(
         "SELECT bioseq.load('{}'::regclass, '{}');", table, path)) == 1);
     REQUIRE(it::query_scalar_int(ctx, fmt::format(
@@ -513,10 +493,9 @@ TEST_CASE("bioseq.load: hash-major minimizers_per_sequence uses the post-load lo
     REQUIRE(it::index_table_row_count(
         ctx, "minimizers_per_fragment", table) == 0);
 
-    // A requested post-load index is part of load's atomic success contract.
-    // Re-enable a forbidden async writer: update_index must fail through SPI,
-    // bioseq.load must propagate that exact failure, and the streamed parent
-    // row/source fragments must roll back with the failed index maintenance.
+    // Force index creation to fail by enabling unsupported async persistence.
+    // The load must report that error and roll back both the sequence and
+    // everything created for its index.
     it::exec_sqlf(ctx,
                   "CREATE TABLE {} "
                   "(header text, seq bioseq.seq('dna4', 64)) USING bioseq;",
@@ -616,7 +595,7 @@ TEST_CASE("bioseq.load: column-rule + malformed-file errors", "[component:bioseq
     const std::string path = "/tmp/bioseq_load_errors.fasta";
     write_fasta(path, {{"error_record", body}});
 
-    // 0 seq columns.
+    // Reject a table without a sequence column.
     it::exec_sql(ctx, "DROP TABLE IF EXISTS load_error_case CASCADE;");
     it::exec_sql(ctx, "CREATE TABLE load_error_case (header text) USING bioseq;");
     {
@@ -626,7 +605,7 @@ TEST_CASE("bioseq.load: column-rule + malformed-file errors", "[component:bioseq
         REQUIRE(err.contains("no bioseq.seq column"));
     }
 
-    // 2 seq columns.
+    // Reject a table with two sequence columns.
     it::exec_sql(ctx, "DROP TABLE IF EXISTS load_error_case CASCADE;");
     it::exec_sql(ctx, "CREATE TABLE load_error_case (sequence_primary bioseq.seq('dna4',64), sequence_secondary bioseq.seq('dna4',64)) USING bioseq;");
     {
@@ -636,8 +615,7 @@ TEST_CASE("bioseq.load: column-rule + malformed-file errors", "[component:bioseq
         REQUIRE(err.contains("bioseq.seq columns"));
     }
 
-    // Two text columns, neither a primary key, and no mapping are ambiguous.
-    // Multi-column identifier resolution asks the user to disambiguate.
+    // Two non-key text columns need an explicit header mapping.
     it::exec_sql(ctx, "DROP TABLE IF EXISTS load_error_case CASCADE;");
     it::exec_sql(ctx, "CREATE TABLE load_error_case (header_primary text, header_secondary text, seq bioseq.seq('dna4',64)) USING bioseq;");
     {
@@ -648,8 +626,7 @@ TEST_CASE("bioseq.load: column-rule + malformed-file errors", "[component:bioseq
         REQUIRE(err.contains("disambiguate"));
     }
 
-    // bigserial PK is NOT identity/generated — it carries a DEFAULT nextval(),
-    // whose default is evaluated per row. The load succeeds and the PK auto-increments.
+    // A bigserial key gets its value from the nextval() default during load.
     it::exec_sql(ctx, "DROP TABLE IF EXISTS load_error_case CASCADE;");
     it::exec_sql(ctx, "CREATE TABLE load_error_case (id bigserial primary key, "
                       "header text, seq bioseq.seq('dna4',64)) USING bioseq;");
@@ -657,8 +634,8 @@ TEST_CASE("bioseq.load: column-rule + malformed-file errors", "[component:bioseq
     {
         const auto rows = it::query_rows(ctx, "SELECT id, header FROM load_error_case");
         REQUIRE(rows.size() == 1);
-        REQUIRE(rows[0][0].value() == "1");   // nextval default evaluated per row
-        REQUIRE(rows[0][1].value() == "error_record"); // sole text column = identifier
+        REQUIRE(rows[0][0].value() == "1");   // nextval() supplied the key
+        REQUIRE(rows[0][1].value() == "error_record"); // the only text column receives the header
     }
 
     it::exec_sql(ctx, "DROP TABLE IF EXISTS load_error_case CASCADE;");
@@ -681,7 +658,7 @@ TEST_CASE("bioseq.load: column-rule + malformed-file errors", "[component:bioseq
         REQUIRE(err.contains("generated"));
     }
 
-    // Unrecognised extension (file_utils).
+    // Reject an unrecognised file extension.
     it::exec_sql(ctx, "DROP TABLE IF EXISTS load_error_case CASCADE;");
     it::exec_sql(ctx, "CREATE TABLE load_error_case (header text, seq bioseq.seq('dna4',64)) USING bioseq;");
     {
@@ -699,7 +676,7 @@ TEST_CASE("bioseq.load: column-rule + malformed-file errors", "[component:bioseq
         REQUIRE(err.contains("bioseq.load"));
     }
 
-    // Malformed FASTA -> data exception + rollback (table stays empty).
+    // Malformed FASTA must fail and leave the table empty.
     const std::string bad_path = "/tmp/bioseq_load_malformed.fasta";
     {
         std::ofstream f(bad_path, std::ios::binary | std::ios::trunc);
@@ -711,7 +688,7 @@ TEST_CASE("bioseq.load: column-rule + malformed-file errors", "[component:bioseq
         REQUIRE(err.sqlstate == "22000");
         REQUIRE(err.contains("bioseq.load"));
     }
-    // Rollback: no partially-written parent row should be visible.
+    // The failed load must leave no rows behind.
     REQUIRE(it::query_rows(ctx, "SELECT header FROM load_error_case").empty());
 }
 
@@ -729,8 +706,8 @@ TEST_CASE("bioseq.load: typed multi-column header parsing + non-empty mmsearch",
     const std::string body = gen_bases(2000, 4242, /*with_n=*/false);
     const std::string query = body.substr(0, 1200);
 
-    // Fixed UniProt headers map positional accession, key-value tags, and typed
-    // integers, verified with a non-empty mmsearch on the loaded sequence.
+    // Read the UniProt accession and named tags into text and integer
+    // columns, then search the loaded sequence.
     {
         const std::string path = "/tmp/bioseq_load_uniprot.fasta";
         write_fasta(path, {{"tr|R9RJF1|R9RJF1_PSEAI Mandelate racemase "
@@ -745,7 +722,7 @@ TEST_CASE("bioseq.load: typed multi-column header parsing + non-empty mmsearch",
         REQUIRE(rows.size() == 1);
         REQUIRE(rows[0][0].value() == "R9RJF1");
         REQUIRE(rows[0][1].value() == "Pseudomonas aeruginosa");
-        REQUIRE(rows[0][2].value() == "1");                 // int4in coerced
+        REQUIRE(rows[0][2].value() == "1");                 // parsed as an integer
 
         // A 1200 bp prefix must map back to the loaded row.
         const auto hits = it::query_rows(ctx, fmt::format(
@@ -754,10 +731,8 @@ TEST_CASE("bioseq.load: typed multi-column header parsing + non-empty mmsearch",
         REQUIRE_FALSE(hits.empty());
         REQUIRE(hits[0][0].value() == "R9RJF1");
 
-        // SPI_finish destroys its private procedure context. Post-load index
-        // maintenance and the active-read resolver must both restore the
-        // pre-connect caller context, otherwise the first search may appear to
-        // work while poisoning this same backend for its next allocation.
+        // Reuse the same backend after loading and searching. This catches
+        // memory-context cleanup errors that can break the next statement.
         REQUIRE(it::query_scalar(ctx, "SELECT pg_backend_pid()::text;")
                 == backend_pid);
         REQUIRE(it::query_scalar_int(ctx, "SELECT 1;") == 1);
@@ -769,13 +744,9 @@ TEST_CASE("bioseq.load: typed multi-column header parsing + non-empty mmsearch",
         REQUIRE(it::query_scalar(ctx, "SELECT pg_backend_pid()::text;")
                 == backend_pid);
 
-        // The active-read policy is trusted extension metadata.  Ordinary
-        // readers are intentionally denied bioseq_internal privileges, so
-        // direct catalog resolution must rely on the already-authorized user
-        // relation instead of imposing an internal-table ACL requirement.
-        // Execute the real mmsearch path as a non-owner with SELECT only on
-        // the user table, exposing owner-only resolver errors that a
-        // superuser integration connection would conceal.
+        // A reader with SELECT on the user table must be able to search it
+        // without access to bioseq_internal tables. Run mmsearch as that role
+        // so the test also covers catalog access outside the table owner.
         it::exec_sql(ctx,
             "DROP ROLE IF EXISTS bioseq_load_restricted_reader; "
             "CREATE ROLE bioseq_load_restricted_reader NOLOGIN; "
@@ -816,7 +787,7 @@ TEST_CASE("bioseq.load: typed multi-column header parsing + non-empty mmsearch",
         REQUIRE(rows.size() == 1);
         REQUIRE(rows[0][0].value() == "dna_new");
         REQUIRE(rows[0][1].value() == "Homo sapiens");
-        REQUIRE(rows[0][2].value() == "17");                // int4in
+        REQUIRE(rows[0][2].value() == "17");                // parsed as an integer
         REQUIRE(rows[0][3].value() == "mRNA");
     }
 
@@ -839,7 +810,7 @@ TEST_CASE("bioseq.load: typed multi-column header parsing + non-empty mmsearch",
         REQUIRE(rows[0][3].value() == "484");               // int4range canonical [188,484)
     }
 
-    // Unmapped NOT NULL columns use constant and volatile defaults.
+    // Unmapped NOT NULL columns use their declared defaults.
     {
         const std::string path = "/tmp/bioseq_load_defaulted_fields.fasta";
         write_fasta(path, {{"tr|X1|X1_HUMAN p OS=Homo sapiens PE=1 SV=1", body}});
@@ -855,7 +826,7 @@ TEST_CASE("bioseq.load: typed multi-column header parsing + non-empty mmsearch",
         REQUIRE(rows.size() == 1);
         REQUIRE(rows[0][0].value() == "X1");
         REQUIRE(rows[0][1].value() == "7");                 // constant default evaluated
-        REQUIRE(rows[0][2].value() == "true");              // volatile now() per row
+        REQUIRE(rows[0][2].value() == "true");              // now() supplied a timestamp
     }
 
     // An unmapped NOT NULL column without a default fails before loading.
@@ -872,7 +843,7 @@ TEST_CASE("bioseq.load: typed multi-column header parsing + non-empty mmsearch",
         REQUIRE(err.contains("no default"));
     }
 
-    // Bad scalar coercion reports the input error with record and column context.
+    // A header value that cannot become an integer must report the input error.
     {
         const std::string path = "/tmp/bioseq_load_bad_coercion.fasta";
         write_fasta(path, {{"tr|X1|X1_HUMAN p OS=Homo sapiens PE=1 SV=abc", body}});
@@ -882,13 +853,12 @@ TEST_CASE("bioseq.load: typed multi-column header parsing + non-empty mmsearch",
             "SELECT bioseq.load('load_bad_coercion'::regclass, '" + path +
             "', header_format => 'uni_prot');");
         REQUIRE(err.sqlstate == "22P02");                   // invalid_text_representation
-        REQUIRE(err.contains("invalid input syntax"));      // int4in's own message
-        // The "record N, column \"sv\"" error context lands in libpq's
-        // PG_DIAG_CONTEXT field, which sql_error() does not fold into `message`;
-        // it is shown in psql's CONTEXT line.
+        REQUIRE(err.contains("invalid input syntax"));      // integer input error
+        // Record and column details are in libpq's PG_DIAG_CONTEXT field.
+        // sql_error() checks the message fields, so they are not asserted here.
     }
 
-    // Mixed numeric and named columns exercise enum and date coercion.
+    // Map numbered header fields into text, enum, and date columns.
     {
         const std::string path = "/tmp/bioseq_load_influenza.fasta";
         write_fasta(path, {{"A/Canoas/LACENRS_1793/2015|A|H3N2|07/17/2015||Brazil|"
@@ -905,7 +875,7 @@ TEST_CASE("bioseq.load: typed multi-column header parsing + non-empty mmsearch",
             "SELECT name, strain::text, dt::text FROM influenza_records");
         REQUIRE(rows.size() == 1);
         REQUIRE(rows[0][0].value() == "A/Canoas/LACENRS_1793/2015");
-        REQUIRE(rows[0][1].value() == "A");                 // enum_in label
-        REQUIRE(rows[0][2].value() == "2015-07-17");        // date_in, MDY
+        REQUIRE(rows[0][1].value() == "A");                 // enum label
+        REQUIRE(rows[0][2].value() == "2015-07-17");        // date parsed with MDY input
     }
 }

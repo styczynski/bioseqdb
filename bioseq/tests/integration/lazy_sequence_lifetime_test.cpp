@@ -1,6 +1,6 @@
 /**
  * @file lazy_sequence_lifetime_test.cpp
- * @brief Exercises persistent ropes, source faults, catalogs, and SQL packing.
+ * @brief Checks sequence lifetimes, cleanup after read errors, and packed SQL output.
  */
 
 #include <cstdio>
@@ -230,23 +230,23 @@ TEST_CASE("source read ERROR crosses every sequence callback boundary",
         "SET bioseq.aligner.vulkan.enabled = off;");
 
     const std::array<const char*, 5> callback_queries{
-        /* One canonical-view callback. */
+        /* Read one slice as text. */
         "SELECT bioseq.to_text(value[4093:4101]) "
         "FROM sequence_acceptance_source_read_faults WHERE id=1;",
-        /* Two-view compare callback. */
+        /* Compare slices from two source rows. */
         "SELECT a.value[4093:4101] OPERATOR(bioseq.=) "
         "       b.value[4093:4101] "
         "FROM sequence_acceptance_source_read_faults AS a "
         "CROSS JOIN sequence_acceptance_source_read_faults AS b "
         "WHERE a.id=1 AND b.id=2;",
-        /* One-rank scalar callback. */
+        /* Read one letter. */
         "SELECT value[4097]::text "
         "FROM sequence_acceptance_source_read_faults WHERE id=1;",
-        /* PostgreSQL heap datumCopy invokes the EOH flatten callback. */
+        /* Storing the slice in a heap tuple requires a packed sequence value. */
         "INSERT INTO sequence_acceptance_source_read_heap "
         "SELECT value[4093:4101] "
         "FROM sequence_acceptance_source_read_faults WHERE id=1;",
-        /* BatchSort canonical-view admission/comparison callback. */
+        /* Sorting compares source-backed sequences through BatchSort. */
         "SELECT id FROM sequence_acceptance_source_read_faults ORDER BY value;",
     };
     for (const char* query : callback_queries) {
@@ -456,8 +456,7 @@ TEST_CASE("SQL packing is identical across tails and slice splits",
         " expected_length bigint NOT NULL,"
         " value bioseq.seq NOT NULL);");
 
-    // The dna4_uint64 profile deliberately exercises the widest packing so
-    // fast local iteration still crosses the largest tail boundary.
+    // The DNA4/64 test crosses packing boundaries even in the smallest build profile.
     require_sequence_acceptance_sql_packing_profile(ctx, "dna4", 64u, 2u, "ACGT");
 
 #if defined(BIOSEQ_TEMPLATE_FLATTEN_HAS_ALL_ALPHABETS_UINT64)
