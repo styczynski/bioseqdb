@@ -138,7 +138,7 @@ struct storage_snapshot {
     return true;
 }
 
-/// Validate the established Cache Storage value consumed by native reports.
+/// Check the Cache Storage diagnostic format used by test reports.
 [[nodiscard]] bool storage_diagnostic_shape(std::string_view diagnostic) {
     if (!consume_literal(diagnostic, "ready") && !consume_literal(diagnostic, "unavailable")) {
         return false;
