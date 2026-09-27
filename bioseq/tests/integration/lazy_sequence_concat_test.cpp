@@ -1,6 +1,6 @@
 /**
  * @file lazy_sequence_concat_test.cpp
- * @brief Exercises lazy COALESCE, concatenation, and bridge contracts.
+ * @brief Checks lazy sequence concatenation, COALESCE, and explicit text or array conversion.
  */
 
 #include <cstdio>

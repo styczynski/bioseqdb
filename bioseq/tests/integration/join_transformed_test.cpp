@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Exercises transformed-owner and parameterized Bioseq joins.
+ * @brief Checks joins with sequence expressions and changing query parameters.
  */
 #include <libpq-fe.h>
 #include <fmt/format.h>
@@ -15,11 +15,9 @@ using namespace bioseq_int_tests::join_test_support;
 
 TEST_CASE("PARAM_EXEC rescan clears NULL and restores the next primary query",
           "[component:bioseq][layer:integration][feature:pipeline][resource:postgres]") {
-    /* OFFSET 0 keeps the LATERAL child as a parameterized Nested Loop inner
-     * scan, so p.probe reaches BioseqScan as PARAM_EXEC.  VALUES supplies the
-     * load-bearing non-NULL -> NULL -> non-NULL rescan sequence in one
-     * executor: the NULL iteration must not replay stale matches, and the
-     * third iteration must reconfigure the same scan state successfully. */
+    /* OFFSET 0 keeps the LATERAL scan inside the nested loop. It receives
+     * a probe, then NULL, then the same probe again. The NULL scan must return
+     * no stale matches, and the final scan must recover the original results. */
     auto ctx = fresh_context({k_hoe_join});
     seed_hoe_fixture(ctx, k_hoe_join);
 
@@ -77,9 +75,8 @@ TEST_CASE("Transformed LATERAL owner survives PARAM_EXEC rescans",
     for (const auto option_suffix : option_suffixes) {
         DYNAMIC_SECTION((option_suffix.empty() ? "two-argument mmsearch"
                                                : "three-argument mmsearch with default options")) {
-            /* OFFSET 0 is the pull-up fence.  q.id=d.ord makes the child join
-             * genuinely parameterized; the same BioseqBatchJoin is rescanned
-             * over present -> NULL -> present sequence payloads. */
+            /* OFFSET 0 keeps the child join separate. The q.id=d.ord condition
+             * makes each outer row rescan it with a sequence, NULL, then a sequence. */
             const std::string sql =
                 fmt::format("SELECT d.ord, matched.pk "
                             "FROM (VALUES (1), (2), (3)) AS d(ord) "
@@ -508,9 +505,8 @@ TEST_CASE("Ineligible mmsearch arguments keep target, query, and options order",
                              "NULL::bioseq_aligner_options));",
                              statement));
 
-        /* EXPLAIN/PREPARE must not evaluate any volatile argument. The
-         * functions intentionally make the candidate ineligible; eligible
-         * options remain raw/folded Consts by contract. */
+        /* These volatile arguments make the custom mmsearch plan ineligible.
+         * PREPARE and EXPLAIN must leave their side effects untouched. */
         exec_sql(ctx,
                  "SELECT setval('pg_temp.argument_effect_sequence',"
                  "1,false);");
