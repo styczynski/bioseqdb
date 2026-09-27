@@ -32,7 +32,7 @@ import bioseq.io.identifier_parser;
 
 namespace bioseq::io::benchmark::detail {
 
-/// Materializes routed identifier fields into benchmark-owned string slots.
+/// Store parsed header fields in strings and count the bytes copied.
 struct bench_identifier_writer {
     std::size_t destination_count_value = 0;
     identifier_benchmark_measurement* measurement = nullptr;
@@ -62,10 +62,10 @@ struct bench_identifier_writer {
     void set_null(bioseq::io::identifier_parser::destination_slot slot) {
         field_storage.at(static_cast<std::size_t>(slot)).clear();
     }
-    /// Complete one identifier tuple without additional benchmark work.
+    /// No work is needed when a header has been parsed.
     void end_tuple() {}
 
-    /// Complete the parser run without additional benchmark work.
+    /// No work is needed when parsing finishes.
     void finish() {}
 
     /// Return the number of routed destination slots.
@@ -76,12 +76,7 @@ struct bench_identifier_writer {
 static_assert(
     bioseq::io::identifier_parser::identifier_destination_writer<bench_identifier_writer>);
 
-// =====================================================================
-//  Reader runners
-// =====================================================================
-//
-// One `dispatch_reader_*` function per reader algorithm. Each returns
-// the io_measurement populated with observed_record_count + observed_body_bytes.
+// Reader workloads report record counts and decoded sequence lengths.
 
 /// Run the Bioseq reader with the exact backend and concurrency options supplied.
 template <bool p_is_fasta>
@@ -207,7 +202,7 @@ template <bool p_is_fasta>
     return out;
 }
 
-/// Resolve a configured reader algorithm to its concrete workload.
+/// Select a reader and its options from the configured algorithm name.
 [[nodiscard]] io_measurement dispatch_reader(std::string_view algo, const reader_input& input) {
     reader_options options{};
     if (algo == "bioseq_io_sync_fasta") {
@@ -274,9 +269,7 @@ template <bool p_is_fasta>
     return {};
 }
 
-// =====================================================================
-//  Reader benchmark lambdas
-// =====================================================================
+// Reader benchmark setup, execution, and cleanup.
 
 /// Prepare one reader corpus and record its expected size and format.
 [[nodiscard]] reader_input build_reader_input(std::string_view data_dir,
@@ -293,8 +286,8 @@ template <bool p_is_fasta>
     input.is_fastq = descriptor.is_fastq;
     input.is_compressed = descriptor.is_compressed;
     input.is_synthetic = descriptor.is_synthetic;
-    // For gzipped real-data: estimate decompressed size at ~3.2x compressed
-    // (matches the SRR FASTQ corpus shape — empirical 6.0 GiB / 1.96 GiB).
+    // Estimate decompressed bytes using the same expansion factor as the
+    // benchmark memory estimate.
     input.decompressed_bytes = input.is_compressed
                                    ? static_cast<std::size_t>(input.bytes_on_disk * 3.2)
                                    : input.bytes_on_disk;
@@ -314,7 +307,7 @@ run_reader(std::string_view algo, const parameter_map& /*params*/, const reader_
     return dispatch_reader(algo, input);
 }
 
-/// Emit reader size, record, body-byte, and nonempty-corpus metrics.
+/// Report file size, decoded sequence length, and record counts.
 [[nodiscard]] std::map<std::string, double> evaluate_reader(std::string_view /*algo*/,
                                                             const parameter_map& /*params*/,
                                                             const reader_input& input,
@@ -323,15 +316,10 @@ run_reader(std::string_view algo, const parameter_map& /*params*/, const reader_
     metrics.emplace("bytes_on_disk", static_cast<double>(input.bytes_on_disk));
     metrics.emplace("decompressed_bytes", static_cast<double>(input.decompressed_bytes));
     metrics.emplace("record_count", static_cast<double>(output.observed_record_count));
-    // Body bytes observed by the reader. For dna4-on-dna5 corpora this
-    // is below raw sequence bytes when N is dropped. For dna4-on-dna4 it equals
-    // the raw seq bytes. Surface as a metric so equality rules between
-    // bioseq paths can detect a path silently dropping or duplicating
-    // bytes that the others see.
+    // Compare decoded sequence lengths across reader implementations to catch
+    // dropped or duplicated sequence data.
     metrics.emplace("observed_body_bytes", static_cast<double>(output.observed_body_bytes));
-    // Sanity: the reader must observe at least one record on a
-    // non-empty corpus. Surface as a 0/1 metric so the regression
-    // layer can pin it to 1 across iterations and test cases.
+    // Record whether the reader produced any records.
     metrics.emplace("records_nonzero", output.observed_record_count > 0 ? 1.0 : 0.0);
     return metrics;
 }
@@ -347,9 +335,7 @@ void cleanup_reader(std::string_view /*data_dir*/,
     filesystem::remove(input.corpus_path, ec);
 }
 
-// =====================================================================
-// Identifier-parser overhead benchmark
-// =====================================================================
+// UniProt header parsing benchmark.
 
 /// Resolve the UniProt destination mapping for an identifier workload.
 [[nodiscard]] identifier_benchmark_input
@@ -415,7 +401,8 @@ build_identifier_input(std::string_view data_dir,
     return input;
 }
 
-/// Parse or copy every FASTA header while preserving identical reader work.
+/// Read FASTA records and compare UniProt field parsing with header copying.
+/// Both paths use the same reader settings.
 [[nodiscard]] identifier_benchmark_measurement
 run_identifier_bench(std::string_view algo,
                      const parameter_map& /*params*/,
@@ -477,7 +464,7 @@ run_identifier_bench(std::string_view algo,
     return out;
 }
 
-/// Emit identifier parsing volume and correctness counters.
+/// Report bytes read, fields copied, and record counts.
 [[nodiscard]] std::map<std::string, double>
 evaluate_identifier_bench(std::string_view /*algo*/,
                           const parameter_map& /*params*/,

@@ -5,7 +5,7 @@
 
 import bioseq.io.benchmark;
 
-/** Delegate all benchmark behavior to its named module owner. */
+/** Pass command-line arguments to the IO benchmark runner. */
 int main(const int argument_count, char** const arguments) {
     return bioseq::io::benchmark::run(argument_count, arguments);
 }

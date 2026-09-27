@@ -31,10 +31,10 @@ import bioseq.parallelism.memory_admission;
 
 namespace bioseq::io::benchmark::detail {
 
-/// Move-only packed payload that maintains live allocation and admission counters.
+/// Own a packed result and track its allocated bytes and memory reservation.
 class lazy_expression_materialization {
   public:
-    /// Own one packed result and charge its payload to benchmark accounting.
+    /// Take ownership of a packed result and add its sizes to the run statistics.
     lazy_expression_materialization(lazy_expression_packed&& packed,
                                     lazy_expression_allocation_statistics& stats,
                                     bool final_boundary,
@@ -58,32 +58,32 @@ class lazy_expression_materialization {
             std::max(stats.peak_live_admitted_bytes, stats.live_admitted_bytes);
     }
 
-    /// Transfer the packed result and its outstanding accounting charge.
+    /// Move the result and transfer responsibility for updating the statistics.
     lazy_expression_materialization(lazy_expression_materialization&& other) noexcept
         : packed_(std::move(other.packed_)), stats_(std::exchange(other.stats_, nullptr)),
           payload_bytes_(other.payload_bytes_), admitted_bytes_(other.admitted_bytes_) {}
 
-    /// Materializations exclusively own one accounting charge.
+    /// Copying would count the same owned result twice.
     lazy_expression_materialization(lazy_expression_materialization const&) = delete;
 
-    /// Materializations cannot duplicate an accounting charge.
+    /// Copy assignment would duplicate ownership of a result.
     lazy_expression_materialization& operator=(lazy_expression_materialization const&) = delete;
 
-    /// Materializations cannot replace an already charged result.
+    /// Move assignment is disabled to keep each result's accounting unchanged.
     lazy_expression_materialization& operator=(lazy_expression_materialization&&) = delete;
 
-    /// Release the outstanding accounting charge with the packed result.
+    /// Remove the result from the live counts before releasing its storage.
     ~lazy_expression_materialization() {
         release_tracking();
     }
 
-    /// Return a borrowed facade over the owned packed result.
+    /// Return a sequence view that borrows this result's storage.
     [[nodiscard]] lazy_expression_facade view() const noexcept {
         return packed_.view();
     }
 
   private:
-    /// Subtract this result from live payload and admission counters once.
+    /// Subtract this result from the live byte counts once.
     void release_tracking() noexcept {
         if (stats_ == nullptr) {
             return;
@@ -103,13 +103,14 @@ class lazy_expression_materialization {
     std::uint64_t admitted_bytes_ = 0;
 };
 
-/// Operations represented by benchmark-local lazy-expression nodes.
+/// Operations supported by the benchmark's expression nodes.
 enum class lazy_expression_node_kind : std::uint8_t {
     slice,
     concat,
 };
 
-/// Non-owning slice or concatenation node interpreted through backend operations.
+/// A slice or concatenation that borrows its child sequences.
+/// Reading a node follows those children without storing an intermediate result.
 struct lazy_expression_node {
     lazy_expression_node_kind kind;
     lazy_expression_facade left;
@@ -134,7 +135,7 @@ struct lazy_expression_node {
     };
 }
 
-/// Describe a concatenation after checking logical-length overflow.
+/// Describe a concatenation, rejecting a combined length that would overflow.
 [[nodiscard]] lazy_expression_node make_lazy_expression_concat(lazy_expression_facade left,
                                                                lazy_expression_facade right) {
     constexpr lazy_expression_size max_size = (std::numeric_limits<lazy_expression_size>::max)();
@@ -150,25 +151,25 @@ struct lazy_expression_node {
     };
 }
 
-/// Return the logical length exposed through the erased backend.
+/// Return the node's sequence length through the backend callback.
 [[nodiscard]] lazy_expression_size lazy_expression_node_bp_size(void const* opaque) noexcept {
     return static_cast<lazy_expression_node const*>(opaque)->logical_size;
 }
 
-/// Report whether both child views may cross worker boundaries.
+/// Return true when both child views may be shared with workers.
 [[nodiscard]] bool lazy_expression_node_worker_shareable(void const* opaque) noexcept {
     const auto& node = *static_cast<lazy_expression_node const*>(opaque);
     return bioseq::storage::is_worker_shareable(node.left) &&
            bioseq::storage::is_worker_shareable(node.right);
 }
 
-/// Decline resident packed access so the workload exercises materialization.
+/// Report no stored packed result so reads must evaluate the expression.
 [[nodiscard]] lazy_expression_facade::resident_probe_result lazy_expression_node_resident_probe(
     void const*, lazy_expression_size, lazy_expression_size, std::uint8_t) noexcept {
     return std::nullopt;
 }
 
-/// Copy a checked child range into caller-owned rank storage.
+/// Copy a child range into the supplied rank buffer, checking coordinate overflow.
 void lazy_expression_copy_child(lazy_expression_facade child,
                                 lazy_expression_size from,
                                 std::span<std::uint8_t> output) {
@@ -180,7 +181,7 @@ void lazy_expression_copy_child(lazy_expression_facade child,
     child.template copy_ranks<false, false>(output, begin, begin + output.size());
 }
 
-/// Copy a logical range from either a slice or concatenation node.
+/// Read a node range by following its slice offset or concatenation children.
 void lazy_expression_copy_forward(lazy_expression_node const& node,
                                   lazy_expression_size from,
                                   std::span<std::uint8_t> output) {
@@ -209,7 +210,8 @@ void lazy_expression_copy_forward(lazy_expression_node const& node,
     }
 }
 
-/// Materialize one requested orientation into the supplied scratch span.
+/// Copy a node range into scratch memory in the requested orientation.
+/// Reverse reads also complement the DNA ranks.
 template <bool p_is_reversed, bool p_write_reversed>
 [[nodiscard]] const std::uint8_t* lazy_expression_node_ptr_at(void const* opaque,
                                                               lazy_expression_size from,
@@ -252,14 +254,15 @@ const lazy_expression_facade::backend_ops lazy_expression_node_operations{
     .worker_shareable = &lazy_expression_node_worker_shareable,
 };
 
-/// Bind a node to the representation-erased lazy-sequence facade.
+/// Expose a node through the lazy-sequence interface. The node must outlive the view.
 [[nodiscard]] lazy_expression_facade
 lazy_expression_view(lazy_expression_node const& node) noexcept {
     return lazy_expression_facade{std::addressof(node),
                                   std::addressof(lazy_expression_node_operations)};
 }
 
-/// Materialize one view while recording payload and admission ownership.
+/// Reserve memory and copy a view into packed storage. Track the allocation
+/// and check that the memory controller records the expected reservation.
 [[nodiscard]] lazy_expression_materialization
 materialize_lazy_expression_view(lazy_expression_facade view,
                                  bool final_boundary,
@@ -301,7 +304,7 @@ finish_lazy_expression_run(lazy_expression_materialization const& final_value) {
     };
 }
 
-/// Require all payload and admission ownership to return to its baseline.
+/// Check that all result storage and memory reservations were released.
 void validate_lazy_expression_run_released(lazy_expression_allocation_statistics const& stats,
                                            std::uint64_t reserved_baseline) {
     const std::uint64_t reserved_after =
@@ -325,7 +328,7 @@ void validate_lazy_expression_run_released(lazy_expression_allocation_statistics
     return source;
 }
 
-/// Append an independently flattened source segment to the oracle ranks.
+/// Append source ranks directly to the expected result.
 void append_lazy_expression_oracle_segment(std::vector<std::uint8_t>& oracle,
                                            std::span<const seq::dna4> source,
                                            std::size_t from,
@@ -353,11 +356,10 @@ void append_lazy_expression_oracle_segment(std::vector<std::uint8_t>& oracle,
     const std::uint64_t seed = static_cast<std::uint64_t>(read_int_field(data, "seed", 377));
     std::vector<seq::dna4> source = make_lazy_expression_source(logical_length, seed);
 
-    // Independent flattening of
+    // Build the expected result directly from source intervals:
     //   concat(concat(source[3N/8:5N/8], source[N/2:3N/4]),
     //          source[N/4:N/2]).
-    // This is algebraically equivalent to the benchmark expression, without
-    // using its slice/concat backend or materializer.
+    // This checks the expression without using its slice or concatenation code.
     std::vector<std::uint8_t> oracle;
     oracle.reserve(3u * logical_length / 4u);
     const std::span<const seq::dna4> source_span{source};
@@ -378,7 +380,7 @@ void append_lazy_expression_oracle_segment(std::vector<std::uint8_t>& oracle,
     };
 }
 
-/// Estimate source, oracle, and materialization memory from logical length.
+/// Estimate memory for source data, the expected result, and copied sequences.
 [[nodiscard]] run_constraints estimate_lazy_expression_resources(
     std::string_view, std::string_view, simdjson::dom::element data) noexcept {
     const std::int64_t configured_logical_length = read_int_field(data, "bp_size", 8 * 1024 * 1024);
@@ -394,7 +396,7 @@ void append_lazy_expression_oracle_segment(std::vector<std::uint8_t>& oracle,
     };
 }
 
-/// Materialize every intermediate operation before the final boundary.
+/// Copy every intermediate result and keep each until the expression finishes.
 [[nodiscard]] lazy_expression_measurement
 run_lazy_expression_eager(const lazy_expression_input& input) {
     const lazy_expression_size logical_length = input.source_logical_length;
@@ -445,7 +447,7 @@ run_lazy_expression_eager(const lazy_expression_input& input) {
     return output;
 }
 
-/// Keep intermediate nodes deferred and materialize only the final boundary.
+/// Keep intermediate operations as views and copy only the final result.
 [[nodiscard]] lazy_expression_measurement
 run_lazy_expression_deferred(const lazy_expression_input& input) {
     const lazy_expression_size logical_length = input.source_logical_length;
@@ -481,7 +483,7 @@ run_lazy_expression_deferred(const lazy_expression_input& input) {
     return output;
 }
 
-/// Dispatch the configured eager or deferred expression algorithm.
+/// Run the configured expression benchmark or reject an unknown algorithm.
 [[nodiscard]] lazy_expression_measurement run_lazy_expression(std::string_view algorithm,
                                                               const parameter_map&,
                                                               const lazy_expression_input& input) {
@@ -494,7 +496,7 @@ run_lazy_expression_deferred(const lazy_expression_input& input) {
     throw std::invalid_argument("unknown lazy-expression benchmark algorithm");
 }
 
-/// Compute packed payload bytes for a DNA4 logical length.
+/// Return the packed byte count for a DNA4 sequence of this length.
 [[nodiscard]] constexpr std::uint64_t
 lazy_expression_payload_bytes(lazy_expression_size bp) noexcept {
     constexpr std::uint64_t letters_per_unit = 32u;
@@ -503,7 +505,7 @@ lazy_expression_payload_bytes(lazy_expression_size bp) noexcept {
     return units * lazy_expression_storage_width;
 }
 
-/// Compute the exact payload-byte total expected from one algorithm.
+/// Return the total packed bytes expected from the chosen evaluation strategy.
 [[nodiscard]] std::uint64_t
 expected_lazy_expression_payload_bytes(bool eager, lazy_expression_size logical_length) noexcept {
     if (!eager) {
@@ -517,10 +519,10 @@ expected_lazy_expression_payload_bytes(bool eager, lazy_expression_size logical_
            lazy_expression_payload_bytes(3u * logical_length / 4u);
 }
 
-/// Compute the exact admitted-byte total expected from one algorithm.
+/// Return the total memory reservation expected from the chosen strategy.
 [[nodiscard]] std::uint64_t
 expected_lazy_expression_admitted_bytes(bool eager, lazy_expression_size logical_length) {
-    // Convert one logical interval to its packed admission charge.
+    // Compute the memory reservation expected for one packed result.
     const auto admitted = [](lazy_expression_size bp) {
         return bioseq::storage::packed_region_admission_bytes<seq::dna4>(
             bp, lazy_expression_storage_width);
@@ -533,7 +535,8 @@ expected_lazy_expression_admitted_bytes(bool eager, lazy_expression_size logical
            admitted(logical_length / 4u) + admitted(3u * logical_length / 4u);
 }
 
-/// Validate logical identity and allocation counts, then emit benchmark metrics.
+/// Check the output against the expected length and hash, then verify allocation
+/// totals and release of all reservations. Return the benchmark metrics.
 [[nodiscard]] std::map<std::string, double>
 evaluate_lazy_expression(std::string_view algorithm,
                          const parameter_map&,
@@ -588,7 +591,7 @@ evaluate_lazy_expression(std::string_view algorithm,
     return metrics;
 }
 
-/// Release no resources because the expression input owns memory only.
+/// No cleanup is needed here. The input releases its memory when destroyed.
 void cleanup_lazy_expression(std::string_view,
                              std::string_view,
                              simdjson::dom::element,
