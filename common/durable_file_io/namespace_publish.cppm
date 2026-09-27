@@ -1,6 +1,6 @@
 /**
  * @file common/durable_file_io/namespace_publish.cppm
- * @brief Internal no-replace link and rename namespace publication.
+ * @brief Publish a file name by hard link or rename, then check the resulting file.
  */
 module;
 

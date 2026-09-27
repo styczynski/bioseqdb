@@ -1,6 +1,6 @@
 /**
  * @file common/durable_file_io/publication.cppm
- * @brief Atomic durable file creation, replacement, publication, and rename.
+ * @brief Publish file contents and sync the files and directory changes.
  */
 module;
 
@@ -28,7 +28,7 @@ import :namespace_publish;
 
 namespace bioseq::common::durable_file_io::detail {
 
-/** Remove the staging name and durably commit its directory mutation. */
+/** Remove the temporary name and sync the directory to finish publication. */
 [[nodiscard]] inline std::expected<publication_result, file_error>
 complete_staging_publication(
     int directory_descriptor,
@@ -62,12 +62,10 @@ complete_staging_publication(
 export namespace bioseq::common::durable_file_io {
 
 /**
- * Publish bytes without replacing an existing destination.
- *
- * An existing destination is accepted only when a stable no-follow read is
- * byte-identical and its permission bits are no broader than `options.mode`;
- * that inode and its parent directory are then fsynced before returning
- * `already_present_identical`.
+ * Create the destination, or accept an existing file with the same bytes.
+ * For an existing file, reject a final symlink and check that its metadata stays
+ * unchanged while reading. Its permissions must be a subset of options.mode.
+ * Sync the file and its parent directory before returning already_present_identical.
  */
 [[nodiscard]] inline std::expected<publication_result, file_error>
 durable_create_file(
@@ -201,7 +199,10 @@ durable_create_file(
         hooks);
 }
 
-/** Atomically replace a destination and durably publish its directory entry. */
+/**
+ * Write the bytes to a temporary file, then atomically replace the destination.
+ * Sync the file before the rename and its directory afterward.
+ */
 [[nodiscard]] inline std::expected<publication_result, file_error>
 durable_replace_file(
     const std::filesystem::path& destination,
@@ -267,11 +268,10 @@ durable_replace_file(
 }
 
 /**
- * Publish bytes with an explicit namespace policy.
- *
- * `exclusive_no_replace` never accepts or alters an existing destination.
- * Callers which need idempotent byte-identical reconciliation may use
- * `durable_create_file` explicitly after deciding that policy is appropriate.
+ * Publish bytes according to the chosen replacement policy.
+ * exclusive_no_replace fails whenever the destination exists, even when its
+ * contents match. Use durable_create_file if an identical existing file should
+ * count as success.
  */
 [[nodiscard]] inline std::expected<publication_result, file_error>
 durable_publish_file(
@@ -336,8 +336,8 @@ durable_publish_file(
 }
 
 /**
- * Fsync and atomically rename an existing regular file, then fsync every
- * directory whose namespace changed.
+ * Sync a regular file, then atomically rename it.
+ * Sync both affected directories when they differ, or the one shared directory.
  */
 [[nodiscard]] inline std::expected<publication_result, file_error>
 durable_rename_file(

@@ -1,6 +1,6 @@
 /**
  * @file common/durable_file_io/open.cppm
- * @brief Internal no-follow POSIX descriptor opening.
+ * @brief Open files and directories while rejecting a symlink at the final name.
  */
 module;
 
