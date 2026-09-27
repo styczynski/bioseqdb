@@ -1,6 +1,6 @@
 /**
  * @file minimizer_read_stats.cppm
- * @brief Declares transport and validation counters for persisted minimizer reads.
+ * @brief Count reads, validation work and memory use when loading stored minimizer indexes.
  */
 module;
 
@@ -19,10 +19,10 @@ export namespace bioseq::storage::indexing {
 using bioseq::indexing::index_chunk_read_stats;
 
 /**
- * @brief Records PostgreSQL work performed during one cold index preparation.
+ * @brief Count PostgreSQL work needed to prepare an index for its first read.
  *
- * Every SQL-bound value saturates at `INT64_MAX` so PostgreSQL bigint output
- * cannot wrap into a plausible smaller counter.
+ * add and merge stop counters at INT64_MAX and mark saturation so the values
+ * remain safe to return as PostgreSQL bigint values.
  */
 struct cold_index_preparation_stats {
     std::uint64_t target_relation_reuses = 0;
@@ -88,7 +88,7 @@ struct cold_index_preparation_stats {
     static constexpr std::uint64_t k_sql_bigint_max =
         static_cast<std::uint64_t>((std::numeric_limits<std::int64_t>::max)());
 
-    /// Adds one SQL-bound value and marks saturation on overflow.
+    /// Add to a counter, stopping at INT64_MAX and recording overflow.
     void add(std::uint64_t& destination, std::uint64_t increment) noexcept {
         if (destination > k_sql_bigint_max ||
             increment > k_sql_bigint_max - std::min(destination, k_sql_bigint_max)) {
@@ -99,7 +99,7 @@ struct cold_index_preparation_stats {
         destination += increment;
     }
 
-    /// Merges one policy, source, or sidecar preparation delta.
+    /// Add another preparation record to these counters.
     void merge(const cold_index_preparation_stats& rhs) noexcept {
         are_stats_saturated = are_stats_saturated || rhs.are_stats_saturated;
         add(target_relation_reuses, rhs.target_relation_reuses);
@@ -166,7 +166,7 @@ struct cold_index_preparation_stats {
     operator==(const cold_index_preparation_stats&) const noexcept = default;
 };
 
-/// Physical and logical counters for one control or position read stage.
+/// Count planned requests, actual reads and validation for one payload stage.
 struct minimizer_generation_payload_stage_read_stats {
     std::uint64_t plan_calls = 0;
     std::uint64_t planned_request_groups = 0;
@@ -190,7 +190,7 @@ struct minimizer_generation_full_payload_read_stats {
     std::uint64_t payload_row_checksum = 0;
 };
 
-/// Hash-major counters that cannot be reconstructed from extent statistics.
+/// Record identity, validation, memory use and results when reading a hash-major index.
 struct hash_major_minimizer_cold_read_stats {
     std::uint64_t layout_revision = 0;
     std::uint64_t sessions = 0;
@@ -229,7 +229,7 @@ struct hash_major_minimizer_cold_read_stats {
     bool saturated = false;
 };
 
-/// Aggregate receipt for one current-generation relation read session.
+/// Collect statistics for one index generation read session.
 struct minimizer_generation_read_stats {
     cold_index_preparation_stats cold{};
     std::uint64_t relation_opens = 0;

@@ -1,6 +1,6 @@
 /**
  * @file contracts.cppm
- * @brief Public sorted-run callbacks, statistics, and store contracts.
+ * @brief Callbacks and statistics for merging sorted minimizer runs.
  */
 module;
 
@@ -18,9 +18,9 @@ export namespace bioseq::storage::indexing {
 /// Pair of minimizer hash and encoded sequence position.
 using sorted_pair_t = std::pair<std::uint64_t, std::uint64_t>;
 
-/// Type-erased callback for one contiguous position batch.
+/// A callback and its context for reading a batch of encoded positions.
 struct position_batch_sink {
-    /// Opaque callback context borrowed for one traversal.
+    /// Caller-owned state passed to the callback.
     void* ctx = nullptr;
     /// Callback receiving a batch view valid only for that invocation.
     void (*call)(void*, std::span<const std::uint64_t>) = nullptr;
@@ -30,21 +30,20 @@ struct position_batch_sink {
 class sorted_pair_position_cursor {
   public:
     sorted_pair_position_cursor() noexcept = default;
-    /// Bind a type-erased accumulator owned by the current k-mer callback.
-    /// @param impl Accumulator pointer that outlives this cursor.
+    /// Borrow the position accumulator for the current minimizer hash.
+    /// @param impl Accumulator that must outlive this cursor.
     explicit sorted_pair_position_cursor(const void* impl) noexcept : impl_(impl) {}
 
-    /// Return the total number of encoded positions.
-    /// @return Exact position count across resident and spilled batches.
+    /// @return Number of encoded positions, including those stored in temporary files.
     [[nodiscard]] std::uint64_t total_count() const noexcept;
 
-    /// Invoke a type-erased callback for each position batch.
-    /// @param sink Callback invoked synchronously with non-owning batch spans.
+    /// Visit each position batch before returning.
+    /// @param sink Callback whose batch view is valid only during that call.
     void for_each_batch_erased(position_batch_sink sink) const;
 
-    /// Invoke a callable for each position batch.
+    /// Visit each position batch before returning.
     /// @tparam p_function Callable accepting `std::span<const std::uint64_t>`.
-    /// @param f Callable borrowed until traversal completes.
+    /// @param f Callback whose batch view is valid only during that call.
     template <class p_function> void for_each_batch(p_function&& f) const {
         position_batch_sink sink{
             .ctx = std::addressof(f),
@@ -61,39 +60,39 @@ class sorted_pair_position_cursor {
     const void* impl_ = nullptr;
 };
 
-/// Type-erased callback for one minimizer hash and its position cursor.
+/// A callback and its context for reading one hash and its positions.
 struct sorted_pair_kmer_sink {
-    /// Opaque callback context borrowed for one merge traversal.
+    /// Caller-owned state passed to each merge callback.
     void* ctx = nullptr;
     /// Callback receiving a hash and cursor valid only for that invocation.
     void (*call)(void*, std::uint64_t, const sorted_pair_position_cursor&) = nullptr;
 };
 
-/// Resource and merge counters for one sorted-run store.
+/// Memory, temporary-file and merge counts for one sorted-run store.
 struct sorted_run_store_stats {
-    /// Number of runs currently held in resident memory.
+    /// Runs currently kept in memory.
     std::uint64_t resident_runs = 0;
     /// Number of runs currently backed by PostgreSQL temporary files.
     std::uint64_t file_runs = 0;
-    /// Bytes covered by current resident-memory permits.
+    /// Bytes reserved for runs currently kept in memory.
     std::uint64_t resident_bytes = 0;
-    /// Maximum simultaneous resident bytes.
+    /// Largest total memory reservation for runs at one time.
     std::uint64_t resident_peak_bytes = 0;
-    /// Cumulative run payload bytes written to temporary files.
+    /// Run payload bytes spilled from memory, excluding compaction output.
     std::uint64_t spilled_bytes = 0;
-    /// Cumulative bytes reported for PostgreSQL temporary files.
+    /// Total temporary-file sizes recorded as run files are written.
     std::uint64_t postgres_temp_file_bytes = 0;
-    /// Number of PostgreSQL temporary files created.
+    /// Number of run and compaction temporary files created.
     std::uint64_t postgres_temp_file_count = 0;
-    /// Bytes reserved for active merge-reader buffers.
+    /// Sum of buffer bytes reserved across merge-reader setups.
     std::uint64_t merge_reader_buffer_bytes = 0;
     /// Number of external merge passes.
     std::uint64_t merge_pass_count = 0;
-    /// Runs spilled in response to memory pressure.
+    /// Runs written to a temporary file after a memory reservation was refused.
     std::uint64_t spill_count_from_pressure = 0;
-    /// Resident runs demoted to temporary files.
+    /// Runs moved from memory to temporary files.
     std::uint64_t resident_demotions = 0;
-    /// Cumulative encoded-position bytes spilled during aggregation.
+    /// Total bytes of positions written to temporary files while grouping by hash.
     std::uint64_t position_spill_bytes = 0;
     /// Number of position spill files created.
     std::uint64_t position_spill_count = 0;
@@ -101,9 +100,9 @@ struct sorted_run_store_stats {
 
 #ifdef BIOSEQ_TEST_INDEXES
 /**
- * Deterministic one-shot leaf failures used by PostgreSQL integration tests.
- * "after" points model the partial-success case where the BufFile state
- * has changed, but the C++ caller must still poison/abandon its handles.
+ * One-shot PostgreSQL failures used by integration tests.
+ * An "after" point raises an error after the file operation has changed state,
+ * so the caller must stop using the affected handles and let PostgreSQL clean up.
  */
 enum class sorted_run_failure_injection : std::uint8_t {
     none,
@@ -121,32 +120,32 @@ enum class sorted_run_failure_injection : std::uint8_t {
     close_after,
     interrupt_before,
     interrupt_after,
-    // Dedicated compaction point: unlike `create_before`, this does not count
-    // the input spill files created before a merge pass starts.
+    // Fail when creating a merge output file. Input spill files do not count
+    // toward this failure point.
     compact_create_before,
 };
 
-/// Deterministic merge-reader admission outcomes for resource-path tests.
+/// Test outcomes for merge-reader memory reservations.
 enum class sorted_run_reader_admission_injection : std::uint8_t {
     none,
     request_ceiling,
     system_pressure_once,
 };
 
-/// Arm one failure at the next matching PostgreSQL leaf call.
-/// @param point One-shot PostgreSQL leaf failure site.
+/// Fail the next matching PostgreSQL operation once.
+/// @param point Operation and before/after position to fail.
 void arm_sorted_run_pg_leaf_failure(sorted_run_failure_injection point) noexcept;
 
-/// Arm one failure at the selected matching PostgreSQL leaf call.
-/// @param point PostgreSQL leaf failure site.
-/// @param operation One-based matching call number.
+/// Fail a selected matching PostgreSQL operation once.
+/// @param point Operation and before/after position to fail.
+/// @param operation Matching call number, starting at one.
 void arm_sorted_run_pg_leaf_failure_on_nth(sorted_run_failure_injection point,
                                            std::uint64_t operation) noexcept;
 /// Override the merge-reader memory budget for one backend test.
 /// @param bytes Budget in bytes, or zero to use the production value.
 void set_sorted_run_merge_reader_budget_for_test(std::uint64_t bytes) noexcept;
-/// Override merge-reader reservation outcomes for one backend test.
-/// @param injection Synthetic predicate applied before the real controller.
+/// Override merge-reader memory reservation results for a test.
+/// @param injection Test result checked before the memory controller.
 /// @param request_ceiling_bytes Largest request accepted by `request_ceiling`.
 void set_sorted_run_reader_admission_injection_for_test(
     sorted_run_reader_admission_injection injection,
@@ -154,8 +153,7 @@ void set_sorted_run_reader_admission_injection_for_test(
 /// Clear every sorted-run failure and budget override.
 void disarm_sorted_run_pg_leaf_failure() noexcept;
 
-/// Report whether a sorted-run leaf failure is armed.
-/// @return Whether a failure point is selected.
+/// @return True if a PostgreSQL operation is set to fail.
 [[nodiscard]] bool sorted_run_pg_leaf_failure_is_armed() noexcept;
 #endif
 

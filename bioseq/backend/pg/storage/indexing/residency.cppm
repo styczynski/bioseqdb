@@ -1,7 +1,6 @@
 /**
  * @file residency.cppm
- * @brief Backend-local residency caches for PostgreSQL index chunks and
- *        assembled minimizer indexes.
+ * @brief Cache index chunks and assembled minimizer indexes in one PostgreSQL backend.
  */
 module;
 
@@ -328,14 +327,11 @@ void evict_relation_residency(Oid relid) noexcept {
     }
 }
 
-/// Evict every backend-local cache entry for one logical sidecar identity.
+/// Remove cached chunks and assembled indexes for one table, column and index.
 ///
-/// Relcache callbacks receive the sidecar relation OID, while residency keys
-/// intentionally carry the owning user relation OID.  A destructive sidecar
-/// schema replacement therefore cannot rely on `evict_relation_residency`:
-/// the two OIDs are different.  The generation-storage cutover calls this
-/// identity form before dropping the old sidecar and again after publishing
-/// the fresh physical relation.
+/// Cache keys contain the user table OID. When replacing an internal index
+/// table, use this function because its relation-cache notification carries
+/// a different OID and cannot identify the entries owned by the user table.
 void evict_index_residency(
         Oid db_oid,
         Oid user_relid,
@@ -477,7 +473,7 @@ void install_index_residency_callbacks() {
         && state.subxact_registered
         && state.relcache_registered;
     if (!state.installed) {
-        // Defensive only: every leaf above either completed or threw.
+        // Callback registration should have completed or raised an exception.
         return;
     }
     bioseq_log<logging_level::debug>("[bioseq] index residency: transaction and relcache callbacks registered");
