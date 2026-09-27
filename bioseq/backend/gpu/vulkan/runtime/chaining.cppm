@@ -1,6 +1,6 @@
 /**
  * @file chaining.cppm
- * @brief Records tiled dynamic-programming chaining and coordinate-trace dispatches.
+ * @brief Runs GPU chaining and reads back scores, predecessors, or one selected chain.
  */
 module;
 
@@ -22,7 +22,13 @@ import std;
 
 namespace bioseq::gpu::vulkan {
 
-/// @brief Runs tiled dynamic-programming chaining over caller-owned buffers.
+/**
+ * @brief Runs tiled GPU chaining and copies scores and predecessors back to the caller.
+ *
+ * The caller supplies anchor ranges and the initial score and predecessor arrays.
+ * This call uploads them, waits for the dispatch, and replaces the output arrays
+ * with the computed values.
+ */
 void runtime::run_chaining_tiled_dp_roundtrip(const chaining_pipeline_key& key,
                                               buffer& transfer_scratch,
                                               buffer& anchors,
@@ -51,9 +57,9 @@ void runtime::run_chaining_tiled_dp_roundtrip(const chaining_pipeline_key& key,
     if (!features_.available) {
         throw vulkan_runtime_error("run_chaining_tiled_dp_roundtrip on unavailable device");
     }
-    // ONE WORKGROUP PER RANGE; the kernel grid-strides
-    // workgroups over ranges, so the dispatch is min(range_count, device limit)
-    // workgroups — range_count is just data, no workgroup-count throw.
+    // Each workgroup processes a range, then advances by the total workgroup
+    // count. This lets the kernel process all ranges when their count exceeds
+    // the device limit for a single dispatch.
     const std::uint32_t chain_groups = std::min(range_count, features_.max_workgroup_count_x);
 #if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
     const chaining_pipeline selected_pipeline = create_pipeline_locked(key);
@@ -69,7 +75,7 @@ void runtime::run_chaining_tiled_dp_roundtrip(const chaining_pipeline_key& key,
             next_operation_identity_locked());
         collector->prepare(selected_pipeline.shader_key,
                            selected_pipeline.metal_archive_receipt);
-        // This operation consumes anchors/ranges, not minimizer/target input.
+        // Record anchor and range counts for this chaining-only operation.
         collector->set_shape_input(0u, 0u, 0u, 0u);
         collector->set_shape_outcome(0u, anchor_count, range_count);
     }
@@ -77,8 +83,7 @@ void runtime::run_chaining_tiled_dp_roundtrip(const chaining_pipeline_key& key,
     const VkPipeline pipeline = create_pipeline_locked(key).pipeline;
 #endif
 
-    // H2D: write the anchors/ranges and the caller-initialised best-scores /
-    // predecessors straight into the host-visible device buffers.
+    // Upload anchors, ranges, and the caller's initial scores and predecessors.
     upload_locked(transfer_scratch, anchors, anchors_bytes, VK_ACCESS_SHADER_READ_BIT);
     upload_locked(transfer_scratch, ranges, ranges_bytes, VK_ACCESS_SHADER_READ_BIT);
     upload_locked(transfer_scratch,
@@ -120,7 +125,7 @@ void runtime::run_chaining_tiled_dp_roundtrip(const chaining_pipeline_key& key,
     push.skip_penalty = skip_penalty;
     push.max_chain_skip = max_chain_skip;
 
-    // record: host-write barrier -> dispatch -> shader-write->host-read barrier.
+    // Make host writes visible to the shader, then make its results visible to the host.
     check_vk(vkResetCommandBuffer(command_buffer_, 0), "vkResetCommandBuffer");
     VkCommandBufferBeginInfo begin{};
     begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
@@ -199,7 +204,7 @@ void runtime::run_chaining_tiled_dp_roundtrip(const chaining_pipeline_key& key,
         collector->commit(command_buffer_);
 #endif
 
-    // D2H: read the propagated scores / predecessors back.
+    // Copy scores and predecessors back after the GPU has finished.
     download_locked(transfer_scratch, best_scores, best_scores_bytes);
     download_locked(transfer_scratch, predecessors, predecessors_bytes);
 
@@ -276,8 +281,8 @@ runtime::finalize_selected_pipeline_operation_transaction(
     std::array<const runtime_metal_archive_pipeline_receipt*, k_runtime_pipeline_prepared_slots>
         distinct_receipts{};
     std::size_t receipt_count = 0u;
-    // Every token is validated before any claim can be consumed. Cached
-    // pipelines shared by segments/jobs enter the report-once set just once.
+    // Validate every operation before claiming its metrics. Count a shared
+    // pipeline once even when several jobs used it.
     const auto collect_operation = [&audit, &distinct_receipts, &receipt_count, &live_features](
                                        const runtime_pipeline_operation_token& operation) {
         bool accepted_kind = false;
@@ -758,7 +763,12 @@ runtime::finalize_selected_query_sketches(
 #endif
 #endif
 
-/// @brief Runs coordinate chaining and downloads the selected predecessor trace.
+/**
+ * @brief Chains anchors on the GPU and returns coordinates with the selected anchor trace.
+ *
+ * The coordinate reduction follows the chaining dispatch in the same submission.
+ * Only the selected trace is copied back, along with its coordinate result.
+ */
 gpu_coordinate_chain_trace_result
 runtime::run_chaining_coordinate_trace_roundtrip(const chaining_pipeline_key& key,
                                                  buffer& transfer_scratch,
@@ -971,8 +981,6 @@ runtime::run_chaining_coordinate_trace_roundtrip(const chaining_pipeline_key& ke
     return out;
 }
 
-// ---------------------------------------------------------------------------
-// Seed lookup — seeding roundtrips
-// ---------------------------------------------------------------------------
+
 
 } // namespace bioseq::gpu::vulkan
