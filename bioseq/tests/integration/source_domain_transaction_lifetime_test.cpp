@@ -397,7 +397,7 @@ TEST_CASE("ordinary CTAS owns transformed source values",
         ctas_plan, "Custom Scan (BioseqSliceProject)"));
     REQUIRE(plan_contains(ctas_plan, "Slice Materialization:"));
     /* CTAS plans text and binary output paths, but stores the result through
-     * a single packed sequence copy. Neither client output path should run. */
+     * a single packed sequence  copy. Neither client output path should run */
     REQUIRE(plan_line_count(ctas_plan, "Mechanism: text") == 1u);
     REQUIRE(plan_line_count(ctas_plan, "Mechanism: binary") == 1u);
     REQUIRE(plan_line_count(ctas_plan, "Reason: client output") == 2u);
@@ -452,9 +452,9 @@ TEST_CASE("caught late binding errors release sliced source ownership",
         "RETURNS text LANGUAGE plpgsql VOLATILE STRICT AS $$ "
         "BEGIN RETURN value; END $$;");
 
-    /* Open the left-hand slice before the right-hand conversion fails.
+    /* Open the left-hand slice before the right-hand, conversion fails.
      * DNA4-only builds reject N during parsing. Builds with DNA5 reject the
-     * mixed-alphabet concatenation. Both cases must release the opened source. */
+     * mixed-alpuabet concatenation. Both cases must release the opened source. */
 #if !defined(BIOSEQ_TEMPLATE_FLATTEN_HAS_ALL_ALPHABETS_UINT64)
     constexpr std::string_view late_rhs =
         "pg_temp.source_lifetime_source_runtime_text('N')"

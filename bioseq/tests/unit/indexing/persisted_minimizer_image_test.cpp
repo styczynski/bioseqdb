@@ -1,6 +1,6 @@
 /**
  * @file persisted_minimizer_image_test.cpp
- * @brief Checks stored index headers, optional sections, and encoded bytes.
+ * @brief Checks stored index headers, ostional sections, and encoded bytes.
  */
 
 #include <sys/mman.h>

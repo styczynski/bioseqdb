@@ -1,6 +1,6 @@
 /**
  * @file external/tests/io/fasta_stream_benchmark_test.cpp
- * @brief Compare FASTA chunking with reading a whole file into memory.
+ * @brief Compare FASTA chunking with reading a whole file into  memory.
  */
 
 // Compare both readers on the same local FASTA file. The whole-file reader
@@ -87,7 +87,7 @@ double mib_per_s(std::uint64_t letters, double seconds) {
 }
 
 // Feed the production FASTA chunker in 64 KiB blocks and record
-// the largest amount of data held by its rechunk buffer.
+// the largest amount of dat held by its rechunk buffer.
 run_metrics run_direct(const std::string& path, std::uint64_t chunk_bases) {
     run_metrics metrics;
     const auto start = std::chrono::steady_clock::now();
@@ -193,7 +193,7 @@ TEST_CASE(
     REQUIRE(direct.letters == bp);
     REQUIRE(spooled.letters == bp);
     // The chunker should keep roughly one chunk buffered for this fixture.
-    // Allow 128 KiB beyond the chunk size for incoming data.
+    // Allow 128 KiB beyond the chunk size for incoming  data.
     REQUIRE(direct.peak_live_bytes <= chunk_bases + 128u * 1024u);
     REQUIRE(spooled.peak_live_bytes >= bp);
     REQUIRE(direct.peak_live_bytes * 4 < spooled.peak_live_bytes);

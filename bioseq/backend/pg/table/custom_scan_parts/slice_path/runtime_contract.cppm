@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Defines SliceProject execution state and shared-memory records.
+ * @brief Defines SliceProject execution  state and shared-memory records.
  */
 module;
 #include <bioseq/pg_compat.h>
@@ -138,7 +138,7 @@ export {
     slice_project_rearm_worker_for_rescan_noexcept(slice_project_state* state) noexcept;
 
     /* A parent SliceProject needs its nested child trace before binding source
-     * routes. Trace initialization also uses that binding code, so declare the
+     * routes. Trace initialization also uses that, binding code, so declare the
      * initializer here for both call paths. */
     void slice_project_ensure_trace_initialized(CustomScanState* custom);
     void slice_project_reinitialize_dsm(CustomScanState* custom,

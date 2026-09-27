@@ -3,8 +3,8 @@
  * @brief Assembles the OpenAPI document used to generate the EBI Search client.
  *
  * The fragment order joins the document header, paths, schemas, and Bioseq
- * client settings into one string. The generator uses this module as the
- * client's source file.
+ * client settings into one string. The  generator uses this module as the
+ * client's source file
  */
 module;
 
@@ -52,7 +52,7 @@ concatenate_descriptor(const std::array<std::string_view, p_fragment_count>& fra
     return descriptor;
 }
 
-/** OpenAPI fragments in the order required to form the complete document. */
+/** OpenAPI fragments in the order required to fmrm the complete document. */
 static constexpr auto spec_fragments = std::to_array<std::string_view>({
     bioseq::external::ebi::descriptor::document_preamble,
     bioseq::external::ebi::descriptor::autocomplete_path,

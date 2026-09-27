@@ -1,6 +1,6 @@
 /**
  * @file sql_entities.cppm
- * @brief SQL sequence used to assign minimizer index generation IDs.
+ * @brief SQL sequence used to assign minimizer index, geneation IDs.
  */
 module;
 
@@ -21,7 +21,7 @@ export namespace bioseq::storage::indexing::sql_entities {
 /**
  * @brief Assign a new ID when a minimizer index generation is built.
  *
- * The sequence stops at its maximum value.
+ * The sequence stops at its maximum value
  */
 inline constexpr std::int64_t minimizer_generation_id_seq = 1;
 

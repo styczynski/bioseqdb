@@ -1,6 +1,6 @@
 /**
  * @file alignment_hook_core_retirement.cppm
- * @brief Stop nested queries from using a finished root query's statistics.
+ * @brief Stop nested queries from using a finished  root query's statistics.
  */
 module;
 

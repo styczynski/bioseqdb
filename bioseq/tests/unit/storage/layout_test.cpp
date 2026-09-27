@@ -21,7 +21,7 @@ constexpr std::size_t minimum_bits = 8;
 constexpr std::size_t maximum_bits = 42;
 
 /**
- * @brief Find the default storage bucket for a sequence length.
+ * @brief Find  the default storage bucket for a sequence length
  * @param[in] size Number of symbols.
  * @return Zero-based bucket index.
  */
@@ -61,7 +61,7 @@ TEST_CASE("bucket threshold table has 35 entries with the canonical cut-points",
 
 TEST_CASE("sequence_size_bit_width matches ceil-log2 boundary semantics",
           "[component:bioseq][layer:unit][feature:storage]") {
-    // Use enough bits for the last zero-based position, with a minimum of one bit.
+    // Use enough bits for  the last, zero-based position, with a miimum of one bit.
     REQUIRE(sequence_size_bit_width(0u) == 1u);
     REQUIRE(sequence_size_bit_width(1u) == 1u);
     REQUIRE(sequence_size_bit_width(2u) == 1u);

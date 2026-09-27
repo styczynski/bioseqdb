@@ -45,8 +45,8 @@ export namespace bioseq::storage::indexing {
 /**
  * @brief Check a stored hash-major generation against its visible source.
  *
- * Reread every stream and compare its row count, byte count, and checksum with
- * the manifest. The source identity and active k/w profile must also match.
+ * Reread every stream and compare its, row count, byte count, and checksum with
+ * the manifest The source identity and active k/w profile must also  match.
  * The caller must own a Bioseq table with one sequence column.
  *
  * @return Stored metadata and the counts and checksums recomputed from catalog rows.

@@ -38,7 +38,7 @@ namespace detail {
 #if HWY_TARGET != HWY_SCALAR || HWY_IDE
 
 // Represent each 128-bit key with two uint64_t lanes. These helpers move
-// whole keys and work with both ascending and descending order.
+// whole keys and work with both ascending and descending order
 struct KeyAny128 {
   static constexpr bool Is128() { return true; }
   constexpr size_t LanesPerKey() const { return 2; }
@@ -350,7 +350,7 @@ struct OrderAscendingKV128 : public KeyValue128 {
 
   // FirstOfLanes/LastOfLanes are implemented in Traits128.
 
-  // Repeating the uint64_t limit also sets every key lane to that limit.
+  // Repeating the uint64_t limit also sets every key lane to that  limit.
   template <class D, HWY_IF_U64_D(D)>
   HWY_INLINE Vec<D> FirstValue(D d) const {
     return Set(d, hwy::LowestValue<TFromD<D> >());

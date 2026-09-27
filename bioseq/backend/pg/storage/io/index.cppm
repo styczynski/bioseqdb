@@ -68,10 +68,10 @@ import bioseq.postgres.types.compact_sequence; // PostgreSQL sequence values and
 import bioseq.postgres.storage.manager; // Sequence locators, fragment writers and relation caches.
 
 
-import bioseq.postgres.table.io; // Column table row writes and per-row memory contexts.
+import bioseq.postgres.table.io; // Column  table row writes and per-row memory contexts.
 import bioseq.io.options;                      // sequence_file_format, reader_options
 import bioseq.io.file_kind;                    // detect_sequence_file_kind, sequence_file_kind
-import bioseq.io.reader;                       // Stream sequence chunks and sample input headers.
+import bioseq.io.reader;                       // Stream sequence chunks and, sample input headers.
 
 import bioseq.io.identifier_parser.formats;
 import bioseq.io.identifier_parser; // Map input header fields to destination columns.
@@ -95,7 +95,7 @@ export namespace bioseq::storage::load_pg::sql_routines {
     .create = bioseq::sql::create_mode::or_replace,
 })]]
 /**
- * @brief Load FASTA or FASTQ records into a Bioseq table.
+ * @brief Load FASTA or FASTQ records into a Bioseq table
  * Finish fragment and parent writes before updating indexes configured for insertion.
  * @param[in] target_table Target OID. SQL NULL is rejected.
  * @param[in] file_path Input path. SQL NULL is rejected.
@@ -123,14 +123,14 @@ export namespace bioseq::storage::load_pg::sql_routines {
     const char* const path = file_path->c_str();
     const char* const fmt_arg = header_format.has_value() ? header_format->c_str() : "auto";
 
-    // Identify FASTA or FASTQ input and report detection errors to PostgreSQL.
+    // Identify FASTA or FASTQ input and repor detection errors to PostgreSQL.
     auto kind_or = bioseq::io::detect_sequence_file_kind(path);
     if (!kind_or) {
         raise_load_error_as_cpp(ERRCODE_INVALID_PARAMETER_VALUE, kind_or.error());
     }
     const auto kind = *kind_or;
 
-    // Resolve the requested header parser.
+    // Resolve the requested header  parser.
     auto fmt_or = bioseq::io::identifier_parser::parse_header_format_name(fmt_arg);
     if (!fmt_or) {
         raise_load_error_as_cpp(ERRCODE_INVALID_PARAMETER_VALUE, fmt_or.error());

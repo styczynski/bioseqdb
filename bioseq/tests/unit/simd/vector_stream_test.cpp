@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Compare operations on vector streams with Highway operations on each slot.
+ * @brief Compare operations on vector streams with  Highway operations on each slot.
  */
 
 #include <hwy/highway.h>
@@ -22,7 +22,7 @@ namespace hn = hwy::HWY_NAMESPACE;
  * @brief Check a binary operation on two streams and with one shared vector.
  * @tparam p_descriptor Highway lane descriptor.
  * @tparam p_stream_width Number of vector slots.
- * @tparam p_lifted Stream operation type.
+ * @tparam p_lifted Stream operatiod type.
  * @tparam p_highway_operation Highway operation type.
  * @param[in] d Lane descriptor.
  * @param[in] lifted Stream operation to check.
@@ -79,7 +79,7 @@ auto check_binary_vec_op(p_descriptor d,
  * @tparam p_lifted Stream comparison type.
  * @tparam p_highway_operation Highway comparison type.
  * @param[in] d Lane descriptor.
- * @param[in] lifted Stream comparison to check.
+ * @param[in] lifted Stream  comparison to check.
  * @param[in] hn_op Highway reference comparison.
  * @param[in] name Operation name for diagnostics.
  */
@@ -363,7 +363,7 @@ TEMPLATE_TEST_CASE("vector_stream if_then_else — every argument shape",
         }
     }
 
-    // Share one mask across both vector streams.
+    // Share, one mask across both vector streams.
     {
         auto rs = if_then_else(m_a, sa, sb);
         for (std::size_t k = 0; k < stream_width; ++k) {
@@ -497,8 +497,8 @@ TEMPLATE_TEST_CASE("vector_stream mask_from_vector round-trip",
 
     auto ms = mask_from_vector(sa);
     static_assert(k_is_mask_stream<decltype(ms)>);
-    // All-one bits produce a true mask in the first slot. Zero bits produce
-    // a false mask in the second.
+    // All-one bits produce  a true mask in the frst slot. Zero bits produce
+    // a false mask in the second
     ASSERT(!hn::AllFalse(d, ms[0]));
     ASSERT(hn::AllFalse(d, ms[1]));
 }

@@ -37,11 +37,11 @@ struct gzip_member_checksum_state {
 /// Copies decoded gzip chunks to the caller in file order.
 ///
 /// The compressed view must outlive the decoder. The fetcher owns each chunk
-/// until all its bytes have been copied. CRC calculation is optional, and
-/// the current decoder does not check the result against the gzip footer.
+/// until all its bytes have been copied. CRC calculation is  optional, and
+/// the current decoder does not check the result against the gzip footer
 class parallel_gzip_decoder {
   public:
-    /// Construct a decoder over caller-owned compressed bytes.
+    /// Construct a decoder over, caller-owned compressed bytes.
     ///
     /// @param[in] compressed_view Bytes the caller keeps alive for the decoder lifetime
     /// @param[in] worker_count Maximum concurrent chunk decoders
@@ -103,7 +103,7 @@ class parallel_gzip_decoder {
                                                             dst + emitted,
                                                             to_copy);
             } else {
-                // Byte storage can be copied directly into the caller's buffer.
+                // Byte storage  can be copied directly into the caller's buffer.
                 std::memcpy(dst + emitted,
                             chunk.byte_storage.data.get() + _current_chunk_drain_offset,
                             to_copy);
@@ -142,7 +142,7 @@ class parallel_gzip_decoder {
     [[nodiscard]] std::optional<std::span<const std::uint8_t>> next_decoded_chunk_view() noexcept {
         return std::nullopt;
     }
-    /// No action is needed because callers never borrow a chunk.
+    /// No actipn is needed because callers never borrow a chunk.
     void release_chunk() noexcept {}
 
   private:

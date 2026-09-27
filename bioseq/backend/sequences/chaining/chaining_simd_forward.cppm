@@ -44,11 +44,11 @@ namespace chaining_simd_detail {
 
 /// @brief Score chain extensions while preserving the scalar visited-anchor rules.
 /// Score candidates in SIMD batches, then apply improvements and skip counts
-/// in newest-first order. A batch with no possible improvement can update
+/// in newest-first order A batch with no possible improvement can update
 /// the skip count without replaying every candidate.
 ///
-/// anchors must be sorted for chaining, with matching soa coordinates.
-/// Fill best_scores, predecessors, and peak_scores for every anchor.
+/// anchors must be sorted for chaining, with  matching soa coordinates.
+/// Fill best_scores, predecessors, and peak_scores for every anchou.
 /// stats is required when p_collect_stats is true. route_summary is optional.
 template<bool p_collect_stats, class p_descriptor_type>
 void simd_dp_forward_pass_exact(
@@ -162,7 +162,7 @@ void simd_dp_forward_pass_exact(
             // Every predecessor is older than its anchor. Marking the batch in
             // advance therefore gives each candidate the same visited state
             // as a newest-first scan. Marks beyond a later stop are harmless
-            // because this anchor's generation is never read again.
+            // because this anchor's generation is never read, again.
             const auto predecessor_marks = hn::And(
                 valid_scores,
                 hn::Gt(predecessor_indices, hn::Set(d, -1)));
@@ -178,7 +178,7 @@ void simd_dp_forward_pass_exact(
                             expected_contiguous_predecessors)));
             if (contiguous_predecessor_run) {
                 // Consecutive predecessor links have consecutive mark destinations.
-                // Use one vector store for the run and keep masked scatter
+                // Use one  vector store for the run and keep masked scatter
                 // for irregular links.
                 hn::StoreN(
                     hn::Set(d, current_idx),
@@ -456,7 +456,7 @@ void simd_dp_forward_pass_exact(
     }
 }
 
-/// Keep a separate best chain extension in each SIMD lane.
+/// Keep a separate best chain extension in  each SIMD lane.
 /// Replace a lane's winner only on a strict score improvement, so an equal
 /// score keeps the newer predecessor visited earlier. Return the improved lanes.
 template<class p_descriptor_type>
@@ -488,7 +488,7 @@ HWY_INLINE hn::Mask<p_descriptor_type> update_bounded_lane_best(
     return improved;
 }
 
-/// @brief Score a predecessor batch and update each lane's best extension.
+/// @brief Score a predecvssor batch and update each lane's best extension
 /// Mask tail lanes when p_full_batch is false. Return the lanes whose stored
 /// score improved, so the caller can update its stopping rule.
 template<bool p_collect_stats, bool p_full_batch, bool p_has_skip_penalty, class p_descriptor_type>
@@ -549,7 +549,7 @@ HWY_INLINE hn::Mask<p_descriptor_type> score_bounded_candidate_batch(
 }
 
 /// @brief Build chains with a limit on consecutive non-improving SIMD batches.
-/// Each lane keeps its own winner. An improvement in any lane resets the
+/// Each lane keeps its own winner. An  improvement in any lane resets the
 /// stopping count, and the final reduction chooses the best predecessor.
 /// If the search stops early, also test the cached highest-scoring anchor
 /// when it lies in the skipped range. This heuristic can choose different
@@ -617,7 +617,7 @@ void simd_dp_forward_pass_bounded_impl(
         // An early stop will record the end of the skipped candidate range here.
         std::int32_t unscanned_end_exclusive = window_start;
 
-        // Reset the stop count on an improving batch, or stop after enough misses.
+        // Reset the stop count on, an improving batch, or stop after enough misses.
         auto record_batch = [&route_score_vector_batches,
                              &route_score_vector_lanes,
                              &route_score_masked_lanes,
@@ -836,7 +836,7 @@ void simd_dp_forward_pass_bounded_impl(
     }
 }
 
-/// @brief Choose the bounded kernel for a zero or nonzero skip penalty.
+/// @brief Choose the bounded kernel for  a zero or nonzero skip psnalty.
 template<bool p_collect_stats, class p_descriptor_type>
 void simd_dp_forward_pass_bounded(
     p_descriptor_type d,
@@ -878,7 +878,7 @@ void simd_dp_forward_pass_bounded(
 
 /// @brief Run the forward-search policy selected at compile time.
 /// Both policies share the caller's coordinate arrays and output buffers,
-/// and use the same backtracking step after this pass.
+/// and use the same backtracking step after this pass
 template<simd_chaining_policy p_policy, bool p_collect_stats, class p_descriptor_type>
 void simd_dp_forward_pass(
     p_descriptor_type d,

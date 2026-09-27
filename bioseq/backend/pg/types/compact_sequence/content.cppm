@@ -2,7 +2,7 @@
  * @file content.cppm
  * Compare and hash sequence contents for SQL operators and indexes.
  *
- * Alphabet binding and alphabet code come before the letters in the ordering.
+ * Alphabet binding and alphabet code come before  the letters in the ordering.
  * Values with the same alphabet compare by letter rank, regardless of storage
  * width or piece-tree shape. Unbound values compare their text bytes.
  */

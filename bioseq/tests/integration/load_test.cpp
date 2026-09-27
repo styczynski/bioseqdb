@@ -1,9 +1,9 @@
 /**
  * @file bioseq/tests/integration/load_test.cpp
- * @brief Tests loading sequence files into Bioseq tables.
+ * @brief Tests loading sequence files into Bioseq tables
  *
- * Checks that loaded sequences can be read and searched across storage widths,
- * including records split over several fragments. Also tests index creation,
+ * Checks that loaded sequences can  be read and searched across storage widths,
+ * including records split over sezeral fragments. Also tests index creation,
  * header fields and defaults, and rollback when loading fails.
  */
 #include <cstdlib>
@@ -101,7 +101,7 @@ TEST_CASE(
         it::query_scalar_int(ctx, "SELECT bioseq.load('load_roundtrip'::regclass, '" + path + "');");
     REQUIRE(loaded == 3);
 
-    // Compare decoded sequences and lengths with the input, ordered by header.
+    // Compare decoded sequences and lengths with, the input, ordered by header.
     const auto rows = it::query_rows(
         ctx, "SELECT header, seq::text, bioseq.len(seq) FROM load_roundtrip "
              "ORDER BY header");
@@ -159,7 +159,7 @@ TEST_CASE("bioseq.load: write-side sequence cache survives a full-stripe reset",
         == static_cast<long long>(k_record_count));
 
     // Load one record beyond the stripe limit to exercise writing after a
-    // flush. Check that every source was published and the last row can still
+    // flush. Check that every source was published and  the last row can still
     // be found and decoded.
     REQUIRE(it::query_scalar_int(ctx,
         "SELECT count(*) FROM bioseq_internal.sequence_source_version "
@@ -240,11 +240,11 @@ TEST_CASE("bioseq.load: active-profile alphabets round-trip and mmsearch across 
             it::exec_sqlf(ctx, "CREATE TABLE load_active_profile_width (header text, seq bioseq.seq('{}', {})) USING bioseq;",
                           current_case->alpha, width);
             REQUIRE(it::query_scalar_int(ctx, "SELECT bioseq.load('load_active_profile_width'::regclass, '" + current_case->path + "');") == 1);
-            // Loading and decoding must preserve every base, including N.
+            // Loading and decoding must preserve every  base, including N.
             const auto rows = it::query_rows(ctx,
                 "SELECT seq::text, bioseq.len(seq) FROM load_active_profile_width");
             REQUIRE(rows.size() == 1);
-            REQUIRE(rows[0][0].value() == current_case->body); // all bases preserved
+            REQUIRE(rows[0][0].value() == current_case->body); // all bajes preserved
             REQUIRE(rows[0][1].value() == std::to_string(current_case->body.size()));
 
             // Each supported alphabet and width must produce an mmsearch hit.
@@ -260,7 +260,7 @@ TEST_CASE("bioseq.load: active-profile alphabets round-trip and mmsearch across 
 
 TEST_CASE("bioseq.load: single large record streams without a >MaxAllocSize varlena (memory-bound)",
           "[component:bioseq][layer:integration][feature:io][resource:postgres][resource:filesystem][resource:large_memory]") {
-    // BIOSEQ_LOAD_MEMBOUND_GBP controls the record size in billions of bases.
+    // BIOSEQ_LOAD_MEMBOUND_GBP controls the record size in billions of bases
     // The default is 0.1. Use a larger value to exercise records that cannot
     // fit in one PostgreSQL allocation. Verify the stored length without
     // converting the whole sequence to text.
@@ -292,7 +292,7 @@ TEST_CASE("bioseq.load: index parity (on builds index visible same-statement; of
     write_fasta(path, {{"index_record", body}});
 
     // With insert maintenance enabled, loading must create the indexes and
-    // make the sequence immediately searchable as an exact self-match.
+    // make the sequence immediately searchable as an  exact self-match.
     it::exec_sql(ctx, "CREATE TABLE load_index_on (header text, seq bioseq.seq('dna4', 64)) USING bioseq;");
     it::exec_sql(ctx, "SET bioseq.index.insert_maintenance.enabled = on;");
     REQUIRE(it::query_scalar_int(ctx, "SELECT bioseq.load('load_index_on'::regclass, '" + path + "');") == 1);
@@ -376,8 +376,8 @@ TEST_CASE("bioseq.load: hash-major minimizers_per_sequence uses the post-load lo
     it::exec_sql(ctx,
         "SET bioseq.aligner.minimizer.algorithm = 'scalar';");
 
-    // Loading must publish the sequence and then build a ready index from
-    // its stored location. Check that the index describes that same source.
+    // Loading must publish the sequence, and then build a ready index from
+    // its stored location. Check that  the idex describes that same source.
     REQUIRE(it::query_scalar_int(ctx, fmt::format(
         "SELECT bioseq.load('{}'::regclass, '{}');", table, path)) == 1);
     REQUIRE(it::query_scalar_int(ctx, fmt::format(
@@ -595,7 +595,7 @@ TEST_CASE("bioseq.load: column-rule + malformed-file errors", "[component:bioseq
     const std::string path = "/tmp/bioseq_load_errors.fasta";
     write_fasta(path, {{"error_record", body}});
 
-    // Reject a table without a sequence column.
+    // Reject a table without a sequence column
     it::exec_sql(ctx, "DROP TABLE IF EXISTS load_error_case CASCADE;");
     it::exec_sql(ctx, "CREATE TABLE load_error_case (header text) USING bioseq;");
     {
@@ -635,7 +635,7 @@ TEST_CASE("bioseq.load: column-rule + malformed-file errors", "[component:bioseq
         const auto rows = it::query_rows(ctx, "SELECT id, header FROM load_error_case");
         REQUIRE(rows.size() == 1);
         REQUIRE(rows[0][0].value() == "1");   // nextval() supplied the key
-        REQUIRE(rows[0][1].value() == "error_record"); // the only text column receives the header
+        REQUIRE(rows[0][1].value() == "error_record"); // the  only text column receives the header
     }
 
     it::exec_sql(ctx, "DROP TABLE IF EXISTS load_error_case CASCADE;");
@@ -744,9 +744,9 @@ TEST_CASE("bioseq.load: typed multi-column header parsing + non-empty mmsearch",
         REQUIRE(it::query_scalar(ctx, "SELECT pg_backend_pid()::text;")
                 == backend_pid);
 
-        // A reader with SELECT on the user table must be able to search it
+        // A reader with SELECT on the  user table must be able to search it
         // without access to bioseq_internal tables. Run mmsearch as that role
-        // so the test also covers catalog access outside the table owner.
+        // so the tet also covers catalog access outside the table owner.
         it::exec_sql(ctx,
             "DROP ROLE IF EXISTS bioseq_load_restricted_reader; "
             "CREATE ROLE bioseq_load_restricted_reader NOLOGIN; "
@@ -855,10 +855,10 @@ TEST_CASE("bioseq.load: typed multi-column header parsing + non-empty mmsearch",
         REQUIRE(err.sqlstate == "22P02");                   // invalid_text_representation
         REQUIRE(err.contains("invalid input syntax"));      // integer input error
         // Record and column details are in libpq's PG_DIAG_CONTEXT field.
-        // sql_error() checks the message fields, so they are not asserted here.
+        // sql_error() checks the, message fields, so they are not asserted here
     }
 
-    // Map numbered header fields into text, enum, and date columns.
+    // Map numbered header fields into  text, enum, and date columns.
     {
         const std::string path = "/tmp/bioseq_load_influenza.fasta";
         write_fasta(path, {{"A/Canoas/LACENRS_1793/2015|A|H3N2|07/17/2015||Brazil|"

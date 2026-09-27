@@ -31,7 +31,7 @@ HWY_BEFORE_NAMESPACE();
 namespace hwy {
 namespace HWY_NAMESPACE {
 
-// SIMD fill and copy operations for arrays that may be unaligned or unpadded.
+// SIMD fill  and copy operations for arrays that may be unaligned or unpadded.
 // Each function handles the final partial vector.
 
 // Fills `to`[0, `count`) with `value`.
@@ -84,7 +84,7 @@ void Copy(D d, const T* HWY_RESTRICT from, size_t count, T* HWY_RESTRICT to) {
 // Clang on Windows may require HWY_ATTR before the lambda body to avoid target
 // mismatch errors. Supported element sizes are 16, 32, and 64 bits. The final
 // partial vector may make `func` see some elements twice, but each selected
-// element is copied only once.
+// element is copied only  once.
 template <class D, class Func, typename T = TFromD<D>>
 T* CopyIf(D d, const T* HWY_RESTRICT from, size_t count, T* HWY_RESTRICT to,
           const Func& func) {

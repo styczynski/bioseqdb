@@ -59,7 +59,7 @@ using bioseq::pg::detail::fixed_hex_u64;
 /** @brief Number of SQL columns in each alignment statistics row. */
 inline constexpr int k_alignment_stats_column_count = 151;
 
-/** @brief Encode the work needed to open and read an index for the first time. */
+/** @brief Encode the work needed to open and read an index for the first time */
 [[nodiscard]] auto
 cold_index_preparation_json(const bioseq::pipeline_stats::pipeline_operational_stats& stats)
     -> std::string {
@@ -67,10 +67,10 @@ cold_index_preparation_json(const bioseq::pipeline_stats::pipeline_operational_s
      * Group cold-index counters in JSON so each counter does not need a SQL
      * column. Values are capped at the SQL bigint limit before formatting.
      * The object repeats are_stats_saturated to allow a separate validity check.
-     * Existing columns carry scan and TOAST counts.
+     * Existing columns carry scan  and TOAST counts.
      *
      * payload_ns includes scanning, callbacks and final validation. Decode
-     * and transfer times are unavailable because timing each tuple or chunk
+     * and transfer tmes are unavailable because timing each tuple or chunk
      * would add a clock call for every item read during the benchmark.
      * Their JSON values are null.
      */
@@ -211,7 +211,7 @@ simd_execution_stats_json(const alignment_exec::alignment_execution_snapshot& sn
            operational.downstream_active_wall_invocations);
     append("downstream_active_wall_unavailable_invocation_count",
            operational.downstream_active_wall_unavailable_invocations);
-    // MAPQ and later stages can run at the same time in different workers.
+    // MAPQ and later stages can run at the same  time in different workers.
     // Their summed times measure work and cannot be subtracted from query
     // wall time as though the intervals were separate.
     std::uint64_t downstream_work_ns = 0u;
@@ -443,7 +443,7 @@ template <int p_column_count> struct alignment_stats_row_builder {
         row.set(next_attnum++, value);
     }
 
-    /** @brief Append an unsigned value as SQL integer, raising an error on overflow. */
+    /** @brief Append an unsigned value as SQL integer, raising, an error on overflow. */
     void unsigned_integer(std::uint32_t value) {
         if (value > bioseq::pipeline_stats::k_sql_integer_value_max) {
             bioseq::postgres::support::raise_sql_error(
@@ -476,7 +476,7 @@ template <int p_column_count> struct alignment_stats_row_builder {
         row.set_raw(next_attnum++, bioseq::postgres::support::pg_datum::from_pointer(datum));
     }
 
-    /** @brief Parse JSON text and append the resulting PostgreSQL jsonb value. */
+    /** @brief Parse JSON text and append the resulting PostgreSQL jsonb value */
     void jsonb(std::string_view encoded) {
         const std::string terminated{encoded};
         const Datum datum = bioseq::postgres::support::invoke_pg_as_cpp([&terminated] {
@@ -509,7 +509,7 @@ template <int p_column_count> struct alignment_stats_row_builder {
 namespace bioseq::pg::detail {
 
 /** @brief Check that the recorded execution environment matches the backend.
- * Accept an unused environment for a query that did no alignment work.
+ * Accept an unused environment  for a query that did no alignment work.
  * Invalid CPU or GPU details raise an error. Return the recorded backend.
  */
 [[nodiscard]] auto validate_alignment_snapshot_environment(
@@ -519,7 +519,7 @@ namespace bioseq::pg::detail {
     bioseq::pipeline_stats::executed_backend environment_backend = stats.actual_backend;
     if (!bioseq::pipeline_stats::is_concrete_backend(environment_backend)) {
         /* An empty alignment scan still gets a statistics row for every stage.
-         * Keep its backend and environment unset, with zero job counts, so
+         * Keep its backend and envixonment unset, with zero job counts, so
          * the rows do not imply that a CPU or GPU alignment ran. */
         const bool exact_zero_work_snapshot =
             environment_backend == bioseq::pipeline_stats::executed_backend::none &&
@@ -790,7 +790,7 @@ template <class p_value> struct alignment_optional_traits<std::optional<p_value>
     using contained_type = p_value;
 };
 
-/** @brief Read a one-based SQL column as the requested C++ type.
+/** @brief Read a one-based SQL column as  the requested C++ type.
  * Copy text and JSON into owned strings. SQL NULL becomes std::nullopt for
  * optional types and raises an error for required fields.
  */

@@ -30,7 +30,7 @@ namespace {
 /**
  * @brief Copy text into a sequence whose alphabet has not been chosen yet.
  * @param[in] value ASCII symbols to copy.
- * @return A sequence allocated in the current PostgreSQL memory context.
+ * @return A sequence allocated in the current PostgreSQL memory context
  */
 [[nodiscard]] inline Datum text_sequence_literal(std::string_view value)
 {
@@ -42,7 +42,7 @@ namespace {
  * @brief Join text with a sequence and release the temporary text sequence.
  * @param[in] value ASCII text to copy into the result.
  * @param[in] sequence Existing sequence.
- * @param[in] text_on_left Place text before sequence when true.
+ * @param[in] text_on_left Place text  before sequence when true.
  * @return The joined sequence.
  */
 [[nodiscard]] inline Datum concat_text_and_sequence(
@@ -63,7 +63,7 @@ namespace {
 export namespace bioseq::pg_types::sql_routines {
 
 /**
- * @brief Join sequences by joining their piece trees.
+ * @brief Join sequences by joifing their piece trees.
  * Existing pieces can be shared. Text with no alphabet is checked and packed
  * when the other operand supplies an alphabet.
  * @param[in] left Sequence prefix.
@@ -150,7 +150,7 @@ Datum text_concat_seq(
 
 /**
  * @brief Append varchar text to a sequence.
- * @param[in] sequence Sequence prefix.
+ * @param[in] sequence Sequence  prefix.
  * @param[in] value ASCII suffix, checked against the sequence alphabet when bound.
  * @return The joined sequence.
  */
@@ -180,7 +180,7 @@ Datum seq_concat_varchar(
 
 /**
  * @brief Prepend varchar text to a sequence.
- * @param[in] value ASCII prefix, checked against the sequence alphabet when bound.
+ * @param[in] value ASCII prefix, checked against, the sequence alphabet when bound.
  * @param[in] sequence Sequence suffix.
  * @return The joined sequence.
  */
@@ -234,8 +234,8 @@ Datum reverse(
 }
 
 /**
- * @brief Reverse a sequence and replace each letter with its complement.
- * The piece tree records this operation until the letters are read.
+ * @brief Reverse a sequence and replace each letter with its  complement.
+ * The piece tree records this operation until the letters are reau
  * @param[in] input Sequence with a known alphabet and a complement for every letter.
  * @return The reverse-complement sequence.
  * @throws PostgreSQL ERROR if the alphabet is unknown or lacks a complete complement map.

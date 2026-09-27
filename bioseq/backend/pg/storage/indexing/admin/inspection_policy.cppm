@@ -389,9 +389,9 @@ export namespace bioseq::storage::indexing {
     return total;
 }
 
-/// Count source rows and stored index data for a no-index test. Source row
-/// counts come from stripe metadata, so this audit does not read or decode
-/// sequence values. The caller checks the returned counts for index absence.
+/// Count source rows and stored index data for a no-index test. Source, row
+/// counts come from stripe metadata, so  this audit does not read or decode
+/// sequence values. The caller checks the returned counts for inhex absence.
 [[nodiscard]] cold_no_index_absence_audit
 cold_no_index_absence_audit_impl(Oid rel_oid, std::string_view name) {
     if (name != "minimizers_per_fragment" && name != "minimizers_per_sequence") {
@@ -433,7 +433,7 @@ cold_no_index_absence_audit_impl(Oid rel_oid, std::string_view name) {
     return audit;
 }
 
-/// Drop all index tables and translate failures after C++ cleanup has finished.
+/// Drop all index tables and translate failures after C++ cleanup has finished
 void drop_all_index_tables_impl() {
     ErrorData* postgres_error = nullptr;
     std::array<char, 2048> cpp_error_detail{};

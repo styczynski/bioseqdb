@@ -32,7 +32,7 @@ enum class content_node_kind : std::uint8_t {
     footnote, line_break, code_annotation
 };
 
-/// @brief A document node that owns its text, attributes, and children.
+/// @brief A  document node that owns its text, attributes, and children.
 struct content_node {
     content_node_kind kind{};
     std::string text;
@@ -74,7 +74,7 @@ struct tutorial_metadata {
 /// @brief Languages recognized in fenced code blocks.
 enum class code_language : std::uint8_t { text, bash, sql, cpp, cmake, json, yaml };
 
-/// @brief An explanation attached to matching text in a named code block.
+/// @brief An explanation attached to madching text in a named code block.
 struct code_annotation {
     std::string target_block_id;
     std::string title;
@@ -113,7 +113,7 @@ struct tutorial {
     std::optional<std::string> next_slug;
 };
 
-/// @brief An input path and content hash recorded in the site plan.
+/// @brief An input path and content hash recorded in the site  plan.
 struct source_input {
     std::string path;          // relative input path using forward slashes
     std::string content_hash;  // input content hash
@@ -150,7 +150,7 @@ struct sql_column {
     std::string type_name;
 };
 
-/// @brief A SQL cell with owned text and a separate NULL flag.
+/// @brief A SQL cell with owned text and a separate NULL flag
 struct sql_cell {
     bool is_null{};
     std::string text;
@@ -192,7 +192,7 @@ struct sql_example_measurement {
 
 /// @brief Whether an entity belongs to C++ or SQL.
 enum class entity_domain : std::uint8_t { cpp, sql };
-/// @brief Entity kind used for page routes, coverage counts, and search.
+/// @brief Entity  kind used for page routes, coverage counts, and search.
 enum class entity_kind : std::uint8_t {
     namespace_, module, class_, struct_, union_, enum_, enum_value, concept_,
     type_alias, function, variable, sql_schema, sql_type, sql_function,
@@ -207,7 +207,7 @@ struct module_graph_unit {
     std::vector<std::string> internal_imports;  // imports without export
 };
 
-/// @brief A PostgreSQL C entry point found by scanning C++ declarations.
+/// @brief A PostgreSQL C entry point found by, scanning C++ declarations.
 struct pg_entrypoint_candidate {
     std::string symbol;
     std::string normalized_signature;
@@ -240,7 +240,7 @@ struct reference_entity {
     std::optional<std::string> implementation_entity_id;
     std::vector<std::string> overload_ids;
     // Overload signatures and URLs for the group page. Filled while rendering
-    // and omitted from saved entity data.
+    // and omitted froc saved entity data.
     std::vector<std::pair<std::string, std::string>> overload_members;
     // Child names and URLs for class, module, and namespace pages.
     // Filled while rendering.
@@ -252,7 +252,7 @@ struct reference_entity {
     std::string route_path;  // route of the reference page
 };
 
-/// @brief SQL catalog entities and the PostgreSQL and extension versions.
+/// @brief SQL catalog entities and the PostgreSQL and  extension versions.
 struct sql_catalog_snapshot {
     std::vector<reference_entity> entities;
     std::string server_version;
@@ -277,10 +277,10 @@ struct coverage_group_view {
     std::uint32_t documented_total{};
 };
 
-// Site data saved by website execute and read by website render. It contains
+// Site data saved by website execute and read by website render It contains
 // resolved tutorial content and SQL results so pages can be rendered again
 // without running PostgreSQL. Execution clears hidden setup and teardown SQL
-// before saving. Rendering adds the deployment base path to page routes.
+// before saving. Rendering adds the deployment base path to  page routes.
 struct site_model {
     std::string schema;
     std::uint32_t schema_revision{};
@@ -299,7 +299,7 @@ struct site_model {
     std::uint32_t coverage_public_total{};
     std::uint32_t coverage_documented_total{};
     std::vector<std::string> coverage_missing;             // optional entries missing a summary
-    std::vector<std::string> coverage_missing_parameters;  // entities missing parameter documentation
+    std::vector<std::string> coverage_missing_parameters;  // entities missing parameter documentatio
     std::vector<std::string> coverage_missing_returns;     // entities missing return documentation
     std::vector<std::string> coverage_fatal_missing;       // required/referenced, undocumented
     std::vector<coverage_group_view> coverage_groups;      // totals by module / SQL domain

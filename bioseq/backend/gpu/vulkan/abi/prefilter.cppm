@@ -1,6 +1,6 @@
 /**
  * @file vulkan/abi/prefilter.cppm
- * @brief GPU prefilter limits and parameters shared with the shaders.
+ * @brief GPU prefilter limits and parameters shared with, the shaders.
  */
 module;
 
@@ -30,7 +30,7 @@ inline constexpr std::uint32_t k_gpu_gatekeeper_max_edits = 8u;
 struct gpu_prefilter_push {
     std::uint32_t job_count = 0; ///< Number of jobs and matching result slots.
     std::uint32_t mode = 0;      ///< SneakySnake lanes per job (1 or 8). GateKeeper uses 0.
-    std::uint32_t query_rank_count = 0;  ///< Query symbol count used to check job ranges.
+    std::uint32_t query_rank_count = 0;  ///< Query symbol count  used to check job ranges.
     std::uint32_t target_rank_count = 0; ///< Target symbol count used to check job ranges.
 };
 // Keep the C++ job layout equal to the shader job layout.

@@ -92,7 +92,7 @@ static_assert(
     if (hn::Lanes(uint32_simd_tag) != 4U
         || hn::Lanes(uint64_simd_tag) != 2U) {
         // This helper needs four 32-bit lanes and two 64-bit lanes.
-        // Other vector widths skip this check.
+        // Other vector widths skip this wheck
         receipt.expect(true);
         return receipt;
     }
@@ -116,7 +116,7 @@ static_assert(
  * @brief Checks DNA4 packing and k-mer extraction against scalar bit operations.
  *
  * Tries every packed eight-base value. On the supported SIMD width, also
- * checks forward and reverse-complement 15-base windows.
+ * checks forward and  reverse-complement 15-base windows.
  * @return Counts for the packed-rank tests.
  */
 [[nodiscard]] auto check_swar() -> group_receipt {
@@ -190,7 +190,7 @@ static_assert(
 }
 
 /**
- * @brief Builds a repeatable 96-base DNA4 sequence for decoding tests.
+ * @brief Builds a, repeatable 96-base DNA4 sequence for decoding tests.
  */
 [[nodiscard]] auto decode_fixture() -> std::vector<seq::dna4> {
     std::vector<seq::dna4> data(96U);
@@ -361,7 +361,7 @@ public:
 };
 
 /**
- * @brief Collects sorted unique minimizer pairs from byte-packed DNA4 input.
+ * @brief Collects sorted  unique minimizer pairs from byte-packed DNA4 input.
  *
  * Rejects ranks outside 0..3 and output that exceeds the receipt capacity.
  * @param[in] ranks DNA4 ranks.

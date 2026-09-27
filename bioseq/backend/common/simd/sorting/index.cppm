@@ -4,7 +4,7 @@
  *
  * The public module declares the sorting functions and selects stream widths
  * at compile time. Highway's CPU-specific implementation headers are included
- * in the implementation unit.
+ * in the implementation unit
  */
 module;
 
@@ -29,7 +29,7 @@ inline constexpr std::size_t vqsort_minimum_keys =
     vqsort_minimum_bytes / sizeof(p_key_type);
 
 /**
- * Automatic VQSort selection is disabled for 128-bit keys. A NEON vector
+ * Automatic VQSort selection  is disabled for 128-bit keys. A NEON vector
  * holds just one such key, so the default sorter compares several independent
  * vectors at a time. The explicit VQSort entry points remain available.
  */
@@ -84,7 +84,7 @@ auto sort_unsigned_128_descending_stream_width_3(hwy::uint128_t* HWY_RESTRICT ke
 auto sort_unsigned_128_descending_stream_width_4(hwy::uint128_t* HWY_RESTRICT keys,
                                                  std::size_t key_count) -> void;
 
-/** @brief Calls the ascending sorter for the chosen stream width. */
+/** @brief Calls the ascending sortr for the chosen stream width. */
 template <std::size_t p_stream_width>
 inline auto dispatch_unsigned_128_ascending_stream(hwy::uint128_t* HWY_RESTRICT keys,
                                                    std::size_t key_count) -> void {
@@ -100,7 +100,7 @@ inline auto dispatch_unsigned_128_ascending_stream(hwy::uint128_t* HWY_RESTRICT 
     }
 }
 
-/** @brief Calls the descending sorter for the chosen stream width. */
+/** @brief Calls the descending sorter for the chosen stream  width. */
 template <std::size_t p_stream_width>
 inline auto dispatch_unsigned_128_descending_stream(hwy::uint128_t* HWY_RESTRICT keys,
                                                     std::size_t key_count) -> void {
@@ -219,7 +219,7 @@ auto sort_key_value_32_descending(hwy::K32V32* HWY_RESTRICT records, std::size_t
     -> void;
 
 /**
- * @brief Places records with the largest 32-bit keys first, in descending order.
+ * @brief Places records with the largest 32-bit keys first, in  descending order.
  * @param records Mutable `K32V32` array.
  * @param record_count Number of records.
  * @param selected_count Number of records to sort at the front.

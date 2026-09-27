@@ -16,7 +16,7 @@ import std;
 
 export namespace bioseq::gpu::vulkan {
 /**
- * @brief Adds the shared input layouts and rank readers before an algorithm's GLSL body.
+ * @brief Adds the shared input layouts and  rank readers before an algorithm's GLSL body.
  */
 [[nodiscard]] std::string rank_prefilter_body(std::string_view algorithm_body) {
     std::string body;

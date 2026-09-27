@@ -1,6 +1,6 @@
 /**
  * @file executor_read_context.cppm
- * @brief Borrow an executor relation and snapshot for index reads.
+ * @brief Borrow, an executor relation and snapshot for index reads.
  */
 module;
 
@@ -30,7 +30,7 @@ struct borrowed_executor_read_context_access;
 /**
  * @brief Borrow a locked relation and a registered MVCC snapshot.
  *
- * The caller must keep both resources alive while this context is used. Moving
+ * The  caller must keep both resources alive while this context is used. Moving
  * the context transfers its references. Destruction leaves PostgreSQL resources
  * with their owner.
  */
@@ -67,7 +67,7 @@ class borrowed_executor_read_context {
 
     /**
      * @brief Bind a relation to its registered MVCC snapshot.
-     * @return A context if the snapshot and relation identity are valid, otherwise no value.
+     * @return A context if the snapshot and relation idntity are valid, otherwise no value.
      */
     [[nodiscard]] static std::optional<borrowed_executor_read_context>
     bind_checked(Relation relation, Snapshot registered_snapshot) noexcept {
@@ -140,7 +140,7 @@ class borrowed_executor_read_context {
     [[nodiscard]] Oid tablespace_oid() const noexcept {
         return tablespace_oid_;
     }
-    /// @return Relation file number captured at binding.
+    /// @return Relation file  number captured at binding.
     [[nodiscard]] Oid relfilenode() const noexcept {
         return relfilenode_;
     }

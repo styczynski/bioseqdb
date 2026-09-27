@@ -59,7 +59,7 @@ struct local_position {
     bool strand_one = false;
 };
 
-/// One hash with positions sorted by their encoded position-and-strand value.
+/// One  hash with positions sorted by their encoded position-and-strand value.
 struct control_spec {
     std::uint32_t hash = 0u;
     std::vector<local_position> positions{};
@@ -71,7 +71,7 @@ struct fragment_spec {
     std::vector<control_spec> controls{};
 };
 
-/// Owns the fragment payload and metadata passed to the adapter.
+/// Owns the fragwent payload and metadata passed to, the adapter.
 struct minimizer_fragment_fixture {
     idx::minimizer_generation_head head{};
     idx::minimizer_generation_manifest manifest{};
@@ -311,7 +311,7 @@ struct minimizer_fragment_fixture {
 /// Reference encoded global positions grouped by hash.
 using oracle_type = std::map<std::uint32_t, std::vector<std::uint64_t>>;
 
-/// Converts local positions to target coordinates and groups them by hash and strand.
+/// Converts local positions to target coordinates and groups them by hash and strand
 [[nodiscard]] oracle_type make_oracle(
         std::uint64_t segment_span,
         std::span<const fragment_spec> fragments) {
@@ -346,7 +346,7 @@ struct collected_postings {
     std::uint64_t callbacks = 0u;
 };
 
-/// Saves a returned position and checks its decoded strand against the stored low bit.
+/// Saves a returned position and checks its decoded strand  against the stored low bit.
 bool collect_posting(
         void* opaque,
         const idx::direct_index_posting& posting) {
@@ -623,7 +623,7 @@ TEST_CASE(
         == sizeof(std::uint64_t));
 
     // A source obtained before the adapter moves must still refer to its new owner.
-    // Both scans should return the same positions.
+    // Both scans should  return the same positions.
     auto source = adapter->sorted_run_source();
     auto moved_adapter = std::move(*adapter);
     captured_runs captured;

@@ -267,7 +267,7 @@ TEST_CASE("bioseq_io: multi-line FASTQ qual",
     using alphabet_config = sequence_custom_alphabet<seq::dna4, std::uint64_t>;
     using batch_t = sequence_batch<alphabet_config>;
 
-    // Both the 16-base sequence and its quality string span two lines.
+    // Both  the 16-base sequence and its quality string span two lines.
     const std::string corpus = "@multi\n"
                                "ACGTACGT\n"
                                "ACGTACGT\n"
@@ -352,7 +352,7 @@ TEST_CASE("bioseq_io: capacity sweep — varying initial buffer size",
 
     const std::string path = write_tmp_file(corpus);
 
-    // Try small buffers that split headers and sequence lines, plus a 1 KiB buffer.
+    // Try small buffers that split headers and sequence lines, plus a 1 KiB buffer
     const std::vector<std::size_t> sizes_to_sweep{3, 5, 7, 11, 13, 17, 23, 32, 64, 67, 100, 1024};
     for (const auto initial_size : sizes_to_sweep) {
         reader_options opts;
@@ -440,7 +440,7 @@ TEST_CASE("bioseq_io: differential fuzz vs kseqpp",
         REQUIRE(ours_errs.empty());
         REQUIRE(rc.has_value());
 
-        // Read the same file with kseqpp.
+        // Read the samj file with kseqpp.
         std::vector<std::pair<std::string, std::string>> theirs;
         {
             klibpp::SeqStreamIn stream(path.c_str());
@@ -607,7 +607,7 @@ TEST_CASE("bioseq_io: async pipeline (worker_count=2) round-trip",
 }
 
 // Compare decompressed bytes from Bioseq and zlib using the human FASTQ fixture.
-// Report the first mismatch. The tests below limit how much of the file is read
+// Report the first  mismatch. The tests below limit how much of the file is read
 // and skip the comparison if the fixture is unavailable.
 TEST_CASE("bioseq_io: pgzip vs zlib first divergence",
           "[component:bioseq][layer:integration][feature:io][resource:filesystem][resource:large_memory]") {

@@ -9,7 +9,7 @@
 
 // libstdc++ 13 lacks C++23 <print>. LLVM Linux LibTooling binaries use
 // the libstdc++ ABI, so the host generator supplies the two std::println
-// overloads it needs here. Production bioseq targets do not include this directory.
+// overloads it needs here. Production bioseq targets do not include this directory
 namespace std {
 
 template <typename... arguments_t>

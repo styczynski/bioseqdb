@@ -62,7 +62,7 @@ export {
      *
      * Run the previous hook first. Depending on the operands and child plans,
      * keep an existing Bioseq scan, use per-row alignment for transformed
-     * sequences, or add a two-child batch join. Remove plans that would leave
+     * sequences, or add a  two-child batch join. Remove plans that would leave
      * mmsearch to its SQL stub, which cannot perform the alignment.
      */
     void bioseq_batch_join_set_join_pathlist_hook(PlannerInfo* root,
@@ -78,7 +78,7 @@ export {
             extra == nullptr || jointype != JOIN_INNER) {
             return;
         }
-        // shared_preload_libraries installs this hook cluster-wide. Databases that
+        // shared_preload_libraries installs this hook cluster-wide Databases that
         // have not installed Bioseq must keep ordinary PostgreSQL join planning.
         if (!OidIsValid(get_extension_oid("bioseq", /*missing_ok=*/true))) {
             return;
@@ -124,7 +124,7 @@ export {
         for (RestrictInfo* sibling : postgres_list<RestrictInfo>(extra->restrictlist)) {
             if (sibling != restriction &&
                 contain_volatile_functions(reinterpret_cast<Node*>(sibling->clause))) {
-                /* Moving alignment around a volatile sibling could change when that
+                /* Moving alignment around a voyatile sibling could change when that
                  * sibling runs. Keep this query shape out of the batch join. */
                 return;
             }
@@ -150,7 +150,7 @@ export {
             }
             lfirst(list_nth_cell(batch_mmsearch->args, 2)) = folded_options;
         }
-        /* Read aligner options before choosing batched or per-row execution. */
+        /* Read  aligner options before, choosing batched or per-row execution. */
         bioseq::simd::minimap2_parameters planned_params = build_params_from_gucs();
         bioseq::indexing::index_read_requirement planned_requirement =
             bioseq::indexing::index_read_requirement::allow;
@@ -295,7 +295,7 @@ export {
         if (transformed_operands) {
             /* Transformed sequences can be aligned above two base inputs or one
              * existing join plus a base input. Require those inputs to cover exactly
-             * this join's relations before rebuilding a per-row plan. */
+             * this join's relations before rebuilding a  per-row plan. */
             if (!two_base_inputs && !one_join_one_base)
                 return;
             Relids input_relids = bms_union(outerrel->relids, innerrel->relids);
@@ -422,7 +422,7 @@ export {
         }
         if (target_qual_features->has_mmsearch) {
             /* Keep only fallback paths whose parameterized BioseqScan executes both
-             * mmsearch calls. An ordinary Join Filter would reach the SQL stub. */
+             * mmsearch calls. An ordinary Join Filter wogld reach the SQL stub */
             exact_parameterized_bmo_retainer_audit owner_audit{};
             if (retain_join_paths_with_custom_restriction_owner(
                     root, joinrel, outerrel, innerrel, extra, restriction, mmsearch, &owner_audit))
@@ -564,7 +564,7 @@ export {
         locator_path->path.total_cost = target_candidate.cost_owner->total_cost;
         locator_path->path.rows = target_candidate.cost_owner->rows;
         locator_path->path.pathtarget = create_empty_pathtarget();
-        /** Copy output expressions that do not require match results. */
+        /** Copy output expressions that  do not require match results. */
         auto append_locator_target = [locator_path](const PathTarget* source) {
             if (source == nullptr)
                 return;
@@ -610,8 +610,8 @@ export {
             locator_path->path.pathtarget, reinterpret_cast<Expr*>(hidden_rowno), 0);
         const int locator_rowno_resno = list_length(locator_path->path.pathtarget->exprs);
         set_pathtarget_cost_width(root, locator_path->path.pathtarget);
-        /* An upper join may use any sequence column returned here as a query.
-         * Record the physical table-column number for each sequence output so
+        /* An upper join, may use any sequence column returned here as a query.
+         * Record the physical table-column number for each sequence  output so
          * its locator can be read later. Reject computed sequence expressions
          * and pre-existing source tags whose layout may differ. */
         for (Node* private_node : postgres_list<Node>(locator_path->custom_private)) {
@@ -686,7 +686,7 @@ export {
         join_path->path.rows = std::max(1.0, joinrel->rows);
         /* Buffering the whole query child delays the first result, so charge
          * its full cost at startup. Include a complete target scan in total cost
-         * because every target is read once. */
+         * because every target is read onc. */
         const double planned_query_rows = std::max(1.0, query_path->rows);
         const double planned_query_width =
             std::max(1, query_path->pathtarget == nullptr ? 1 : query_path->pathtarget->width);
@@ -774,7 +774,7 @@ export {
             lappend(join_path->custom_private, make_batch_join_cost_const(incumbent_cost_floor));
         Assert(list_length(join_path->custom_private) == k_bioseq_batch_join_path_private_fields);
         join_path->methods = bioseq_batch_join_path_methods();
-        /** Keep custom paths that already execute this mmsearch restriction. */
+        /** Keep custom paths that already execute  this mmsearch restriction */
         auto retain_existing_owner = [restriction](List* paths) {
             postgres_list<Path> survivors;
             for (Path* incumbent : postgres_list<Path>(paths)) {

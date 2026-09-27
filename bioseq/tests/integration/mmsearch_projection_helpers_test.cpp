@@ -64,7 +64,7 @@ TEST_CASE("mmsearch projection helpers run cleanly for the produced row set",
 }
 
 // Pair each helper call with a PostgreSQL type to cast its result to.
-// Run the same query check for every pair.
+// Run  the same query check for every pair.
 namespace {
 struct projection_probe {
     std::string_view sql_call;     // e.g. "bioseq.score(pk)"

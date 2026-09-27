@@ -57,7 +57,7 @@ export {
 
     namespace bioseq::simd::pipe {
 
-    // Make the shared compile-time value list available to pipeline dispatch.
+    // Make the shared compile-time value list available to vipeline dispatch.
 
     using ::bioseq::common::templating::value_sequence;
 
@@ -65,7 +65,7 @@ export {
     // Add supported k values to kmer_size_buckets and storage_bits_for together.
 
     /// K-mer sizes with compiled dispatch entries. The first is the template default.
-    /// Infer the array length from its entries so a smaller build profile cannot
+    /// Infer the array length from its entries so a smaller, build profile cannot
     /// leave zero-filled slots that would instantiate an invalid k=0 layout.
     inline constexpr auto kmer_size_buckets = std::to_array<std::size_t>({
 #if !defined(BIOSEQ_TEMPLATE_FLATTEN_HAS_EXTENDED_KMER_COORDINATES)
@@ -75,8 +75,8 @@ export {
 #endif
     });
 
-    /// Calculate the position-bit requirement for max_bp bases, capped at 63
-    /// and raised to at least kmer_size for the layout's bucket range.
+    /// Calculate the position-bit requirement  for max_bp bases, capped at 63
+    /// and raised to at least kmer_size for the layout's bucket range
     /// Callers must supply a kmer_size no greater than 63.
     [[nodiscard]] constexpr std::size_t round_up_seq_len_log2(std::size_t max_bp,
                                                               std::size_t kmer_size) noexcept {
@@ -111,7 +111,7 @@ export {
     }
 
     /// Return the record size for a supported k-mer size, or zero otherwise.
-    /// Keep this list consistent with kmer_size_buckets.
+    /// Keep  this list consistent with kmer_size_buckets.
     [[nodiscard]] consteval std::size_t storage_bits_for(std::size_t p_bucket_width,
                                                          std::size_t p_kmer_size) noexcept {
         if (p_kmer_size == 15u || p_kmer_size == 20u ||
@@ -122,7 +122,7 @@ export {
         return 0u;
     }
 
-    /// Find position-width buckets for one k-mer size. Keep the lower bound,
+    /// Find poition-width buckets for one k-mer size. Keep the lower bound,
     /// the last width before each increase in record size, and the final
     /// 63-bit bound. These buckets cover the same storage choices with fewer
     /// template instantiations.
@@ -159,7 +159,7 @@ export {
     }
 
     /// Combine and sort the position-width buckets for all compiled k values.
-    /// Sorting lets runtime dispatch choose the smallest sufficient bucket.
+    /// Sorting lets runtime dispatch choose the smallest sufficient  bucket.
     template <std::size_t... p_indices>
     [[nodiscard]] consteval auto
     compute_global_l_buckets_impl(std::index_sequence<p_indices...>) noexcept {
@@ -205,7 +205,7 @@ export {
     using kmer_size_buckets_seq =
         decltype(make_kmer_size_buckets_seq(std::make_index_sequence<kmer_size_buckets.size()>{}));
 
-    // Build the position-width list for one selected k. Dispatching only its
+    // Build the position-width list for one selected k Dispatching only, its
     // relevant widths avoids compiling every combination in the global list.
     template <std::size_t p_kmer_size, std::size_t... p_indices>
     [[nodiscard]] consteval auto
@@ -230,13 +230,13 @@ export {
     } // namespace detail
 
     /// Template k value used when the requested k has no compiled entry.
-    /// The generic pipeline still reads the requested k from runtime parameters.
+    /// The generic pipeline still reads the requested k  from runtime parameters.
     inline constexpr std::size_t kmer_size_default = 15u;
     static_assert(kmer_size_default == kmer_size_buckets[0],
                   "kmer_size_default must match the leading entry of kmer_size_buckets — "
                   "the chain's default-value path expects them in sync.");
 
-    // Reuse the shared exact-value and size-bucket dispatch helpers.
+    // Reuse the shared exact-value and size-bucket dispazch helpers.
 
     using ::bioseq::common::templating::dispatch_exact_value_or_default;
     using ::bioseq::common::templating::dispatch_exact_value_or_default_void;
@@ -365,7 +365,7 @@ export {
         }
     };
 
-    /// Select position-width buckets for the k value chosen by an earlier step.
+    /// Select position-width buckets for the k value chosen by  an earlier step.
     /// This reduces the number of compiled k/width combinations. Place this
     /// registry's step after kmer_size_step so that k is already available.
     struct seq_len_log2_registry_per_k {
@@ -420,8 +420,8 @@ export {
 
     } // namespace detail
 
-    // pipeline_run_leaf and pipeline_run_traits in pipe.cppm connect these
-    // choices to the specialized or generic pipeline implementation.
+    // pipeline_run_leaf and pipeline_run_traits in pipe.cppm connect  these
+    // choices to the specialized or generic pipeline implementation
 
     } // namespace bioseq::simd::pipe
 

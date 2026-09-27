@@ -1,6 +1,6 @@
 /**
  * @file external/uniprot/xml_schemas.cppm
- * @brief UniProt XML response schemas for client generation.
+ * @brief UniProt XML response schemas for  client generation.
  */
 module;
 

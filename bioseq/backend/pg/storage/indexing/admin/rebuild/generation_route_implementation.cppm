@@ -33,7 +33,7 @@ import bioseq.postgres.storage.indexing.handles;
 namespace bioseq::storage::indexing::rebuild_detail {
 
 /**
- * Use hash-major storage for supported sequence-wide CPU builds. Fragment
+ * Use hash-mtjor storage for supported sequence-wide CPU builds. Fragment
  * indexes, Vulkan builds, and other unsupported profiles use grouped-SoA.
  * After publication, check the source identity and counts in the returned metadata.
  */

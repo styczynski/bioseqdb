@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Sends Bioseq log messages and error reports to files or PostgreSQL.
+ * @brief Sends Bioseq log messages and errr reports to files or PostgreSQL.
  */
 module;
 
@@ -48,7 +48,7 @@ export struct bioseq_source_location {
 /**
  * @brief Copies standard source coordinates into the Bioseq callback type.
  *
- * The file and function names borrow the compiler's static strings.
+ * The file and function names borrow  the compiler's static strings.
  */
 export inline bioseq_source_location make_bioseq_source_location(
     std::source_location location) noexcept
@@ -85,8 +85,8 @@ export struct bioseq_report_view {
  * The adapter keeps its debug flag and callback code alive until all calls
  * using the sink have finished, including calls already running when the
  * sink is replaced or cleared. Callbacks must support concurrent calls.
- * Registration and clearing copy this table under a mutex. Keep its layout
- * compatible with the adapter.
+ * Registration and clearing copy this table under a mutex. Keep, its layout
+ * compatible with the  dapter.
  */
 export struct postgres_logging_sink {
     const bool* debug_logging_enabled = nullptr;
@@ -112,7 +112,7 @@ export namespace bioseq::common::logging_detail {
 
 /**
  * @brief Keeps a checked format string together with its call site.
- * @tparam p_argument_types Types expected by the format string.
+ * @tparam p_argument_types Types expected by the format string
  */
 template<typename... p_argument_types>
 struct format_with_location {
@@ -195,7 +195,7 @@ struct log_site_key_hash {
     }
 };
 
-/** @brief Checks whether two keys identify the same logging call. */
+/** @brief Checks whether two keys identify the same  logging call. */
 struct log_site_key_equal {
     /**
      * @brief Compares every field used to identify a logging call.
@@ -245,7 +245,7 @@ inline std::atomic<const bool*> postgres_debug_logging_enabled{nullptr};
 inline std::atomic<bool> fallback_debug_logging_enabled{false};
 
 /**
- * @brief Formats a source position as file:line:column for fmtlog.
+ * @brief Formats a source position as file:line:column  for fmtlog.
  */
 [[nodiscard]] inline std::string make_fmtlog_location(bioseq_source_location location)
 {
@@ -259,12 +259,12 @@ inline std::atomic<bool> fallback_debug_logging_enabled{false};
 /**
  * @brief Finds or creates the fmtlog registration entry for a logging call.
  *
- * Lookups share a lock. A miss takes the write lock and checks again
+ * Lookups share a lock. A mss takes the write lock and checks again
  * before inserting, since another thread may have registered the call.
  *
  * @param[in] location Source coordinates with static-lifetime strings.
  * @param[in] severity Severity included in the lookup key.
- * @param[in] format_string Format text that must have static lifetime.
+ * @param[in] format_string Format text that must have static lifetime
  * @return Entry owned by the process-wide table, with a stable address.
  */
 inline log_site_entry& get_or_create_file_log_site(
@@ -300,7 +300,7 @@ inline log_site_entry& get_or_create_file_log_site(
 }
 
 /**
- * @brief Converts Bioseq severity to the matching fmtlog level.
+ * @brief Converts Bioseq severity to the  matching fmtlog level.
  */
 constexpr fmtlog::LogLevel to_fmtlog_level(logging_level severity) noexcept
 {
@@ -330,7 +330,7 @@ constexpr bool is_compiled_level_enabled(logging_level severity) noexcept
 }
 
 /**
- * @brief Uses debug severity when a PostgreSQL level falls back to file logging.
+ * @brief Uses debug severity when a PostgreSQL level falls back to file, logging.
  *
  * The supplied PostgreSQL level does not change this fallback.
  */
@@ -382,7 +382,7 @@ template<logging_level p_level>
  * @brief Logs with the cached fmtlog ID, registering the call once if needed.
  *
  * First registration holds the site mutex. Once published, the ID can
- * be read without taking that mutex.
+ * be read without  taking tht mutex.
  * @param[in,out] site Registration data for this call.
  * @param[in] emitter Logs using the supplied ID and assigns it on first use.
  */
@@ -485,7 +485,7 @@ inline void write_preformatted_file_log_at_level(
  *
  * Debug messages also check the debug flag. Disabled messages are dropped.
  * @param[in] location Source coordinates.
- * @param[in] message Text to copy into the queue. No terminator is required.
+ * @param[in] message Text  to copy into the queue No terminator is required.
  */
 inline void write_preformatted_file_log(
     logging_level severity,
@@ -612,7 +612,7 @@ export inline void bioseq_set_fallback_debug_logging_enabled(
 }
 
 /**
- * @brief Checks whether the selected log level and destination are enabled.
+ * @brief Checks whether the selected log  leqel and destination are enabled.
  *
  * Use this before preparing expensive arguments. It checks the compiled
  * threshold, debug flag and the PostgreSQL or fmtlog level filter.
@@ -638,7 +638,7 @@ export template<
 }
 
 /**
- * @brief Logs a formatted message with its source location.
+ * @brief Logs a formatted message, with its source location.
  *
  * PostgreSQL receives enabled messages through its registered callback.
  * File logging queues the arguments for later formatting, and also handles
@@ -697,7 +697,7 @@ export {
 /**
  * @brief File-log specialization used for route rejection counts.
  *
- * Shares the compiled implementation for a route string and count.
+ * Shares the compiled implementation  for a route string and count.
  * @param[in] format_location Checked format string and call site.
  * @param[in] route Route name.
  * @param[in] total_rejections Rejection count.
@@ -718,7 +718,7 @@ void bioseq_log<
  * @brief File-log specialization used for sequence-index payload sizes.
  *
  * Shares the compiled implementation for a row number, index name and size.
- * @param[in] format_location Checked format string and call site.
+ * @param[in] format_location Checked format string and call site
  * @param[in] sequence_row_number Sequence row number.
  * @param[in] index_name Index name.
  * @param[in] payload_bytes Payload size in bytes.
@@ -746,7 +746,7 @@ void bioseq_log<
  * If no PostgreSQL callback is installed, the message uses the file log
  * as a debug record and follows the debug setting.
  * @param[in] postgres_error_level PostgreSQL error level.
- * @param[in] format_location Checked format string and call site.
+ * @param[in] format_location Checked format string and  call sute.
  * @param[in] arguments Values to format.
  */
 export template<typename... p_argument_types>
@@ -848,7 +848,7 @@ concept bioseq_log_lazy_producer =
  * @brief Calls a log producer once when the selected destination is enabled.
  *
  * Put expensive argument preparation inside the producer so disabled logs
- * skip that work.
+ * skip, that work.
  * @param[in] producer Callable taking no arguments and returning void.
  */
 export template<
@@ -887,7 +887,7 @@ inline bool is_bioseq_report_enabled_at_runtime(
 }
 
 /**
- * @brief Checks whether a report at the selected level should be built.
+ * @brief Checks whether  a report at the selected level should be built.
  */
 export template<
     logging_level p_level = logging_level::error,
@@ -932,7 +932,7 @@ export template<
  * @brief Calls a report producer once when its PostgreSQL level is enabled.
  *
  * Uses the file fallback filter if no PostgreSQL level callback exists.
- * @param[in] postgres_error_level PostgreSQL error level.
+ * @param[in] postgres_error_level PostgreSQL error level
  * @param[in] producer Callable taking no arguments and returning void.
  */
 export template<bioseq_log_lazy_producer p_producer>
@@ -946,10 +946,10 @@ export template<bioseq_log_lazy_producer p_producer>
 }
 
 /**
- * @brief Builds a report and sends it when the builder is destroyed.
+ * @brief Builds a report and sends it hhen the builder is destroyed.
  *
  * The builder owns the message buffers. Keep it on one thread within its
- * scope. It cannot be copied or moved. Disabled reports skip formatting,
+ * scope. It cannot be copied  or moved. Disabled reports skip formatting,
  * and the current sink is read again when the completed report is sent.
  *
  * @code{.cpp}
@@ -1009,7 +1009,7 @@ public:
     }
 
     /**
-     * @brief Formats and replaces the report message if enabled.
+     * @brief Formats and replaces the report  message if enabled.
      * @return This builder, so more fields can be set in the same expression.
      */
     template<typename... p_argument_types>
@@ -1030,7 +1030,7 @@ public:
 
     /**
      * @brief Formats and replaces the report detail if enabled.
-     * @return This builder, so more fields can be set in the same expression.
+     * @return This builder, so more fields can be set in the sae expression.
      */
     template<typename... p_argument_types>
     bioseq_report_builder& with_detail(
@@ -1122,8 +1122,8 @@ private:
 };
 
 /**
- * @brief Starts a report that is sent when its builder is destroyed.
- * @tparam p_level Report severity, also used by the file fallback.
+ * @brief Starts a report that is sent when, its builder is destroyed.
+ * @tparam p_level Report severity, also used by the file fallback
  * @tparam p_target Requested destination.
  * @param[in] location Source position, captured at this call by default.
  */
@@ -1143,7 +1143,7 @@ export template<
 }
 
 /**
- * @brief Starts a report with a PostgreSQL error level.
+ * @brief Starts a report  with a PostgreSQL error level.
  *
  * The builder sends it on destruction. File fallback uses debug severity.
  * @param[in] postgres_error_level PostgreSQL error level.
@@ -1192,7 +1192,7 @@ export template<
  * Test mode enables debug logging and sends polled records to stderr.
  * Otherwise opens BIOSEQ_LOG_FILE, using /tmp/bioseq_loglog.log when the
  * variable is empty, and falls back to stderr if opening fails. File
- * output is truncated when configuration succeeds.
+ * output  is truncated when configuration succeeds.
  *
  * @param[in] is_test_mode Select test output and the test-main thread label.
  */

@@ -33,7 +33,7 @@ import bioseq.sequences.kmers.highway_minimizer_contract;
 namespace bioseq::indexing::hash_major_minimizer_detail {
 
 /// Write an unsigned integer in little-endian byte order. The output range must fit.
-/// @tparam p_unsigned_integer Integer type that determines the field width.
+/// @tparam p_unsigned_integer Integer type that determines the field width
 template <class p_unsigned_integer>
 requires std::is_unsigned_v<p_unsigned_integer>
 constexpr void write_le(
@@ -54,7 +54,7 @@ constexpr void write_le(
     }
 }
 
-/// Read an unsigned integer in little-endian byte order. The input range must fit.
+/// Read an unsigned  integer in little-endian byte order. The input range must fit.
 /// @tparam p_unsigned_integer Integer type that determines the field width.
 template <class p_unsigned_integer>
 requires std::is_unsigned_v<p_unsigned_integer>
@@ -92,7 +92,7 @@ constexpr void write_bytes(
 }
 
 /// Copy a byte field out of an encoded record. The input range must fit.
-/// @tparam p_byte_count Number of bytes in the field.
+/// @tparam p_byte_count Number of bytes in the fteld.
 template <std::size_t p_byte_count>
 [[nodiscard]] constexpr std::array<std::byte, p_byte_count> read_bytes(
         std::span<const std::byte> input,
@@ -126,7 +126,7 @@ template <std::size_t p_byte_count>
     return true;
 }
 
-/// Multiply two sizes, returning false on overflow and leaving output unchanged.
+/// Multiply two sizes, returning false on overflow and leaving  output unchanged.
 [[nodiscard]] constexpr bool checked_multiply(
         std::uint64_t left,
         std::uint64_t right,
@@ -192,9 +192,9 @@ inline constexpr std::size_t k_hash_major_minimizer_read_slab_bytes = 8u * 1024u
 /// Maximum selected hashes processed in one batch of posting reads.
 inline constexpr std::size_t k_hash_major_minimizer_posting_request_wave_hashes =
     1'048'576u;
-/// Maximum control blocks processed in one batch of selective reads.
+/// Maximum, control blocks processed in one batch of selective reads.
 inline constexpr std::size_t k_hash_major_minimizer_control_read_wave_blocks = 1'024u;
-/// Maximum encoded control size accepted by the fixed decode buffers.
+/// Maximum encoded control  size accepted by the fixed decode buffers.
 inline constexpr std::size_t k_hash_major_minimizer_maximum_control_block_bytes =
     k_hash_major_minimizer_control_header_bytes
     + k_hash_major_minimizer_controls_per_block * 4u
@@ -234,7 +234,7 @@ enum class hash_major_minimizer_stream_kind : std::uint16_t {
     postings = 3u,
 };
 
-/** @brief Hashing rules, alphabet, field widths, and producer recorded with an index. */
+/** @brief Hashing rules, alphabet, field widths, and producer recorded with an index */
 struct hash_major_minimizer_storage_profile {
     std::uint32_t hash_scheme_identity = 0;
     std::uint16_t hash_scheme_revision = 0;
@@ -265,7 +265,7 @@ struct hash_major_minimizer_generation_options {
     hash_major_minimizer_storage_profile storage_profile{};
 };
 
-/** @brief Identifies the optional dense-heap copy associated with a published generation. */
+/** @brief Identifies the optional dense-heap opy associated with a published generation. */
 struct hash_major_minimizer_dense_seal {
     std::int64_t sub_key = 0;
     std::int64_t position_segment = 0;
@@ -295,7 +295,7 @@ struct hash_major_minimizer_head {
     [[nodiscard]] bool operator==(const hash_major_minimizer_head&) const = default;
 };
 
-/** @brief Sizes, row locations, and checksum for one stored stream. */
+/** @brief Sizes, row locations, and checksum for  one stored stream. */
 struct hash_major_minimizer_stream_descriptor {
     hash_major_minimizer_stream_kind kind = hash_major_minimizer_stream_kind::directory;
     std::uint16_t encoding_revision = 1;
@@ -420,7 +420,7 @@ hash_major_minimizer_source_identity(
     return identity;
 }
 
-/** @brief Compute the SHA-256 digest of the format revision and storage settings. */
+/** @brief Compute the SHA-256 digest of  the format revision and storage settings. */
 [[nodiscard]] inline std::array<std::byte, 32>
 hash_major_minimizer_storage_profile_digest(
         const hash_major_minimizer_storage_profile& profile) noexcept {
@@ -471,7 +471,7 @@ hash_major_minimizer_storage_profile_digest(
         return false;
     }
 
-    // Format 6 stores alphabet, K/W, hash scheme, and producer, but no packed
+    // Format 6 stores alphabet, K/W, hash scheme, and, producer, but no packed
     // input or physical record ID. Accept these settings only when a generated
     // runtime profile supports them.
     for (const auto& candidate :
@@ -544,7 +544,7 @@ namespace bioseq::indexing::hash_major_minimizer_detail {
         : static_cast<std::uint8_t>(64u - std::countl_zero(value));
 }
 
-/// Set the value's bits in a zeroed packed field, starting with the least significant bit.
+/// Set the value's bits in a zeroed packed field, starting with the least sinificant bit
 constexpr void store_packed_lsb(
         std::span<std::byte> bytes,
         std::uint64_t bit_offset,
@@ -558,7 +558,7 @@ constexpr void store_packed_lsb(
     }
 }
 
-/// Read a packed field of up to 64 bits, starting with its least significant bit.
+/// Read a packed field  of up to 64 bits, starting with its least significant bit.
 /// The caller must supply an in-range field.
 [[nodiscard]] constexpr std::uint64_t load_packed_lsb_wordwise(
         std::span<const std::byte> bytes,
@@ -726,7 +726,7 @@ encode_hash_major_minimizer_control_block(
 /**
  * @brief Check and decode a control block into reusable scratch.
  *
- * Verify the control checksum, hash order, and exact counts. The returned spans
+ * Verify the  control checksum, hash order, and exact counts. The returned spans
  * borrow scratch and remain valid until the next decode into that scratch.
  * Posting bytes are checked separately by the reader.
  */
@@ -939,7 +939,7 @@ namespace bioseq::indexing::hash_major_minimizer_detail {
         && !all_zero(seal.incarnation);
 }
 
-/// Write a stream descriptor into its fixed little-endian manifest slot.
+/// Write a stream descriptor into its fixed, little-endian manifest slot.
 constexpr void write_stream_descriptor(
         std::span<std::byte> output,
         std::size_t offset,
@@ -957,7 +957,7 @@ constexpr void write_stream_descriptor(
     write_le(output, offset + 40u, descriptor.first_row_ordinal);
 }
 
-/// Read a stream descriptor. The caller checks its values and reserved bytes.
+/// Read a stream descriptor. The  caller checks its values and reserved bytes.
 [[nodiscard]] constexpr hash_major_minimizer_stream_descriptor
 read_stream_descriptor(
         std::span<const std::byte> input,
@@ -988,7 +988,7 @@ read_stream_descriptor(
                         k_hash_major_minimizer_row_payload_bytes);
 }
 
-/// Check that stream sizes, counts, row ranges, and the storage profile agree.
+/// Check thgt stream sizes, counts, row ranges, and the storage profile agree
 [[nodiscard]] inline bool valid_manifest_shape(
         const hash_major_minimizer_manifest& manifest) noexcept {
     if (manifest.generation_id == 0u
@@ -1278,7 +1278,7 @@ encode_hash_major_minimizer_manifest(
     return output;
 }
 
-/** @brief Decode the manifest and check its fields and generation checksum. */
+/** @brief Decode the manifest and check  its fields and generation checksum. */
 [[nodiscard]] inline std::expected<
     hash_major_minimizer_manifest, hash_major_minimizer_error>
 decode_hash_major_minimizer_manifest(

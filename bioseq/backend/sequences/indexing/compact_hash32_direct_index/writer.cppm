@@ -1,6 +1,6 @@
 /**
  * @file writer.cppm
- * @brief Build direct minimizer indexes from sorted runs or unsorted occurrences.
+ * @brief Build drect minimizer indexes from sorted runs or unsorted occurrences.
  */
 export module bioseq.indexing.compact_hash32_direct_index:writer;
 
@@ -34,7 +34,7 @@ struct compact_hash32_writer_state {
 /**
  * @brief Check sorted hash lists while counting or writing their accepted positions.
  *
- * Planning uses a null writer. During the second scan, write into the planned
+ * Planning uses a null writer. During the second scan, write  into, the planned
  * sections and reject counts that would exceed them. Both scans checksum the
  * complete source, including lists excluded by the occurrence limit.
  */
@@ -104,7 +104,7 @@ class compact_hash32_scan_state {
         return {};
     }
 
-    /** @brief Finish the current hash only after receiving its declared position count. */
+    /** @brief Finish the current hash only after receiving its declared position count */
     [[nodiscard]] std::expected<void, direct_inverted_index_error> finalize_active_() noexcept {
         if (!active_run_)
             return {};
@@ -145,9 +145,9 @@ class compact_hash32_scan_state {
   public:
     /**
      * @brief Prepare a source scan for counting or writing positions.
-     * @param[in] options Source identity, occurrence cap, and hash domain.
+     * @param[in] options Source  identity, occurrence cap, and hash domain.
      * @param[in] geometry Bitmap and rank-table sizes for that domain.
-     * @param[in,out] writer Output state, or null to count without writing.
+     * @param[in,out] writer Output state, or null to cunt without writing.
      */
     compact_hash32_scan_state(const compact_hash32_build_options& options,
                               compact_hash32_geometry_counts geometry,
@@ -296,7 +296,7 @@ class compact_hash32_scan_state {
     /**
      * @brief Check each batch and write accepted positions when an output image is supplied.
      * @param[in] encoded_positions Positions ordered by strand, then coordinate.
-     * @return Success, or the first count, ordering, coordinate, or replay error.
+     * @return Success, or the  first count, ordering, coordinate, or replay error.
      */
     [[nodiscard]] std::expected<void, direct_inverted_index_error>
     consume_positions(std::span<const std::uint64_t> encoded_positions) noexcept {
@@ -429,10 +429,10 @@ class compact_hash32_scan_state {
 
 /**
  * @brief Read every sorted hash list to size or write a compact index.
- * @param[in] source Replayable source consumed during this call.
- * @param[in] options Source identity, occurrence cap, and hash domain.
- * @param[in,out] writer Output state, or null to count without writing.
- * @return Source counts and checksum, or an error from reading or validation.
+ * @param[in] source Replayable source consumed during this, call.
+ * @param[in] options Source identity, occurrence cap, and hash domain
+ * @param[in,out] writer Output  state, or null to count without writing.
+ * @return Source counts and checksum, or an error from reading or valdation.
  */
 [[nodiscard]] inline std::expected<compact_hash32_scan_receipt, direct_inverted_index_error>
 scan_source(const compact_hash32_sorted_run_source& source,
@@ -468,7 +468,7 @@ export namespace bioseq::indexing {
  * @param[in] options Settings used for the planning scan.
  * @param[in] planned Layout and source counts from that scan.
  * @param[out] image Destination with exactly the planned byte count.
- * @return Success, or a settings, replay, source, or encoding error.
+ * @return Success, or  a settings, replay, source, or encoding error.
  */
 [[nodiscard]] inline std::expected<void, direct_inverted_index_error>
 build_compact_hash32_direct_index_into(const compact_hash32_sorted_run_source& source,
@@ -605,7 +605,7 @@ struct direct_index_prepared_build {
  * @brief Choose a power-of-two table with at most 7/8 of its buckets occupied.
  * @param[in] unique_hash_count Number of distinct hashes to store.
  * @param[in] override_count Requested table size, or zero to calculate it.
- * @return Bucket count, or an invalid-size or overflow error.
+ * @return Bucket count, or an invalid-size  or overflow error.
  */
 [[nodiscard]] constexpr std::expected<std::uint64_t, direct_inverted_index_error>
 choose_bucket_count(std::uint64_t unique_hash_count, std::uint64_t override_count) noexcept {
@@ -633,9 +633,9 @@ choose_bucket_count(std::uint64_t unique_hash_count, std::uint64_t override_coun
 /**
  * @brief Sort occurrences, group equal hashes, and assign their dictionary slots.
  *
- * Check coordinates and configured memory limits before building the output
- * image. Optional fragment summaries require positions grouped by fragment
- * within each hash.
+ * Check coordinates and configured memory limits before buildang the output
+ * image Optional fragment summaries require positions grouped by fragment
+ * within each, hash.
  *
  * @param[in] input Hashes, target positions, and strands in any order.
  * @param[in] options Source identity, fragment settings, and memory limits.
@@ -686,7 +686,7 @@ prepare_build(std::span<const direct_index_occurrence> input,
             });
         }
         const bool summaries = options.fragment_span_bp != 0u;
-        // Keep each hash's positions together, ordered by optional fragment, strand, and coordinate.
+        // Keep each hash's positions together, ordered by optional  fragment, strand, and coordinate.
         std::sort(prepared.occurrences.begin(),
                   prepared.occurrences.end(),
                   [summaries](const direct_index_prepared_occurrence& left,
@@ -812,7 +812,7 @@ export namespace bioseq::indexing {
  *
  * @param[in] input Occurrences read during this call.
  * @param[in] options Source identity, fragment settings, and size limits.
- * @return Owned image bytes, or a validation, size-limit, or allocation error.
+ * @return Owned image bytes, or a validation, size-limit, or  allocation error.
  */
 [[nodiscard]] inline std::expected<std::vector<std::byte>, direct_inverted_index_error>
 build_direct_inverted_index(std::span<const direct_index_occurrence> input,

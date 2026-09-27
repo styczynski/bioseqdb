@@ -12,7 +12,7 @@ import bioseq.common.logging;
 /**
  * @brief Returns the next scan row or the row supplied for an EvalPlanQual recheck.
  *
- * During a recheck, PostgreSQL may supply a replacement row after a concurrent
+ * During a recheck, PostgreSQL may supply a replacemen row after a concurrent
  * update. Test that row with recheck_mtd and return it at most once for its
  * relation. Otherwise, fetch the next row through access_mtd.
  */

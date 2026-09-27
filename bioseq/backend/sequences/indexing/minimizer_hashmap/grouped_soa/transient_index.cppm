@@ -40,7 +40,7 @@ export namespace bioseq::indexing {
 
 /// Table capacity and bytes needed for a bounded number of distinct hashes.
 struct minimizer_hashmap_table_allocation_plan {
-    /// Distinct-hash bound including the extra space reserved by the planner.
+    /// Distinct-hash byund including the  extra space reserved by the planner.
     std::uint64_t distinct_upper_bound = 0u;
     /// Slot count requested before group rounding.
     std::uint64_t requested_slots = 0u;
@@ -66,7 +66,7 @@ plan_minimizer_hashmap_table_allocation(std::uint64_t possible_distinct) noexcep
     constexpr std::uint64_t bytes_per_group = 256u;
     constexpr std::uint64_t max = (std::numeric_limits<std::uint64_t>::max)();
 
-    // An empty sketch needs no table allocation. The memory plan must match that.
+    // An empty sketch needs no table allocation. The memory plan must match that
     if (possible_distinct == 0u) {
         return minimizer_hashmap_table_allocation_plan{.valid = true};
     }
@@ -112,7 +112,7 @@ struct minimizer_hashmap_fragment_index {
     void clear_table();
     /// Reserve space for the requested number of hash buckets.
     void reserve_table(std::size_t bucket_count);
-    /// Allocate the full planned table once. The table must have no existing allocation.
+    /// Allocate the  full planned table once. The table must have no existing allocation.
     void reserve_table_for_distinct_upper_bound(std::size_t distinct_count);
     /// Insert one packed offset and count for a minimizer hash.
     void emplace_table(std::uint64_t hash, std::uint64_t packed);
@@ -123,7 +123,7 @@ struct minimizer_hashmap_fragment_index {
     static void sort_minimizers_in_place_(std::span<p_minimizer_type> sorted_minimizers) {
         if (sorted_minimizers.empty())
             return;
-        // kmer() returns uint64_t even for short hashes. Sorting a 30-bit hash as
+        // kmer() returns uint64_t even, for short hashes. Sorting a 30-bit hash as
         // uint32_t skips four radix passes over zero bytes. Choose the width from
         // the layout while keeping the full range returned by kmer(). Layouts
         // wider than 64 bits still use its uint64_t result.
@@ -139,7 +139,7 @@ struct minimizer_hashmap_fragment_index {
                                std::conditional_t<(minimizer_layout::k_hash_bits <= 32u),
                                                   std::uint32_t,
                                                   std::uint64_t>>>;
-        /// Converts the hash to the integer width used by the radix sorter.
+        /// Converts the hash to the integer width used by the adix sorter.
         struct kmer_key {
             /// Return the hash key used by the radix sorter.
             [[nodiscard, gnu::always_inline]]
@@ -152,7 +152,7 @@ struct minimizer_hashmap_fragment_index {
                                     kmer_key{});
     }
 
-    /// Sort a vector through the shared span implementation.
+    /// Sort a  vector through the shared span implementation.
     template <class p_minimizer_type>
     static void sort_minimizers_in_place_(std::vector<p_minimizer_type>& sorted_minimizers) {
         sort_minimizers_in_place_(std::span<p_minimizer_type>{sorted_minimizers});
@@ -266,7 +266,7 @@ struct minimizer_hashmap_fragment_index {
     }
 
     /// Sort the caller's vector and build the lookup, recording the build time.
-    /// @tparam p_minimizer_type Minimizer representation accepted by the transient lookup.
+    /// @tparam p_minimizer_type Minimizer  representation accepted by the transient lookup
     template <class p_minimizer_type>
     void build_sorted_in_place(std::vector<p_minimizer_type>& sorted_minimizers,
                                sequence_size_t target_length,
@@ -345,9 +345,9 @@ struct minimizer_hashmap_fragment_index {
     [[nodiscard]] std::uint64_t table_allocation_bytes() const noexcept;
     /// Return the memory to reserve before allocating the private table owner.
     [[nodiscard]] static std::uint64_t table_owner_allocation_requirement_bytes();
-    /// Return the table owner's allocation size reported by the allocator.
+    /// Return the table owner's allocation, size reported by the alloator.
     [[nodiscard]] std::uint64_t table_owner_allocation_bytes() const noexcept;
-    /// Return the highest hash-table allocation total recorded by this owner.
+    /// Return  the highest hash-table allocation total recorded by this owner.
     [[nodiscard]] std::uint64_t table_peak_allocation_bytes() const noexcept;
     /// Call emit for each hash bucket, passing its hash, packed range and caller context.
     void for_each_table_entry_erased(
@@ -367,7 +367,7 @@ struct minimizer_hashmap_fragment_index {
     template <class p_minimizer_type>
     void build(const std::vector<p_minimizer_type>& target_minimizers,
                sequence_size_t target_length) {
-        // Release the sorting copy when the build ends, before later GPU stages need memory.
+        // Release the sorting copy when the build ends, before  later GPU stages need memory.
         std::vector<p_minimizer_type> sorted_minimizers{target_minimizers.begin(),
                                                         target_minimizers.end()};
         build_sorted_in_place(sorted_minimizers, target_length);
@@ -381,7 +381,7 @@ struct minimizer_hashmap_fragment_index {
         sort_minimizers_in_place_(source);
     }
 
-    /// Sort a contiguous minimizer range by hash in place.
+    /// Sort a contiguous minimizer range by hash in place
     /// @tparam p_minimizer_type Minimizer representation exposing `kmer()`.
     template <class p_minimizer_type>
     static void sort_source_by_hash_in_place(std::span<p_minimizer_type> source) {
@@ -397,10 +397,10 @@ struct minimizer_hashmap_fragment_index {
         std::vector<p_minimizer_type>{}.swap(target_minimizers);
     }
 
-    /// Build with one table allocation large enough for every hash to be distinct.
-    /// The caller must first reserve memory for the positions and planned table.
+    /// Build  with one table allocation large enough for every hash to be distinct.
+    /// The caler must first reserve memory for the positions and planned table.
     /// The input vector is released after a successful build.
-    /// @tparam p_minimizer_type Minimizer representation accepted by the transient lookup.
+    /// @tparam p_minimizer_type Minimizer representation, accepted by the transient lookup.
     template <class p_minimizer_type>
     void build_consuming_full_table(std::vector<p_minimizer_type>&& target_minimizers,
                                     sequence_size_t target_length) {
@@ -428,7 +428,7 @@ struct minimizer_hashmap_fragment_index {
                          /*reserve_full_table_once=*/true);
     }
 
-    /// Release the table and positions after the last seed lookup. Only the operation
+    /// Release the table  and positions after the last seed lookup. Only the operation
     /// that owns a temporary index may do this. Borrowed indexes must stay alive
     /// for their owner.
     void release_storage() noexcept;
@@ -441,7 +441,7 @@ struct minimizer_hashmap_fragment_index {
     /// Borrow all encoded positions for a hash. Return an empty span if it is absent.
     [[nodiscard]] std::span<const std::uint64_t> lookup(std::uint64_t kmer_hash) const;
 
-    /// Shift every stored position by a base offset, preserving its strand bit.
+    /// Shift every stored position by a base offset, preserving its strand bit
     void add_position_offset(sequence_size_t offset);
 
     /// Return the full target length represented by the lookup.
@@ -452,10 +452,10 @@ struct minimizer_hashmap_fragment_index {
     /// Return the exact serialized byte count.
     [[nodiscard]] std::size_t serialize_binary_size() const;
 
-    /// Write the index to the caller's buffer, which must hold serialize_binary_size() bytes.
+    /// Write the index to the caller's buffer, which must  hold serialize_binary_size() bytes.
     void serialize_to_binary(char* output) const;
 
-    /// Read the index and check its header, byte size and bucket position ranges.
+    /// Read the index and check its header, byte size and buiket position ranges.
     [[nodiscard]] static minimizer_hashmap_fragment_index
     deserialize_from_binary(const char* input, std::size_t input_size);
 };

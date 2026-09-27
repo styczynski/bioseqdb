@@ -2,8 +2,8 @@
  * @file scalar.cppm
  * @brief Chain anchors with scalar dynamic programming.
  *
- * Score possible predecessors within a moving reference window, then follow
- * the chosen predecessor links to recover chains. Temporary arrays and output
+ * Score possible predecessors within a moving, reference window, then follow
+ * the chosen predecessor links to  lecover chains. Temporary arrays and output
  * records use the chaining arena.
  */
 module;
@@ -27,10 +27,10 @@ export {
 namespace bioseq::chaining {
 
 /// Build chains by choosing a predecessor for each anchor.
-/// Search recent anchors first. Distance and iteration limits bound the search.
+/// Search recent anchors first. Distance and iteration limits bound the search
 /// The visited-mark skip rule can stop repeated unsuccessful checks, while a
 /// cached high-scoring anchor gets one extra check if the main search missed it.
-/// Backtrack from highest-scoring endpoints, keeping chains that meet score and
+/// Backtrack from highest-scoring endpoints, keeping chains that meet  score and
 /// seed-count limits. Claim shared anchors once. Both output slabs must stay
 /// bound to the caller's live chaining arena.
 ///
@@ -94,7 +94,7 @@ void chain_anchors_scalar(
         int32_t best_score = static_cast<int32_t>(anchors[current_idx].query_span);
         int32_t skip_count = 0;
 
-        // Move past anchors from another strand or outside the reference window.
+        // Move  past anchors from another strand or outside the reference window.
         while (window_start < current_idx &&
                (anchors[current_idx].strand_partition_key() != anchors[window_start].strand_partition_key() ||
                 anchors[current_idx].reference_sort_key() > anchors[window_start].reference_sort_key()
@@ -125,7 +125,7 @@ void chain_anchors_scalar(
                 continue;
             }
 
-            // Save this pair score for the extra-candidate check below.
+            // Save thi pair score for the extra-candidate check below.
             if (candidate_idx == global_best_idx) {
                 cached_global_pair_score = pair_score;
                 global_pair_score_cached = true;
@@ -166,7 +166,7 @@ void chain_anchors_scalar(
             global_pair_score_cached = false;
         }
         if (global_best_idx >= 0 && global_best_idx < search_end) {
-            // Score the extra candidate if the main search did not save its score.
+            // Score the extra candidate if the, main search did not save its score
             const int32_t global_pair_score = global_pair_score_cached
                 ? cached_global_pair_score
                 : compute_chaining_score(

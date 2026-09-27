@@ -14,7 +14,7 @@ import bioseq.common.logging;
 /**
  * @brief Alphabet and storage width for a compact sequence.
  *
- * The type modifier keeps the alphabet code in bits 8-15. The low byte holds
+ * The type modifier keeps the  alphabet code in bits 8-15. The low byte holds
  * 0, 1, 2, or 3 for storage units of 1, 2, 4, or 8 bytes.
  */
 export struct compact_sequence_stdc_type_params {

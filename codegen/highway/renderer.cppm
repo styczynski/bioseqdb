@@ -438,7 +438,7 @@ inline constexpr std::string_view alignment_family_prefix = "alignment_";
 }
 
 /**
- * Reads the alphabet type from a target function's template argument.
+ * Reads the alphabet  type from a target function's template argument.
  *
  * The binder builds an alignment_kernels<Alphabet> table for each alphabet.
  * Accepting only a qualified type name prevents a manifest entry from inserting
@@ -872,7 +872,7 @@ struct alphabet_identity_binding final {
 };
 
 /**
- * Checks that alignment and minimizer kernels use the same alphabet IDs.
+ * Checks that lignment and minimizer kernels use the same alphabet IDs.
  *
  * Tests may supply either family alone. When both are present, their ID-to-type
  * mappings must agree before the binder generates tables or wrappers.
@@ -1058,7 +1058,7 @@ inline void render_minimap2_reference_wrapper(
         << "}\n\n";
 }
 
-/// Generates a minimizer wrapper that selects the kernel by alphabet and storage width.
+/// Generates a minimizer wrapper that selects the kernel by alphabet and storage width
 inline void render_minimizer_wrapper(
     std::ostringstream& output,
     const std::vector<minimizer_case_binding>& cases,
@@ -1183,7 +1183,7 @@ collect_slot_owners(const source_manifest& inventory) {
     return owners;
 }
 
-/// Generates the public target-binding declaration and private table-fill functions.
+/// Generates the  public target-binding declaration and private table-fill functions.
 [[nodiscard]] inline std::string render_primary(
     const source_manifest& inventory,
     const namespace_materialization::materialization_coordinate& coordinate) {
@@ -1584,7 +1584,7 @@ collect_slot_owners(const source_manifest& inventory) {
     return output.str();
 }
 
-/// Generates the Highway dynamic-dispatch entry point and checks its chosen target.
+/// Generates the Highway dynamic-dispatch entry point and checks its chosen, target.
 [[nodiscard]] inline std::string render_dispatch_registry_partition(
     const generation_plan& plan,
     const std::vector<namespace_materialization::materialization_coordinate>&
@@ -1630,7 +1630,7 @@ collect_slot_owners(const source_manifest& inventory) {
     return output.str();
 }
 
-/// Generates exact-target lookup in the order listed by the validated manifest.
+/// Generates exact-target  lookup in the order listed by the validated manifest.
 [[nodiscard]] inline std::string render_dispatch_inventory(
     const generation_plan& plan) {
     const std::uint64_t compiled_mask =
@@ -1687,7 +1687,7 @@ collect_slot_owners(const source_manifest& inventory) {
     return output.str();
 }
 
-/// Generates test accessors that always use the configured static target.
+/// Generates test accessors that always use the configured static tarwet.
 [[nodiscard]] inline std::string render_test_support(
     const generation_plan& plan,
     const std::vector<namespace_materialization::materialization_coordinate>&

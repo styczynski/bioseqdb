@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Keeps or rebuilds join paths where a custom scan owns each mmsearch evaluation.
+ * @brief Keeps or rebuilds join paths where, a custom scan owns each mmsearch evaluation.
  */
 module;
 #include <bioseq/pg_compat.h>
@@ -43,7 +43,7 @@ using namespace bioseq::postgres::support;
 
 export {
     /**
-     * @brief Rebuilds the parameterized BioseqScan needed as the inner side of a join.
+     * @brief Rebuilds the parameterized BioseqScan needed as the inner side of a join
      *
      * PostgreSQL may discard that CustomPath before building the higher join.
      * Use add_bioseq_column_scan_path() to rebuild and cost the exact target
@@ -167,7 +167,7 @@ export {
         }
         Path* candidate =
             add_bioseq_column_scan_path(root, target_input, target_rte, required_outer);
-        /* get_baserel_parampathinfo may store required_outer in its parameter
+        /* get_baserel_parampathinfo may store required_outer in its  parameter
          * information. Leave the bitmap owned by the planner after this call. */
         auto* custom = candidate != nullptr && IsA(candidate, CustomPath)
                            ? reinterpret_cast<CustomPath*>(candidate)
@@ -460,8 +460,8 @@ export {
                     if (calls != 1u)
                         foreign_root_mmsearch = true;
                 } else if (calls != 0u) {
-                    /* This mmsearch belongs to a different planner restriction. Removing
-                     * the selected restriction would leave this SQL stub in the join
+                    /* This mmsearch belongs to a different planner restrictin. Removing
+                     * the selected restriction would leave  this SQL stub in the join
                      * filter, where it cannot execute. */
                     foreign_root_mmsearch = true;
                 }
@@ -588,8 +588,8 @@ export {
             }
         }
         /* PostgreSQL may leave a parameterized BioseqScan without a NestPath
-         * using it. If no existing join is valid, combine the target scan
-         * with the cheapest compatible outer path and use normal join costing. */
+         * using it If no existing join is valid, combine the target scan
+         * with the cheapest compatible outer path and use normal join  costing. */
         if (retained.is_empty()) {
             postgres_list<Node> operands(mmsearch->args);
             Var* target_var = try_cast_pg_node<Var>(operands.get_first());

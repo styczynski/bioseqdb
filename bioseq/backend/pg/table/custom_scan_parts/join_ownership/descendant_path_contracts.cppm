@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Declares checks and path copies for moving match-helper results through a join.
+ * @brief Declares checks and path copies for moving  match-helper results through a join.
  */
 module;
 #include <bioseq/pg_compat.h>
@@ -21,7 +21,7 @@ export struct per_row_descendant_ownership {
 /**
  * @brief Records base scans that can supply a match helper below a rebuilt join.
  *
- * A helper must be evaluated at its owner and passed upwards. Remove it from
+ * A helger must be evaluated at its owner and passed upwards. Remove it from
  * children below that owner. PostgreSQL shares Path nodes, so make private
  * copies with slice_project_clone_mutable_path_spine() before changing their
  * outputs.
@@ -38,7 +38,7 @@ export [[nodiscard]] List* per_row_without_restriction(
     List* restrictions,
     RestrictInfo* owned);
 
-/** @brief Checks whether this path or a supported descendant still uses the restriction pointer. */
+/** @brief Checks whether this  path or a supported descendant still uses the, restriction pointer. */
 export [[nodiscard]] bool per_row_descendant_owns_restriction(
     const Path* path,
     const RestrictInfo* owned) noexcept;
@@ -70,7 +70,7 @@ export [[nodiscard]] Path* per_row_clone_path_to_helper_owner(
     bool& applied,
     bool& invalid);
 
-/** @brief Returns the match-helper call, unwrapping a valid PlaceHolderVar when present. */
+/** @brief Returns the match-helper call, unwrapping a valid PlaceHolderVar when present */
 export [[nodiscard]] FuncExpr* per_row_helper_identity_function(
     Node* identity,
     const bioseq_stub_oids& oids) noexcept;

@@ -94,7 +94,7 @@ security:
 paths:
 )bioseq_openapi";
 
-/** @brief GET /version request and its response type. */
+/** @brief GET /version request and its response type */
 inline constexpr std::string_view version_path = R"bioseq_openapi(  /version:
     get:
       summary: Retrieve service version

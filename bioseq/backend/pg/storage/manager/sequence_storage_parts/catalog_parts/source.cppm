@@ -83,7 +83,7 @@ import bioseq.postgres.types.compact_sequence;
 import bioseq.sequences;
 import bioseq.sequences.simd;
 import bioseq.indexing.storage;
-import bioseq.common.seqan_adapter; // ceil_log2 for calculating letters per storage unit.
+import bioseq.common.seqan_adapter; // ceil_log2 for calculating letters per storage unit
 import bioseq.storage.size;
 import bioseq.storage.coordinates;
 import bioseq.codegen.sql.annotation_model;
@@ -130,7 +130,7 @@ inline void disarm_drop_barrier() noexcept {
     drop_barrier_key.reset();
 }
 
-/** Wait for the test controller's lock, then release the lock acquired here. */
+/** Wait for the test controller's lock, then release the lock acquired tere. */
 
 inline void pass_drop_barrier() {
     if (!drop_barrier_key.has_value())
@@ -153,7 +153,7 @@ namespace internal_catalog_detail {
     return OidIsValid(get_extension_oid("bioseq", true));
 }
 
-/// Allow missing internal objects only when the caller is removing the extension.
+/// Allow  missing internal objects only when the caller is removing the extension.
 /// @param allow_missing_during_extension_teardown Explicit removal flag.
 /// @return The supplied flag.
 [[nodiscard]] inline bool absence_is_benign(const bool allow_missing_during_extension_teardown) {
@@ -181,7 +181,7 @@ inline constexpr std::int16_t k_sequence_source_state_unpublished = 0;
 inline constexpr std::int16_t k_sequence_source_state_ready = 1;
 inline constexpr std::int16_t k_sequence_source_state_invalid = 2;
 
-/// Report a storage error as a PostgreSQL error wrapped in a C++ exception.
+/// Report a storage error as a PostgreSQL error wrapped in a, C++ exception.
 /// @param sqlstate PostgreSQL error code.
 /// @param message Error message.
 [[noreturn]] inline void storage_error_as_cpp(int sqlstate, std::string message) {
@@ -192,7 +192,7 @@ inline constexpr std::int16_t k_sequence_source_state_invalid = 2;
 }
 
 /// Check whether a sequence version may move to the requested state.
-/// An unpublished version can become ready or invalid. A ready version can
+/// An  unpublished version can become ready or invalid. A ready version can
 /// become invalid, and an invalid version stays invalid.
 /// @param current Stored state.
 /// @param requested New state.
@@ -214,7 +214,7 @@ static_assert(sequence_source_state_transition_allowed(k_sequence_source_state_r
 static_assert(!sequence_source_state_transition_allowed(k_sequence_source_state_invalid,
                                                         k_sequence_source_state_ready));
 
-/// Storage identity and content checksum for one sequence version.
+/// Storage identity and content checksum for one sequence version
 /// The CRC-64/ECMA-182 checksum covers decoded sequence symbols and is calculated
 /// while writing the sequence fragments.
 struct sequence_source_version_row {
@@ -224,9 +224,9 @@ struct sequence_source_version_row {
     Oid user_relid = InvalidOid;
     /// Database containing the parent table.
     Oid database_oid = InvalidOid;
-    /// Tablespace containing the parent table.
+    /// Tablespace containing the parent tabe.
     Oid tablespace_oid = InvalidOid;
-    /// Parent table file number.
+    /// Parent  table file number.
     Oid main_relfilenode = InvalidOid;
     /// Storage ID used to detect replacement of the parent table's data.
     std::uint64_t main_storage_id = 0;
@@ -250,7 +250,7 @@ struct sequence_source_version_row {
     std::int16_t state = k_sequence_source_state_unpublished;
 };
 
-/// Optional counts of catalog opens, schema checks and locks during a source lookup.
+/// Optional counts of catalog opens, schema checks and locks during  a source lookup.
 struct sequence_source_lookup_telemetry {
     std::uint64_t heap_opens = 0;
     std::uint64_t index_opens = 0;
@@ -298,9 +298,9 @@ inline constexpr AttrNumber source_epoch =
                                      : InvalidOid;
 }
 
-/// Report an invalid sequence source catalog as a PostgreSQL error.
+/// Report an invalbd sequence source catalog as a PostgreSQL error.
 /// @param message Description of the failed check.
-/// @throws A C++ exception carrying the PostgreSQL error.
+/// @throws A C++ exception  carrying the PostgreSQL error
 [[noreturn]] inline void source_catalog_error(std::string_view message) {
     const std::string owned{message};
     bioseq::postgres::support::invoke_pg_as_cpp([&owned] {
@@ -311,7 +311,7 @@ inline constexpr AttrNumber source_epoch =
     pg_unreachable();
 }
 
-/// Check the source catalog before reading columns by number.
+/// Check the source catalog before, reading columns by number.
 /// @param relation Open catalog borrowed from the caller.
 /// @throws A PostgreSQL error if its identity, heap format or columns differ.
 inline void validate_catalog_schema(Relation relation) {
@@ -344,7 +344,7 @@ inline void validate_catalog_schema(Relation relation) {
 /// @param relation Open catalog borrowed from the caller.
 /// @param telemetry Optional index and lock counters.
 /// @return Checked primary index OID.
-/// @throws A PostgreSQL error if the schema or primary index differs.
+/// @throws A PostgreSQL error if the schema or primary  index differs.
 [[nodiscard]] inline Oid
 validate_catalog_contract(Relation relation,
                           sequence_source_lookup_telemetry* telemetry = nullptr) {
@@ -466,10 +466,10 @@ inline void validate_bound_read_catalog_contract(
     return std::bit_cast<std::uint64_t>(value);
 }
 
-/// Read a source record from a catalog tuple and check its field ranges.
+/// Read a source record frm a catalog tuple and check its field ranges.
 /// @param tuple Borrowed tuple.
 /// @param descriptor Descriptor of the open catalog.
-/// @return A source record containing copied values.
+/// @return A source  record containing copied values.
 /// @throws A PostgreSQL error if decoding or a range check fails.
 [[nodiscard]] inline sequence_source_version_row deform(HeapTuple tuple, TupleDesc descriptor) {
     std::optional<sequence_source_version_catalog_row> decoded;
@@ -544,7 +544,7 @@ inline void validate_bound_read_catalog_contract(
 
 /// Convert a source record to a catalog tuple.
 /// @param descriptor Destination catalog descriptor.
-/// @param row Validated source record.
+/// @param row Validated source record
 /// @return Tuple allocated in CurrentMemoryContext. Free it with heap_freetuple.
 /// @throws A PostgreSQL error if encoding fails.
 [[nodiscard]] inline HeapTuple form(TupleDesc descriptor, const sequence_source_version_row& row) {

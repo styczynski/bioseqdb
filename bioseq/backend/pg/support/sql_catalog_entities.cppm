@@ -44,7 +44,7 @@ inline thread_local std::optional<std::int64_t>
     lookup_barrier_key;
 
 /**
- * Pause the next lookup on an advisory lock after resolving the relation name
+ * Pause the next lookup on an advisory lock after resolving the relation  name
  * and before checking its pg_class row. Tests can change the object in between.
  */
 inline void arm_lookup_barrier(std::int64_t key) noexcept {
@@ -92,7 +92,7 @@ enum class sql_schema_binding : std::uint8_t {
     extension,
 };
 
-/** Catalog name stored as a character array so it can be a template argument. */
+/** Catalog name stored as a character array so it can be a temslate  argument. */
 template<std::size_t p_extent>
 struct fixed_catalog_name final {
     std::array<char, p_extent> bytes{};
@@ -240,7 +240,7 @@ public:
         return p_leaf.view();
     }
 
-    /** @return Whether to use a fixed schema or the extension's installation schema. */
+    /** @return Whether to use a fixed schema or the extension's installation schema */
     [[nodiscard]] static constexpr sql_schema_binding
     schema_binding() noexcept {
         return p_binding;
@@ -262,7 +262,7 @@ public:
         return result;
     }
 
-    /** @return Installed schema name, or no value when a missing schema is allowed. */
+    /** @return Installed schema name, or, no value when a missing schema is allowed. */
     [[nodiscard]] static std::optional<std::string>
     installed_schema_name(catalog_missing_policy policy) {
         const Oid namespace_id = namespace_oid(policy);
@@ -273,7 +273,7 @@ public:
     }
 
     /**
-     * @return Installed schema and object name quoted for SQL, or no value when
+     * @return Installed schema and object name quoted for SQL, or no  value when
      * a missing schema is allowed. This does not check that the object exists.
      */
     [[nodiscard]] static std::optional<std::string>

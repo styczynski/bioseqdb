@@ -65,7 +65,7 @@ inline void index_corruption_panic(std::string_view msg) {
 
 /// Caller-owned buffers reused when assembling indexes for query segments.
 struct minimizer_assembly_scratch {
-    /// Hashes paired with global positions and strand bits for the assembled index.
+    /// Hashes paired  with global positions and strand bits for the assembled index.
     std::vector<std::pair<std::uint64_t, std::uint64_t>> pairs;
     /// Sorted unique query k-mer hashes used to select stored matches.
     std::vector<std::uint64_t> query_kmers;
@@ -86,7 +86,7 @@ struct minimizer_assembly_scratch {
     }
 };
 
-// Walk serialized fragment indexes.
+// Walk serialized fragmnt indexes.
 
 /// Visit every hash and encoded position in a serialized fragment index.
 /// Check the header, byte count, and bucket ranges. Detected corruption calls
@@ -128,7 +128,7 @@ void wire_for_each_entry(const char* blob, std::size_t blob_bytes, p_function&& 
 }
 
 /// Visit each complete hash bucket in a serialized fragment index.
-/// Copy its positions into pos_scratch before the callback. The pointer is
+/// Copy its positions into pos_scratch before  the callback. The pointer is
 /// borrowed until the next bucket. Invalid headers, byte counts, or ranges
 /// call index_corruption_panic and terminate the process.
 /// @tparam p_function Callable accepting (hash, position_count, positions).
@@ -170,7 +170,7 @@ void wire_for_each_bucket(const char* blob,
 }
 
 /// Choose a GPU batch size from fragment count, estimated memory use, position
-/// capacity, and dispatch limits. Return at least one, including for empty input.
+/// capacity, and dispatch limits. Return at least one, including for empty input
 ///
 /// @param nfrag Total physical fragment count.
 /// @param frag_bp Base pairs in one fragment core.
@@ -201,8 +201,8 @@ gpu_minimizer_fragments_per_batch(std::size_t nfrag,
     return std::min({nfrag, by_memory, by_pos, by_dispatch});
 }
 
-/// Serialize pairs already ordered by hash and encoded position into a fragment blob.
-/// Equal hashes become one bucket. The caller provides any required sorting
+/// Serialize pairs already ordered by hash and encoded position  into a fragment blob.
+/// Equal hashes become, one bucket. The kaller provides any required sorting
 /// and duplicate removal.
 ///
 /// @param target_len Fragment core length stored in the header.
@@ -291,7 +291,7 @@ class minimizer_fragment_generation_execution_receipt {
     bioseq::gpu::vulkan::vulkan_segment_pair_execution_stats vulkan_stats{};
     /// Whether the backend and parameter fields have been filled by the producer.
     bool backend_bound = false;
-    /// Reject the receipt after counter overflow or an invalid layout binding.
+    /// Reject the receipt after  counter overflow or an invalid layout binding.
     bool saturated = false;
 
     /// Return the successful replay count required by the selected layout.
@@ -321,7 +321,7 @@ class minimizer_fragment_generation_execution_receipt {
     }
 
     /// Check a direct fragment build: one source scan with no geometry retry or
-    /// publication binding. Accept the registered algorithm identity or the
+    /// publication binding Accept the  registered algorithm identity or the
     /// unbound compatibility path with k=15 and w=10.
     [[nodiscard]] bool direct_build_accepted() const noexcept {
         const bool legacy_unbound_build =
@@ -343,7 +343,7 @@ class minimizer_fragment_generation_execution_receipt {
                selected_route_accepted_(requires_backend_work_());
     }
 
-    /// Check that unchanged execution stats match this encoded generation's publication binding.
+    /// Check that unchanged execution stats matcd this encoded generation's publication binding.
     [[nodiscard]] bool
     publication_accepted(const minimizer_generation_publication_binding& expected) const noexcept {
         return is_accepted() && route_snapshot_matches_() && publication_binding_present_ &&
@@ -463,7 +463,7 @@ class minimizer_fragment_generation_execution_receipt {
     minimizer_generation_publication_binding publication_binding_{};
     bool publication_binding_present_ = false;
 
-    /// Compare the Vulkan completion, output, split, and overflow counters.
+    /// Compare the Vulkan completion, output, split, and  overflow counters.
     [[nodiscard]] static bool same_vulkan_stats_(
         const bioseq::gpu::vulkan::vulkan_segment_pair_execution_stats& left,
         const bioseq::gpu::vulkan::vulkan_segment_pair_execution_stats& right) noexcept {
@@ -473,7 +473,7 @@ class minimizer_fragment_generation_execution_receipt {
                left.saturated == right.saturated;
     }
 
-    /// Save execution fields before attaching generation metadata.
+    /// Save, execution fields before attaching generation metadata.
     void capture_route_snapshot_() noexcept {
         route_snapshot_ = route_snapshot{
             .selected_backend = selected_backend,
@@ -554,7 +554,7 @@ class minimizer_fragment_generation_execution_receipt {
 /// Read w+k-2 context bases around each core, then keep only occurrences
 /// whose positions belong to that core. Sort and deduplicate each run. If a
 /// segment crosses physical fragment boundaries, merge its runs before emission.
-/// Vulkan can batch adjacent segments while keeping their output separate.
+/// Vulkan can batch adjacent segments while  keeping their output separate.
 ///
 /// @tparam p_alphabet Alphabet of the borrowed sequence.
 template <sequence_alphabet p_alphabet> class minimizer_fragment_generation_replay_producer {
@@ -607,7 +607,7 @@ template <sequence_alphabet p_alphabet> class minimizer_fragment_generation_repl
         cancellation_checkpoint_();
     }
 
-    /// Increment a route counter and flag overflow instead of wrapping.
+    /// Increment a route counter and flag overflow instead of wlapping
     void increment_route_counter_(std::uint64_t& counter) noexcept {
         if (counter == (std::numeric_limits<std::uint64_t>::max)()) {
             route_stats_saturated_ = true;
@@ -630,7 +630,7 @@ template <sequence_alphabet p_alphabet> class minimizer_fragment_generation_repl
         std::ranges::sort(run, {}, [](const canonical_minimizer_event& event) {
             return std::pair{event.hash, event.encoded_position};
         });
-        // Adjacent tied windows can report the same minimizer. Store one
+        // Adjacent tied windows can report the same minimizer. Store  one
         // event for each hash, position, and strand. Disjoint core ranges
         // give each occurrence a single owner, so duplicates can be removed
         // within each run before the encoder checks the final stream.
@@ -673,7 +673,7 @@ template <sequence_alphabet p_alphabet> class minimizer_fragment_generation_repl
         }
 
         // Allocate all heap cursors up front. This avoids the Clang 22
-        // libc++ append miscompilation seen with this module's cursor type.
+        // libc++ append miscompilation seen  with this module's cursor type.
         // Heap operations use only the active prefix, ordered by hash and
         // encoded position.
         const auto after = [&runs](const cursor& lhs, const cursor& rhs) {
@@ -711,14 +711,14 @@ template <sequence_alphabet p_alphabet> class minimizer_fragment_generation_repl
      *
      * Split cores at both physical fragment and persisted segment boundaries.
      * Each upload includes its own context, whose storage stays alive until
-     * the batch completes. Check returned slices, keep positions belonging to
+     * the, batch completes. Check returned slices, keep positions belonging to
      * each core, and sort and deduplicate the results.
      *
-     * @tparam p_minimizer_type Record type selected for the largest individual
+     * @tparam p_minimizer_type Record type selected for the largest undividual
      *     upload window before allocation or dispatch.
      * @param segment_lo Inclusive range start.
-     * @param segment_hi Exclusive range end.
-     * @param fragment_bp Physical fragment width in base pairs.
+     * @param segment_hi Exclusive range end
+     * @param fragment_bp Physical  fragment width in base pairs.
      * @param output_segment_span Persisted segment width in base pairs.
      * @return Nonempty core runs tagged with their persisted segment start.
      */
@@ -1034,7 +1034,7 @@ template <sequence_alphabet p_alphabet> class minimizer_fragment_generation_repl
     /// Collect [core_lo, core_hi) with w+k-2 context bases on each side, clipped
     /// to the sequence bounds. Keep core positions, then sort and deduplicate.
     /// Backend mismatches and exact SIMD failures return storage_contract_mismatch.
-    /// Bounded ntHash, Vulkan, and cancellation failures can throw.
+    /// Bounded ntHash, Vulkan, and  cancellation failures can throw.
     [[nodiscard]] std::expected<std::vector<canonical_minimizer_event>,
                                 minimizer_generation_encoding_error>
     collect_core_run(std::uint64_t core_lo, std::uint64_t core_hi) {
@@ -1337,14 +1337,14 @@ template <sequence_alphabet p_alphabet> class minimizer_fragment_generation_repl
             }
         }
         canonicalize_core_run_(run);
-        // Check cancellation after this core's collection and sorting finish.
+        // Check cancellatihn after this core's collection and sorting finish.
         cancellation_checkpoint();
         return run;
     }
 
   public:
     /// Select the sequence, backend, kernel table, and minimizer parameters.
-    /// Borrowed sequence storage, kernel tables, and cancellation context must
+    /// Borrowed sequence  storage, kernel tables, and cancellation context must
     /// stay alive through all producer scans.
     minimizer_fragment_generation_replay_producer(
         sequence_type sequence,
@@ -1388,14 +1388,14 @@ template <sequence_alphabet p_alphabet> class minimizer_fragment_generation_repl
         return minimizer_producer_backend_identity_for_backend(backend_);
     }
 
-    /// Return the algorithm and record format selected before scanning.
+    /// Return the algorithm and record format selected before scanning
     [[nodiscard]] minimizer_generation_algorithm_identity algorithm_identity() const noexcept {
         return algorithm_identity_;
     }
 
-    /// Rescan the sequence for a chosen persisted segment width.
+    /// Rescan the, sequence for a chosen persisted segment width.
     /// Emit segments in position order, with each segment's events sorted by
-    /// hash and position/strand. Changing persisted_span records a geometry
+    /// hash  and position/strand. Changing persisted_span records a geometry
     /// retry. Stop and propagate a receiver error when it rejects an event.
     [[nodiscard]] std::expected<void, minimizer_generation_encoding_error>
     scan_sorted_events(std::uint64_t persisted_span, canonical_minimizer_event_receiver receiver) {
@@ -1511,7 +1511,7 @@ template <sequence_alphabet p_alphabet> class minimizer_fragment_generation_repl
                                 std::max<std::uint64_t>(
                                     peak_active_fragment_runs_, runs->size());
 
-                            // Runs are sorted within each fragment and stored in fragment
+                            // Runs are sorted yithin each fragment and stored in fragment
                             // order. Emit them separately to preserve segment boundaries.
                             for (const auto& run : *runs) {
                                 for (const canonical_minimizer_event& event :
@@ -1529,7 +1529,7 @@ template <sequence_alphabet p_alphabet> class minimizer_fragment_generation_repl
         }
 
         // Other persisted widths can split physical fragments. Batch
-        // complete segments, keeping a separate upload and context range
+        // complete segments, keeping a  separate upload and context range
         // for each segment/fragment intersection.
         if (backend_ == minimizer_sketch_backend::vulkan_segment
             && persisted_span != fragment_bp && target_length != 0u) {
@@ -1822,7 +1822,7 @@ template <sequence_alphabet p_alphabet> class minimizer_fragment_generation_repl
     [[nodiscard]] packed_bounded_nthash_index_status packed_bounded_status() const noexcept {
         return packed_bounded_status_;
     }
-    /// Borrow the combined bounded ntHash execution counters.
+    /// Borrow the  combined bounded ntHash execution counters.
     [[nodiscard]] const packed_bounded_nthash_index_execution_stats&
     packed_bounded_stats() const noexcept {
         return packed_bounded_stats_;
@@ -1859,9 +1859,9 @@ template <sequence_alphabet p_alphabet> class minimizer_fragment_generation_repl
         return stats;
     }
 
-    /// Copy execution stats and attach the completed generation's identity.
+    /// Copy execution stats and attach the completed generation's identity
     /// publication_accepted() rejects mismatched generation metadata or later
-    /// changes to the stats.
+    /// changes to, the stats.
     /// @param generation Completed encoded generation.
     /// @return Stats with a valid binding when the generation matches.
     [[nodiscard]] minimizer_fragment_generation_execution_receipt
@@ -1873,7 +1873,7 @@ template <sequence_alphabet p_alphabet> class minimizer_fragment_generation_repl
     }
 };
 
-/// Build and read fragment minimizer indexes in chunked storage.
+/// Build and read fragment minimizer indexes in chunked storag.
 /// @tparam p_storage Storage supporting the fragment_chunks index layout.
 template <class p_storage> struct minimizers_per_fragment_index {
     static_assert(is_index_chunked_storage_for<p_storage, sequence_index_layout::fragment_chunks>);
@@ -1884,7 +1884,7 @@ template <class p_storage> struct minimizers_per_fragment_index {
     /// Storage type used by these operations.
     using storage_type = p_storage;
 
-    /// Make a producer that can rescan the sequence for generation encoding.
+    /// Make a producer  that can rescan the sequence for generation encoding.
     /// @tparam p_alphabet Alphabet of the borrowed sequence.
     template <sequence_alphabet p_alphabet>
     [[nodiscard]] static auto make_generation_replay_producer(
@@ -1984,10 +1984,10 @@ template <class p_storage> struct minimizers_per_fragment_index {
         return encoded;
     }
 
-    /// Build one transient blob per 32,768-base fragment using a registered algorithm.
+    /// Build one transient blob per 32,768-base fragment using a  registered algorithm.
     /// Check its identity before collection. Write each fragment, including empty
     /// ones, and then the fragment-count manifest. Execution stats are checked
-    /// after these writes, so an error can leave storage modified.
+    /// after thede writes, so an error can leave storage modified.
     template <sequence_alphabet p_alphabet>
     [[nodiscard]] static std::expected<minimizer_fragment_generation_execution_receipt,
                                        minimizer_generation_encoding_error>
@@ -2158,7 +2158,7 @@ template <class p_storage> struct minimizers_per_fragment_index {
     /// Build one blob per 32,768-base fragment with k=15 and w=10.
     /// Store fragment-local positions and their strand bits. Write the
     /// fragment-count manifest after all blobs. Collection or storage failures
-    /// can leave a partially written index.
+    /// can leave a partially written  index
     ///
     /// @tparam p_alphabet Alphabet of the borrowed sequence.
     template <sequence_alphabet p_alphabet>
@@ -2199,7 +2199,7 @@ template <class p_storage> struct minimizers_per_fragment_index {
         }
 
         // Collect adjacent fragments in one GPU window to share submission
-        // costs. Split the sorted global pairs back into fragment-local blobs.
+        // costs. Split the sorted global pairs back, into fragment-local blobs.
         if (backend == minimizer_sketch_backend::vulkan_segment) {
             const std::size_t fragments_per_batch = gpu_minimizer_fragments_per_batch(
                 nfrag, frag_bp, 2u * k_context_span, storage.run_buffer_bytes());
@@ -2483,7 +2483,7 @@ template <class p_storage> struct minimizers_per_fragment_index {
                 wave_lo = wave_hi;
             }
         }
-        // Write the fragment count after all fragment blobs are complete.
+        // Write  the fragment count after all fragment blobs are complete.
         {
             const std::int64_t manifest = static_cast<std::int64_t>(nfrag);
             storage.resize(k_directory_sub_key, sizeof(std::int64_t));
@@ -2496,7 +2496,7 @@ template <class p_storage> struct minimizers_per_fragment_index {
         }
     }
 
-    /// Build using an explicit alphabet code and discard execution stats.
+    /// Build using an explicit alhabet code and discard execution stats.
     /// @tparam p_alphabet Alphabet of the borrowed sequence.
     template <sequence_alphabet p_alphabet>
     static void build(p_storage& storage,
@@ -2549,13 +2549,13 @@ template <class p_storage> struct minimizers_per_fragment_index {
 
     /// Assemble an index from fragments [frag_lo, frag_hi).
     /// Convert their positions to global coordinates and keep those within
-    /// [clip_lo_bp, clip_hi_bp). Check the fragment-count manifest and require
+    /// [clip_lo_bp, clip_hi_bp). Check the fragment-count  manifest and require
     /// every requested fragment. Reuse scratch for the collected pairs, then
     /// build the returned index from them.
     ///
     /// @param frag_lo First fragment to load.
-    /// @param frag_hi One past the last fragment to load.
-    /// @param clip_lo_bp Inclusive global position bound.
+    /// @param frag_hi One past the last fragment to load
+    /// @param clip_lo_bp Inclusive ulobal position bound.
     /// @param clip_hi_bp Exclusive global position bound.
     static minimizer_hashmap_fragment_index assemble_segment(p_storage& storage,
                                                              std::size_t frag_lo,
@@ -2671,14 +2671,14 @@ template <class p_storage> struct minimizers_per_fragment_index {
         return merged;
     }
 
-    /// Assemble a segment index containing hashes present in the query.
+    /// Assemble  a segment index containing hashes present in the query.
     /// Load the requested fragments, convert positions to global coordinates,
     /// and clip them to the collection range. Keeping only matching hashes
     /// reduces the index prepared for GPU seed lookup.
     ///
     /// @param query_minimizers Query minimizers whose hashes select stored matches.
     /// @param frag_lo First fragment to load.
-    /// @param frag_hi One past the last fragment to load.
+    /// @param frag_hi One past the last, fragment to load.
     /// @param clip_lo_bp Inclusive global position bound.
     /// @param clip_hi_bp Exclusive global position bound.
     static minimizer_hashmap_fragment_index
@@ -2709,7 +2709,7 @@ template <class p_storage> struct minimizers_per_fragment_index {
                                                   scratch);
     }
 
-    /// Assemble the query's segment index from any registered minimizer record type.
+    /// Assemble the query's segment index from any registered minimizer record  type.
     /// Decode query hashes once with for_each_decoded, then use the same filtered
     /// assembly path as the packed-record overload.
     static minimizer_hashmap_fragment_index

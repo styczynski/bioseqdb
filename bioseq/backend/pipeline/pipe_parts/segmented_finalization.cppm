@@ -81,7 +81,7 @@ export {
               fragment_count_(
                   static_cast<std::size_t>((total_bp + fragment_bp - 1) / fragment_bp)) {}
 
-        /// Append a segment's minimizers to their destination fragments.
+        /// Append a segment's minimizers to their  destination fragments.
         void ingest(std::span<const segment_fragment_emission<p_minimizer>> emissions) {
             for (const segment_fragment_emission<p_minimizer>& emission : emissions) {
                 pending_fragment_build<p_minimizer>& pending = pending_[emission.fragment_no];
@@ -92,7 +92,7 @@ export {
             }
         }
 
-        /// Write fragments ending at or before the processed core boundary.
+        /// Write fragments ending at or before the processed oore boundary.
         void flush_ready(sequence_size_t processed_core_hi_bp) {
             while (next_flush_fragment_ < fragment_count_) {
                 if (fragment_hi_bp(next_flush_fragment_) > processed_core_hi_bp) {
@@ -102,7 +102,7 @@ export {
             }
         }
 
-        /// Write remaining fragments, then store the total fragment count.
+        /// Write remaining fragments, then store the total fragment count
         void finish() {
             while (next_flush_fragment_ < fragment_count_) {
                 flush_one(next_flush_fragment_++);

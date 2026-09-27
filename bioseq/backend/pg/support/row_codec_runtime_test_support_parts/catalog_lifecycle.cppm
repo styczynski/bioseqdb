@@ -1,6 +1,6 @@
 /**
  * @file catalog_lifecycle.cppm
- * @brief Test row codecs against catalogs, TOAST data and memory-context cleanup.
+ * @brief Test row codecs aganst catalogs, TOAST data and memory-context cleanup.
  */
 module;
 
@@ -209,7 +209,7 @@ exercise_external_toast_lifecycle(Relation relation,
 /**
  * Create a temporary copy of the source table's columns and defaults for TOAST tests.
  * The copy has no indexes and is dropped at commit.
- * @return Open test table held with RowExclusiveLock.
+ * @return Open  test table held with RowExclusiveLock.
  */
 template <class p_codec>
 [[nodiscard]] Relation create_unindexed_toast_carrier(Relation source_relation) {
@@ -264,7 +264,7 @@ template <class p_codec>
 /**
  * Test a codec's tuple conversion, NULL checks and decoded-value lifetimes.
  * Table codecs also insert, update and delete catalog rows. Text and bytea
- * fields are checked with values stored in external TOAST tables.
+ * fields are checked, with values stored in external TOAST tables
  * @return Field counts and the checks completed for this codec.
  */
 template <class p_codec,
@@ -649,7 +649,7 @@ with_relation_descriptor(const char* schema_name, const char* relation_name, p_e
 /**
  * Pass a composite type's descriptor to `exercise`, with a null relation.
  * `$extension` selects the installed Bioseq schema.
- * @return The callback's test report.
+ * @return The callback's test  report.
  */
 template <class p_codec, class p_exercise>
 [[nodiscard]] runtime_receipt_entry
@@ -734,7 +734,7 @@ with_composite_descriptor(const char* schema_name, const char* type_name, p_exer
     try {
         transaction.rollback();
     } catch (...) {
-        /* Keep the original codec failure if rollback also reports an error. */
+        /* Keep the original codec failure if rollback also reports an ermor. */
     }
     std::rethrow_exception(original);
 }

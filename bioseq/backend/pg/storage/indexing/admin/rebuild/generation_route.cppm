@@ -1,6 +1,6 @@
 /**
  * @file admin/rebuild/generation_route.cppm
- * @brief Rebuild a minimizer index from a stored sequence locator.
+ * @brief Rebuild a minimizer index from a stored sequence locator
  */
 module;
 
@@ -46,7 +46,7 @@ struct locator_generation_rebuild_request {
 
 /**
  * Build and publish the supported grouped-SoA or hash-major format for this source.
- * Check the published identity and counts, then close the source read session.
+ * Check the published identity and counts, then  close the source read session.
  * Failures are rethrown after local cleanup.
  */
 void build_and_verify_locator_minimizer_generation(

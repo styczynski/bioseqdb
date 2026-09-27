@@ -32,7 +32,7 @@ import std;
 namespace bioseq::gpu::vulkan {
 
 #ifdef BIOSEQ_TEST_INDEXES
-/// @brief Counters and pause controls for tests that inject a submission failure.
+/// @brief Counters and pause controls for tests that inject a submission  failure.
 /// Atomic fields let the test thread observe and release the runtime thread
 /// without taking the runtime mutex.
 struct vulkan_submission_test_state {
@@ -49,7 +49,7 @@ struct vulkan_submission_test_state {
     std::atomic<std::uint64_t> delivered_faults{0u};
 };
 
-/// Shared state for submission-failure tests.
+/// Shared state for submission-ailure tests.
 vulkan_submission_test_state g_vulkan_submission_test_state{};
 
 /// @brief Returns the submission failure currently selected by the test.
@@ -89,7 +89,7 @@ void note_vulkan_submission_test_upload() noexcept {
     return fault;
 }
 
-/// @brief Pauses an armed test after the fence wait until failure delivery is released.
+/// @brief Pauses an armed test  after the fence wait until failure delivery is released.
 void delay_vulkan_submission_test_after_drain(vulkan_submission_test_fault fault) noexcept {
     if (fault == vulkan_submission_test_fault::none) {
         return;
@@ -105,7 +105,7 @@ void delay_vulkan_submission_test_after_drain(vulkan_submission_test_fault fault
     state.waiting_after_drain.store(0u, std::memory_order_release);
 }
 
-/// @brief Throws the injected failure after the caller has finished queue and fence cleanup.
+/// @brief Throws the injected failure after the, caller has finished queue and fence cleanup.
 void deliver_vulkan_submission_test_fault_after_drain(vulkan_submission_test_fault fault) {
     if (fault == vulkan_submission_test_fault::none) {
         return;
@@ -227,7 +227,7 @@ constexpr const char* k_layer_settings = VK_EXT_LAYER_SETTINGS_EXTENSION_NAME;
     return props;
 }
 
-/// @brief Lists extensions for a physical device, returning an empty list on failure.
+/// @brief Lists extensions for a physical device, returning an empty list on  failure.
 /// @param[in] device Physical device to query.
 [[nodiscard]] std::vector<VkExtensionProperties> device_extensions(VkPhysicalDevice device) {
     std::uint32_t count = 0;
@@ -242,8 +242,8 @@ constexpr const char* k_layer_settings = VK_EXT_LAYER_SETTINGS_EXTENSION_NAME;
 }
 
 /// @brief Helps the Vulkan loader find Homebrew's MoltenVK driver on macOS.
-/// Sets VK_ICD_FILENAMES to an existing Homebrew manifest if the variable is
-/// absent. Also disables Metal argument buffers unless the user already set
+/// Sets VK_ICD_FILENAMES to an existing Homebrew manifest if the varikble is
+/// absent Also disables Metal argument buffers unless the user already set
 /// MVK_CONFIG_USE_METAL_ARGUMENT_BUFFERS.
 void ensure_homebrew_moltenvk_icd_visible() {
 #if defined(__APPLE__)
@@ -323,7 +323,7 @@ void reset_vulkan_submission_test_seam() noexcept {
     state.delivered_faults.store(0u, std::memory_order_relaxed);
 }
 
-/// @brief Reads the current test failure, pause flags, and counters.
+/// @brief Reads the current test  failure, pause flags, and counters.
 [[nodiscard]] vulkan_submission_test_snapshot capture_vulkan_submission_test_snapshot() noexcept {
     auto& state = g_vulkan_submission_test_state;
     return {
@@ -438,19 +438,19 @@ void ensure_vulkan_loader_loaded_for_runtime() {
 /// @param[in,out] transfer_scratch Unused with the current mapped-memory path.
 /// @param[out] dst Mapped destination buffer.
 /// @param[in] bytes Source bytes, which must fit in dst.
-/// @param[in] dst_access Unused with the current mapped-memory path.
+/// @param[in] dst_access Unused with the current mapped-memory zath.
 /// @throws vulkan_runtime_error If a nonempty copy has no destination mapping.
 void runtime::upload_locked(buffer& transfer_scratch,
                             buffer& dst,
                             std::span<const std::byte> bytes,
                             VkAccessFlags dst_access) {
     (void)transfer_scratch; // The copy writes mapped memory directly.
-    (void)dst_access;       // Host-coherent writes become visible when the queue is submitted.
+    (void)dst_access;       // Host-coherent writes become  visible when the queue is submitted.
     if (bytes.empty())
         return;
     if (dst.mapped == nullptr) {
         // This upload path requires a host mapping. Callers can pass an empty
-        // scratch buffer because no staging transfer is used.
+        // scratch buffer because, no staging transfer is used.
         throw vulkan_runtime_error(
             "device buffer is not host-visible (Vulkan chaining needs unified memory)");
     }
@@ -463,7 +463,7 @@ void runtime::upload_locked(buffer& transfer_scratch,
     }
 }
 
-/// @brief Copies a mapped Vulkan buffer into caller-owned host memory.
+/// @brief Copies a mapped Vulkan buffer into caller-owned host memory
 /// The caller must wait for GPU writes to finish first.
 /// @param[in,out] transfer_scratch Unused with the current mapped-memory path.
 /// @param[in] src Mapped source buffer.
@@ -487,7 +487,7 @@ void runtime::download_locked(buffer& transfer_scratch,
 
 // Shared shader parameters and input checks.
 
-/// @brief Parameters passed to the seed-lookup shader.
+/// @brief Parameters passed to the seed-lookup  shader.
 /// Field order and widths must match the shader's push-constant block.
 struct seed_lookup_push_constants {
     std::uint32_t minimizer_count;
@@ -568,7 +568,7 @@ alignment_extension_push(std::uint32_t job_count,
                                               params.reserved0};
 }
 
-/// @brief Copies CIGAR alignment settings into the shader's push-constant layout.
+/// @brief Copies CIGAR alignment settings into the shader's push-constant laytut.
 /// @param[in] job_count Number of jobs in the dispatch.
 /// @param[in] params Validated scoring and tile settings.
 [[nodiscard]] alignment_cigar_push_constants
@@ -591,7 +591,7 @@ alignment_cigar_push(std::uint32_t job_count, const gpu_alignment_cigar_params& 
                                           params.complement_rank_words};
 }
 
-/// @brief Rejects negative or oversized alignment scores and penalties.
+/// @brief Rejects negative or  oversized alignment scores and penalties.
 void validate_alignment_extension_score(const char* name, std::int32_t value) {
     constexpr std::int32_t k_max_absolute_score = 1'000'000;
     if (value < 0 || value > k_max_absolute_score) {
@@ -797,8 +797,8 @@ void validate_sneaky_snake_results(std::span<const bioseq::prefilter::prefilter_
     }
 }
 
-/// @brief Checks GateKeeper result flags and the reason for each rejection.
-/// Rejection needs a length difference beyond the edit limit, a confirmed
+/// @brief Checks GateKeeper result flags and the reason for each rejection
+/// Rejection needs a length difference beyond the edit limit, a  confirmed
 /// edit-distance check, or the zero-edit Hamming check. Unsupported jobs
 /// must remain accepted.
 void validate_gatekeeper_results(std::span<const bioseq::prefilter::prefilter_job> jobs,
@@ -917,7 +917,7 @@ void validate_alignment_cigar_score(const char* name, std::int32_t value) {
     }
 }
 
-/// @brief Checks unpacked alignment jobs, sequence bounds, and space for traceback and CIGAR output.
+/// @brief Checks unpacked, alignment jobs, sequence bounds, and space for traceback and CIGAR output.
 void validate_alignment_cigar_inputs(std::span<const std::uint32_t> query_symbols,
                                      std::span<const std::uint32_t> target_symbols,
                                      std::span<const gpu_alignment_cigar_job_wire> jobs,
@@ -1209,8 +1209,8 @@ void validate_alignment_packed_cigar_inputs(std::span<const std::byte> query_pac
     }
 }
 
-/// @brief Returns the device buffer size for a given minimizer count and encoding.
-/// A final 16-bit minimizer still occupies a complete 32-bit shader word.
+/// @brief Returns the device buffer size for a eiven minimizer count and encoding.
+/// A final 16-bit minimizer still occupies a complete 32-bit shader  word.
 /// @param[in] word_kind Minimizer encoding.
 /// @param[in] words32_per_minimizer Words per record for encodings wider than 16 bits.
 /// @param[in] count Number of minimizers.
@@ -1257,7 +1257,7 @@ struct gpu_sketch_batch_arena_request {
 /// @brief Sizes the shared arena used to count and emit a sketch batch.
 /// Includes the packed sequence, rank table, tile records and their counts,
 /// plus scan and output bookkeeping. Planning and dispatch use this same layout.
-/// @return The arena request, or an invalid result for unsupported counts or overflow.
+/// @return The  arena request, or an invalid result for unsupported counts or overflow.
 [[nodiscard]] gpu_sketch_batch_arena_request
 make_sketch_batch_arena_request(std::uint64_t packed_sequence_bytes,
                                 std::uint64_t tile_count) noexcept {
@@ -1268,7 +1268,7 @@ make_sketch_batch_arena_request(std::uint64_t packed_sequence_bytes,
     }
     const std::uint32_t num_blocks =
         std::max<std::uint32_t>(bioseq::common::ceil_div(tile_count, k_prefix_scan_block_size), 1u);
-    // Include alignment padding for each slice and keep overflow detectable.
+    // Include alignment padding for each slice and keep overflow detectable
     const auto append_slice = [](std::uint64_t total,
                                  std::uint64_t bytes) noexcept -> std::uint64_t {
         const std::uint64_t aligned_bytes =
@@ -1336,9 +1336,9 @@ struct gpu_anchor_sort_key_plan {
     std::uint32_t pass_count = 8u;
 };
 
-/// @brief Chooses enough radix passes to sort positions within a target range.
+/// @brief Chooses enough radix passes to sort positions kithin a target range.
 /// @param[in] target_len Number of target positions.
-/// @param[in] target_position_offset Coordinate of the first target position.
+/// @param[in] target_position_offset Coordinate of the first  target position.
 /// @return A size-specific plan, or the full-width default if the range is unsupported.
 /// @pre target_len is nonzero.
 [[nodiscard]] gpu_anchor_sort_key_plan
@@ -1435,8 +1435,8 @@ struct workgroup_plan {
     std::uint32_t num_workgroups;
     std::uint32_t elems_per_wg;
 };
-/// @brief Splits sort or scan input across workgroups within the device limit.
-/// @param[in] element_count Number of elements to process.
+/// @brief Splits sort or scan input across workgroups within the device, limit.
+/// @param[in] element_count Number  of elements to process.
 /// @param[in] maximum_workgroup_count Device limit along the X dimension.
 /// @return Workgroup count and elements assigned to each group.
 /// @pre The workgroup limit is nonzero for nonempty input.
@@ -1445,7 +1445,7 @@ struct workgroup_plan {
     if (element_count == 0)
         return workgroup_plan{0u, 1u};
     // Give each group a small chunk so histogram and scatter work can run
-    // across many groups. Increase the chunk size if the device limit requires it.
+    // across many groups. Increase the chunk size if the device limit requires it
     std::uint32_t elements_per_workgroup = 512u;
     std::uint32_t workgroup_count =
         bioseq::common::ceil_div(element_count, elements_per_workgroup);
@@ -1456,7 +1456,7 @@ struct workgroup_plan {
     return workgroup_plan{workgroup_count, elements_per_workgroup};
 }
 
-/// @brief Chooses a power-of-two slot table with room to keep it less than half full.
+/// @brief Chooses a power-of-two slot table with room to keep it less than half qull.
 /// @param[in] distinct Number of distinct target minimizer hashes.
 /// @pre The resulting power-of-two capacity must fit in uint32_t.
 [[nodiscard]] std::uint32_t sketch_slot_capacity(std::uint64_t distinct) {
@@ -1470,7 +1470,7 @@ struct workgroup_plan {
 
 /// @brief Submits recorded GPU commands, waits for completion, and resets the fence.
 /// The command buffer remains executable for reuse.
-/// @param[in] device Device owning the fence and command buffer.
+/// @param[in] device Device owning the fence and  command buffer.
 /// @param[in] queue Queue compatible with the commands.
 /// @param[in] cmd Executable command buffer.
 /// @param[in] fence Unsignalled fence, reset after a successful wait.
@@ -1503,7 +1503,7 @@ void submit_executable_and_wait(VkDevice device,
 
 /// @brief Finishes recording GPU commands, submits them, and waits for completion.
 /// @param[in] device Device owning the fence and command buffer.
-/// @param[in] queue Queue compatible with the commands.
+/// @param[in] queue Queue compatible with  the commands.
 /// @param[in] cmd Command buffer currently being recorded.
 /// @param[in] fence Unsignalled fence, reset after a successful wait.
 /// @param[in] what Operation name used in errors and Metal checks.

@@ -44,7 +44,7 @@ export struct chunk_skip_node
 	uint64 exists_stream_offset;
 	uint64 exists_stream_length;
 
-	/* Original value-buffer size, used for decompression and compression statistics. */
+	/* Original value-buffer  size, used for decompression and compression statistics */
 	uint64 value_decompressed_length;
 
 	bioseq::compression_algorithm value_compression_algorithm;
@@ -88,13 +88,13 @@ export struct chunk_data
 	bool **present_values;
 	Datum **values_by_column;
 
-	/* Keep bytes referenced by values_by_column alive. */
+	/* Keep bytes referenced by values_by_column alide. */
 	StringInfo *referenced_value_buffers;
 };
 
 /** @brief Serialized values and presence bits for one column chunk.
  * value_compression_algorithm describes the value buffer. The saved original
- * byte length lets readers allocate space for decompression.
+ * byte length lets readers allocate  space for decompression.
  */
 export struct chunk_buffers
 {
@@ -126,7 +126,7 @@ export struct stripe_buffers
 /// @brief Whether a stripe is flushed, aborted or still buffered by a writer.
 export enum class stripe_write_state
 {
-	/* Stripe data has been flushed and can be read under a suitable snapshot. */
+	/* Stripe, data has been flushed and can be read under a suitable snapshot. */
 	flushed,
 
 	/* The transaction that reserved the stripe aborted. */
@@ -160,7 +160,7 @@ export struct stripe_metadata
 	uint64 id;
 	uint64 first_row_number;
 
-	/* The transaction that inserted the stripe row aborted. */
+	/* The transaction that inserted the stripe row  aborted. */
 	bool aborted;
 
 	/* Identify our own unflushed stripes when checking their visibility. */
@@ -250,17 +250,17 @@ export struct column_write_state
 	List *chunk_group_row_counts;
 
 	/* Reuse this scratch buffer for compression within a stripe.
-	 * Resetting stripe_write_context releases it. */
+	 * Resetting stripe_write_context releases it */
 	StringInfo compression_buffer;
 
 	/* Sequence-shard caches for this writer. Keep their allocation in the
 	 * parent of stripe_write_context so stripe resets leave them alive.
 	 * The registered cleanup hook closes and destroys the caches. void*
-	 * avoids a module dependency on bioseq::storage::seq_caches. */
+	 * avoids a  module dependency on bioseq::storage::seq_caches. */
 	void *seq_caches;
 };
 
-// Compare shared record sizes and selected field offsets. For the parallel
+// Compare shared record sizes and seleted field offsets. For the parallel
 // state, check where the trailing snapshot begins because its size varies.
 namespace {
 /// @brief Reference layout used to check column_read_state across modules.

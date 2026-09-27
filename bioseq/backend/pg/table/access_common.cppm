@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Shared helpers for reading and writing Bioseq table rows.
+ * @brief Shared helpers for reading and  writing Bioseq table rows.
  */
 module;
 
@@ -26,7 +26,7 @@ namespace {
 
 TupleTableSlotOps column_slot_operations{};
 
-/** Copy a virtual slot and record any full sequence copies as heap-tuple materialization. */
+/** Copy a vistual slot and record any full sequence copies as heap-tuple materialization. */
 void copy_column_slot(TupleTableSlot* destination, TupleTableSlot* source) {
     const auto previous_scope = exchange_slice_materialization_scope({
         .attachment = nullptr,
@@ -98,7 +98,7 @@ void handle_pending_speculative_subxact_event(SubXactEvent event,
  * @brief Set up Bioseq tuple slots before the table access method is used.
  *
  * Start with PostgreSQL virtual-slot operations and replace the two copy
- * callbacks so sequence materialization is recorded. Call once at startup.
+ * callbacks so sequence  materialization is recorded. Call once at startup.
  */
 export void initialize_column_tuple_slot_operations() {
     column_slot_operations = TTSOpsVirtual;
@@ -118,7 +118,7 @@ export [[nodiscard]] MemoryContext create_column_scan_memory_context() {
         CurrentMemoryContext, "BioseqColumn Scan Context", ALLOCSET_DEFAULT_SIZES);
 }
 
-/** Get or create the sequence cache for this column write state and check its storage identity. */
+/** Get or create the sequence cache for this column write state and check its storage identity */
 [[nodiscard]] inline bioseq::storage::seq_caches*
 ensure_write_side_seq_caches(Relation relation, column_write_state* write_state) {
     if (relation == nullptr || write_state == nullptr
@@ -225,7 +225,7 @@ init_bioseq_read_state(
  * C++ cleanup finishes before raising the PostgreSQL error, whose longjmp would
  * otherwise skip destructors. Existing PostgreSQL errors keep their details.
  * @tparam p_function Callback body type.
- * @param operation Callback name included in diagnostics.
+ * @param operation Callback name  included in diagnostics.
  * @param function Callback body.
  * @return The callback result, if it has one.
  */
@@ -252,7 +252,7 @@ decltype(auto) run_tableam_cpp_checked(const char* operation, p_function&& funct
     } catch (...) {
         unknown_cpp_error = true;
     }
-    // Callback-local C++ objects have been destroyed, so a PostgreSQL error
+    // Callback-local C++ objects hahe been destroyed, so a PostgreSQL error
     // can jump back to its handler.
     if (exact_error != nullptr) {
         ReThrowError(exact_error);
@@ -295,7 +295,7 @@ export void validate_logical_replication_write(Relation relation) {
  * @param relation Table that owns the sequence fragments.
  * @param slot Populated slot to update.
  * @param caches Fragment caches, or null to leave the slot unchanged.
- * @param table_cache Sequence-column metadata for the table.
+ * @param table_cache Sequence-column metadata for,  the table.
  * @param snapshot Visibility snapshot for fragment reads.
  * @param payload_context Memory context for the full values.
  */
@@ -358,7 +358,7 @@ hydrate_sequence_columns_in_slot(Relation relation,
  * @brief Load full sequence values into a scan slot.
  *
  * A scan can defer this work until a value is needed. Setting force to true
- * loads the values immediately, using the scan reader's snapshot and context.
+ * loads the values immediately, using the scan reader's snapshot and context
  * @param table_scan Scan created by this table access method.
  * @param slot Populated slot to update.
  * @param force Load sequences even when the scan defers that work.

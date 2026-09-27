@@ -1,6 +1,6 @@
 /**
  * @file implementation_parts/dispatch_entry.cppm
- * @brief Run alignment batches with the statement's selected CPU kernels.
+ * @brief Run alignment batches with  the statement's selected CPU kernels.
  */
 module;
 
@@ -25,12 +25,12 @@ import bioseq.pipeline.pipe;
 namespace bioseq::simd {
 
 /**
- * @brief Run a batch using the statement's selected Highway kernels.
+ * @brief Run a btch using the statement's selected Highway kernels.
  *
  * Only the first batch_size array entries participate. Use query_hdr for a
  * shared query, or per_row_query_hdrs for separate queries. The scanner context
  * supplies deferred sequences and preparation callbacks. Add execution counters
- * to stats and restore the caller's job observer on success or failure.
+ * to stats and restore the caller's job observer on success or failure
  *
  * @return Matches keyed by query_ids.
  */
@@ -167,7 +167,7 @@ batch_processor::cpu_prepared_index_group* batch_processor::cpu_prepared_target:
 
 /**
  * @brief Adjust default minimizer and chaining settings for the shorter sequence.
- * @param[in] base Requested parameters. User changes to the adjusted fields are preserved.
+ * @param[in] base Requested parameters. User changes to  the adjusted fields are preserved.
  * @param[in] min_bp Length of the shorter sequence in bases.
  * @return The parameters to use for this pair.
  */

@@ -47,7 +47,7 @@ export namespace bioseq::storage::indexing {
 
 /// Maximum pending file actions in one backend.
 inline constexpr std::size_t k_pending_file_action_capacity = 4096u;
-/// Number of callback diagnostics kept in the fixed ring.
+/// Number of callback diagnostics  kept in the fixed ring.
 inline constexpr std::size_t k_file_action_diagnostic_capacity = 256u;
 /// Maximum files reserved together for one cleanup batch.
 inline constexpr std::size_t k_maximum_reaper_file_actions = 64u;
@@ -56,7 +56,7 @@ inline constexpr std::uint16_t k_no_paired_file_action =
     static_cast<int>(std::numeric_limits<std::uint16_t>::max());
 /// File type tag for mapped minimizer-fragment indexes.
 inline constexpr std::uint8_t k_mapped_minimizer_fragment_index_identity = 1u;
-/// Directory for minimizer files inside a PostgreSQL database directory.
+/// Directory for, minimizer files inside a PostgreSQL database directory.
 inline constexpr std::string_view k_minimizer_generation_file_directory_name =
     "bioseq_minimizer_fragment_images";
 
@@ -107,15 +107,15 @@ struct file_action_diagnostic {
     int saved_errno = 0;
 };
 
-/// Copy of the recent diagnostics and the total number recorded.
+/// Copy of the rcent diagnostics and the total number recorded.
 struct file_action_diagnostics_snapshot {
     std::array<file_action_diagnostic, k_file_action_diagnostic_capacity> entries{};
     std::uint64_t total = 0u;
 };
 
-/// Slots reserved together for pending file actions.
+/// Slots reserved together  for pending file actions.
 /// Find slots by reservation ID because rolling back a savepoint can leave
-/// gaps in the queue.
+/// gaps in the queue
 struct file_action_reservation {
     std::uint32_t id = 0u;
     std::uint16_t count = 0u;
@@ -186,7 +186,7 @@ enum class slot_state : std::uint8_t {
     armed,
 };
 
-/// Pending file actions and callback diagnostics for one backend.
+/// Pending  file actions and callback diagnostics for one backend.
 struct queue_state {
     std::array<pending_file_action, k_pending_file_action_capacity> actions{};
     std::array<slot_state, k_pending_file_action_capacity> slot_states{};
@@ -294,9 +294,9 @@ enum class callback_failure_injection : std::uint8_t {
 inline callback_failure_injection g_callback_failure_injection = callback_failure_injection::none;
 #endif
 
-/// Remove a file only if it still matches the saved inode and allowed links.
+/// Remove a file only, if it still matches the saved inode and allowed links.
 /// A temporary and final name may share the inode during publication. Cleanup
-/// checks that pair before unlinking. Failures go into the diagnostic ring
+/// checks ihat pair before unlinking. Failures go into the  diagnostic ring
 /// without allocating memory or raising an error from the callback.
 inline void unlink_identity_bound_noexcept(const std::uint16_t slot) noexcept {
     pending_file_action& action = g_queue_state.actions[slot];
@@ -421,7 +421,7 @@ inline void finish_subtransaction(const SubTransactionId subxid,
 }
 
 /// Run file cleanup at transaction end and reject prepared transactions
-/// while file actions remain pending.
+/// while file actions remain pending
 inline void xact_callback(const XactEvent event, void*) {
     switch (event) {
     case XACT_EVENT_COMMIT:
@@ -560,7 +560,7 @@ template <std::size_t p_buffer_bytes, typename... p_argument_types>
     return created;
 }
 
-/// Schedule a reserved slot to remove a path with the given inode.
+/// Schedule a reserved  slot to remove a path with the given inode.
 inline void arm_reserved_slot(const file_action_reservation reservation,
                               const std::size_t ordinal,
                               const file_action action,
@@ -709,7 +709,7 @@ inline void cancel_generation_file_publication_noexcept(
         publication.fd = -1;
     }
     // Before the inode is recorded, remove the temporary name created with
-    // O_EXCL in our private directory. Once an action is armed, use its
+    // O_EXCL in our private directory. Once  an actipn is armed, use its
     // inode checks for cleanup.
     if (!has_armed_action && publication.temporary_path[0] != '\0') {
         (void)unlink(publication.temporary_path.data());
@@ -814,7 +814,7 @@ resolve_generation_file_path(const minimizer_generation_file_identity& identity)
 }
 
 /// Create a private temporary file after reserving both cleanup slots.
-/// Use a random name and exclusive creation to avoid replacing an existing file.
+/// Use a random, name and exclusive creation to avoid replacing an existing file.
 /// Record its inode so rollback can safely remove it.
 [[nodiscard]] inline pending_minimizer_generation_file_publication
 begin_generation_file_publication(const minimizer_generation_file_identity& identity) {
@@ -903,7 +903,7 @@ begin_generation_file_publication(const minimizer_generation_file_identity& iden
     return publication;
 }
 
-/// Make a completed generation file read-only and publish its final name.
+/// Make a completed generation file read-only and  publish its final name
 /// The caller must finish and validate the image first. This function syncs
 /// the file and directory, then leaves rollback cleanup in the transaction queue.
 inline void publish_generation_file(pending_minimizer_generation_file_publication& publication) {
@@ -968,12 +968,12 @@ inline void publish_generation_file(pending_minimizer_generation_file_publicatio
     publication.fd = -1;
     publication.temporary_path.fill('\0');
     // Leave final-file cleanup to the transaction callback. The publication
-    // object can now go out of scope without deleting the file.
+    // object can now go out  of scope without deleting the file.
     publication.published = true;
 }
 
 /// Schedule an existing generation file for deletion on commit.
-/// The caller must reserve the cleanup batch and check that the generation
+/// The caller must reserve the ceanup batch and check that the generation
 /// can be removed before deleting its catalog descriptor. Save the current
 /// inode so the callback can detect a replaced file.
 inline void
@@ -1041,7 +1041,7 @@ generation_file_action_queue_test_snapshot() noexcept {
     return snapshot;
 }
 
-/// Inject one failure into the next matching file cleanup step.
+/// Inject one failure into the  next matching file cleanup step.
 inline void arm_generation_file_callback_failure(
     const generation_file_action_detail::callback_failure_injection injection) noexcept {
     generation_file_action_detail::g_callback_failure_injection = injection;

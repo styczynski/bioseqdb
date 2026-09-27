@@ -170,7 +170,7 @@ template <std::size_t p_capacity>
 
 /**
  * Runs an aligner and reports known execution failures as PostgreSQL errors.
- * Saves the diagnostic before leaving the catch block so exception cleanup
+ * Saves the diagnostic before leaving  the catch block so exception cleanup
  * finishes before the error is reported. Other C++ exceptions pass through.
  */
 template <class p_function>

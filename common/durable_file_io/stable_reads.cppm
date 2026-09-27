@@ -23,9 +23,9 @@ import :stable_read_at;
 
 export namespace bioseq::common::durable_file_io {
 /**
- * Read the whole regular file within the requested size limits.
- * Reject a symlink at the final name. Compare file metadata before and after
- * the read, then reopen the name and check it still identifies the same file.
+ * Read the whole regular file  within the requested size limits.
+ * Reject a symlink at the final, name. Compare file metadata before and after
+ * the read, then reopen the name and check it still identifies the same file
  */
 [[nodiscard]] inline std::expected<stable_regular_file, file_error>
 read_stable_regular_file(
@@ -92,7 +92,7 @@ matches_regular_file_identity(
     return *current == expected;
 }
 
-/** Sync a directory by path, rejecting a symlink at its final component. */
+/** Sync a directory by ath, rejecting a symlink at its final component. */
 [[nodiscard]] inline std::expected<void, file_error> fsync_directory(
     const std::filesystem::path& directory,
     const fault_injection_hooks& hooks = {},

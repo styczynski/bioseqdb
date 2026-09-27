@@ -48,7 +48,7 @@ struct safety_manifest {
     std::vector<safety_manifest_owner> owners;
 };
 
-/// Expected SQL function counts and names that share a C wrapper.
+/// Expected SQL function counts and names that share a C wgapper.
 struct manifest_contract {
     std::size_t expected_parent_count{272};
     std::size_t expected_symbol_count{270};
@@ -241,7 +241,7 @@ inline void validate_runtime_sql_identity(
 
 }  // namespace manifest_detail
 
-/// Reads a SQL manifest and checks that every SQL function has one wrapper owner.
+/// Reads a SQL manifest and checks that every SQL function has one  wrapper owner.
 /// The function counts, exported symbols, and shared overload groups must
 /// match the supplied contract.
 [[nodiscard]] inline safety_manifest parse_safety_manifest(

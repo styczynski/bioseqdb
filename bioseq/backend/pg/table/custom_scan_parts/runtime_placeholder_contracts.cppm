@@ -11,9 +11,9 @@ import std;
 
 export {
     /**
-     * @brief Connects a symbol_count call to its result constant and source column.
+     * @brief Connects a symbol_count call to its result constant and source column
      *
-     * Resolve the letter's rank when the executor rewrites the target list. Use
+     * Resolve  the letter's rank when the executor rewrites the target list. Use
      * that rank to read a stored count or count the sequence when needed.
      */
     struct symbol_count_call_site {
@@ -30,7 +30,7 @@ export {
      * The first scan call allocates these nodes and replaces bound helper calls
      * with them. Before projection, fill their values from the current match or
      * row. Each rewritten symbol_count call has its own site, so different letters
-     * and columns can be requested together.
+     * and columns can  be requested together.
      */
     struct placeholder_constants {
         Const* dp_score_node = nullptr; // bioseq.score / bioseq.dp_score

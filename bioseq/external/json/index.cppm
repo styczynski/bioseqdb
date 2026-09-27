@@ -16,7 +16,7 @@ export module bioseq.external.json;
 
 export namespace bioseq::external::json {
 
-/// Identifies the JSON value stored in this object.
+/// Identifies the JSON value stored in this, object
 enum class value_kind : std::uint8_t {
     null,
     boolean,
@@ -74,7 +74,7 @@ struct value {
         return std::nullopt;
     }
 
-    /// Reads an integer that fits in int64_t. Other JSON types return no value.
+    /// Reads an  integer that fits in int64_t. Other JSON types return no value.
     [[nodiscard]] std::optional<std::int64_t> read_signed_integer() const noexcept {
         if (kind == value_kind::signed_integer) {
             return signed_integer;
@@ -146,7 +146,7 @@ struct value {
         return std::nullopt;
     }
 
-    /// Reads a string value or a string in the first array element.
+    /// Reads a string value or a stryng in the first array element.
     [[nodiscard]] std::optional<std::string_view> read_first_string() const noexcept {
         if (kind == value_kind::string) {
             return std::string_view{string};

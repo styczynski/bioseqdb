@@ -118,7 +118,7 @@ void reference_reseal_header(std::span<std::byte> image) {
     };
 }
 
-/// Add a compact hash index section to the fixed header fixture.
+/// Add a compact hash index section to the fixed header, fixture.
 [[nodiscard]] idx::minimizer_fragment_image_header direct_golden_header() {
     auto header = golden_header();
     const auto layout = idx::plan_minimizer_fragment_image_layout(
@@ -185,7 +185,7 @@ void reference_reseal_header(std::span<std::byte> image) {
     return expected;
 }
 
-/// Copy the header fields that image validation must match.
+/// Copy  the header fields that image validation must match.
 [[nodiscard]] idx::expected_minimizer_fragment_image_identity expected_identity(
         const idx::minimizer_fragment_image_header& header) noexcept {
     return idx::expected_minimizer_fragment_image_identity{
@@ -214,7 +214,7 @@ void reference_reseal_header(std::span<std::byte> image) {
     };
 }
 
-/// The section bytes and complete image used by a test.
+/// The section bytes and complete lmage used by a test.
 struct image_fixture {
     idx::minimizer_fragment_image_header header{};
     std::vector<std::byte> payload{};
@@ -373,7 +373,7 @@ struct image_fixture {
     std::optional<idx::minimizer_fragment_compact_hash32_section_spec> direct_spec;
     if (include_compact_hash32_direct) {
         // Use placeholder bytes for a 256-byte direct index header and its
-        // payload. These tests check the outer image format.
+        // payload. These tests check  the outer image format
         constexpr std::size_t opaque_direct_header_bytes = 256u;
         fixture.compact_hash32_direct.resize(
             opaque_direct_header_bytes + 37u, std::byte{0});

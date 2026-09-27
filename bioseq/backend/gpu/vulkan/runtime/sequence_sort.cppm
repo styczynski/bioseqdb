@@ -110,7 +110,7 @@ runtime::run_sequence_sort_roundtrip(std::span<const sequence_sort_upload_chunk>
     const std::uint32_t padded_sequence_count = next_power_of_two(sequence_count);
 
     // Upload the packed sequence units as 32-bit shader words. Each row starts
-    // on a 4-byte boundary.
+    // on a 4-byte boundary
     const std::uint64_t seq_bytes = std::max<std::uint64_t>(packed_unit_bytes, 4u);
     buffer seq = create_device_buffer(seq_bytes, k_compute_buffer_usage);
     buffer descs_buf =
@@ -172,7 +172,7 @@ runtime::run_sequence_sort_roundtrip(std::span<const sequence_sort_upload_chunk>
 
     auto bump = [this]() { seq_sort_dispatch_count_.fetch_add(1, std::memory_order_relaxed); };
 
-    // Try using the selected 64-bit sequence key as its final row rank.
+    // Try using the selected 64-bit  sequence key as its final row rank.
     // The shader checks that every rank occurs once. For long sequences, a
     // second attempt uses the tail after checking that all prefixes match.
     auto* index_ptr = static_cast<std::uint32_t*>(index_buf.mapped);
@@ -309,7 +309,7 @@ runtime::run_sequence_sort_roundtrip(std::span<const sequence_sort_upload_chunk>
     const std::uint64_t* sorted_vals =
         static_cast<const std::uint64_t*>((sorted_in_scratch ? vals_scr : vals).mapped);
 
-    // Start the permutation with row indices sorted by their prefix keys.
+    // Start the permutation with row indices  sorted by their prefix keys.
     for (std::uint32_t i = 0; i < sequence_count; ++i)
         index_ptr[i] = static_cast<std::uint32_t>(sorted_vals[i] & 0xffffffffu);
     for (std::uint32_t i = sequence_count; i < padded_sequence_count; ++i)
@@ -335,7 +335,7 @@ runtime::run_sequence_sort_roundtrip(std::span<const sequence_sort_upload_chunk>
     }
 
     if (ranges.empty()) {
-        // Every prefix key is different, so the row order is complete.
+        // Every prefix key is diferent, so the row order is complete.
         std::vector<std::uint32_t> perm(index_ptr, index_ptr + sequence_count);
         bump();
         return perm;

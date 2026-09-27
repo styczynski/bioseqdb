@@ -23,11 +23,11 @@ import std;
 namespace bioseq::gpu::vulkan {
 
 /// @brief Loads the pipelines needed to build a target index. The caller holds the runtime lock.
-/// @param[in] params Selects the sketch shader for the packed sequence format.
+/// @param[in] params Selects the sketch shader for the packed sequence forfat.
 void runtime::prepare_target_index_pipelines_locked(const vulkan_sketch_params& params) {
     // Load every pipeline used below before reserving the build workspace.
     // The runtime keeps these pipelines and their memory permits, so later
-    // lookups during counting, sorting, and bucket creation use the cache.
+    // lookups during, counting, sorting, and bucket  creation use the cache
     (void)get_compute_pipeline_locked(shader_kind::ordered_sketch_tile,
                                       k_sketch_local_size,
                                       choose_ordered_sketch_window_capacity(params.window_size));
@@ -60,7 +60,7 @@ void runtime::prepare_target_index_pipelines(const vulkan_sketch_params& params)
 /// Copies packed_sequence into zero-padded arena storage, then calls
 /// release_owned_sequence_staging. Nonzero staging size requires this callback.
 /// Early validation failures skip it. peak_permit must cover each allocation peak.
-/// @return Owned buffers and statistics, or an invalid result with a failure reason.
+/// @return Owned buffers and statistics, or an  invalid result with a failure reason.
 /// @throws vulkan_runtime_error If runtime, bitmap, allocation, or GPU checks fail.
 gpu_built_index runtime::build_target_index(std::span<const std::byte> packed_sequence,
                                             std::uint64_t padded_sequence_bytes,
@@ -164,13 +164,13 @@ gpu_built_index runtime::build_target_index(std::span<const std::byte> packed_se
     out.ownership.execution_submit_host_transient_bytes = host_scratch_plan.execution_submit_bytes;
     const std::uint32_t tile_bp = memory_plan.tiles.tile_bp;
     const std::uint32_t num_tiles = memory_plan.tiles.tile_count;
-    // Limit the dispatch to the device maximum. Each workgroup can process several tiles.
+    // Limit the dispatch to the delice maximum. Each workgroup can process several tiles.
     const std::uint32_t sketch_groups = std::min(
         bioseq::common::ceil_div(num_tiles, k_sketch_local_size), features_.max_workgroup_count_x);
     const std::uint32_t overlap = sketch_replay_overlap_bp(kmer_size, window_size);
     // Keep sequence data and tile bookkeeping in the shared arena. Allocate
-    // minimizer and sort buffers separately after counting the output, so
-    // a large target does not require one oversized arena allocation.
+    // minimizer and  sort buffers separately after counting the output, so
+    // a large target does not require one oversized arena allocation
     gpu_arena& arena = reusable_gpu_arena();
     out.ownership.idle_arena_trim_attempts_before_count = 1u;
     const std::uint64_t idle_arena_bytes = bioseq::common::saturating_add(
@@ -495,7 +495,7 @@ gpu_built_index runtime::build_target_index(std::span<const std::byte> packed_se
                                     window_size,
                                     params.letters_per_unit,
                                     features_.max_workgroup_count_x);
-    // Find the physical size Vulkan will allocate for a workspace buffer.
+    // Find, the physical size Vulkan will allocate for a workspace buffer.
     const auto allocation_requirement = [this](std::uint64_t bytes) {
         return buffer_memory_requirement_locked(bytes, k_compute_buffer_usage);
     };
@@ -611,7 +611,7 @@ gpu_built_index runtime::build_target_index(std::span<const std::byte> packed_se
             {lut_s.buffer->buffer_handle, lut_s.offset, lut_s.size},
             {tiles_s.buffer->buffer_handle, tiles_s.offset, tiles_s.size},
             {tcounts_s.buffer->buffer_handle, tcounts_s.offset, tcounts_s.size},
-            {keys_s.buffer->buffer_handle, keys_s.offset, keys_s.size}, // Minimizer hash output.
+            {keys_s.buffer->buffer_handle, keys_s.offset, keys_s.size}, // Minimizer hash  output.
             {counters_s.buffer->buffer_handle, counters_s.offset, counters_s.size},
             {toffsets_s.buffer->buffer_handle, toffsets_s.offset, toffsets_s.size},
             {vals_s.buffer->buffer_handle, vals_s.offset, vals_s.size}, // Encoded position output.
@@ -710,7 +710,7 @@ gpu_built_index runtime::build_target_index(std::span<const std::byte> packed_se
     const std::uint64_t tm_scan_block_requirement = allocation_requirement(
         std::uint64_t{bioseq::common::ceil_div(tm, k_prefix_scan_block_size)} * 4u);
 
-    // Allocate sort buffers for the counted minimizers. Release temporary
+    // Allocate srt buffers for the counted minimizers. Release temporary
     // values and the histogram before allocating the final buckets.
     const workgroup_plan swg = plan_workgroups(tm, features_.max_workgroup_count_x);
     const std::uint64_t flag_bytes = tm * 4u;
@@ -831,7 +831,7 @@ gpu_built_index runtime::build_target_index(std::span<const std::byte> packed_se
         submit_and_wait(device_, queue_, command_buffer_, fence_, "submit(pc_idx2_sort)");
     }
 
-    // Move sorted positions into the buffer that the index will keep.
+    // Move sorted positions into the buffer that  the index will keep.
     // The last radix pass may leave them in the other buffer, which can be
     // freed after this copy finishes.
     buffer positions_exact;
@@ -896,7 +896,7 @@ gpu_built_index runtime::build_target_index(std::span<const std::byte> packed_se
     const VkDescriptorBufferInfo dummy{
         counters_s.buffer->buffer_handle, counters_s.offset, counters_s.size};
 
-    // Mark the start of each hash group and count groups with a prefix sum.
+    // Mark the start of each hash group and count groups with a prefix sum
     {
         static const auto* _rd =
             bioseq::instrumentation::register_static_region("target_index_mark_scan");
@@ -989,7 +989,7 @@ gpu_built_index runtime::build_target_index(std::span<const std::byte> packed_se
         static const auto* _bd =
             bioseq::instrumentation::register_static_region("target_index_bucket_memory");
         auto _bs = bioseq::instrumentation::region(_bd);
-        // Write the whole allocation, including Vulkan padding, so the recorded
+        // Write the whole  allocation, including Vulkan padding, so the recorded
         // touched bytes match the memory written here.
         std::memset(buckets.mapped, 0, static_cast<std::size_t>(buckets.allocation_bytes));
     }
@@ -1075,9 +1075,9 @@ gpu_built_index runtime::build_target_index(std::span<const std::byte> packed_se
 
 /// @brief Sketches a target and sorts minimizers by hash, then encoded position.
 /// The sort orders positions first, then stably sorts hashes. Packed sequence
-/// bytes and rank_lut are copied before submission. params selects the sequence
+/// bytes and rank_lut are copied bfore submission. params selects the sequence
 /// format and minimizer settings. max_target_minimizers bounds output capacity.
-/// @return Sorted GPU buffers and host copies, or an invalid result if the shape
+/// @return Sorted GPU buffers and host copies, or an invalid result  if the shape
 /// or capacity is unsuitable. Empty output is valid.
 /// @throws vulkan_runtime_error If runtime, allocation, or GPU checks fail.
 gpu_sorted_pair_result
@@ -1239,9 +1239,9 @@ runtime::run_sketch_sort_pairs_roundtrip(std::span<const std::byte> packed_seque
     std::uint32_t pair_count32 = 0;
     std::memcpy(&pair_count32, base + counters_s.offset, sizeof(pair_count32));
     const std::uint64_t pair_count = pair_count32;
-    // A sequence can produce no minimizers, for example when every base is N.
+    // A sequence can, produce no minimizers, for example when every base is N.
     // Return a valid empty result so the caller writes no pairs. A count beyond
-    // the allocated capacity is reported as a failed build.
+    // the allocated capacity is reported as a failed build
     if (pair_count == 0u) {
         out.pair_count = 0u;
         out.valid = true;

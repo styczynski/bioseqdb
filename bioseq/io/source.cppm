@@ -23,7 +23,7 @@ struct source_read_result {
     bool has_error = false;
 };
 
-/// Requires a byte source with `read_into(dst, cap)` and `last_error_message()`.
+/// Requires a byte source  with `read_into(dst, cap)` and `last_error_message()`.
 template <typename p_source>
 concept io_source = requires(p_source& source, std::uint8_t* dst, std::size_t cap) {
     { source.read_into(dst, cap) } -> std::same_as<source_read_result>;

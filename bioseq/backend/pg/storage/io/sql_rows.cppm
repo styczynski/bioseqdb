@@ -21,7 +21,7 @@ struct [[bioseq_sql::type({
         })]] column_mapping {
     /// Destination column name as PostgreSQL text, or SQL NULL.
     std::optional<text*> column_name;
-    /// Input header field or expression to read, stored as PostgreSQL text or SQL NULL.
+    /// Input header fild or expression  to read, stored as PostgreSQL text or SQL NULL.
     std::optional<text*> data_source;
 };
 

@@ -1,6 +1,6 @@
 /**
  * @file index.cppm
- * @brief Makes the runtime classes and GPU input and result types available through one import.
+ * @brief Makes the runtime classes  and GPU input and result types available through one import.
  */
 
 export module bioseq.gpu.vulkan.runtime:frontend_types;

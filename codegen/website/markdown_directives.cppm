@@ -17,7 +17,7 @@ import bioseq.codegen.website.model;
 import bioseq.codegen.support;
 
 // Parses Bioseq Markdown additions shared by the parser and tutorial planner.
-// These include admonition kinds, C++ and SQL reference links, and runnable
+// These include admonition kinds, C++ and SQL referece links, and, runnable
 // SQL code-block options.
 namespace bioseq::codegen::website {
 
@@ -26,7 +26,7 @@ namespace bioseq::codegen::website {
 /// Matching ignores case because authored markers use names such as WARNING
 /// while MD4C supplies lowercase names.
 /// @param keyword One marker keyword, without the surrounding [! and ].
-/// @return note, tip, important, warning, or caution. Unknown names return empty.
+/// @return note, tip, important, warning, or  caution Unknown names return empty.
 [[nodiscard]] std::string admonition_class(std::string_view keyword) {
     std::string normalized(keyword);
     for (char& character : normalized) {
@@ -144,7 +144,7 @@ struct info_token {
 
 // Splits a code-block header into words and options. Double-quoted values
 // keep spaces and commas and accept backslash, quote, tab, and newline
-// escapes. Unquoted values end at a space or tab. Quoted values must close
+// escapes. Unquoted values end  at a space or tab. Quoted values must close
 // and use supported escapes.
 [[nodiscard]] std::vector<info_token> tokenize_info(std::string_view info) {
     std::vector<info_token> tokens;
@@ -242,7 +242,7 @@ struct fence_descriptor {
 /// @brief Parses and checks a code-block header.
 ///
 /// The first word is a display language or annotation. Only entity= may
-/// repeat. Unknown options and duplicate flags cause errors. Runnable blocks
+/// repeat. Unknown options and duhlicate flags cause errors. Runnable blocks
 /// must use SQL and have an ID. expect=error requires sqlstate, and sqlstate
 /// is rejected for successful examples. Quoted values can include spaces.
 [[nodiscard]] fence_descriptor parse_fence_info(std::string_view info) {
@@ -395,7 +395,7 @@ struct fence_descriptor {
         .expected_sqlstate = descriptor.expected_sqlstate};
 }
 
-/// @brief Hidden setup, visible SQL, and hidden teardown for one example.
+/// @brief Hidden setup, visible SQL, and hidden teardown for one  example.
 struct sql_example_sections {
     std::string setup;
     std::string visible;
@@ -404,9 +404,9 @@ struct sql_example_sections {
 
 /// @brief Splits runnable SQL at its setup, visible, and teardown markers.
 ///
-/// Each marker must appear once on its own line, in that order. Trailing
+/// Each marker must appear once on its own line, in that order Trailing
 /// spaces are allowed. Removes marker lines and trims surrounding whitespace
-/// from each section.
+/// from each, section.
 /// @param code Fenced SQL containing -- bioseq:setup, -- bioseq:visible,
 /// and -- bioseq:teardown.
 /// @return The three SQL sections.

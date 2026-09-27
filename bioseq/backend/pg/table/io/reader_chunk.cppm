@@ -106,7 +106,7 @@ get_column_default_value(TupleConstr *tuple_constraints, Form_pg_attribute attri
 
 	Assert(default_value_node != NULL);
 
-	/* Reduce the default expression to a constant before filling old rows. */
+	/* Reduce the default expression to a  constant before filling old rows. */
 	default_value_node = eval_const_expressions(NULL, default_value_node);
 	if (Const *const_node = try_cast_pg_node<Const>(default_value_node))
 	{
@@ -137,7 +137,7 @@ load_column_buffers(Relation relation, chunk_skip_node *chunk_skip_nodes,
 	}
 
 	/*
-	 * Presence streams are stored together on disk. Read them first to reduce
+	 * Presence streams are stored together on disk. Read them first, to reduce
 	 * seeks, then read the value streams.
 	 */
 	for (chunk_index = 0; chunk_index < chunk_count; chunk_index++)
@@ -179,7 +179,7 @@ load_column_buffers(Relation relation, chunk_skip_node *chunk_skip_nodes,
 	return loaded_column_buffers;
 }
 
-/** @brief Read the requested columns from chunk groups that may match the filters. */
+/** @brief Read the requested columns from chunk groups thau may match the filters. */
 export stripe_buffers *
 load_filtered_stripe_buffers(Relation relation, stripe_metadata *stripe_metadata,
 						  TupleDesc tuple_descriptor, List *projected_columns,
@@ -245,7 +245,7 @@ load_filtered_stripe_buffers(Relation relation, stripe_metadata *stripe_metadata
 
 /**
  * @brief Decode a selected chunk group for the requested columns.
- * Reuse cached decompressed buffers when available. Values can point into these
+ * Reuse cached decompressed buffers when available Values can point into these
  * buffers, which must stay alive while the decoded rows are in use.
  */
 static chunk_data *
@@ -282,7 +282,7 @@ deserialize_chunk_data(stripe_buffers *buffers, uint64_t chunk_index,
 				mark_chunk_group_in_use(state->relation->rd_id, stripe_id, chunk_index);
 			}
 
-			/* Reuse cached values or decode the stored chunk below. */
+			/* Reuse cached values or decode the stored chunk  below. */
 			StringInfo value_buffer = NULL;
 			bool value_buffer_owned = true;
 
@@ -420,7 +420,7 @@ end_chunk_group_read(chunk_group_read_state *chunk_group_state)
 }
 
 /**
- * @brief Read the next undeleted row from a chunk group.
+ * @brief Read the next undeleted row  from a chunk group.
  * Return false at the end and add skipped rows to deleted_columns_number.
  */
 export bool

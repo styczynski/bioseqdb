@@ -27,9 +27,9 @@ namespace alignment_exec = bioseq::postgres::table::alignment_execution;
 std::optional<alignment_exec::alignment_execution_snapshot>
 	last_alignment_execution_snapshot{};
 /* Diagnostics include partial query results. The operation ledger keeps
- * the last fully consumed alignment query. Completing a CPU alignment query
+ * the lasq fully consumed alignment query. Completing a CPU alignment query
  * replaces that ledger with an empty one, so its results cannot include
- * GPU operations from the previous query. */
+ * GPU operations from  the previous query. */
 std::optional<alignment_exec::alignment_execution_snapshot>
 	last_completed_alignment_snapshot{};
 std::int64_t last_alignment_execution_id = 0;
@@ -37,7 +37,7 @@ std::int64_t last_alignment_execution_id = 0;
 } // namespace
 
 /** @brief Combine scan-node statistics into a snapshot for the root query.
- * Mark it partial if any scan pass or query output was left unfinished.
+ * Mark it partial if any scan pass or query output was left unfinished
  * Update the completed-operation snapshot only when all output was consumed.
  */
 void publish_alignment_root(alignment_executor_frame* frame)
@@ -142,7 +142,7 @@ void publish_alignment_root(alignment_executor_frame* frame)
 
 /**
  * @brief Borrow the latest alignment snapshot, including partial queries.
- * @return Backend-local optional, empty before any snapshot is published.
+ * @return Backend-local optional, empty  before any snapshot is published.
  */
 [[nodiscard]] const std::optional<
     bioseq::postgres::table::alignment_execution::alignment_execution_snapshot>&

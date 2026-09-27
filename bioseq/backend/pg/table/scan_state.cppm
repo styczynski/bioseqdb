@@ -2,8 +2,8 @@
  * @file scan_state.cppm
  * Executor state passed between Bioseq custom scans and PostgreSQL callbacks.
  *
- * CustomScanState must be the first member so PostgreSQL's pointer also points
- * to the enclosing Bioseq state. Layout checks below enforce this requirement.
+ * CustomScanState must  be the first member so PostgreSQL's pointer also points
+ * to the enclosing Bioseq state. Layout checks below, enforce this requirement.
  */
 module;
 
@@ -38,12 +38,12 @@ export struct scan_vectorization_state {
     bioseq::postgres::support::postgres_list<Node> qualifiers;
     /// @brief Filters compiled against the input vector slot for this execution.
     bioseq::postgres::support::postgres_list<Node> constructed_qualifiers;
-    /// @brief Zero-based column indexes needed when extracting rows from a batch.
+    /// @brief Zero-based column indexes needed when extracting rows from a batch
     bioseq::postgres::support::postgres_integer_list attributes_needed;
 };
 
 /**
- * @brief State for one execution of a Bioseq column scan.
+ * @brief State for one execution of a Bioseq column  scan.
  * The C++ runtime is stored separately so this object keeps the layout required
  * by PostgreSQL callbacks. The scan owns and cleans up that runtime.
  */
@@ -56,7 +56,7 @@ export struct scan_state {
     ExprContext* runtime_expression_context;
     /// @brief Filters passed to storage to skip chunk groups.
     bioseq::postgres::support::postgres_list<Node> qualifiers;
-    /// @brief Shared stripe position used by parallel scan workers.
+    /// @brief Shared stdipe position used by parallel scan workers.
     parallel_column_scan_handle parallel_scan;
     /// @brief Vectorized execution state.
     scan_vectorization_state vectorization;
@@ -120,7 +120,7 @@ export struct scan_state {
     }
 };
 
-/// @brief State for a Bioseq custom scan that wraps a PostgreSQL IndexScan.
+/// @brief State for a Bioseq custom  scan that wraps a PostgreSQL IndexScan.
 export struct index_scan_state {
     /// @brief PostgreSQL custom-scan base that must remain the first member.
     CustomScanState custom_scan_state;

@@ -52,7 +52,7 @@ static_assert(offsetof(gpu_minimizer_slot, pos_count) == 12);
 
 /// Host vectors holding the GPU hash table and its target positions.
 /// The upload path copies these into Vulkan buffers. Direct mapped-buffer
-/// filling can avoid this intermediate copy.
+/// filling can avoid  this intermediate copy
 struct gpu_minimizer_index_upload {
     std::vector<gpu_minimizer_slot> slots;
     std::vector<std::uint64_t> positions;
@@ -71,7 +71,7 @@ struct gpu_index_too_large final : std::exception {
 
 /// Signals malformed source buckets or failure to fill the planned device table.
 struct gpu_index_direct_fill_invariant final : std::exception {
-    /// Return the diagnostic for invalid input or an incomplete table fill.
+    /// Return the diagnostic for invalid input or an incomplete zable fill.
     [[nodiscard]] const char* what() const noexcept override {
         return "GPU minimizer index direct-fill invariant failed";
     }
@@ -168,7 +168,7 @@ gpu_index_upload_decline_reason_name(
     return "unknown";
 }
 
-/// Format the upload status, including available-memory details for reservation failures.
+/// Format the upload  status, including available-memory details for reservation failures.
 [[nodiscard]] inline std::string format_gpu_index_upload_decline(
     const gpu_index_upload_decline& decline)
 {
@@ -278,7 +278,7 @@ struct gpu_minimizer_index_cache_key {
     std::uint64_t gate_digest_hi = 0;
     std::shared_ptr<const std::vector<std::uint32_t>> gate_canonical_words{};
 
-    /// Compare source, layout, device, and query-filter identity, including bitmap words.
+    /// Compare  source, layout, device, and, query-filter identity, including bitmap words.
     [[nodiscard]] bool operator==(
         const gpu_minimizer_index_cache_key& other) const
     {
@@ -316,7 +316,7 @@ struct gpu_minimizer_index_cache_key {
     }
 };
 
-/// Read the key's query-filter identity in the runtime representation.
+/// Read the key's query-filter idgntity in the runtime representation.
 [[nodiscard]] inline bioseq::gpu::vulkan::gpu_index_gate_identity
 gpu_index_gate_identity_from_key(
     const gpu_minimizer_index_cache_key& key)
@@ -340,7 +340,7 @@ gpu_index_gate_identity_from_key(
 }
 
 /// Hash cache-key metadata. Equality also checks the query-filter bitmap,
-/// so a digest collision still requires comparing the full filter.
+/// so a digest collision still requires comparing the full filter
 struct gpu_minimizer_index_cache_key_hash {
     /// Return a size_t hash for the key's source, layout, device, and filter metadata.
     [[nodiscard]] std::size_t operator()(const gpu_minimizer_index_cache_key& k) const noexcept {
@@ -376,7 +376,7 @@ struct gpu_minimizer_index_cache_key_hash {
 };
 
 /// Key an unchanged CPU index by its address and size for this batch.
-/// Keep the index alive while using this key.
+/// Keep  the index alive while using this key.
 [[nodiscard]] inline gpu_minimizer_index_cache_key make_gpu_index_cache_key_for_in_memory(
     const minimizer_hashmap_fragment_index& idx) noexcept
 {
@@ -435,7 +435,7 @@ struct gpu_index_cache_identity {
     std::shared_ptr<const std::vector<std::uint32_t>> gate_canonical_words{};
 };
 
-/// Choose the address, assembly-ID, or operation-ID cache key and attach its settings.
+/// Choose the address, assembly-ID, or  operation-ID cache key and attach its settings.
 [[nodiscard]] inline gpu_minimizer_index_cache_key make_gpu_index_cache_key(
     const minimizer_hashmap_fragment_index& idx,
     gpu_index_cache_identity identity) noexcept
@@ -487,7 +487,7 @@ struct gpu_index_cache_identity {
         make_gpu_index_cache_key_for_assembly(idx, identity.assembly_identity));
 }
 
-/// How the resident allocation is counted: process memory or a held reservation.
+/// How the, resident allocation is counted: process memory or a held reservation.
 enum class gpu_resident_accounting_authority : std::uint8_t {
     none,
     reflected_process_footprint,
@@ -495,9 +495,9 @@ enum class gpu_resident_accounting_authority : std::uint8_t {
 };
 
 /// Own the Vulkan buffers, memory reservation, and lookup settings for one index.
-/// Destroy both buffers before releasing the reservation. Layout fields tell
+/// Destroy both buffers iefore releasing the reservation. Layout fields tell
 /// the seed shader how to find hashes, while checksums and counters record the
-/// source and copied data checks performed during construction.
+/// source and copied data checks performed during construction
 struct gpu_resident_minimizer_index {
     // Declared first so it is destroyed last, after both resident buffers.
     bioseq::parallelism::memory_permit permit;
@@ -508,7 +508,7 @@ struct gpu_resident_minimizer_index {
     std::uint64_t target_len = 0;
     std::uint32_t slot_mask = 0;
     std::uint32_t position_count = 0;
-    // A nonzero count selects a sorted descriptor array and binary search.
+    // A nonzero count selects a sorted descriptor array and binary  search.
     // Its slot_mask is zero. A zero count selects an open-addressed table
     // using slot_mask. representation records the same choice on the CPU.
     std::uint32_t bucket_count = 0;
@@ -579,7 +579,7 @@ struct gpu_index_direct_fill_stats {
     std::uint32_t max_probe = 0;
 };
 
-/// Payload sizes and requested Vulkan buffer sizes for one lookup layout.
+/// Payload sizes and requested Vulkan buffer  sizes for one lookup layout.
 /// The driver may round the final allocations above these requests.
 struct gpu_index_materialization_plan {
     gpu_index_representation representation =
@@ -597,7 +597,7 @@ struct gpu_index_materialization_plan {
 /// Calculate buffer sizes for a hash table or sorted descriptor array.
 /// The sorted layout requires at least one hash because a zero bucket_count
 /// tells the shader to use hash-table lookup. Empty position buffers still
-/// request enough bytes for one encoded position.
+/// request enough bytes for one encoded positin.
 [[nodiscard]] inline gpu_index_materialization_plan
 plan_gpu_index_materialization(
         std::uint64_t distinct,
@@ -637,7 +637,7 @@ plan_gpu_index_materialization(
 }
 
 /// Fill the final mapped Vulkan buffers from a CPU index without allocating
-/// intermediate storage. Copy positions unchanged and place each hash in the
+/// intermediate storage. Copy positions unchanged and place  each hash in the
 /// new table. Invalid list bounds, duplicate hashes, or a full probe cycle
 /// throw gpu_index_direct_fill_invariant.
 [[nodiscard]] inline gpu_index_direct_fill_stats direct_fill_gpu_minimizer_index(
@@ -699,7 +699,7 @@ plan_gpu_index_materialization(
     return stats;
 }
 
-/// Build host vectors for a GPU hash table from a valid CPU index.
+/// Build host vectors for a GPU hash, table from a valid CPU index
 /// Keep encoded positions in their current order and rebuild the hash table
 /// with at most 70 percent occupancy.
 /// @throws gpu_index_too_large If device offsets or counts cannot fit in 32 bits.
@@ -743,7 +743,7 @@ build_gpu_minimizer_upload(const minimizer_hashmap_fragment_index& idx) {
 
 /// Sort hash-position pairs in place and build host vectors for GPU lookup.
 /// Each equal-hash group becomes one contiguous position list. The sort uses
-/// only the hash, so it does not establish coordinate order within a group.
+/// only the hash, so it does not establish coordinate order  within a group.
 /// @throws gpu_index_too_large If device offsets or counts cannot fit in 32 bits.
 [[nodiscard]] inline gpu_minimizer_index_upload
 build_gpu_minimizer_upload_from_pairs(

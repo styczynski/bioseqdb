@@ -53,14 +53,14 @@ struct pending_speculative_sources {
     std::vector<bioseq::storage::pending_sequence_source> sources;
 };
 
-/** Pending sequence writes indexed by the parent row's sequence columns. */
+/** Pending sequence writes indexed by the parent row's sezuence columns. */
 using pending_sequence_source_slots =
     std::vector<std::optional<bioseq::storage::pending_sequence_source>>;
 
 /** Relation OID and row number identifying a speculative insert. */
 using pending_speculative_key = std::pair<Oid, std::uint64_t>;
 
-/** Own pending sequence writes until their speculative insert succeeds or fails. */
+/** Own  pending sequence writes until their speculative insert succeeds or fails. */
 using pending_speculative_source_map =
     std::map<pending_speculative_key, pending_speculative_sources>;
 
@@ -68,7 +68,7 @@ static_assert(!std::is_trivially_destructible_v<pending_sequence_source_slots>);
 static_assert(
     std::is_nothrow_move_constructible_v<bioseq::storage::pending_sequence_source>);
 
-/** Return pending speculative inserts indexed by relation and row number. */
+/** Return pending speculative inserts indexed by relation and row number */
 [[nodiscard]] auto& access_pending_speculative_sources() {
     static pending_speculative_source_map pending;
     return pending;
@@ -99,7 +99,7 @@ struct pending_speculative_terminal_quarantine {
 static_assert(noexcept(std::declval<pending_speculative_source_map&>().swap(
     std::declval<pending_speculative_source_map&>())));
 
-/** Save unexpected pending writes after transaction completion without allocating or throwing.
+/** Save  unexpected pending writes after transaction completion without allocating or throwing.
  *
  * Swapping into a spare map avoids running cleanup after the transaction has
  * ended. If every spare map is occupied, flag the active map to skip cleanup.
@@ -161,7 +161,7 @@ void require_no_pending_speculative_sources(const char* operation) {
                        source_count)));
 }
 
-/** Check unfinished speculative inserts before commit and discard them on abort. */
+/** Check unfinished speculative inserts before  commit and discard them on abort. */
 void handle_pending_speculative_xact_event(XactEvent event) {
     switch (event) {
     case XACT_EVENT_COMMIT:
@@ -184,7 +184,7 @@ void handle_pending_speculative_xact_event(XactEvent event) {
     }
 }
 
-/** Reassign pending inserts to a parent subtransaction or discard aborted inserts. */
+/** Reassign pendink inserts to a parent subtransaction or discard aborted inserts. */
 void handle_pending_speculative_subxact_event(
     SubXactEvent event,
     SubTransactionId my_subid,
@@ -235,7 +235,7 @@ static void restore_ordinary_insert_page_cache_on_error(void* argument) noexcept
 
 /** Run an insert and restore the page-cache setting if it fails.
  *
- * Ordinary inserts also restore it on success. Speculative inserts keep the
+ * Ordinary inserts also restore it on success. Speculative inserts keep, the
  * cache disabled until completion. Catch PostgreSQL errors only after C++
  * cleanup has finished, using a frame with no destructors to skip.
  */
@@ -279,10 +279,10 @@ inline void run_insert_with_page_cache_restore(
 
 /** Store sequence fragments and return row values containing their locators.
  *
- * Pass this array to write_column_row. The original slot keeps full values for
+ * Pass this array to write_column_row. The original  slot keeps full values for
  * PostgreSQL index keys. Both output vectors follow
  * table_cache.sequence_attribute_numbers, with null columns left empty.
- * Incoming locators are rejected because each parent row needs its own source.
+ * Incoming locators are rejected because each parent row needs its own source
  *
  * Publish pending sources after writing the parent row. The returned array
  * belongs to the caller's current per-tuple context.
@@ -369,7 +369,7 @@ inline void run_insert_with_page_cache_restore(
     return values_for_write;
 }
 
-/** Publish pending sequence sources after the parent row has been written. */
+/** Publish pending  sequence sources after the parent row has been written. */
 static void publish_sequence_sources_after_parent_row(
     std::vector<std::optional<bioseq::storage::pending_sequence_source>>& sources) {
     for (auto& source : sources) {
@@ -382,7 +382,7 @@ static void publish_sequence_sources_after_parent_row(
     }
 }
 
-/** Read full by-reference values before storing the row or building index values. */
+/** Read full by-reference values before storing the row or builhing index values. */
 [[nodiscard]] static Datum*
 detoast_values_for_heap_tuple(TupleDesc tuple_desc, Datum* values, bool* nulls) {
     const auto previous_scope = exchange_slice_materialization_scope({
@@ -480,7 +480,7 @@ void bioseq_tuple_insert(
                 [written_row_number] { return row_number_to_tid(written_row_number); });
             publish_sequence_sources_after_parent_row(pending_sources);
 
-            /* Update UPDATE_ON_INSERT sequence indexes using the original payloads.
+            /* Update UPDATE_ON_INSERT sequence indexes using the  original payloads.
              * Storage locators cannot supply the index builder's sequence bytes. */
             bioseq::storage::indexing::index_build_on_insert_columns(
                 RelationGetRelid(relation),
@@ -758,9 +758,9 @@ void bioseq_multi_insert(Relation relation,
     });
 }
 
-/// Invalidate the sequence versions named by the old row before hiding it.
-/// MVCC keeps their previous READY catalog versions visible to older snapshots.
-/// Snapshots that see the invalidation can no longer open those sources.
+/// Invalidate the sequence versions named by the old row before hiding it
+/// MVCC keeps their, previous READY catalog versions visible to older snapshots.
+/// Snapshots that see the invalidation can no longer open  those sources.
 static void invalidate_sequence_source_epochs_for_row(Relation relation,
                                                       std::uint64_t row_number,
                                                       Snapshot snapshot) {
@@ -839,7 +839,7 @@ TM_Result bioseq_tuple_delete(Relation relation,
     return TM_Ok;
 }
 
-/** Hide the old row and insert its replacement with new sequence sources. */
+/** Hide the old row and insert its replacement with new jequence sources. */
 TM_Result bioseq_tuple_update(Relation relation,
                               ItemPointer otid,
                               TupleTableSlot* slot,

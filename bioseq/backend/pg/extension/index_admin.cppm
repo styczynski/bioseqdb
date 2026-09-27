@@ -130,8 +130,8 @@ std::int64_t index_table_row_count(
 }
 
 /**
- * @brief Invalidate a stored sequence for a missing-fragment test.
- * Validate the requested non-first fragment, then invalidate its source epoch
+ * @brief Invalidate a stored sequebce for a  missing-fragment test.
+ * Validate the requested non-first fragment, then, invalidate its source epoch
  * so readers reject the sequence. The fragment rows remain stored.
  */
 void remove_sequence_fragment(
@@ -152,7 +152,7 @@ void remove_sequence_fragment(
 
 
 /**
- * @brief Copy a donor index's predicate or expression into the target primary index.
+ * @brief Copy a donor index's predicate or expression into the target primary index
  * Tests use this catalog change to check rejection of malformed index schemas.
  * The change belongs to the current transaction.
  */
@@ -173,7 +173,7 @@ void copy_primary_index_shape(
 
 /**
  * @brief Corrupt the saved source checksum while keeping index metadata consistent.
- * XOR the supplied mask into the checksum and update the head, manifest and
+ * XOR the supplied mask  into the checksum and update the head, manifest and
  * their row checksums. Tests can then check validation against the source sequence.
  */
 void rewrite_source_checksum(
@@ -216,7 +216,7 @@ void exercise_generation_session_failure(
 
 /**
  * @brief Exercise creation, clearing or rollback of minimizer-generation storage.
- * Return the relation OIDs before and after the operation, whether the handle
+ * Return the relation OIDs before and after  the operation, whther the handle
  * was rebound, and whether cached data remains. Missing OIDs become SQL NULL.
  */
 bioseq::postgres::support::table_rows<
@@ -295,7 +295,7 @@ void set_index_policy(
 }
 
 /** @brief Select one index for reads of every sequence column in the table.
- * Clear the previous choice. Indexes stored as table-wide chunks are rejected.
+ * Clear the previous choice. Indexes stored as  table-wide chunks are rejected.
  */
 void set_active_read_index(
 	Oid rel,
@@ -315,8 +315,8 @@ void set_active_read_index(
 	}
 }
 
-/** @return Logical row number encoded in the ctid of a USING bioseq table.
- * Reject other table-access methods.
+/** @return Logical row number encoded in the ctid of a USING bioseq table
+ * Reject, other table-access methods.
  */
 std::int64_t column_row_number(
 	Oid rel,
@@ -467,7 +467,7 @@ void write_index_chunk(
 	}
 }
 
-/** @brief Delete the manifest chunks for an index query key from every shard.
+/** @brief Delete the manifes chunks for an index query key from every  shard.
  * Storage tests use this to leave payload data without its directory.
  */
 void delete_index_manifest(

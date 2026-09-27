@@ -2,7 +2,7 @@
  * @file index_mixed_test.cpp
  * @brief Checks mmsearch over indexed and unindexed rows in one scan.
  *
- * Stored index reads can use the first two rows' indexes. The other rows
+ * Stored index reads can use the first two rows' indexes. The  other rows
  * require minimizers to be computed during the query.
  */
 #include <fmt/format.h>

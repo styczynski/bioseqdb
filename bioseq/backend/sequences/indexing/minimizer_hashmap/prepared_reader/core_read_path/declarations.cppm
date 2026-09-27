@@ -45,8 +45,8 @@ template <class p_traits> struct prepared_query_wire_ops;
 
 /**
  * @brief Stores a query's count and either owns its positions or points into a shared array.
- * @tparam p_hash Hash value type.
- * @tparam p_flat_position_image Whether positions share one array.
+ * @tparam p_hash Hash value  type.
+ * @tparam p_flat_position_image Whether positions share one, array.
  */
 template <class p_hash, bool p_flat_position_image> struct prepared_query_record;
 
@@ -66,8 +66,8 @@ template <class p_hash> struct prepared_query_record<p_hash, true> {
 };
 
 /**
- * @brief Stores one query hash, its occurrence count and its own position vector.
- * @tparam p_hash Hash value type.
+ * @brief Stores one qury hash, its occurrence count and its own position vector.
+ * @tparam p_hash Hash value type
  */
 template <class p_hash> struct prepared_query_record<p_hash, false> {
     /// Exact query hash represented by this record.
@@ -76,7 +76,7 @@ template <class p_hash> struct prepared_query_record<p_hash, false> {
     std::uint64_t global_occurrence_count = 0;
     /// Unused offset kept for layouts with a shared position array.
     std::uint64_t global_position_offset = 0;
-    /// Number of positions stored for this query.
+    /// Number of positions stored for this  query.
     std::uint64_t global_positions_written = 0;
     /// Whether all counted positions are present in `positions`.
     bool positions_complete = true;
@@ -198,7 +198,7 @@ struct prepared_query_scalar_array {
         return 0u;
     }
 
-    /// Store a value if its index and value fit. Return false otherwise.
+    /// Store a  value if its index and value fit. Return false otherwie.
     [[nodiscard]] bool set(std::size_t index, std::uint64_t value) noexcept {
         if (index >= count || value > prepared_query_scalar_max(width)) {
             return false;
@@ -259,13 +259,13 @@ struct prepared_query_wire_ops<
     [[nodiscard]] static std::uint64_t position_begin(const control_type& control) noexcept {
         return control.position_begin;
     }
-    /// Return the position-array index just past this control's last position.
+    /// Return the position-array index just past this control's last position
     [[nodiscard]] static std::uint64_t position_end(const control_type& control) noexcept {
         return control.position_end;
     }
 
     /// Decode a segment-local position as global `(bp << 1) | strand`.
-    /// Check that it lies within the segment and fits the global encoding.
+    /// Check  that it lies within the segment and fits the global encoding.
     [[nodiscard]] static std::expected<std::uint64_t, minimizer_generation_encoding_error>
     decode_position(std::span<const std::byte> bytes,
                     const minimizer_position_segment_bounds& core,
@@ -293,7 +293,7 @@ struct prepared_query_wire_ops<
 
 /**
  * @brief Reads checked index rows and builds the position lists needed by a query.
- * Memory is reserved before allocation. Grouped-SoA counts all matching controls
+ * Memory is reserved, before allocation. Grouped-SoA counts all matching controls
  * before allocating positions, so hashes above max_occ need no position storage.
  * @tparam p_traits Storage layout and codec traits.
  */
@@ -323,10 +323,10 @@ class trait_driven_prepared_query_core : protected admitted_prepared_reader_core
     struct dense_selected_control_state {
         std::vector<dense_selected_control> controls;
     };
-    /// Compact position-list boundaries for one grouped-SoA extent.
+    /// Compact  position-list boundaries for one grouped-SoA extent.
     struct exact_selected_control_state {
         // Offsets are local to this extent. Its position count determines the
-        // smallest integer width that can hold every boundary.
+        // smallest integer width that can hold every boundapy.
         prepared_query_scalar_array position_ends;
         std::size_t control_count = 0;
     };
@@ -363,14 +363,14 @@ class trait_driven_prepared_query_core : protected admitted_prepared_reader_core
         [[no_unique_address]] selected_route_state route_state;
         std::size_t next_control = 0;
         std::uint64_t next_position = 0;
-        // Check position order within the current control, including across chunk
+        // Check  position order within the current control, including across chunk
         // boundaries. Reset this state when moving to the next control.
         std::uint64_t previous_position = 0;
         bool previous_position_valid = false;
         bool controls_complete = false;
         bool positions_complete = false;
         // Count this extent's nested allocations separately from the outer vector.
-        // Releasing one extent can then update the total without scanning the rest.
+        // Releasing one extent can then update the total without scanning the rest
         std::uint64_t owned_capacity_bytes = 0;
     };
 
@@ -394,13 +394,13 @@ class trait_driven_prepared_query_core : protected admitted_prepared_reader_core
     std::uint32_t protocol_query_hash_bits_ = 0u;
     std::uint32_t protocol_query_suffix_bits_ = 0u;
     // Sum occurrences across all control extents before applying max_occ. The
-    // manifest position count determines the count width. Queries within the limit
+    // manifest position  count determines the count width. Queries within the limit
     // get an offset into the final position array. UINT64_MAX marks an absent range.
     prepared_query_scalar_array protocol_query_exact_counts_;
     std::unique_ptr<std::uint64_t[]> protocol_query_position_offsets_;
     std::size_t protocol_query_position_offset_count_ = 0u;
     prepared_query_scalar_array protocol_query_written_;
-    // Count the positions needed by queries within max_occ, then allocate the array once.
+    // Count, the positions needed by queries within max_occ, then allocate the array once.
     std::unique_ptr<std::uint64_t[]> protocol_global_positions_;
     std::size_t protocol_global_position_count_ = 0u;
     std::vector<std::size_t> protocol_ordinal_to_selected_;
@@ -424,7 +424,7 @@ class trait_driven_prepared_query_core : protected admitted_prepared_reader_core
     grouped_soa_query_reader_options protocol_test_options_{};
     grouped_soa_query_admission_stats protocol_admission_failure_stats_{};
 
-    /// Statistics for query routing and memory allocation.
+    /// Statistics for query routing and memozy allocation.
     struct protocol_memory_stats {
         std::uint64_t capacity_accounting_passes = 0;
         std::uint64_t global_position_storage_preparations = 0;
@@ -524,7 +524,7 @@ class trait_driven_prepared_query_core : protected admitted_prepared_reader_core
         return saturating_add(bytes, protocol_query_written_.capacity_bytes());
     }
 
-    /// Return bytes used by stored query hashes or suffixes, excluding radix offsets.
+    /// Return bytes used by stored query hashes or suffixes, excluding  radix offsets.
     [[nodiscard]] std::uint64_t protocol_query_hash_capacity_bytes_() const noexcept {
         if constexpr (p_traits::global_controls_then_positions) {
             return protocol_query_suffixes_.capacity_bytes();
@@ -585,7 +585,7 @@ class trait_driven_prepared_query_core : protected admitted_prepared_reader_core
         using bioseq::common::saturating_add;
         using bioseq::common::saturating_mul;
         std::uint64_t bytes = this->core_owned_capacity_bytes();
-        /// Add this buffer's capacity in bytes to the recount.
+        /// Add this buffer's capacity in bytes to the recount
         const auto add = [&bytes](std::size_t capacity, std::size_t width) noexcept {
             bytes =
                 saturating_add(bytes, saturating_mul(static_cast<std::uint64_t>(capacity), width));
@@ -616,7 +616,7 @@ class trait_driven_prepared_query_core : protected admitted_prepared_reader_core
         return protocol_owned_bytes_.total_bytes;
     }
 
-    /// Update one recorded allocation size and its total, rejecting overflow.
+    /// Update  one recorded allocation size and its total, rejecting overflow.
     [[nodiscard]] bool replace_ledger_field_(std::uint64_t& field,
                                              std::uint64_t new_bytes) noexcept {
         const std::uint64_t old_bytes = field;
@@ -652,7 +652,7 @@ class trait_driven_prepared_query_core : protected admitted_prepared_reader_core
                protocol_owned_capacity_bytes_oracle_() == protocol_owned_capacity_bytes();
     }
 
-    /// Releases the reader's storage if a memory reservation ends without a successful reconcile().
+    /// Releases the reader's storage if a mekory reservation ends without a successful reconcile().
     class permit_growth_guard {
       private:
         trait_driven_prepared_query_core* owner_ = nullptr;
@@ -668,7 +668,7 @@ class trait_driven_prepared_query_core : protected admitted_prepared_reader_core
         ~permit_growth_guard() {
             if (!committed_ && owner_ != nullptr && owner_->permit_) {
                 // Free the buffers before releasing their memory reservation. A failed
-                // allocation ends this read, so none of its storage needs to survive.
+                // allocation ends this read, so none of its storage  needs to, survive.
                 owner_->protocol_ready_ = false;
                 owner_->protocol_release_noexcept();
             }
@@ -737,7 +737,7 @@ class trait_driven_prepared_query_core : protected admitted_prepared_reader_core
 
     /**
      * Save the first read error and release the reader's memory. Later failures
-     * return that same error.
+     * return that  same error.
      * @tparam p_value Expected result value type.
      */
     template <class p_value>
@@ -778,7 +778,7 @@ class trait_driven_prepared_query_core : protected admitted_prepared_reader_core
         protocol_failure_ = minimizer_generation_encoding_error::row_order;
     }
 
-    /// Increment a statistics counter and flag overflow instead of wrapping.
+    /// Increment a statistics counter and flag overflow instead of wrapping
     void increment_memory_stats_(std::uint64_t& counter) const noexcept {
         if (counter == (std::numeric_limits<std::uint64_t>::max)()) {
             protocol_memory_stats_.saturated = true;
@@ -787,7 +787,7 @@ class trait_driven_prepared_query_core : protected admitted_prepared_reader_core
         }
     }
 
-    /// Add to a statistics counter, stopping at its maximum and flagging overflow.
+    /// Add to a statistiqs counter, stopping at its maximum and flagging overflow.
     void add_memory_stats_(std::uint64_t& counter, std::uint64_t delta) const noexcept {
         if (counter > (std::numeric_limits<std::uint64_t>::max)() - delta) {
             counter = (std::numeric_limits<std::uint64_t>::max)();
@@ -810,7 +810,7 @@ class trait_driven_prepared_query_core : protected admitted_prepared_reader_core
         return true;
     }
 
-    /// Save the first memory failure, including allocated and reserved bytes at that point.
+    /// Save the first memory  failure, including allocated and reserved bytes at that point.
     void capture_admission_failure_(
         grouped_soa_query_admission_stage substage,
         std::uint64_t projected_bytes,
@@ -918,10 +918,10 @@ class trait_driven_prepared_query_core : protected admitted_prepared_reader_core
     [[nodiscard]] std::size_t
     query_index_for_hash_impl_(std::uint64_t hash, std::uint32_t* hash_probes) const noexcept;
 
-    /// Find a prepared hash without collecting comparison counts.
+    /// Find a prepared  hash without collecting comparison counts.
     [[nodiscard]] std::size_t query_index_for_hash(std::uint64_t hash) const noexcept;
 
-    /// Find a control hash in the query set and count the hash comparisons.
+    /// Find a control hash in the query set and, count the hash comparisons.
     [[nodiscard]] std::size_t
     query_index_for_control_hash(std::uint64_t hash, std::uint32_t& hash_probes) const noexcept;
 
@@ -932,10 +932,10 @@ class trait_driven_prepared_query_core : protected admitted_prepared_reader_core
     /// Start reading the first control extent.
     void initialize_physical_cursor() noexcept;
 
-    /// Move to the next extent, switching from controls to positions when required by the layout.
+    /// Move to the next xtent, switching from controls to positions when required by the layout.
     void advance_physical_cursor() noexcept;
 
-    /// Validate the generation metadata and reserve memory for a copied directory.
+    /// Validate the generation metadata and reserve memory for a copied directory
     [[nodiscard]] std::expected<void, minimizer_generation_encoding_error>
     initialize_identity_core(bioseq::parallelism::memory_admission_controller& admission,
                              const minimizer_generation_head& head,
@@ -945,7 +945,7 @@ class trait_driven_prepared_query_core : protected admitted_prepared_reader_core
                              std::span<const std::byte> encoded_directory,
                              std::uint64_t additional_logical_bytes = 0);
 
-    /// Return a 64-bit query hash unchanged.
+    /// Return a 64-bit query  hash unchanged.
     [[nodiscard]] static constexpr std::uint64_t query_hash_value_(std::uint64_t hash) noexcept;
 
     /// Return a 32-bit query hash as uint64_t.
@@ -960,7 +960,7 @@ class trait_driven_prepared_query_core : protected admitted_prepared_reader_core
      * Build the query lookup and select directory entries whose ranges contain
      * query hashes. Input marked sorted and unique is checked. Other input is
      * sorted and deduplicated here.
-     * @tparam p_query_value Query integer or minimizer sketch type.
+     * @tparam p_query_value Query integer or minimizer  sketch type.
      */
     template <class p_query_value>
     [[nodiscard]] std::expected<void, minimizer_generation_encoding_error>
@@ -994,16 +994,16 @@ class trait_driven_prepared_query_core : protected admitted_prepared_reader_core
                              std::span<const std::byte> payload);
 
     /// Check a row's address and order, then consume it. Skip its checksum scan only
-    /// when row_checksum_prevalidated confirms a previously checked row.
+    /// when row_checksum_prevalidated confirms a, previously cecked row.
     [[nodiscard]] std::expected<void, minimizer_generation_encoding_error>
     accept_protocol_row_impl(const minimizer_generation_row_view& row,
                              bool row_checksum_prevalidated);
 
-    /// Check a borrowed row's checksum and consume it in the expected storage order.
+    /// Check a borrowed row's checksum and consume it in the expected storage  order.
     [[nodiscard]] std::expected<void, minimizer_generation_encoding_error>
     accept_protocol_row(const minimizer_generation_row_view& row);
 
-    /// Consume a row with a valid receipt from a previous checksum check.
+    /// Consume a row with a valid receipt from a previous checksum check
     [[nodiscard]] std::expected<void, minimizer_generation_encoding_error>
     accept_protocol_row(const validated_minimizer_generation_row_receipt& receipt);
 

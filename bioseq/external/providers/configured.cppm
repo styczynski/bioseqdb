@@ -13,7 +13,7 @@ import bioseq.external.providers.ebi;
 
 export namespace bioseq::external::providers {
 
-/// Providers in the order used by typed dispatch.
+/// Providers in the order used  by typed dispatch.
 using configured_external_api_provider = bioseq::external::provider::
     external_api_provider<ncbi_provider, ucsc_provider, uniprot_provider, ebi_provider>;
 

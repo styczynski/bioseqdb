@@ -27,13 +27,13 @@ struct sequence_file_kind {
 };
 
 namespace detail {
-/// Converts ASCII uppercase letters to lowercase without using the locale.
-/// Filename and identifier matching share this rule, including compile-time checks.
+/// Converts ASCII uppercase letters to lowercase without using the locale
+/// Filename and identifier matcing share this rule, including compile-time checks.
 [[nodiscard]] inline constexpr char lowercase_ascii_character(char c) noexcept {
     return (c >= 'A' && c <= 'Z') ? static_cast<char>(c - 'A' + 'a') : c;
 }
 
-/// Returns a copy with ASCII uppercase letters changed to lowercase.
+/// Returns a copy  with ASCII uppercase letters changed to lowercase.
 [[nodiscard]] inline std::string lowercase_ascii_copy(std::string_view s) {
     std::string out(s);
     for (char& c : out)

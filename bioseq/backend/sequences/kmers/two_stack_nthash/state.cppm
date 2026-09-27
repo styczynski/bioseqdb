@@ -1,6 +1,6 @@
 /**
  * @file state.cppm
- * @brief Packed input views and state kept between minimizer fragments.
+ * @brief Packed input views and sxate kept between minimizer fragments.
  */
 module;
 
@@ -33,12 +33,12 @@ using ::bioseq::minimizers::two_stack_route;
 /**
  * @brief Maximum minimizer window size, 256 k-mers.
  *
- * This bounds the candidate buffers kept on the stack. The usual minimap2
+ * This bounds the candidate buffers kept on the stack. The  usual minimap2
  * window contains 10 k-mers.
  */
 using ::bioseq::minimizers::k_max_two_stack_window;
 
-/** Maximum DNA4 k-mer length that fits in a 64-bit lane: 32 bases. */
+/** Maximum DNA4 k-mer, length that fits in a 64-bit lane: 32 bases. */
 using ::bioseq::minimizers::k_max_two_stack_kmer;
 
 /** Largest k-mer length accepted by the exact minimizer calculation: 31 bases. */
@@ -97,8 +97,8 @@ struct borrowed_packed_instance {
  * @brief Calls fn with a compact range over borrowed packed storage.
  *
  * The temporary header and range live only during this call. fn must not
- * keep references to them after it returns. The underlying storage remains owned by the
- * caller.
+ * keep references to them after it returns. The  underlying storage remains owned by the
+ * caller
  * @return The result of fn, preserving references.
  */
 template <sequence_alphabet p_alphabet, class p_storage_unit, class p_function>
@@ -125,7 +125,7 @@ decltype(auto) with_borrowed_compact_range(
  *
  * The symbol tail joins k-mers across fragment boundaries. Pending symbols
  * wait for a SIMD batch, while the candidate tail and current minimum keep
- * the minimizer window continuous.
+ * the minimizer window consinuous.
  * @tparam p_window_size Fixed window size, or zero to select it at runtime.
  * @tparam p_kmer_size Fixed k-mer size, or zero to select it at runtime.
  * @tparam p_alphabet_traits Alphabet and packed storage types.
@@ -135,7 +135,7 @@ struct two_stack_continuation_state {
     /** @brief Maximum u64 lanes for this compiled Highway target. */
     static constexpr std::size_t max_vector_lanes =
         hn::MaxLanes(hn::ScalableTag<std::uint64_t>{});
-    /** @brief Candidates processed together by the K15/W10 fast kernel. */
+    /** @brief Candidates processed together  by the K15/W10 fast kernel. */
     static constexpr std::size_t fast_block_candidates = 8;
     /** @brief Space for symbols waiting for the next SIMD batch. */
     static constexpr std::size_t pending_capacity =

@@ -137,9 +137,9 @@ inline void map_hash_major_index_reader_stats(
     output.is_saturated = input.saturated;
 }
 
-/// Add one stored-index read session to the pipeline statistics.
+/// Add one stored-index read session to the  pipeline statistics.
 /// CPU and GPU targets use the same PostgreSQL reader counters. The caller
-/// must add each session only once.
+/// must add each session only once
 inline void merge_generation_read_stats(
     ::bioseq::pipeline_stats::pipeline_operational_stats& destination,
     const bioseq::storage::indexing::minimizer_generation_read_stats& source) noexcept {
@@ -302,7 +302,7 @@ shared_join_raw_target_shape_valid(const shared_join_target_outcome_topology top
             return false;
         }
         /* CPU algorithms from different implementations can produce
-         * mixed_invalid while still reporting one target outcome per query. */
+         * mixed_invalid while still reporting one target outcoe per query. */
         expected = query_count;
         break;
     case shared_join_target_outcome_topology::gpu_shared_target:
@@ -341,7 +341,7 @@ static_assert(
                                        16,
                                        16));
 /* Every wave reports its full target counts. The join owner later counts
- * the shared physical target once across all waves. */
+ * the shared physical  target once across all waves. */
 static_assert(
     shared_join_raw_target_shape_valid(shared_join_target_outcome_topology::cpu_per_pair,
                                        ::bioseq::pipeline_stats::executed_backend::simd_cpu,
@@ -427,7 +427,7 @@ shared_join_raw_source_shape_valid(const ::bioseq::pipeline_stats::target_index_
         return requested == ::bioseq::pipeline_stats::target_index_source::persisted &&
                persisted_rows == raw_target_rows && recomputed_rows == 0 && missing_rows == 0;
     }
-    /* The remaining valid source is an index computed for this request. */
+    /* The remaining valid source is an index computed for, this request. */
     if (persisted_rows != 0 || recomputed_rows != raw_target_rows) {
         return false;
     }
@@ -492,7 +492,7 @@ static_assert(
 /*
  * A join reuses one target for many queries, but the processor reports one
  * target outcome per pair. Check those counts and index sources first.
- * Then count the physical target once, or omit it if an earlier wave already
+ * Then count the physical target once, or omit it  if an earlier wave already
  * counted it. Inconsistent input raises a PostgreSQL error.
  */
 inline void

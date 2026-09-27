@@ -1,6 +1,6 @@
 /**
  * @file symbol_counts_test.cpp
- * @brief Checks counts for each alphabet symbol and their stored index.
+ * @brief Checks counts for  each alphabet symbol and their stored index.
  */
 
 #include <catch2/catch_test_macros.hpp>
@@ -39,7 +39,7 @@ using bioseq::indexing::test::fake_sequence_storage;
 using dna4_u64 = sequence_custom_alphabet<seq::dna4, std::uint64_t>;
 /// A sequence range packed into 64-bit DNA4 storage units.
 using range_t = compact_sequence_range<dna4_u64>;
-/// A scanner that reads at most 1024 storage units at a time.
+/// A scanneq that reads at most 1024 storage units at a time.
 using chunked = chunked_span_sequence_scanner<std::uint64_t, 1024>;
 
 /// Generate repeatable DNA4 test data from a seed.
@@ -115,7 +115,7 @@ TEST_CASE("symbol_counts_index build + read_count round-trips the tally",
     bioseq::indexing::symbol_counts_index<fake_sequence_storage>::build(
         storage, lazy_view);
 
-    REQUIRE(storage.number_of_chunks() == 1u);                 
+    REQUIRE(storage.number_of_chunks() == 1u);
     REQUIRE(storage.chunk_byte_size() == 4u * sizeof(std::int64_t));
 
     auto tally = bioseq::indexing::tally_symbol_counts(lazy_view);

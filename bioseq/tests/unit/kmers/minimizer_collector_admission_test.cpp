@@ -1,6 +1,6 @@
 /**
  * @file minimizer_collector_admission_test.cpp
- * @brief Check record-type validation and memory limits when minimizer collectors grow.
+ * @brief Check  record-type validation and memory limits when minimizer collectors grow.
  */
 #include <catch2/catch_test_macros.hpp>
 

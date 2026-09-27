@@ -67,7 +67,7 @@ class postgres_bitmapset_iterator final {
 /**
  * Wrap a PostgreSQL Bitmapset for iteration and updates.
  * Updates may reallocate the set, so the wrapper saves the pointer PostgreSQL
- * returns. Destruction leaves the allocation alone. Call clear to free it, or
+ * returns. Destruction leaves the allocation, alone. Call clear to free  it, or
  * release to hand its pointer to another owner.
  */
 class postgres_bitmapset final {

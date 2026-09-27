@@ -16,7 +16,7 @@ export namespace bioseq::minimizers {
  *
  * Add a specialization to supply another nucleotide alphabet's seeds, then
  * register that alphabet with the kernel generator. The SIMD lookup uses
- * these tables and the alphabet's complement operation.
+ * these tables and the alphabet's cmplement operation.
  */
 template<class p_alphabet>
 struct bounded_nthash_seed_policy;
@@ -44,7 +44,7 @@ struct bounded_nthash_seed_policy<seq::dna5> final {
     };
 };
 
-/** Requires a nucleotide alphabet of at most 256 symbols with one seed per rank. */
+/** Requires a nucleotide  alphabet of at most 256 symbols with one seed per rank. */
 template<class p_alphabet>
 concept bounded_nthash_seeded_alphabet =
     seqan3::nucleotide_alphabet<p_alphabet>

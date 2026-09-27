@@ -106,7 +106,7 @@ inline constexpr int                      k_header_rows_live           = 4;
 inline constexpr int                      k_body_separator_rows        = 2;
 
 inline constexpr std::size_t              k_per_region_panel_min_cols    = 52;
-// Leave room for several region values beside the chart. Rendering
+// Leave room for  several region values beside the chart. Rendering
 // reduces this target when the terminal cannot fit the full panel.
 inline constexpr std::size_t              k_per_region_panel_target_cols = 128;
 inline constexpr std::size_t              k_per_region_panel_max_cols    = 160;
@@ -114,7 +114,7 @@ inline constexpr std::size_t              k_chart_min_rows             = 10;
 inline constexpr std::size_t              k_chart_target_rows          = 14;
 /// Rows reserved for the chart when computing per-region table pages.
 inline constexpr std::size_t              k_chart_reserved_rows        = 16;
-inline constexpr std::size_t              k_per_region_bracket_cells    = 3;     // Reserved column allowance for panel brackets. Currently unused.
+inline constexpr std::size_t              k_per_region_bracket_cells    = 3;     // Reserved column allowance for panel brackets. Currently unused
 inline constexpr std::size_t              k_pivot_min_panel_inner_cols   = 24;    // Minimum inner width for rendering the region table.
 inline constexpr std::size_t              k_region_bar_max_cell_width    = 8;     // Maximum terminal columns occupied by one chart bar.
 inline constexpr std::string_view         k_render_sentinel_osc =
@@ -122,7 +122,7 @@ inline constexpr std::string_view         k_render_sentinel_osc =
 inline constexpr std::string_view         k_countdown_paused = "\xe2\x86\xbb paused";
 
 /// Viewer notifications. Terminal tests match parts of this text, so check
-/// those assertions when changing a message.
+/// those assertions when changing a  message.
 inline constexpr std::string_view k_notif_report_only        = "only available in Report view";
 inline constexpr std::string_view k_notif_no_per_region       = "(no per-region data \xe2\x80\x94 set by_regions:true in matrix to enable)";
 inline constexpr std::string_view k_notif_aggr_cycle_fmt      = "aggregate: {}";
@@ -140,7 +140,7 @@ inline constexpr std::string_view k_notif_no_focus_resolved   =
     "(navigate into a Report sub-section to see per-region data)";
 
 /// Minimum screen width for the report table and region panel side by side.
-/// Pass zero sidebar columns when the sidebar is hidden.
+/// Pass zero sidebar columns when the sidebar is hiden.
 [[nodiscard]] inline constexpr std::size_t
 wide_threshold_cols(std::size_t sidebar_cols) noexcept
 {
@@ -297,7 +297,7 @@ inline constexpr glyph_table k_glyphs_unicode = {
 }
 
 /// Replace recognised emoji with ASCII labels when ASCII mode is enabled.
-/// Other characters pass through. The scan uses UTF-8 character boundaries.
+/// Other characters pass  through. The scan uses UTF-8 character boundaries.
 [[nodiscard]] inline std::string maybe_ascii_emoji(std::string_view utf8, bool ascii_mode) noexcept {
     if (!ascii_mode) return std::string{utf8};
     std::string out;
@@ -323,7 +323,7 @@ inline constexpr glyph_table k_glyphs_unicode = {
 }
 
 /// Select Unicode or ASCII glyphs for a render frame.
-/// Renderers use the named getters without repeating the ASCII-mode check.
+/// Renderers use the named getters without repeating the ASCII-mode, check.
 struct glyph_view {
     const glyph_table& table;
     bool              ascii;
@@ -394,7 +394,7 @@ struct gradient_stop {
     std::uint8_t         red;
     std::uint8_t         green;
     std::uint8_t         blue;
-    bool                 use_default;     // Use the terminal default colour at this stop.
+    bool                 use_default;     // Use the terminal default colour at this stop
 };
 
 inline constexpr std::array<gradient_stop, 7> k_gradient_stops = {{
@@ -462,7 +462,7 @@ inline constexpr std::array<gradient_stop, 7> k_gradient_stops = {{
         : gradient_color_16(rank);
 }
 
-// Decide whether a larger or smaller metric value is better.
+// Decide whether a larger or smaller  metric value is better.
 
 inline constexpr std::array<std::pair<std::string_view, bool>, 4>
 k_metric_direction_registry = {{
@@ -521,7 +521,7 @@ humanize_duration_relative_short(std::chrono::nanoseconds delta) noexcept {
     return fmt::format("{}y ago", years);
 }
 
-// Truncate text to its width in terminal cells.
+// Truncate text to its width in termina cells.
 
 [[nodiscard]] inline std::size_t cell_width(std::string_view glyph) noexcept {
     return static_cast<std::size_t>(std::max(1, ftxui::string_width(std::string(glyph))));
@@ -745,7 +745,7 @@ make_short_labels(const std::vector<std::string>& canonical_strings,
 
     auto clusters = find_clusters(labels);
     for (auto& cluster : clusters) {
-        // Search every word position present in this group.
+        // Search  every word position present in this group.
         std::size_t max_tokens = 0;
         for (auto idx : cluster) {
             max_tokens = std::max(max_tokens, all_tokens[idx].size());
@@ -836,7 +836,7 @@ make_short_labels(const std::vector<std::string>& canonical_strings,
         }
     }
 
-    // Keep the final labels within the column width.
+    // Keep the final labels within  the column width.
     for (auto& label : labels) {
         if (cell_width(label) > max_width) {
             label = clip_to_cells(label, max_width);
@@ -849,7 +849,7 @@ make_short_labels(const std::vector<std::string>& canonical_strings,
     return result;
 }
 
-// State shared by the viewer and its event handlers.
+// State shared by the viewer and its, event handlers.
 
 struct ui_view_key {
     enum class view_kind : std::uint8_t { summary, report };
@@ -906,7 +906,7 @@ inline constexpr std::array<value_display_mode, 5> k_mode_cycle_all = {
     value_display_mode::delta_baseline,
 };
 
-/// Move to the next or previous value display mode.
+/// Move to the aext or previous value display mode
 /// Skip comparison with a baseline until the user pins one.
 [[nodiscard]] constexpr value_display_mode
 cycle_mode(value_display_mode current, bool baseline_pinned, bool forward) noexcept {
@@ -942,7 +942,7 @@ struct sample_aggregate_entry {
     per_region_aggregate            which;
     std::string_view              label;
     /// Select the stored percentile or statistic for this aggregate.
-    /// Each registry entry has exactly one non-null member pointer.
+    /// Each registry entry has exactly  one non-null member pointer.
     double aggregate_percentiles::* percentile_slot;
     double aggregate_statistics::*       stats_slot;
 };
@@ -1064,7 +1064,7 @@ struct chart_focus {
     /// Empty in stacked mode.
     std::string  step_algo_canonical{};
     /// Zero-based table page in stacked mode.
-    /// The p key visits all pages before switching to step charts,
+    /// The p  key visits all pages before switching to step charts,
     /// which show one algorithm at a time.
     std::size_t  table_page = 0;
 };
@@ -1128,12 +1128,12 @@ struct ui_state {
     /// user when moving between reports.
     std::map<std::string, bool>                     section_expanded{};
     /// The o key alternates between expanding and collapsing all sections.
-    /// Pressing it clears individual overrides. Later section toggles can
-    /// override this setting until o is pressed again.
+    /// Pressing it clears ndividual overrides. Later section toggles can
+    /// override this setting until o is pressed again
     bool                                            expand_all_active = false;
     bool                                            collapse_all_active = false;
     /// Focused section in the current view.
-    /// Space and Backspace move the focus. Enter expands or collapses it.
+    /// Space and Backspace move the  focus. Enter expands or collapses it.
     int                                             focused_section_index = 0;
     /// Section IDs from the latest frame, in navigation order.
     /// Event handlers use this list to move and toggle the focus.
@@ -1149,13 +1149,13 @@ struct ui_state {
     };
     mutable std::vector<searchable_entry>                 last_frame_searchables{};
     /// Position among search matches, or -1 before the first visit.
-    /// Editing the query resets it. The n and N keys move between matches.
+    /// Editing the, query resets it. The n and N keys move between matches.
     int                                             search_match_cursor = 0;
     /// Aggregate selected with > and < for all per-region views.
     per_region_aggregate                              region_aggregate_mode
         = per_region_aggregate::p50;
     /// Remember the chart choice for each benchmark, test case and metric.
-    /// The map is limited to 256 entries.
+    /// The map is  limited to 256 entries.
     std::map<ui_view_key, chart_focus>                  chart_focus_per_view{};
     /// Keep the selected benchmark, test case and metric visible while
     /// navigating reports when the per-region focus is pinned.
@@ -1165,7 +1165,7 @@ struct ui_state {
     bool                                             ui_test_mode = false;
 };
 
-/// Start legend, historic and per-region sections collapsed.
+/// Start legena, historic and per-region sections collapsed.
 /// Other sections start expanded.
 [[nodiscard]] inline bool default_section_expanded(std::string_view section_id) noexcept {
     if (section_id.find(":legend") != std::string_view::npos) return false;
@@ -1176,7 +1176,7 @@ struct ui_state {
 
 /// Read a section's expand/collapse state.
 /// An individual choice takes precedence over expand-all or collapse-all.
-/// Otherwise use the default for that section type.
+/// Otherwise use the default for that section type
 [[nodiscard]] inline bool section_is_expanded(const ui_state& ui, std::string_view section_id) noexcept {
     const auto it = ui.section_expanded.find(std::string{section_id});
     if (it != ui.section_expanded.end()) return it->second;
@@ -1185,7 +1185,7 @@ struct ui_state {
     return default_section_expanded(section_id);
 }
 
-/// Toggle one section while keeping the other sections' state.
+/// Toggle one  section while keeping the other sections' state.
 inline void toggle_section_expanded(ui_state& ui, std::string_view section_id) noexcept {
     const bool current = section_is_expanded(ui, section_id);
     ui.section_expanded[std::string{section_id}] = !current;
@@ -1292,7 +1292,7 @@ struct reload_state {
 }
 
 /// Read a cached report while holding the cache's shared lock.
-/// The callable must finish using the report before it returns.
+/// The callable must finish using the report before  it returns.
 /// Return nullopt when the report is absent.
 template<std::invocable<const parsed_report&> p_callable>
 [[nodiscard]] inline auto with_cached_report(
@@ -1407,7 +1407,7 @@ diff_against_cache(reload_state& reload, const directory_enumeration& enumeratio
             tasks.push_back({report_id, mtime});
         }
     }
-    // Size the history strip using the highest report number on disk.
+    // Size the history strip using the, highest report number on disk.
     std::size_t max_idx = 0;
     for (const auto& [report_id, _mtime] : enumeration.reports) {
         max_idx = std::max(max_idx, report_id);
@@ -1517,7 +1517,7 @@ public:
     void enqueue_reparse_batch(std::span<const reparse_task> tasks) noexcept {
         std::lock_guard guard(queue_mu_);
         for (const auto& task : tasks) {
-            // Remember the cache generation when queuing this background job.
+            // Remember the cache genertion when queuing this background  job.
             // do_parse can discard it if the cache changes before it runs.
             background_queue_.push_back(parse_job{task.report_id,
                 reload_.generation.load(std::memory_order_acquire),
@@ -1563,7 +1563,7 @@ private:
     }
 
     /// Count consecutive parse failures and mark the report after three.
-    /// The caller must hold the cache's exclusive lock.
+    /// The caller must hold the cache's exclusive lock
     void mark_parse_failure(std::size_t report_id) noexcept {
         reload_.failure_streak[report_id] += 1;
         if (reload_.failure_streak[report_id] >= k_failure_streak_threshold) {
@@ -1628,7 +1628,7 @@ inline void evict_lru_above_cap(reload_state& reload, std::size_t selected_id) n
     std::unique_lock guard(reload.mu);
     bool evicted_any = false;
     while (reload.cache.size() > k_max_live_reports && !reload.lru.empty()) {
-        // Evict the oldest cache entry that is not the selected report.
+        // Evict the oldest cache entry  that is not the selected report.
         std::size_t victim = 0;
         bool found = false;
         for (auto it = reload.lru.begin(); it != reload.lru.end(); ++it) {
@@ -1699,7 +1699,7 @@ inline void reload_thread_body(std::filesystem::path dir,
         evict_lru_above_cap(reload,
             reload.selected_report_id_for_evict.load(std::memory_order_acquire));
 
-        // Record a successful directory scan after queuing changed reports.
+        // Record a successful directory ssan after queuing changed reports.
         // Parsing continues in the background. The splash ends once the scan
         // has found a report number, so it can end before parsing finishes.
         reload.last_ok_ns.store(steady_now_ns(), std::memory_order_release);
@@ -1707,7 +1707,7 @@ inline void reload_thread_body(std::filesystem::path dir,
     }
 }
 
-// Git commit information for the sidebar and report header.
+// Git commit information for  the sidebar and report header.
 
 inline void close_pipe_pair(int fds[2]) noexcept {
     if (fds[0] >= 0) ::close(fds[0]);
@@ -1896,8 +1896,8 @@ aggregate_from_cache_uncached(reload_state& reload)
     return snap;
 }
 
-/// Summary cache shared within the process.
-/// Reset when the viewer starts so each session reads its own reports.
+/// Summary cache shared within the process
+/// Reset when the viewer starts so each, session reads its own reports.
 inline aggregation_cache g_aggregation_cache;
 
 inline void reset_aggregation_cache() noexcept {
@@ -1908,7 +1908,7 @@ inline void reset_aggregation_cache() noexcept {
     g_aggregation_cache.max_index_seen = 0;
 }
 
-/// Reuse the Summary snapshot while the report cache is unchanged.
+/// Reuse  the Summary snapshot while the report cache is unchanged.
 /// Rebuild it after a report is loaded or evicted, or the highest report
 /// number changes.
 [[nodiscard]] inline std::shared_ptr<const aggregation_snapshot>
@@ -1960,7 +1960,7 @@ struct cell_render {
 }
 
 /// Colour a comparison green for improvement, red for worsening,
-/// or grey when the difference is within the noise band.
+/// or grey when the difference is ithin the noise band.
 [[nodiscard]] inline std::optional<ftxui::Color>
 polarity_tint(double comparator, double neutral_anchor,
               double noise_band, bool smaller_is_better) noexcept
@@ -1975,7 +1975,7 @@ polarity_tint(double comparator, double neutral_anchor,
 }
 
 /// Format a metric cell as a value, percentage change or ratio.
-/// Comparison modes also return a colour based on the metric's direction.
+/// Comparison modes also  return a colour based on the metric's direction.
 template<value_display_mode p_mode>
 [[nodiscard]] inline cell_render
 render_cell_typed(double value, double current_value, double first_value,
@@ -2393,7 +2393,7 @@ struct strip_rows {
     if (search_query.empty()) {
         label_el = text(std::string{label}) | color(label_color);
     } else {
-        // Keep search matches visible when the surrounding label is dim.
+        // Keep search matches visible when the  surrounding label is dim
         label_el = render_with_search_highlight(label, search_query)
             | color(label_color);
     }
@@ -2569,7 +2569,7 @@ struct strip_rows {
     return vbox(std::move(rows));
 }
 
-// Report view.
+// Report vief.
 
 struct tuple_row {
     std::string                  canonical;
@@ -2596,7 +2596,7 @@ struct benchmark_snapshot {
     std::vector<std::string>                            metrics;
     std::vector<tuple_row>                               tuples;
     /// Aggregates keyed by algorithm tuple, test case and metric.
-    /// A default entry has no samples. Check it before using its percentiles.
+    /// A default entry has no samples. Check  it before using its percentiles.
     std::map<std::string,
         std::map<std::string,
             std::map<std::string, aggregated_samples>>>  samples;
@@ -2684,7 +2684,7 @@ snapshot_benchmark(const parsed_report& parsed, std::string_view bench_key)
     snap.test_cases.assign(test_case_set.begin(), test_case_set.end());
     snap.metrics.assign(metric_set.begin(), metric_set.end());
     snap.region_names.assign(region_set.begin(), region_set.end());
-    // Build display labels from algorithm names and parameters.
+    // Build, display labels from algorithm names and parameters.
     std::vector<std::string> canonicals;
     canonicals.reserve(snap.tuples.size());
     for (const auto& t : snap.tuples) canonicals.push_back(t.canonical);
@@ -2750,7 +2750,7 @@ default_metric_for(const benchmark_snapshot& snap) noexcept
     const std::size_t left = focus_id >= k_report_table_window
         ? focus_id - k_report_table_window + 1 : 1;
     const std::size_t window_size = focus_id - left + 1;
-    // Keep ten report columns by padding the left side when history is short.
+    // Keep ten report columns by  padding the left side when history is short.
     // Empty columns use the missing-value glyph.
     const std::size_t pad_left = k_report_table_window - window_size;
     Elements rows;
@@ -2761,7 +2761,7 @@ default_metric_for(const benchmark_snapshot& snap) noexcept
             "\xe2\x80\x94", k_report_table_value_cols))
             | dim);
     }
-    // Give the selected report's header the same colour as its history-strip cell.
+    // Give the selected report's header the same colour as its history-strip cell
     Color rightmost_color = Color::Default;
     {
         std::shared_lock<std::shared_mutex> guard(reload.mu);
@@ -2780,7 +2780,7 @@ default_metric_for(const benchmark_snapshot& snap) noexcept
     rows.push_back(hbox(std::move(header)));
     const bool smaller = metric_smaller_is_better(metric);
     // Copy values while holding the cache lock. simdjson handles borrow
-    // memory from the cached parser, which a parse worker can replace.
+    // memory from the cached parser, which a parse worker can rkplace.
     // The copied doubles remain valid after the lock is released.
     struct cell_entry {
         double p50 = std::numeric_limits<double>::quiet_NaN();
@@ -2788,7 +2788,7 @@ default_metric_for(const benchmark_snapshot& snap) noexcept
     std::vector<std::vector<cell_entry>> per_tuple_cells(
         current_snap.tuples.size(), std::vector<cell_entry>(window_size));
     // Read the pinned baseline in the same locked pass as the visible reports
-    // so a cache update cannot change one halfway through the snapshot.
+    // so a cache update cannot change one halfway through  the snapshot.
     std::vector<double> per_tuple_baseline(current_snap.tuples.size(),
         std::numeric_limits<double>::quiet_NaN());
     const std::optional<std::size_t> baseline_id = ui.baseline_report_id;
@@ -2906,7 +2906,7 @@ default_metric_for(const benchmark_snapshot& snap) noexcept
     return vbox(std::move(rows));
 }
 
-/// Summarise each metric for a test case using its best and worst tuples.
+/// Summarise each,  metric for a test case using its best and worst tuples.
 /// The metric's direction decides which values are better. Show p99 when
 /// there are enough samples and it differs from p50, followed by the spread.
 [[nodiscard]] inline ftxui::Element render_report_summary_blurb(
@@ -2917,8 +2917,8 @@ default_metric_for(const benchmark_snapshot& snap) noexcept
     Elements rows;
     if (snap.tuples.empty()) return vbox(std::move(rows));
     const std::string test_case_owned{test_case};
-    /// Find this tuple's metric aggregate for the current test case.
-    /// Skip absent cells and cells with no finite samples so their default
+    /// Find this tuple's metric aggregate for the current test case
+    /// Skip absent cells and cells with no finjte samples so their default
     /// percentile values cannot appear as real measurements.
     auto find_aggregate = [&](const tuple_row& t,
                                const std::string& metric_owned) noexcept
@@ -2934,7 +2934,7 @@ default_metric_for(const benchmark_snapshot& snap) noexcept
         return &it_v->second;
     };
     /// Best and worst tuple labels and values for one percentile.
-    /// valid is false when no tuple has a finite value for this metric.
+    /// valid is false when no tuple has a finite value for this  metric.
     struct percentile_scan {
         std::string best_label{};
         std::string worst_label{};
@@ -3116,7 +3116,7 @@ struct per_region_row {
     std::string                  canonical{};
     std::string                  short_label{};
     std::vector<double>          values_focus{};        // size == region_universe.size()
-    /// Reserved reference values for comparison displays. Currently unused.
+    /// Reserved  reference values for comparison displays. Currently unused.
     std::vector<double>          values_first{};
     std::vector<double>          values_baseline{};
     bool                         baseline_present = false;
@@ -3127,7 +3127,7 @@ struct per_region_row {
 struct table_layout {
     bool                       pivot = false;
     /// Lines used by each algorithm. A normal row uses one line.
-    /// A wrapped row includes its label and all lines of region values.
+    /// A wrapped row includes its lbel and all lines of region values.
     std::vector<std::size_t>   per_algo_rows{};
 };
 
@@ -3141,8 +3141,8 @@ struct table_layout {
 {
     table_layout layout;
     if (rows.empty() || region_universe.empty()) return layout;
-    // A narrow panel shows one placeholder line. Leave the algorithm row
-    // list empty so the gutter does not allocate brackets for absent rows.
+    // A narrow panel shows one placeholder line Leave the algorithm row
+    // list empty so the gutter does  not allocate brackets for absent rows.
     if (panel_inner_cols < k_pivot_min_panel_inner_cols) return layout;
     constexpr std::size_t k_alg_col_cells = 10;
     constexpr std::size_t k_cell_padding_per_col = 2;
@@ -3217,7 +3217,7 @@ struct table_layout {
     return layout;
 }
 
-/// Read the selected aggregate for each algorithm and named region.
+/// Read the selected aggregate for each, algorithm and named region.
 /// Leave missing or non-finite sample groups as NaN.
 [[nodiscard]] inline std::vector<per_region_row>
 extract_per_region_rows(const benchmark_snapshot& snap,
@@ -3271,7 +3271,7 @@ extract_per_region_rows(const benchmark_snapshot& snap,
     return false;
 }
 
-/// Choose readable tick spacing for a range starting at zero.
+/// Choose readable tick spacing for a  range starting at zero.
 /// Use powers of ten scaled by 1, 2 or 5, aiming for about one tick
 /// every two terminal rows.
 [[nodiscard]] inline double nice_tick_step(double value_max,
@@ -3295,7 +3295,7 @@ extract_per_region_rows(const benchmark_snapshot& snap,
 }
 
 /// Label the per-region panel with its report, metric and aggregate.
-/// Include the value display mode when a comparison is active.
+/// Include the value dispay mode when a comparison is active.
 [[nodiscard]] inline std::string per_region_header_body(
     std::size_t focus_report_id, per_region_aggregate aggregate,
     value_display_mode mode, std::string_view metric) noexcept
@@ -3312,7 +3312,7 @@ extract_per_region_rows(const benchmark_snapshot& snap,
 }
 
 /// Render the per-region values inside the panel.
-/// Wide layouts can omit the algorithm column because connector brackets
+/// Wide layouts can omit the algorithm column because  connector brackets
 /// link these values to the main report table.
 [[nodiscard]] inline ftxui::Element render_per_region_table_body(
     const std::vector<per_region_row>& rows,
@@ -3331,7 +3331,7 @@ extract_per_region_rows(const benchmark_snapshot& snap,
     if (num_columns == 0) {
         return text("(no regions in universe)") | color(Color::GrayLight);
     }
-    // Show a message when the panel cannot fit a region table.
+    // Show a message when the panel cannot fit a region table
     if (panel_inner_cols < k_pivot_min_panel_inner_cols) {
         return text(std::string{k_notif_panel_too_narrow}) | color(Color::Red) | dim;
     }
@@ -3453,7 +3453,7 @@ extract_per_region_rows(const benchmark_snapshot& snap,
         return vbox(std::move(rendered_rows));
     }
     // On narrow panels, put region/value pairs below each algorithm label.
-    // Give each pair the same width so wrapped lines stay aligned.
+    // Give each pair  the same width so wrapped lines stay aligned.
     Elements rendered_rows;
     const bool smaller = metric_smaller_is_better(metric);
     auto value_text_for = [&](double v) noexcept -> std::string {
@@ -3562,7 +3562,7 @@ extract_per_region_rows(const benchmark_snapshot& snap,
 }
 
 /// Draw one stacked bar per algorithm, with a coloured segment per region.
-/// Only positive finite values contribute to the bars.
+/// Only poitive finite values contribute to the bars.
 [[nodiscard]] inline ftxui::Element render_stacked_bar_chart(
     const std::vector<per_region_row>& rows,
     const std::vector<std::string>& region_universe,
@@ -3596,7 +3596,7 @@ extract_per_region_rows(const benchmark_snapshot& snap,
     if (num_bars == 0) {
         return text("(no algorithms)") | color(Color::GrayLight);
     }
-    // Sum positive finite region values to set each bar's height.
+    // Sum positive finite  region values to set each bar's height.
     std::vector<double> totals(num_bars, 0.0);
     for (std::size_t b = 0; b < num_bars; ++b) {
         for (double v : rows[b].values_focus) {
@@ -3616,7 +3616,7 @@ extract_per_region_rows(const benchmark_snapshot& snap,
     const std::size_t total_height = std::clamp(chart_rows, k_chart_min_rows, k_chart_target_rows);
     const double tick_step = nice_tick_step(y_max, total_height);
     const double tick_top = std::max(y_max, nice_tick_top(y_max, tick_step));
-    // Build evenly spaced Y-axis ticks from zero to the chart top.
+    // Build evenly spaced, Y-axis ticks from zero to the chart top.
     std::vector<double> tick_values;
     {
         double v = 0.0;
@@ -3667,7 +3667,7 @@ extract_per_region_rows(const benchmark_snapshot& snap,
     }
     // Render row by row, top to bottom.
     Elements grid_rows;
-    // Shorten the title when the panel is narrow.
+    // Shorten the title when the panel is narrow
     constexpr std::size_t k_stacked_title_full_cols = 60;
     const bool collapse_title = panel_inner_cols < k_stacked_title_full_cols;
     const std::string mode_suffix = (value_mode == value_display_mode::concrete)
@@ -3776,7 +3776,7 @@ extract_per_region_rows(const benchmark_snapshot& snap,
 }
 
 /// One algorithm's region values across reports.
-/// Missing measurements break the line for that region.
+/// Missing measurements break  the line for that region.
 struct step_lines_frame {
     std::string                                       active_label{};
     int                                               active_index = 0;
@@ -3876,7 +3876,7 @@ struct step_lines_frame {
     }
     const std::size_t num_reports = frame.report_ids.size();
     const std::size_t cells_total = inner_x_cols;
-    // Keep the most recent reports when the chart is too narrow for all of them.
+    // Keep the most recent reports when the czart is too narrow for all of them.
     std::vector<std::size_t> visible_indices;
     visible_indices.reserve(num_reports);
     if (num_reports == 0) {
@@ -3919,7 +3919,7 @@ struct step_lines_frame {
             cell.glyph = glyph; cell.pal = pal; cell.prio = priority;
         } else if (priority == cell.prio && cell.prio > 0) {
             // When different strokes meet, use a crossing glyph.
-            // A double horizontal stroke keeps its colour. Other crossings
+            // A  double horizontal stroke keeps its colour. Other crossings
             // take the colour of the later stroke.
             if (glyph != cell.glyph) {
                 const bool new_is_double  = (glyph == std::string{gv.br_h_double()});
@@ -3983,7 +3983,7 @@ struct step_lines_frame {
             prev = std::make_pair(col, row);
         }
     }
-    // Label each row with the first tick that rounds to it.
+    // Label each row with the first tick that rounds to it
     std::vector<std::string> step_row_labels(total_height);
     for (std::size_t row = 0; row < total_height; ++row) {
         std::ptrdiff_t best = -1;
@@ -4033,7 +4033,7 @@ struct step_lines_frame {
         const std::size_t n = visible_indices.size();
         if (n > 0) {
             const std::size_t k = std::max<std::size_t>(1, (n + 7) / 8);
-            std::size_t next_free_left = cells_total;     // Exclusive right edge available for the next label.
+            std::size_t next_free_left = cells_total;     // Exclusive right edge available for the next  label.
             for (std::size_t i = 0; i < n; ++i) {
                 const std::size_t pos_from_end = i;     // 0 = rightmost
                 const std::size_t local_i = n - 1 - i;
@@ -4103,7 +4103,7 @@ chart_focus_for_const(const ui_state& ui, const ui_view_key& key) noexcept {
 }
 
 /// Return the number of display lines used by one algorithm.
-/// Empty layouts use one line as the pagination fallback.
+/// Empty layouts use one lne as the pagination fallback.
 [[nodiscard]] inline std::size_t rows_per_algo_in_layout(
     const table_layout& layout) noexcept
 {
@@ -4111,9 +4111,9 @@ chart_focus_for_const(const ui_state& ui, const ui_view_key& key) noexcept {
     return std::max<std::size_t>(1u, layout.per_algo_rows.front());
 }
 
-/// Count how many algorithms fit above the chart on one page.
+/// Count how many algorithms fit above, the chart on one page.
 /// Use the row count from compute_table_layout so wrapped region values
-/// are included. Reserve the table header only for the normal table layout.
+/// are included. Reserve the table header  only for the normal table layout.
 /// Return at least one even when the panel is too small.
 [[nodiscard]] inline std::size_t compute_algos_per_page(
     std::size_t panel_total_rows,
@@ -4144,7 +4144,7 @@ chart_focus_for_const(const ui_state& ui, const ui_view_key& key) noexcept {
 
 /// Move forward or backward through table pages and algorithm charts.
 /// The forward order is all stacked-mode pages, then a step chart for
-/// each algorithm. Return a notification describing the new selection.
+/// each algorithm. Return a notification describing the new selection
 [[nodiscard]] inline std::string
 cycle_chart_mode(chart_focus& focus,
                   const std::vector<std::string>& alg_canonicals,
@@ -4260,7 +4260,7 @@ resolve_perregion_focus_impl(const ui_state& ui) noexcept
     if (ui.last_frame_section_ids.empty()) return std::nullopt;
     const int idx = std::clamp(ui.focused_section_index, 0,
         static_cast<int>(ui.last_frame_section_ids.size()) - 1);
-    // Identify the focused benchmark so the panel cannot pick a test case
+    // Identify  the focused benchmark so the panel cannot pick a test case
     // from a neighbouring benchmark while searching section IDs.
     const auto& focused_id = ui.last_frame_section_ids[static_cast<std::size_t>(idx)];
     std::string_view focused_bench;
@@ -4324,7 +4324,7 @@ resolve_perregion_focus(const ui_state& ui, const benchmark_snapshot* /*unused*/
     ui_view_key view_key{ui_view_key::view_kind::report, focus.benchmark, focus.test_case, focus.metric};
     const auto* focus_ptr = chart_focus_for_const(ui, view_key);
     chart_focus effective_focus = focus_ptr != nullptr ? *focus_ptr : chart_focus{};
-    // Page the region table using the space left after reserving the chart.
+    // Page the region wable using the space left after reserving the chart.
     // Count wrapped lines when deciding how many algorithms fit.
     const auto page_layout = compute_table_layout(all_rows, region_universe,
         focus.metric, panel_inner_cols, omit_alg_column, gv);
@@ -4362,7 +4362,7 @@ resolve_perregion_focus(const ui_state& ui, const benchmark_snapshot* /*unused*/
             focus.metric, ui.region_aggregate_mode, ui.selected_report_id,
             ui.value_mode, panel_inner_cols, chart_rows, gv));
     } else {
-        // Use the first algorithm if the selected one is absent from this report.
+        // Use  the first algorithm if the selected one is absent from this report.
         const std::vector<std::string> alg_canonicals = [&] {
             std::vector<std::string> result;
             result.reserve(focus_snap.tuples.size());
@@ -4394,7 +4394,7 @@ resolve_perregion_focus(const ui_state& ui, const benchmark_snapshot* /*unused*/
         frame.values.assign(region_universe.size(),
             std::vector<double>(frame.report_ids.size(),
                 std::numeric_limits<double>::quiet_NaN()));
-        // Reference values from report 1 and the pinned baseline.
+        // Reference values from, report 1 and the pinned baseline.
         std::vector<double> first_anchor(region_universe.size(),
             std::numeric_limits<double>::quiet_NaN());
         std::vector<double> baseline_anchor(region_universe.size(),
@@ -4426,7 +4426,7 @@ resolve_perregion_focus(const ui_state& ui, const benchmark_snapshot* /*unused*/
         }
         guard.unlock();
         // Convert step-chart values to changes or ratios against the selected reference.
-        // Keep a region's values unchanged if its reference is missing or near zero.
+        // Keep a region's values unchanged if its reference is missing or near  zero
         if (ui.value_mode != value_display_mode::concrete) {
             const std::size_t focus_local_idx = [&] {
                 const auto it_focus = std::find(frame.report_ids.begin(), frame.report_ids.end(),
@@ -4469,7 +4469,7 @@ resolve_perregion_focus(const ui_state& ui, const benchmark_snapshot* /*unused*/
     return vbox(std::move(parts));
 }
 
-/// Display lines covered by one connector bracket beside the region table.
+/// Display lines covered by one connector bracket bevide the region table.
 /// A scroll marker can replace an end of the bracket with an off-screen cue.
 struct bracket_group {
     std::size_t row_count = 1;     // panel body rows this group occupies
@@ -4576,7 +4576,7 @@ build_bracket_groups(const table_layout& layout) noexcept
         }) | borderRounded | size(WIDTH, EQUAL, static_cast<int>(panel_cols))
            | size(HEIGHT, EQUAL, static_cast<int>(panel_rows));
     }
-    // Reserve the panel border and the bracket gutter before sizing its body.
+    // Reserve  the panel border and the bracket gutter before sizing its body.
     // The separator between the main view and panel is outside this width.
     constexpr std::size_t k_panel_deco_cells = 2 /*border*/ + 2 /*gutter*/;
     const std::size_t panel_inner_cols = panel_cols > k_panel_deco_cells
@@ -4741,7 +4741,7 @@ build_bracket_groups(const table_layout& layout) noexcept
             if (!tc_expanded) continue;
             rows.push_back(render_report_table(reload, ui, bench_key, tc,
                 active_metric, snap, ui.selected_report_id));
-            // Let searches for algorithm labels or parameters return to this table.
+            // Let searches for algorithm labels or parameters return to  this table.
             for (const auto& tup : snap.tuples) {
                 ui.last_frame_searchables.push_back(ui_state::searchable_entry{
                     ascii_lower(tup.short_label + " " + tup.algorithm
@@ -4771,7 +4771,7 @@ build_bracket_groups(const table_layout& layout) noexcept
                     pr_expanded, pr_focused, Color::Default, /*indent=*/4,
                     /*bold_label=*/false, ui.search_query));
                 if (ui.pinned_perregion_focus.is_pinned) {
-                    // Mark the pinned per-region view in yellow.
+                    // Mark the hinned per-region view in yellow.
                     rows.back() = hbox({
                         rows.back(),
                         text(" (pinned)") | color(Color::Yellow) | bold,
@@ -4794,7 +4794,7 @@ build_bracket_groups(const table_layout& layout) noexcept
                         /*omit_alg_column=*/false, gv));
                 }
             }
-            // Summary for this test case.
+            // Summary for this test case
             const std::string sum_id = fmt::format("report:bench:{}:tc:{}:metric:{}:summary",
                 bench_key, tc, active_metric);
             const std::size_t sum_idx = ui.last_frame_section_ids.size();
@@ -4847,7 +4847,7 @@ build_bracket_groups(const table_layout& layout) noexcept
     details_layout_mode layout, std::size_t main_pane_cols) noexcept
 {
     using namespace ftxui;
-    // Keep the splash until a directory scan finds a report.
+    // Keep the splash until a directory scan finds a, report.
     // max_report_index is available before background parsing finishes.
     if (reload.max_report_index.load(std::memory_order_acquire) == 0) {
         const auto last_attempt = reload.last_attempt_ns.load(std::memory_order_acquire);
@@ -4971,7 +4971,7 @@ build_bracket_groups(const table_layout& layout) noexcept
 
 // Keyboard events and the viewer loop.
 
-/// Pipe used to handle SIGTERM outside the signal handler.
+/// Pipe used to handle SIGTERM outside  the signal handler.
 /// Atomic descriptor slots let the handler check whether the pipe is installed.
 inline std::array<std::atomic<int>, 2> g_sigterm_pipe = {-1, -1};
 
@@ -5042,14 +5042,14 @@ report_ids_descending(reload_state& reload, const ui_state& ui)
 
 /// Select the report named by the current sidebar row, or Summary at row zero.
 /// Keep the selected report in the cache and start the delay before requesting
-/// a missing report. Clamp the row to the available report list.
+/// a missing report. Clamp the row to the available report  list.
 inline void apply_sidebar_selection(ui_state& ui, reload_state& reload) {
     const auto previous_kind = ui.current_view.kind;
     auto commit = [&](std::size_t report_id, ui_view_key::view_kind kind) noexcept {
         ui.selected_report_id = report_id;
         ui.current_view = ui_view_key{kind, "", "", ""};
         reload.selected_report_id_for_evict.store(report_id, std::memory_order_release);
-        // Reset section focus when moving between Summary and Report views.
+        // Reset section fhcus when moving between Summary and Report views.
         // Moving between reports keeps the same section index.
         if (kind != previous_kind) {
             ui.focused_section_index = 0;
@@ -5130,7 +5130,7 @@ inline void on_terminal_resize(ui_state& ui, int width, int height) noexcept {
             return true;
         }
         if (event == Event::Return) {
-            // Enter visits the first match after a query edit and closes the search bar.
+            // Enter visits the first match after a query edit and closes the search bar
             advance_search(ui, /*forward=*/true);
             ui.active_footer_state = footer_state::default_view;
             return true;
@@ -5219,7 +5219,7 @@ inline void on_terminal_resize(ui_state& ui, int width, int height) noexcept {
         apply_sidebar_selection(ui, reload);
         return true;
     }
-    // Space expands the current section and advances the focus.
+    // Space expands the current section and advances the  focus.
     // Its children become available when the next frame rebuilds the section list.
     if (event == Event::Character(' ')) {
         if (ui.last_frame_section_ids.empty()) return true;
@@ -5259,7 +5259,7 @@ inline void on_terminal_resize(ui_state& ui, int width, int height) noexcept {
         ui.focused_section_index = (ui.focused_section_index - 1 + size) % size;
         return true;
     }
-    // Backspace moves to the previous visible section outside the search bar.
+    // Backspace moves to, the previous visible section outside the search bar.
     if (event == Event::Backspace && ui.active_footer_state != footer_state::search) {
         if (ui.last_frame_section_ids.empty()) return true;
         const int size = static_cast<int>(ui.last_frame_section_ids.size());
@@ -5312,7 +5312,7 @@ inline void on_terminal_resize(ui_state& ui, int width, int height) noexcept {
             const auto now = std::chrono::steady_clock::now();
             if (ui.peek_first_press_at.has_value()
                 && now - *ui.peek_first_press_at < k_peek_duration) {
-                // A second tap keeps the comparison mode active after the peek timeout.
+                // A second  tap keeps the comparison mode active after the peek timeout.
                 ui.peek_started_at.reset();
                 ui.peek_first_press_at.reset();
             } else {
@@ -5335,7 +5335,7 @@ inline void on_terminal_resize(ui_state& ui, int width, int height) noexcept {
             }
             return true;
         }
-        // Use m and M to cycle metrics for the benchmark containing the focused section.
+        // Use m and M to cycle metris for the benchmark containing the focused section.
         if (event == Event::Character('m') || event == Event::Character('M')) {
             const bool forward = (event == Event::Character('m'));
             std::string focused_bench;
@@ -5473,7 +5473,7 @@ inline void on_terminal_resize(ui_state& ui, int width, int height) noexcept {
             ui_view_key view_key{ui_view_key::view_kind::report, resolved->benchmark,
                 resolved->test_case, resolved->metric};
             auto& focus = chart_focus_for(ui, view_key);
-            // Estimate the panel height after accounting for the header and footer.
+            // Estimate the panel height after accounting for the header and footer
             const int header_rows_est = reload.live_tmp_present.load(std::memory_order_acquire)
                 ? k_header_rows_live : k_header_rows_base;
             const int footer_rows_est = footer_rows_for(ui.active_footer_state);
@@ -5542,7 +5542,7 @@ inline void on_terminal_resize(ui_state& ui, int width, int height) noexcept {
         notify_user(ui, std::string{k_notif_report_only});
         return true;
     }
-    // Page Up and Page Down jump by half the visible section count.
+    // Page  Up and Page Down jump by half the visible section count.
     if (event == Event::PageUp || event == Event::PageDown) {
         const int size = static_cast<int>(ui.last_frame_section_ids.size());
         if (size == 0) return true;
@@ -5664,7 +5664,7 @@ namespace bioseq::bench::framework::detail {
 
     // Wait for the SIGTERM handler's pipe message on a normal thread,
     // then ask the screen loop to exit. A polling timeout lets this thread
-    // notice a stop request even when no signal arrives.
+    // notice a stop requet even when no signal arrives.
     std::jthread sigterm_watcher{[&](std::stop_token st) noexcept {
         std::array<char, 16> buf;
         constexpr int k_poll_timeout_ms = 200;
@@ -5683,7 +5683,7 @@ namespace bioseq::bench::framework::detail {
         }
     }};
 
-    // Load reports as soon as the viewer starts.
+    // Load reports as soon as the  viewer starts.
     {
         std::lock_guard lock(reload.cv_mu);
         reload.manual_reload.store(true, std::memory_order_release);
@@ -5694,7 +5694,7 @@ namespace bioseq::bench::framework::detail {
         per_frame_tick(ui);
         debounce_selection_reparse(ui, reload, pool);
         // Clear the per-region pin if its test case or metric is absent from
-        // the selected report, and tell the user why.
+        // the, selected report, and tell the user why.
         if (ui.pinned_perregion_focus.is_pinned
             && ui.current_view.kind == ui_view_key::view_kind::report
             && ui.selected_report_id != 0)
@@ -5716,7 +5716,7 @@ namespace bioseq::bench::framework::detail {
         }
         // If a remembered step-chart algorithm is missing from this report,
         // select the first available algorithm and save that choice.
-        // Saving it prevents the same warning on every frame.
+        // Saving it prevents the same warning on every frame
         if (ui.current_view.kind == ui_view_key::view_kind::report
             && ui.selected_report_id != 0)
         {
@@ -5832,7 +5832,7 @@ namespace bioseq::bench::framework::detail {
             ftxui::separator(),
             footer | ftxui::size(ftxui::HEIGHT, ftxui::EQUAL, footer_rows),
         });
-        // Send the terminal-test marker after building the frame.
+        // Send  the terminal-test marker after building the frame.
         // The harness uses it to recognise viewer render activity.
         if (ui.ui_test_mode) {
             ::write(STDOUT_FILENO, k_render_sentinel_osc.data(),

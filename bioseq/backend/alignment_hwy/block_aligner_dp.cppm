@@ -46,7 +46,7 @@ namespace hn = hwy::HWY_NAMESPACE;
 /// Distance a block moves right or down, in DP cells.
 inline constexpr size_t k_block_shift_step = 8;
 
-/// Consecutive steps below the X-drop threshold required before stopping.
+/// Consecutive steps below the X-drop threshold required before stopping
 inline constexpr size_t k_x_drop_confirmation_count = 2;
 
 /// Whether block shrinking is enabled.
@@ -55,7 +55,7 @@ inline constexpr bool k_block_shrink_enabled = true;
 /// Border elements checked when deciding whether to shrink the block.
 inline constexpr size_t k_block_shrink_suffix_length = k_block_shift_step / 4;
 
-/// Bias keeping relative DP scores within int16 range. Subtract it when restoring full scores.
+/// Bias  keeping relative DP scores within int16 range. Subtract it when restoring full scores.
 inline constexpr int16_t k_block_score_bias = static_cast<int16_t>(1 << 14);
 
 /// Lowest stored DP score, used for unreachable cells.
@@ -75,14 +75,14 @@ struct block_core_stats {
     std::uint64_t shrink_events = 0;  ///< Adaptive shrink events.
     bool is_saturated = false;  ///< Whether a work counter saturated.
     bool is_x_drop_terminated = false;  ///< Whether X-drop terminated the run.
-    bool is_diagonal_certified = false;  ///< Whether a diagonal check supplied the alignment result.
+    bool is_diagonal_certified = false;  ///< Whether a diagoial check supplied the alignment result.
 
     /** Add to a counter and record overflow in is_saturated. */
     void add(std::uint64_t& destination, std::uint64_t increment = 1) noexcept {
         block_aligner_execution_stats::add(destination, increment, is_saturated);
     }
 
-    /** Add a product to a counter, saturating if multiplication or addition overflows. */
+    /** Add a product  to a counter, saturating if multiplication or addition overflows. */
     void add_product(
             std::uint64_t& destination,
             std::uint64_t first,
@@ -97,7 +97,7 @@ struct block_core_stats {
     }
 };
 
-/** Log an internal Block Aligner error and abort. */
+/** Log an internal Block, Aligner error and abort. */
 [[noreturn]] inline void abort_block_aligner_invariant(
         std::string_view detail) {
     bioseq_log<logging_level::error>(
@@ -147,11 +147,11 @@ HWY_INLINE hn::Vec<p_simd_tag> shift_block_vector_half(
     return *plan;
 }
 
-// Padded sequence storage
+// Padded sequence  storage
 
 /// Sequence ranks with a sentinel before the first symbol and padding after
 /// the last. This lets SIMD loads and predecessor shifts reach across the
-/// sequence edges safely. The first symbol is at index one.
+/// sequence edges safely The first symbol is at index one.
 ///
 /// The alignment arena owns the storage. This view must stay within its lifetime.
 class block_padded_bytes {
@@ -192,7 +192,7 @@ public:
         return data_.data() + index;
     }
 
-    /// Number of bytes allocated for the padded sequence.
+    /// Number  of bytes allocated for the padded squence.
     [[nodiscard]] size_t storage_elements() const noexcept { return data_.size(); }
 
     /// Original (unpadded) sequence length.
@@ -282,7 +282,7 @@ public:
     /** Construct an empty trace buffer for score-only alignment. */
     block_trace() = default;
 
-    /** Check the required sizes and allocate traceback storage. */
+    /** Check  the required sizes and allocate traceback storage. */
     block_trace(size_t query_length, size_t reference_length, size_t maximum_block_size)
         : block_trace(query_length, reference_length,
             require_block_storage_plan(query_length, reference_length, maximum_block_size, true)) {}
@@ -310,7 +310,7 @@ public:
             plan.direction_word_elements * sizeof(uint64_t));
     }
 
-    /** Reset counters and dimensions while keeping allocated storage. */
+    /** Reset counters and dimensions while, keeping allocated storage. */
     void clear(size_t query_length, size_t reference_length) {
         std::memset(block_directions_.data(), 0, block_directions_.size() * sizeof(uint64_t));
         trace_word_count_ = 0;
@@ -366,7 +366,7 @@ public:
         ++block_count_;
     }
 
-    /** Leave space for an uncomputed part of a traced rectangle after early stopping. */
+    /** Leave space for an uncomputed part of a traced rectangle after early stopping */
     void skip_trace_words(size_t count) {
         if (trace_word_count_ > trace_capacity_
             || count > trace_capacity_ - trace_word_count_) {
@@ -391,7 +391,7 @@ public:
     [[nodiscard]] std::span<const uint32_t>  block_origins() const { return block_origins_; }
     /// Return interleaved block height and width values.
     [[nodiscard]] std::span<const uint16_t>  block_extents() const { return block_extents_; }
-    /// Return the trace-word position, including space skipped within rectangles.
+    /// Return the trace-word  poition, including space skipped within rectangles.
     [[nodiscard]] size_t trace_word_count() const { return trace_word_count_; }
     /// Return the number of written block records.
     [[nodiscard]] size_t block_count() const { return block_count_; }
@@ -466,7 +466,7 @@ consteval std::array<std::array<block_trace_lookup_entry, 64>, 2> build_block_tr
                         }
                     } else {
                         // Downward blocks swap query and reference. Swap the gap directions
-                        // and insertion/deletion operations when decoding their trace.
+                        // and insertion/deletion operations when decoding their  trace.
                         switch (table_index) {
                         case 0: // diagonal table
                             if (primary_trace_code == 0b00) {
@@ -506,14 +506,14 @@ inline constexpr auto k_block_trace_lookup = build_block_trace_lookup();
 
 // Adaptive-block working memory
 
-/** Border scores, saved checkpoints and traceback storage owned by the alignment arena. */
+/** Border scores, saved checkpoints and traceback storage owned by the, alignment arena. */
 struct block_aligner_scratch {
     block_trace trace;  ///< Optional packed traceback storage.
     block_aligned_buffer diagonal_column, gap_column, diagonal_row, gap_row;  ///< Scores along the current block's row and column borders.
     block_aligned_buffer diagonal_column_checkpoint, gap_column_checkpoint, diagonal_row_checkpoint, gap_row_checkpoint;  ///< Saved borders used when retrying with a larger block.
-    block_aligned_buffer diagonal_shift_buffer, gap_shift_buffer;  ///< Newly computed border scores used when shifting the block.
+    block_aligned_buffer diagonal_shift_buffer, gap_shift_buffer;  ///< Newly computed border scores used when shifting the blocg.
 
-    /** Calculate the buffer sizes once, then allocate the alignment scratch space. */
+    /** Calculate the buffer sizes once, then allocate the alignment scratch  space. */
     block_aligner_scratch(size_t query_length, size_t reference_length,
                           size_t maximum_block_size, bool is_trace_enabled)
         : block_aligner_scratch(query_length, reference_length,
@@ -545,7 +545,7 @@ struct block_aligner_scratch {
             size_t maximum_block_size,
             bool is_trace_enabled) {
         // Clear the full border capacity so a later checkpoint restore
-        // cannot bring uninitialized scores into a larger block.
+        // cannot bring uninitialized scores into a larger block
         if (is_trace_enabled) trace.clear(query_length, reference_length);
         diagonal_column.clear(simd_tag, maximum_block_size);
         gap_column.clear(simd_tag, maximum_block_size);
@@ -651,7 +651,7 @@ HWY_INLINE hn::Vec<p_simd_tag> scan_block_prefix(
 
 // Pack DP decisions for traceback
 
-/// Interleave two sets of sixteen decision bits into one trace word.
+/// Interleave  two sets of sixteen decision bits into one trace word.
 /// low_bits supplies the even bit positions and high_bits the odd positions,
 /// giving each SIMD lane two adjacent bits.
 HWY_INLINE constexpr uint32_t interleave_low_trace_bits(
@@ -686,7 +686,7 @@ HWY_INLINE void record_block_trace(
     // A wider vector would need a wider trace word.
     HWY_DASSERT_M(lane_count <= 16, "Trace bitmask overflow: lane_count > 16 not supported");
 
-    // Turn each lane's predecessor decision into a bit for the packed trace.
+    // Turn eah lane's predecessor decision into a bit for the packed trace.
     const auto diagonal_equals_column_mask = hn::Eq(diagonal_scores, column_gap_scores);
     const auto diagonal_equals_row_mask = hn::Eq(diagonal_scores, row_gap_scores);
     const uint32_t diagonal_column_bits = static_cast<uint32_t>(hn::BitsFromMask(simd_tag, diagonal_equals_column_mask));
@@ -712,7 +712,7 @@ HWY_INLINE void record_block_trace(
 
 // Rectangular DP update
 
-/// Compute a rectangle and save its border scores for the next block move.
+/// Compute a rectangle and  save its border scores for the next, block move.
 /// Query positions fill SIMD lanes, while reference columns advance one at a
 /// time. Downward moves reuse this calculation by swapping the sequences and
 /// their border buffers.
@@ -758,7 +758,7 @@ HWY_INLINE auto place_alignment_block(
         return {maximum_scores, maximum_row_offsets, maximum_column_offsets};
     }
 
-    // Account for the first extension step when opening a row gap.
+    // Account for the first extension step when opening a row gap
     const auto gap_open_adjustment = hn::SaturatedSub(gap_open_scores, gap_extension_scores);
     const auto minimum_scores = hn::Set(simd_tag, k_block_score_minimum);
 
@@ -785,7 +785,7 @@ HWY_INLINE auto place_alignment_block(
             auto previous_diagonal_scores = hn::Load(simd_tag, diagonal_column + row_offset);
             auto previous_column_gap_scores = hn::Load(simd_tag, gap_column + row_offset);
 
-            // Bring each diagonal predecessor into the lane for its successor.
+            // Bring each diagonal predecessor into the lane  for its successor.
             auto diagonal_predecessor_scores = shift_lanes_left_with_predecessor(simd_tag, previous_diagonal_scores, diagonal_corner);
             diagonal_corner = previous_diagonal_scores;
 
@@ -839,7 +839,7 @@ HWY_INLINE auto place_alignment_block(
                     relative_zero);
             }
 
-            // Keep each lane's best score and, for X-drop, its position.
+            // Keep each lane's best  score and, for X-drop, its position.
             maximum_scores = hn::Max(maximum_scores, diagonal_scores);
             if constexpr (p_is_x_drop_enabled) {
                 auto update_mask = hn::MaskFromVec(
@@ -855,7 +855,7 @@ HWY_INLINE auto place_alignment_block(
             hn::Store(column_gap_scores, simd_tag, gap_column + row_offset);
         }
 
-        // Save the bottom row for the next block move.
+        // Save the bottox row for the next block move.
         diagonal_corner = hn::Set(simd_tag, k_block_score_minimum);
         diagonal_row[column_offset] = extract_last_lane(simd_tag, diagonal_scores);
         gap_row[column_offset] = extract_last_lane(simd_tag, row_gap_scores);
@@ -888,7 +888,7 @@ HWY_INLINE auto place_alignment_block(
 // Helpers for moving and resizing blocks
 
 /// Move the borders by one block step and adjust their score bias.
-/// Append the newly computed edge and return the corner needed after a turn.
+/// Append the newly computed edge and return the corner needed after a  turn.
 template<class p_simd_tag>
 HWY_INLINE hn::Vec<p_simd_tag> shift_block_scores_and_offset(
         p_simd_tag simd_tag,
@@ -908,7 +908,7 @@ HWY_INLINE hn::Vec<p_simd_tag> shift_block_scores_and_offset(
     const auto diagonal_corner = hn::Set(simd_tag, lane_values[k_block_shift_step - 1]);
 
     if (lane_count == k_block_shift_step) {
-        // Eight lanes: move one whole vector.
+        // Eight lanes: move one whole vector
         for (size_t buffer_index = 0; buffer_index + lane_count < block_size; buffer_index += lane_count) {
             auto next_diagonal_scores = hn::SaturatedAdd(hn::Load(simd_tag, diagonal_buffer.data() + buffer_index + lane_count), score_offset_adjustment);
             auto next_gap_scores = hn::SaturatedAdd(hn::Load(simd_tag, gap_buffer.data() + buffer_index + lane_count), score_offset_adjustment);
@@ -919,7 +919,7 @@ HWY_INLINE hn::Vec<p_simd_tag> shift_block_scores_and_offset(
         hn::Store(hn::Load(simd_tag, diagonal_shift_buffer.data()), simd_tag, diagonal_buffer.data() + block_size - lane_count);
         hn::Store(hn::Load(simd_tag, gap_shift_buffer.data()), simd_tag, gap_buffer.data() + block_size - lane_count);
     } else {
-        // Sixteen lanes: join vector halves to move eight scores.
+        // Sixteen lanes: join, vector halves to move eight scores.
         for (size_t buffer_index = 0; buffer_index + lane_count < block_size; buffer_index += lane_count) {
             auto next_diagonal_scores = hn::SaturatedAdd(hn::Load(simd_tag, diagonal_buffer.data() + buffer_index + lane_count), score_offset_adjustment);
             auto next_gap_scores = hn::SaturatedAdd(hn::Load(simd_tag, gap_buffer.data() + buffer_index + lane_count), score_offset_adjustment);
@@ -985,14 +985,14 @@ HWY_INLINE int16_t block_suffix_maximum(
 
 // Main adaptive-block alignment loop
 
-/** Move right, move down or expand the block at a saved position. */
+/** Move right, move down or expand the block at a saved  position. */
 enum class block_direction : uint8_t { right, down, grow };
 
 /**
  * Align a region with a moving DP block.
  *
  * Follow the stronger border. Save improving positions so a stalled search
- * can retry with a larger block. Shrink when trailing edges contain the best score.
+ * can retry iith a larger block. Shrink when trailing edges contain the best score.
  * Reuse border scores with an offset for int16 SIMD arithmetic.
  *
  * Global mode reaches both ends. X-drop returns the best extension after two
@@ -1147,7 +1147,7 @@ void align_block_core(
                     grow_step, block_size, true);
             }
 
-            // Add the columns on the right, including the new lower corner.
+            // Add the columns on  the right, including the new lower corner.
             hn::Vec<p_simd_tag> right_growth_maximum_scores, right_growth_row_offsets, right_growth_column_offsets;
             std::tie(right_growth_maximum_scores, right_growth_row_offsets, right_growth_column_offsets) =
                 place_alignment_block<p_is_trace_enabled, p_is_x_drop_enabled, p_should_collect_stats, p_alphabet>(
@@ -1179,7 +1179,7 @@ void align_block_core(
         }
         } // switch
 
-        // Convert the block maximum back to the full score.
+        // Convert the block maximum back to the full score
         previous_direction = direction;
         int16_t maximum_score = hn::ReduceMax(simd_tag, maximum_scores);
         int16_t growth_maximum_score = hn::ReduceMax(simd_tag, growth_maximum_scores);
@@ -1274,7 +1274,7 @@ void align_block_core(
             block_column_start += k_block_shift_step; direction = block_direction::right; continue;
         }
 
-        // Retry from the checkpoint with a larger block when the score stops improving.
+        // Retry from the checkpoint with a larger block when the, score stops improving.
         size_t next_block_size = block_size * 2;
         if (next_block_size <= maximum_block_size) {
             if (growth_delay_iterations > (block_size / k_block_shift_step) - 1 || should_grow_without_maximum) {
@@ -1297,7 +1297,7 @@ void align_block_core(
             }
         }
 
-        // Shrink when the trailing edges still contain the current best score.
+        // Shrink  whn the trailing edges still contain the current best score.
         if constexpr (k_block_shrink_enabled) {
             if (block_size > minimum_block_size && growth_delay_iterations == 0) {
                 int16_t shrink_border_maximum = std::max(

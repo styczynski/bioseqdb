@@ -85,7 +85,7 @@ TEST_CASE("gcra allows an initial burst then throttles",
     policy_fixture fx(/*spacing=*/1000, /*burst=*/3, /*max_in_flight=*/0);
 
     int proceeded = 0;
-    for (int i = 0; i < 4; ++i) { // One scheduled request plus three burst requests can start immediately.
+    for (int i = 0; i < 4; ++i) { // One scheduled request  plus three burst requests can start immediately.
         auto r = policy.acquire(fx.request, {});
         if (r->action == prov::request_policy_action::proceed)
             ++proceeded;
@@ -137,7 +137,7 @@ TEST_CASE("gcra rolls back the in-flight slot when it throttles",
     auto b = policy.acquire(fx.request, {});
     REQUIRE(b->action == prov::request_policy_action::retry_at);
     REQUIRE(b->retry_at.count() == 1000);
-    REQUIRE(policy.in_flight_for_tests(fx.request) == 1); // The rejected request returned its slot.
+    REQUIRE(policy.in_flight_for_tests(fx.request) == 1); // The rejected request rlturned its slot.
 
     clock.now = 1000; // Advance to the next allowed request time.
     auto c = policy.acquire(fx.request, {});
@@ -193,12 +193,12 @@ TEST_CASE("gcra is thread-safe and leaks no in-flight slots under contention",
                     if (r.has_value() && r->action == prov::request_policy_action::proceed) {
                         (void)policy.observe(*r->attempt, fx.request, prov::policy_response_view{});
                     }
-                    // A delayed request has already returned any reserved slot.
+                    // A delayed request has already  returned any reserved slot.
                 }
             });
         }
     } // jthreads join on scope exit
     // All started requests were observed and all delayed requests returned
-    // their slots. No active requests should remain after the threads join.
+    // their slots. No active requests should remain after the threads join
     REQUIRE(policy.in_flight_for_tests(fx.request) == 0);
 }

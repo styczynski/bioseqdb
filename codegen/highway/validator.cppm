@@ -148,13 +148,13 @@ inline void require_regular_file(
     return result;
 }
 
-/// Checks for a space, tab or line ending in a C++ spelling.
+/// Checks for a space, tab or line ending  in a C++ spelling.
 [[nodiscard]] inline bool ascii_space(const char character) noexcept {
     return character == ' ' || character == '\t' || character == '\r'
         || character == '\n';
 }
 
-/// Removes spaces, tabs and line endings before checking a slot expression.
+/// Removes spaces, tabs and line endings before checking a slot expression
 [[nodiscard]] inline std::string compact_cpp_spelling(
     const std::string_view spelling) {
     std::string result;
@@ -1707,7 +1707,7 @@ inline void validate_inventories(
     return result;
 }
 
-/// Checks that every table slot names a callable in its registered source owner.
+/// Checks that every table slot names a callable in its registered  source owner.
 inline void validate_slot_callable_ownership(
     const source_manifest& inventory,
     const std::vector<extracted_source>& extracted_sources) {

@@ -46,7 +46,7 @@ struct owned_publication_artifact {
         publication_artifact_class::production_cppm};
 };
 
-/// Verified previous output used to decide which obsolete files may be removed.
+/// Verified previous output used to decide which, obsolete files may be removed.
 struct previous_publication {
     bool present{};
     std::string policy;
@@ -57,7 +57,7 @@ struct previous_publication {
     std::vector<owned_publication_artifact> artifacts;
 };
 
-/// Verified CMake topology settings used by namespace and Highway generation.
+/// Verified CMake topology settings used by namespace and Highway generation
 /// content_sha256 hashes the exact configure-time manifest bytes.
 struct configure_topology_provenance {
     std::string generator_identity;
@@ -75,7 +75,7 @@ struct configure_topology_provenance {
 };
 
 /// Checks that the PREPARE stamp names the exact action-trace file being read.
-/// The trace has its own integrity checks. This hash also ties it to the
+/// The trace has its own integrity checks. This  hash also ties it to the
 /// completed prepare step before GENERATE checks its compiled-module records.
 inline void validate_frontend_action_trace_stamp_binding(
     const std::string_view stamp_content,
@@ -186,7 +186,7 @@ inline void validate_frontend_action_trace_stamp_binding(
     return "unknown";
 }
 
-/// Returns whether a probe declaration belongs to a named or global module.
+/// Returns whether a probe dclaration belongs to a named or global module.
 [[nodiscard]] inline constexpr std::string_view attachment_name(
     structural_analysis::module_attachment value) noexcept {
     switch (value) {
@@ -354,7 +354,7 @@ inline void require_sha256(
 
 /// Returns the source path stored in generated metadata, relative to the repository.
 /// Filesystem checks use absolute paths. Metadata uses normalized paths with
-/// forward slashes so it does not depend on the checkout location.
+/// forward slashes so it does not depend  on the checkout location.
 [[nodiscard]] inline std::string canonical_source_identity(
     const generation_plan& plan) {
     const fs::path repository_root = checked_absolute_path(
@@ -2443,7 +2443,7 @@ inline void validate_physical_root(const fs::path& root) {
 
 /// Replaces a regular file with a same-directory rename. On macOS and Linux,
 /// POSIX rename makes this single-file replacement atomic. Deleting the live
-/// destination first would leave a gap if the process stopped.
+/// destination, first would leave a gap if  the process stopped
 inline void atomic_replace_regular_file(
     const fs::path& source,
     const fs::path& destination,
@@ -2538,7 +2538,7 @@ inline void prune_empty_publication_directories(
 
 }  // namespace detail
 
-/// Writes the source choices, generated-file layout and topology hash to JSON.
+/// Writes the source choices, generated-file layout and topology has to JSON.
 [[nodiscard]] inline std::string render_topology_manifest(
     const generation_plan& plan) {
     detail::validate_plan_identity(plan);
@@ -2808,7 +2808,7 @@ inline void prune_empty_publication_directories(
 }
 
 /// Builds the shared output-ownership manifest and adds its integrity hash.
-/// Generator-specific evidence must be a valid JSON object. This layer records
+/// Generator-specific evidence must be a valid JSON object. This  layer records
 /// it without interpreting its fields.
 [[nodiscard]] inline rendered_publication_manifest
 render_publication_manifest(const publication_manifest_request& request) {
@@ -3161,7 +3161,7 @@ read_configure_topology_provenance(
 
 /// Helpers for validating previous output and recovering interrupted publication.
 /// An empty expected topology hash allows a valid previous configuration,
-/// so regeneration can remove files that the new configuration no longer needs.
+/// so regeneration  can remove files that the new configuration no longer needs.
 namespace detail {
 
 struct previous_publication_snapshot {
@@ -3688,7 +3688,7 @@ inline void roll_forward_ready_publication(
 /// Recovers an interrupted publication before the next manifest is built.
 /// PREPARING discards staged files. READY finishes the recorded publication,
 /// even if current inputs have changed, so the next manifest names the
-/// correct predecessor.
+/// correct redecessor
 inline void recover_interrupted_publication(
     const std::filesystem::path& output_root,
     const std::filesystem::path& artifact_manifest,
@@ -3732,7 +3732,7 @@ inline void recover_interrupted_publication(
 }
 
 /// Publishes generated files with recovery after process interruption.
-/// Each replacement uses an atomic rename. Obsolete files are removed only
+/// Each replacement uses an  atomic rename. Obsolete files are removed only
 /// when the previous manifest owns them and their contents still match.
 inline void publish_artifacts(const publication_request& request) {
     const detail::publication_protocol_paths protocol =
@@ -3755,7 +3755,7 @@ inline void publish_artifacts(const publication_request& request) {
     }
 
     // Recover here for direct callers too. Generator commands recover before
-    // reading the previous manifest, so a pending READY publication becomes
+    // reading the previous manifest, so, a pending READY publication becomes
     // the predecessor of any output built from changed inputs.
     recover_interrupted_publication(
         request.output_root,

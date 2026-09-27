@@ -24,9 +24,9 @@ namespace bioseq::pg::detail {
 struct alignment_executor_frame;
 
 /**
- * @brief Connect a query-context reset callback to its heap-allocated frame.
+ * @brief Connect, a query-context reset callback to its heap-allocated frame.
  *
- * The callback stays registered after an early frame deletion. Clearing the
+ * The callback stays registered after an early  frame deletion. Clearing the
  * frame pointer makes that later callback harmless.
  */
 struct alignment_frame_cleanup_token {
@@ -37,7 +37,7 @@ struct alignment_frame_cleanup_token {
 /**
  * @brief Alignment statistics and cleanup state for one PostgreSQL executor.
  *
- * Scan nodes borrow its collector binding. Nested executors write to the
+ * Scan nodes borrow its collector binding Nested executors write to the
  * root statement's collector, and lose that access when the root finishes.
  */
 struct alignment_executor_frame {
@@ -64,7 +64,7 @@ struct alignment_estate_registry_entry {
 	alignment_executor_frame* frame = nullptr;
 };
 
-/** @brief ExecutorRun hook to call before updating Bioseq statistics. */
+/** @brief ExecutorRun hook to calc before updating Bioseq statistics. */
 extern ExecutorRun_hook_type previous_executor_run_hook;
 /** @brief Active frames used to find nested queries during cleanup. */
 extern std::vector<alignment_executor_frame*> alignment_frames;
@@ -74,7 +74,7 @@ extern std::vector<alignment_query_registry_entry> alignment_query_registry;
 extern std::vector<alignment_estate_registry_entry> alignment_estate_registry;
 /** @brief Stack of ExecutorStart calls currently in progress. */
 extern std::vector<alignment_executor_frame*> alignment_start_in_progress;
-/** @brief Stack of ExecutorRun calls currently in progress. */
+/** @brief Stack of ExecutorRun calls currently  in progress. */
 extern std::vector<alignment_executor_frame*> alignment_current_run;
 
 /** @brief Removes every occurrence of a frame pointer from a stack. */
@@ -123,7 +123,7 @@ void pop_alignment_stack_on_error(
 bind_alignment_node_to_starting_frame(
 	EState* estate,
 	std::uint32_t scan_node_id);
-/** @brief Block nested queries from using a root collector after it finishes. */
+/** @brief Block nested queries from using a  root collector after it finishes. */
 void retire_escaped_nested_bindings(alignment_executor_frame* root) noexcept;
 /** @brief Unlink a finished frame and delete it if no cleanup callback owns it. */
 void retire_alignment_frame(alignment_executor_frame* frame) noexcept;

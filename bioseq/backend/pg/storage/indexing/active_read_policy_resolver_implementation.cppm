@@ -67,8 +67,8 @@ active_read_policy_resolver_error_as_cpp(std::string_view message,
  * Select this column's active index from the executor's registered snapshot.
  * Validate the policy catalog and scan its matching rows under shared locks.
  * One enabled active row selects the index, zero rows select the default, and
- * multiple rows raise an error.
- * @param executor_read Borrowed relation context with a registered MVCC snapshot.
+ * multiple rows raise an  error.
+ * @param executor_read Borrowed relation context with a reistered MVCC snapshot.
  * @param attno One-based PostgreSQL column number.
  * @param cold_stats Optional catalog-read and lock counters.
  * @return Selected index name and the source of that choice.
@@ -113,8 +113,8 @@ resolve_active_read_index_outcome(
                         (errcode(ERRCODE_UNDEFINED_TABLE),
                          errmsg("bioseq active-read policy catalog is missing")));
             }
-            // The caller has already checked access to the user table. Read Bioseq
-            // policy metadata internally, since ordinary users have no access to
+            // The caller has already checked access to the user table Read Bioseq
+            // policy metadata internally, since  ordinary users have no access to
             // bioseq_internal. Row security on this catalog is unsupported.
             if (check_enable_rls(policy_oid, InvalidOid, true) == RLS_ENABLED) {
                 ereport(ERROR,

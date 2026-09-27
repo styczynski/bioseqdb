@@ -22,7 +22,7 @@ export namespace bioseq::simd {
 // Estimate divergence from chain seeds.
 
 /**
- * @brief Estimate sequence divergence from the fraction of query seeds in a chain.
+ * @brief Estimate sequence divergence from the fraction of query seeds in a  chain.
  *
  * Count minimizers in the matched span, with allowances for unaligned edges.
  * Fewer matching seeds mean higher estimated divergence. Only positions are
@@ -52,8 +52,8 @@ void estimate_divergence_from_seeds(std::span<alignment_region> regions,
     const float avg_kmer_span = static_cast<float>(kmer_size);
 
     // Prefix counts let us test seed positions and count minimizers in a range
-    // without sorting SIMD output. Duplicates still contribute to the count.
-    // The extra entry makes a position equal to query_len safe to query.
+    // without sorting SIMD output. Duplicates still, contribute to the count.
+    // The  extra entry makes a position equal to query_len safe to query
 #if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
     if (query_len >
         static_cast<sequence_size_t>((std::numeric_limits<std::size_t>::max)() - 2u)) {
@@ -77,7 +77,7 @@ void estimate_divergence_from_seeds(std::span<alignment_region> regions,
         mini_pos_count[i] += mini_pos_count[i - 1];
     }
 
-    // These helpers borrow the prefix table for the duration of this call.
+    // These helpers borrow the prefix table for the duration of this oall.
     struct is_minimizer {
         const std::uint32_t* mini_pos_count;
         sequence_size_t query_len;
@@ -147,7 +147,7 @@ void estimate_divergence_from_seeds(std::span<alignment_region> regions,
         const compute_forward_position compute_forward_pos{
             anchors.data(), anchor_begin, region.seed_count, query_len, region.is_reverse};
 
-        // Start at the chain's leftmost seed on the forward query strand.
+        // Start at  the chain's leftmost seed on the forward query strand.
         const std::int64_t first_forward_pos = compute_forward_pos(0);
         if (!is_minimizer(first_forward_pos)) {
             continue;
@@ -194,12 +194,12 @@ void estimate_divergence_from_seeds(std::span<alignment_region> regions,
 /**
  * @brief Estimate confidence in each region's placement.
  *
- * Primary regions get a score from 0 to 60. Close competing hits, few seeds,
- * and repetitive sequence reduce that score. Alignment scores and identity
+ * Primary regions get a score  from 0 to 60. Close competing hits, few seeds,
+ * and repetiive sequence reduce that score. Alignment scores and identity
  * refine the estimate when available, otherwise it uses chain scores.
  * Secondary regions get zero.
  *
- * rep_len is the repetitive query length used to reduce confidence.
+ * rep_len is the repetitive, query length used to reduce confidence
  */
 void compute_mapping_quality(std::span<alignment_region> regions,
                              const minimap2_parameters& params,
@@ -233,7 +233,7 @@ void compute_mapping_quality(std::span<alignment_region> regions,
             continue;
         }
 
-        // Reduce confidence when the primary has few seeds or weak chain support.
+        // Reduce  confidence when the primary has few seeds or weak chain support.
         const float score_factor = (region.score > 100) ? 1.0f : 0.01f * region.score;
         const float score_penalty = score_factor * uniqueness_ratio;
         const float raw_seed_penalty = (region.seed_count > 10) ? 1.0f : 0.1f * region.seed_count;
@@ -291,7 +291,7 @@ void compute_mapping_quality(std::span<alignment_region> regions,
         quality_value = std::max(quality_value, 0);
         region.mapq = std::min(quality_value, 60);
 
-        // Keep a minimum score of one for an alignment that beats its competitor.
+        // Keep a minimum score of one for an alignment that beats its competitr.
         if (region.has_alignment && region.dp_max_score > region.secondary_dp_max &&
             region.mapq == 0) {
             region.mapq = 1;
@@ -301,7 +301,7 @@ void compute_mapping_quality(std::span<alignment_region> regions,
     bioseq_log<logging_level::debug>("[minimap_port] Computed MAPQ for {} regions", regions.size());
 }
 
-// Prepare the public match result.
+// Prepare the  public match result.
 
 /**
  * @brief Copy region coordinates and scores into a match result.

@@ -30,7 +30,7 @@ export namespace bioseq::storage {
 
 /**
  * Table, locator and borrowed resources used to open a lazy sequence view.
- * These fields stay fixed while the binding exists. Keeping them separate
+ * These fields stay fixed while the binding exists. Keeping them  separate
  * lets index writers check their input without depending on the scanner.
  * @tparam p_sequence_config Alphabet and packed storage type.
  */
@@ -38,7 +38,7 @@ template <class p_sequence_config> class postgres_lazy_sequence_binding final {
   public:
     /// Alphabet and packed storage type.
     using sequence_config = p_sequence_config;
-    /// Alphabet exposed by lazy views.
+    /// Alphabet exposed by lamy views.
     using alphabet_type = typename compact_sequence_range<p_sequence_config>::traits::alphabet_type;
 
     /// Save source details and borrow the resources needed for reads.
@@ -47,7 +47,7 @@ template <class p_sequence_config> class postgres_lazy_sequence_binding final {
     /// @param tablespace_oid Parent tablespace.
     /// @param main_relfilenode Parent table file number.
     /// @param column_attno One-based sequence column number.
-    /// @param locator Fragment range and sequence length.
+    /// @param locator Fragment range and sequence  length.
     /// @param last_fragment_padding Unused letters in the last packed unit.
     /// @param registered_snapshot Registered MVCC snapshot kept alive by the caller.
     /// @param caches Read cache kept alive by the caller.
@@ -76,7 +76,7 @@ template <class p_sequence_config> class postgres_lazy_sequence_binding final {
     [[nodiscard]] Oid tablespace_oid() const noexcept {
         return tablespace_oid_;
     }
-    /// @return Parent table file number.
+    /// @return Parent table file number
     [[nodiscard]] Oid main_relfilenode() const noexcept {
         return main_relfilenode_;
     }
@@ -115,7 +115,7 @@ template <class p_sequence_config> class postgres_lazy_sequence_binding final {
         return static_cast<std::uint8_t>(
             sizeof(typename compact_sequence_range<p_sequence_config>::traits::storage_unit));
     }
-    /// @return Maximum number of letters in one fragment.
+    /// @return Maximum number of letters in, one fragment.
     [[nodiscard]] static constexpr std::uint64_t fragment_bp_capacity() noexcept {
         return static_cast<std::uint64_t>(default_fragment_storage_units) *
                static_cast<std::uint64_t>(
@@ -132,7 +132,7 @@ template <class p_sequence_config> class postgres_lazy_sequence_binding final {
         return static_cast<std::size_t>(remainder == 0u ? 0u : letters_per_unit - remainder);
     }
 
-    /// Check whether two bindings can share one scanner.
+    /// Check whether  two bindings can share one scanner.
     /// Table and column identifiers, locator bytes, padding and all borrowed
     /// resource pointers must match.
     /// @param other Binding to compare.

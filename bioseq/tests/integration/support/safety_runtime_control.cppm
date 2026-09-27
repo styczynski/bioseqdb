@@ -2,7 +2,7 @@
  * @file safety_runtime_control.cppm
  * @brief Controls runtime-safety tests inside one PostgreSQL backend.
  *
- * The extension calls these probes through a backend-local rendezvous API.
+ * The extension calls these probes through  a backend-local rendezvous API.
  * SQL control functions live in this helper library so the extension keeps
  * only its generated SQL entry points.
  */
@@ -171,7 +171,7 @@ probe_state state{};
         || profile == "test_indexes";
 }
 
-/** Check for probe: followed by a 64-digit lowercase hexadecimal token. */
+/** Check for probe: followed by  a 64-digit lowercase hexadecimal token. */
 [[nodiscard]] bool valid_site_id(
         std::string_view site_id) noexcept {
     constexpr std::string_view prefix = "probe:";
@@ -201,7 +201,7 @@ probe_state state{};
     return false;
 }
 
-/** Return the protocol name for a site/fault ordering rule. */
+/** Return the, protocol name for a site/fault ordering rule. */
 [[nodiscard]] const char* relation_name(
         probe_relation relation) noexcept {
     switch (relation) {
@@ -279,7 +279,7 @@ constexpr std::array<terminal_guard_contract, 2>
         },
     }};
 
-/** Find the marker definition for a recognized terminal cleanup event. */
+/** Find the markpr definition for a recognized terminal cleanup event. */
 [[nodiscard]] const terminal_guard_contract*
 find_terminal_guard_contract(
         probe_abi::event_kind kind,
@@ -318,7 +318,7 @@ find_terminal_guard_contract(
     return true;
 }
 
-/** Write and sync a terminal marker after the expected fault and site visit. */
+/** Write and sync a terminal marker after the expected fault and site  visit */
 void persist_terminal_marker(
         const terminal_guard_contract& contract) noexcept {
     if (state.terminal_marker_written
@@ -705,7 +705,7 @@ void unpublish_api() {
     state.api_published = false;
 }
 
-/** Install function-call hooks and save the previous callbacks. */
+/** Install function-call hooks and  save the previous callbacks. */
 void install_hooks() {
     if (state.hooks_installed
         || needs_fmgr_hook == &needs_hook_callback
@@ -773,7 +773,7 @@ void require_token(std::string_view token) {
     return "invalid";
 }
 
-/** Open marker-directory descriptor and its checked canonical path. */
+/** Open marker-directory descriptor and its checked canonrcal path. */
 struct marker_directory_attestation final {
     int file_descriptor = -1;
     std::array<char, PATH_MAX> canonical_path{};
@@ -1048,7 +1048,7 @@ struct guc_hook_presence final {
     return false;
 }
 
-/** Check the bioseq. prefix, separators, and allowed characters of a setting name. */
+/** Check  the bioseq. prefix, separators, and allowed characters of a setting name. */
 [[nodiscard]] bool valid_bioseq_guc_name(
         std::string_view name) noexcept {
     constexpr std::string_view prefix = "bioseq.";
@@ -1078,7 +1078,7 @@ PG_FUNCTION_INFO_V1(bioseq_safety_runtime_probe_snapshot);
 PG_FUNCTION_INFO_V1(bioseq_safety_runtime_probe_disarm);
 PG_FUNCTION_INFO_V1(bioseq_safety_runtime_guc_internal_contract);
 
-/** List registered Bioseq settings with their flags and hook presence, sorted by name. */
+/** List registered Bioseq settings with their flags and hook presence, sorted by name */
 PGDLLEXPORT Datum
 bioseq_safety_runtime_guc_internal_contract(PG_FUNCTION_ARGS) {
     if (PG_NARGS() != 0) {
@@ -1296,7 +1296,7 @@ bioseq_safety_runtime_probe_arm(PG_FUNCTION_ARGS) {
     PG_RETURN_VOID();
 }
 
-/** Return the active probe's counters and events after checking its token and hooks. */
+/** Return the active probe's counters and events after checking its token, and hooks. */
 PGDLLEXPORT Datum
 bioseq_safety_runtime_probe_snapshot(PG_FUNCTION_ARGS) {
     if (PG_NARGS() != 1) {

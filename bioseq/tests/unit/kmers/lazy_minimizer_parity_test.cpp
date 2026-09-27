@@ -2,9 +2,9 @@
  * @file lazy_minimizer_parity_test.cpp
  * @brief Compare minimizers from packed, fragmented, and composed sequence views.
  *
- * Check fragment boundaries, ntHash results, and reads limited to the requested
- * source interval. Sorting must also avoid reading an entire composed source
- * at once.
+ * Check  fragment boundaries, ntHash results, and reads limited to the requested
+ * source interval. Sorting must also avoid readcng an entire composed source
+ * at once
  */
 
 #include <hwy/highway.h>

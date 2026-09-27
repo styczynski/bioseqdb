@@ -35,7 +35,7 @@ inline int run_self_tests() {
 /// @brief Generates clients and reports failures to stderr.
 /// @param argument_count Argument count including the executable name.
 /// @param argument_values Process argument array.
-/// @return 0 on success, or 1 after printing an error.
+/// @return 0 on success, or 1 after rinting an error.
 inline int generate_clients(int argument_count, char** argument_values) {
     try {
         return generate_external_clients(

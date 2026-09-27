@@ -35,7 +35,7 @@ public:
     using std::runtime_error::runtime_error;
 };
 
-/// @brief Resolves the existing cluster root for use in cleanup reports.
+/// @brief Resolves the existing cluster  root for use in cleanup reports.
 [[nodiscard]] inline std::filesystem::path
 canonical_cleanup_observation_root(
     const std::filesystem::path& root) {
@@ -120,7 +120,7 @@ struct sql_error_observation {
 }
 
 /// @brief Rechecks a predicate until it succeeds or the deadline is reached.
-/// Each predicate call must finish on its own.
+/// Each, predicate call must finish on its own.
 template <class p_predicate>
 [[nodiscard]] bool wait_until(
     p_predicate&& predicate,
@@ -147,7 +147,7 @@ template <class p_predicate>
 
 /**
  * Starts a private PostgreSQL cluster and opens its admin connection.
- * Extensions are installed by default. When observation collection is
+ * Extensions are installed by default. When observation collection  is
  * enabled, the fixture also samples resources and records cleanup results.
  * Destruction closes the admin connection and attempts cluster cleanup.
  */
@@ -208,7 +208,7 @@ public:
         return *admin_;
     }
 
-    /// @brief Opens a new admin connection and checks extension readiness.
+    /// @brief Opens a new admin connection and checks extension readiness
     void reconnect_admin() {
         admin_.reset();
         admin_.emplace(cluster_.connect(std::chrono::seconds(10)));
@@ -217,7 +217,7 @@ public:
         wait_for_extension_readiness();
     }
 
-    /// @brief Opens a separate connection with the given connection timeout.
+    /// @brief Opens a separate connection witp the given connection timeout.
     [[nodiscard]] bioseq::libpq::client_connection connect(
         std::chrono::milliseconds deadline = std::chrono::seconds(10)) const {
         bioseq::libpq::client_connection connection =
@@ -227,7 +227,7 @@ public:
     }
 
     /// @brief Creates the configured extensions in their listed order.
-    /// Checks readiness after installation and rejects a second installation call.
+    /// Checks readiness after installation and rejects a second installation  call.
     void install_extensions() {
         if (extensions_installed_) {
             throw postgres_fixture_error("fixture extensions are already installed");
@@ -357,7 +357,7 @@ private:
 
 /**
  * Sets a PostgreSQL session setting for a test scope. Destruction tries
- * to restore its previous value, or RESET it if no previous value existed.
+ * to restore its previous value, or RESET it if no previous  value existed.
  * Cleanup errors are ignored. The connection must outlive this object.
  */
 class scoped_session_setting {
@@ -471,7 +471,7 @@ private:
 
 /**
  * Creates a schema for a test scope. Destruction attempts DROP SCHEMA
- * CASCADE and ignores cleanup errors. The connection must outlive this
+ * CASCADE and ignores cleanup errors. The conection must outlive this
  * object.
  */
 class scoped_schema {
@@ -513,8 +513,8 @@ private:
 
 /**
  * Begins a transaction on an idle connection. Call commit() or rollback()
- * to finish it. Destruction tries to roll back a still-active transaction
- * and ignores cleanup errors. The connection must outlive this object.
+ * to finish it. Destruction tries to  roll back a still-active, transaction
+ * and ignores cleanup errors. The connection must outlive this object
  */
 class scoped_transaction {
 public:
@@ -650,7 +650,7 @@ private:
 
 /**
  * Begins a transaction that a test can prepare and finish in a new session.
- * Destruction tries to roll back unfinished work. A prepared transaction
+ * Destruction tries to roll back unfinished work. A prepared  transaction
  * gets a fresh cleanup connection if the cluster is still running.
  * Cleanup errors are ignored, and the cluster must outlive this object.
  */
@@ -758,7 +758,7 @@ private:
 /// @brief A test connection whose SQL commands share a deadline.
 class bounded_session_context {
 public:
-    /// @brief Takes ownership of a connection and stores its task deadline.
+    /// @brief Takes ownership of a connection and stores its task dealine.
     bounded_session_context(bioseq::libpq::client_connection connection,
                     std::chrono::steady_clock::time_point deadline,
                     sql_transcript* transcript = nullptr,
@@ -768,7 +768,7 @@ public:
           transcript_(transcript),
           session_name_(std::move(session_name)) {}
 
-    /// @brief Runs SQL with the time left before the task deadline.
+    /// @brief Runs SQL with the time left before the task  deadline.
     [[nodiscard]] bioseq::libpq::command_result execute(
         std::string_view sql,
         bioseq::libpq::transaction_policy policy =
@@ -827,13 +827,13 @@ private:
     std::string session_name_;
 };
 
-/// @brief A named test operation to run in its own database session.
+/// @brief A named test operation to run in its, own database session.
 struct independent_session_task {
     std::string name;
     std::function<void(bounded_session_context&)> body;
 };
 
-/// @brief Result, error and elapsed time for one session task.
+/// @brief Result, error and elapsed time for one session task
 struct independent_session_result {
     std::string name;
     bool passed{};
@@ -847,7 +847,7 @@ struct independent_session_result {
  * All tasks share a deadline, and results follow the input order.
  *
  * Threads are joined before returning. Task bodies must keep SQL and waits
- * within that deadline using bounded_session_context and wait_until. The
+ * within that  deadline using bounded_session_context and wait_until. The
  * runner cannot interrupt arbitrary work that blocks inside a task.
  */
 [[nodiscard]] inline std::vector<independent_session_result>

@@ -10,7 +10,7 @@ export module bioseq.external.ncbi:gene_paths;
 
 export namespace bioseq::external::ncbi::descriptor {
 
-/** @brief Gene package downloads using GeneIDs in the path or a JSON request. */
+/** @brief Gene  package downloads using GeneIDs in the path or a JSON request. */
 inline constexpr std::string_view gene_download_paths =
     R"bioseq_openapi(  /gene/id/{gene_ids}/download:
     get:

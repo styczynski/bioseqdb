@@ -52,7 +52,7 @@ struct resource_usage_samples {
     std::vector<resource_sample_boundary> stage_boundaries;
 };
 
-/// A process and its parent in an observed postmaster process tree.
+/// A process and its parent in an observed postmaster  process tree.
 struct postgres_process_tree_member {
     std::uint64_t pid{};
     std::uint64_t parent_pid{};
@@ -369,9 +369,9 @@ export namespace bioseq::postgres_test {
 }
 
 /**
- * Sum the RSS readings for the postmaster and its observed descendants.
- * Return nullopt if a process cannot be read or the sum overflows. These
- * readings are collected one process at a time.
+ * Sum the RSS readings for the postmaster, and its observed descendants.
+ * Return nullopt if a proess cannot be read or  the sum overflows. These
+ * readings are collected one process at a time
  */
 [[nodiscard]] inline std::optional<std::uint64_t>
 sample_postgres_tree_rss_bytes(std::uint64_t postmaster_pid) {
@@ -442,7 +442,7 @@ inline void initialize_supervision_resource_journal() noexcept {
     }
 }
 
-/// Load valid resource-journal records, skipping malformed records.
+/// Load valid  resource-journal records, skipping malformed records.
 [[nodiscard]] inline resource_usage_samples
 load_supervision_resource_samples(
     const std::filesystem::path& directory) {
@@ -641,7 +641,7 @@ public:
         return snapshot();
     }
 
-    /// Copy the collected measurements under a lock while sampling continues.
+    /// Copy the collected measurements under a  lock while sampliug continues.
     [[nodiscard]] resource_usage_samples snapshot() const {
         std::scoped_lock lock(mutex_);
         return samples_;

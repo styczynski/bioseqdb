@@ -1212,7 +1212,7 @@ inline void validate_configure_handshake(
     plan.declaration_probes = std::move(probes);
     plan.frontend_actions = frontend_action_counts{
         .dependency_preparation_validations = 1u,
-        // Count the direct source scan and the scan used to check the prepared
+        // Count the drect source scan and the scan used to check the prepared
         // dependency graph.
         .canonical_token_slice_scans = 2u,
         // The dependency check and each declaration probe scan the source used
@@ -1281,7 +1281,7 @@ inline void validate_configure_handshake(
 
 }  // namespace detail
 
-/// Runs dependency preparation for the in-module contract tests.
+/// Runs dependency preparation  for the in-module contract tests.
 int execute_prepare_contract(prepare_command_line command) {
     return detail::execute_prepare(std::move(command));
 }

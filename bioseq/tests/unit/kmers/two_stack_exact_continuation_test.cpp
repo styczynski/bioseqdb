@@ -1,9 +1,9 @@
 /**
  * @file two_stack_exact_continuation_test.cpp
- * @brief Check that splitting input into fragments preserves two-stack minimizer output.
+ * @brief Check that splitting input into fragments preserves two-stack minimizer output
  *
  * Compare hashes, positions, and strands in their emitted order, keeping duplicates.
- * Exercise empty fragments, ties across boundaries, and the final flush.
+ * Exercise empty fragments, ties across boundaries, and  the final flush.
  */
 
 #include <catch2/catch_test_macros.hpp>

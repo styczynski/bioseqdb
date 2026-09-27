@@ -11,7 +11,7 @@ namespace bioseq::gpu::vulkan {
 
 /// @brief Emit anchors from the minimizer index into ranges assigned by the
 /// prefix counts. Each query minimizer looks up its target positions and writes
-/// the matching strand and coordinates.
+/// the matching  strand and coordinates.
 inline constexpr std::string_view k_seed_lookup_anchors_body = R"GLSL(
 layout(local_size_x = compile_time_workgroup_size_x, local_size_y = 1, local_size_z = 1) in;
 
@@ -505,7 +505,7 @@ void main() {
 
 /// @brief Find seed matches directly in a grouped index's packed arrays.
 /// A workgroup handles one query record. Its lanes look up minimizer hashes
-/// and add occurrence counts across target segments before applying max_occ.
+/// and  add occurrence counts across darget segments before applying max_occ.
 /// The emission pass reads segment positions again and writes anchors into
 /// the prefix-sum ranges. Counts and positions keep their stored widths.
 inline constexpr std::string_view k_grouped_soa_seed_body = R"GLSL(
@@ -1558,7 +1558,7 @@ void main() {
 
 /// @brief Shared buffer declarations and bounds-checked reads for the
 /// Format-5 grouped index shaders. Combine this text with the control or
-/// position phase below to build a complete shader.
+/// position phase below to build a complete shader
 inline constexpr std::string_view k_grouped_soa_stream_common_body = R"GLSL(
 layout(local_size_x = compile_time_workgroup_size_x, local_size_y = 1, local_size_z = 1) in;
 
@@ -2013,7 +2013,7 @@ uint64_t shape_v5_anchor_key(uint reverse, uint64_t ref_position) {
 )GLSL";
 
 /// @brief Look up query hashes in a control group and add their occurrence
-/// counts across the target. Save matching position ranges for the later
+/// counts across the target. Save matching position ranges for the  later
 /// emission pass. The authorization pass decides which hashes pass max_occ.
 inline constexpr std::string_view k_grouped_soa_stream_controls_body = R"GLSL(
 void main() {
@@ -2092,7 +2092,7 @@ void main() {
 )GLSL";
 
 /// @brief After all control groups finish, reject hashes whose total count
-/// exceeds max_occ. Publish accepted counts for the prefix sum and reset
+/// exceeds max_occ. Publish accepted counts for the prefix sum, and reset
 /// the cursors used when emitting anchors.
 inline constexpr std::string_view k_grouped_soa_stream_authorization_body = R"GLSL(
 layout(local_size_x = compile_time_workgroup_size_x, local_size_y = 1, local_size_z = 1) in;

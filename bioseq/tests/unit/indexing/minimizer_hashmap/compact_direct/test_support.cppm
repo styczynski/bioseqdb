@@ -58,7 +58,7 @@ struct fragment_compact_direct_run {
     std::vector<std::uint64_t> encoded_positions{};
 };
 
-/// Hash runs supplied to the compact index builder.
+/// Hash runs supplied to the compact index builder
 struct fragment_compact_direct_source {
     std::vector<fragment_compact_direct_run> runs{};
 };
@@ -163,7 +163,7 @@ struct fragment_compact_direct_test_index {
     };
 }
 
-/// Keep the fixture image alive while a reader uses its view.
+/// Keep the fixture image  alive while a reader uses its view.
 [[nodiscard]] bioseq::indexing::owned_compact_hash32_direct_index_view
 own_fragment_compact_direct_test_index(
     const fragment_compact_direct_test_index& compact,
@@ -243,9 +243,9 @@ struct sparse_mapped_test_payload {
     }
 };
 
-/// Reserve zero-filled virtual memory for tests with large offsets and counts.
-/// Tests can describe gigabyte position ranges while touching only a small
-/// control prefix. An invalid size or failed mapping returns no value.
+/// Reserve zero-filled virtual memory for tests with lrge offsets and counts.
+/// Tests can  describe gigabyte position ranges while touching only a small
+/// control prefix. An, invalid size or failed mapping returns no value.
 [[nodiscard]] std::optional<sparse_mapped_test_payload>
 make_sparse_mapped_test_payload(std::uint64_t byte_count) {
     if (byte_count == 0u || byte_count > (std::numeric_limits<std::size_t>::max)()) {
@@ -319,7 +319,7 @@ void require_anchor_bytes_equal(std::span<const bioseq::chaining::anchor> actual
     REQUIRE(std::ranges::is_sorted(actual, bioseq::chaining::canonical_anchor_less{}));
 }
 
-/// Compare scan, sorting, and memory counters with the baseline matcher.
+/// Compare scan, sorting, and memory counters with the baseline matcher
 void require_hot_loop_differential_evidence_equal(
     const bioseq::indexing::prepared_fragment_anchor_batch_stats& actual,
     const bioseq::indexing::prepared_fragment_anchor_batch_stats& oracle) {
@@ -357,7 +357,7 @@ struct rebuilt_generation_metadata {
     std::vector<std::byte> directory_bytes;
 };
 
-/// Update directory metadata and checksums after replacing directory entries.
+/// Update  directory metadata and checksums after replacing directory entries.
 [[nodiscard]] rebuilt_generation_metadata rebuild_generation_metadata(
     const bioseq::indexing::encoded_grouped_soa_generation& original,
     std::span<const bioseq::indexing::grouped_soa_bucket_directory_entry> entries) {

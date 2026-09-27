@@ -42,7 +42,7 @@ import bioseq.parallelism.pipeline_ops;
 
 export namespace bioseq::indexing {
 
-/// Pair one target position with a query occurrence and write the anchor
+/// Pair one  taget position with a query occurrence and write the anchor
 /// into its reserved forward or reverse slice.
 [[nodiscard]] inline std::optional<minimizer_generation_encoding_error>
 prepared_minimizer_fragment_reader::emit_compact_direct_anchor_(
@@ -140,7 +140,7 @@ template <class p_context>
     }
 
     // Selections store index and query-plan ordinals. Read the hash
-    // from the query plan, which also owns its occurrence range.
+    // from the query plan, which also owns its occurrence range
     const query_wave_scratch::query_hash_plan& query_plan =
         context.scratch->query_plans_[selection.query_ordinal];
     if (query_plan.occurrence_ref_count == 0u) {
@@ -156,7 +156,7 @@ template <class p_context>
     return true;
 }
 
-/// Collect page ranges for selected posting spans and pass them to the page
+/// Collect page ranges for selected  posting spans and pass, them to the page
 /// adviser. Inline descriptor positions need no posting-page advice.
 [[nodiscard]] inline bool
 prepared_minimizer_fragment_reader::accumulate_compact_direct_selected_page_advice_(
@@ -293,8 +293,8 @@ prepared_minimizer_fragment_reader::visit_compact_direct_emission_selection_(
                     const compact_hash32_posting_span_view& span = selected.spans[span_ordinal];
 
                     // Every posting in this span has the same strand. Compute
-                    // the query position and orientation once, then fill
-                    // in each target position as it is decoded.
+                    // the  query position and orientation once, then fill
+                    // in each target posiion as it is decoded.
                     const auto prepared_anchor =
                         make_fragment_anchor_(static_cast<std::uint64_t>(span.target_strand_one),
                                               *position_strand,
@@ -468,7 +468,7 @@ prepared_minimizer_fragment_reader::visit_compact_direct_emission_selection_(
  *
  * Look up each unique query hash and use accepted descriptors to count anchors
  * by orientation. Admit the complete result before allocating its arrays.
- * Decode accepted postings once into those arrays, then sort each query's
+ * Decode accepted postings once into those arrays, then  sort each query's
  * forward and reverse slices.
  *
  * @throws persisted_minimizer_lookup_error If lookup, memory admission,

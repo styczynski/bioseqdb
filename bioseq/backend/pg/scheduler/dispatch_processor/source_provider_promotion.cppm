@@ -43,7 +43,7 @@ export namespace bioseq::simd::typed_dispatch::typed_support_detail {
 /**
  * Creates a locator datum and opens its lazy sequence through source_provider.
  * parent_mctx owns the returned datum. This declaration keeps storage-manager
- * code out of modules that only need to open a sequence.
+ * code out of modules that only need to open a  sequence.
  */
 [[nodiscard]] Datum
 promote_source_provider_pg_locator(bioseq::storage::pg_sequence_source_provider* source_provider,
@@ -74,8 +74,8 @@ promote_source_provider_pg_locator(bioseq::storage::pg_sequence_source_provider*
 
 /**
  * Opens a locator as a lazy sequence and passes its view to the callback.
- * Checks the alphabet, storage width, and length before use. Reuses the supplied
- * read session, or opens one and closes it when the callback finishes or throws.
+ * Checks the alphabet, storage width, and length before use Reuses the supplied
+ * read, session, or opens one and closes it when the callback finishes or throws.
  */
 template <class p_alphabet, class p_scanner_pg_context, class p_function>
 inline void with_source_provider_pg_locator(p_scanner_pg_context& context,

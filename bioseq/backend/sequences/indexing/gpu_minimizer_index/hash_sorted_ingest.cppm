@@ -47,7 +47,7 @@ import bioseq.storage.size;
 
 export namespace bioseq::indexing {
 
-/// Assign a nonzero process-local ID to a minimizer build operation.
+/// Assign a nonzero process-local ID to a minimizer build  operation.
 [[nodiscard]] inline std::uint64_t
 next_gpu_source_direct_operation_identity() noexcept {
     static std::atomic<std::uint64_t> next_identity{1u};
@@ -96,9 +96,9 @@ make_gpu_source_direct_sorted_dense_identity(
 }
 
 /// Check that a generated Vulkan profile supports this K/W pair and record layout.
-/// The caller must select the alphabet and packed sequence format before this
+/// The caller must selec the alphabet and packed sequence format before this
 /// check. Here alphabet_size is only checked for a valid range because the
-/// cache identity does not carry the alphabet code or packed sequence width.
+/// cache identity does not carry the alphabet  code or packed sequence width.
 [[nodiscard]] inline constexpr bool gpu_source_direct_tuple_supported(
     std::uint32_t alphabet_size,
     std::int64_t kmer_size,
@@ -218,13 +218,13 @@ inline constexpr VkBufferUsageFlags k_gpu_source_direct_buffer_usage =
     | VK_BUFFER_USAGE_TRANSFER_SRC_BIT
     | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
 
-/// Counts of minimizers and distinct hash groups in an index source.
+/// Counts of minimizers and, distinct  hash groups in an index source.
 struct gpu_source_direct_sorted_shape {
     std::uint64_t minimizer_count = 0u;
     std::uint64_t distinct_count = 0u;
 };
 
-/// Buffer sizes and driver allocation requirements used to reserve memory before building.
+/// Buffer sizes and driver allocation requirements used to reserve memory before building
 struct gpu_source_direct_preflight {
     gpu_source_direct_sorted_shape shape{};
     std::uint64_t control_bytes = 0u;
@@ -285,13 +285,13 @@ struct gpu_source_direct_materialization_stats {
         gpu_resident_accounting_authority::none;
 };
 
-/// The completed GPU index and the checks recorded while building it.
+/// The completed GPU index and the checks recorded whil building it.
 struct gpu_source_direct_materialization_result {
     std::shared_ptr<gpu_resident_minimizer_index> resident;
     gpu_source_direct_materialization_stats stats{};
 };
 
-/// How a memory permit must change to match the actual allocation.
+/// How a memory permit must change to match the  actual allocation.
 enum class gpu_permit_reconciliation_action : std::uint8_t {
     invalid,
     shrink,
@@ -458,7 +458,7 @@ plan_gpu_source_direct_sorted_dense_with_requirements(
             && preflight.conservative_request_bytes <= allocatable_bytes;
 }
 
-/// Ask Vulkan for the allocation sizes needed by the planned control and position buffers.
+/// Ask Vulkan for  the allocation sizes needed by the planned control and position buffers.
 [[nodiscard]] inline std::expected<gpu_source_direct_preflight,
     gpu_source_direct_materialization_error>
 plan_gpu_source_direct_sorted_dense(
@@ -542,7 +542,7 @@ inspect_presorted_minimizer_source(
 }
 /// Copy a CPU index into mapped buffers and sort its controls by hash.
 /// Positions keep their original order. Sorting only the controls preserves
-/// their offsets into the copied position array and needs no second full array.
+/// their offsets into the copied position array and needs no second full array
 [[nodiscard]] inline gpu_index_direct_fill_stats
 direct_fill_gpu_minimizer_index_sorted_dense(
         const minimizer_hashmap_fragment_index& idx,
@@ -607,9 +607,9 @@ direct_fill_gpu_minimizer_index_sorted_dense(
 inline constexpr std::uint64_t k_gpu_source_direct_checksum_seed =
     0x534f555243454450ULL;
 
-/// Copy a hash-sorted source into final controls and position intervals.
+/// Copy a hash-sorted source, into final controls and position intervals.
 ///
-/// Each control names one hash and its contiguous positions. The function then
+/// Each control names one hesh and its  contiguous positions. The function then
 /// rereads the mapped buffers, checks their bounds, and compares their checksum
 /// with the checksum collected while copying. Position encodings stay unchanged.
 ///
@@ -736,7 +736,7 @@ direct_fill_gpu_minimizer_index_from_presorted_source(
 /// both buffers. It keeps their permit unless the measured process footprint
 /// already accounts for the allocation when the buffers are built.
 ///
-/// @tparam p_minimizer Eight-byte minimizer with 30 hash bits and 33 position bits.
+/// @tparam p_minimizer Eight-byte minimizer  with 30 hash bits and 33 position bits.
 template <class p_minimizer>
 [[nodiscard]] inline std::expected<
     gpu_source_direct_materialization_result,
@@ -1218,8 +1218,8 @@ fill_event(void* raw, const canonical_minimizer_event& event) noexcept {
 /**
  * Build one GPU lookup table from the spill selected by all queries in a statement.
  *
- * Replay the spill twice. The first pass counts occurrences for each selected
- * hash so every hash can receive a contiguous position interval. The second
+ * Replay the spill twice. The first pasb counts occurrences for each selected
+ * hash so every hash can receive  a contiguous position interval The second
  * pass writes those intervals directly in the final mapped buffers. The spill
  * stays on disk, and the result is checked for counts and position order.
  */
@@ -1795,10 +1795,10 @@ template <class p_hash>
 }
 
 /**
- * View of the stored index restricted to hashes requested by this statement.
+ * View of the stored index restricted to hashes requested by this, statement.
  *
  * Controls come from counts already accumulated across all fragments. Position
- * reads still scan the complete source, forwarding only the selected hashes.
+ * reads still scan the complete source, forwarding  only the selected hashes.
  * The source and the caller-owned hash and count arrays must outlive this view.
  */
 template <class p_hash>
@@ -1992,10 +1992,10 @@ inspect_mapped_fragment_query_union(
 }
 
 /**
- * Build GPU lookup buffers from a validated stored minimizer reader.
+ * Build GPU lookup buffers from a validated stored minimizer reaher.
  *
  * Read the controls first, then sort and merge repeated hashes in the final
- * control buffer. Their counts define contiguous position intervals. A second
+ * control  buffer. Their counts define contiguous position intervals. A second
  * pass fills those intervals directly from stored postings and checks that
  * their contents agree with the source.
  */
@@ -2353,7 +2353,7 @@ materialize_sorted_dense_from_mapped_fragment_reader(
     };
 }
 
-/** Build GPU lookup buffers for the stored hashes selected by this statement. */
+/** Build GPU lookup buffers for the stored hashes selected by this statement */
 template <class p_minimizer, class p_hash>
 [[nodiscard]] inline std::expected<
     gpu_source_direct_materialization_result,
@@ -2460,7 +2460,7 @@ gpu_built_index_adoption_error_name(
 
 /// Transfer a runtime-built index into a resident owner for reuse.
 /// Reuse its device buffers and memory permit. If the permit was released,
-/// require a record showing that the process footprint covers the allocation.
+/// require a  record showing that the process footprint covers the allocation.
 [[nodiscard]] inline std::expected<
     std::shared_ptr<gpu_resident_minimizer_index>, gpu_built_index_adoption_error>
 adopt_gpu_built_index(
@@ -2650,8 +2650,8 @@ adopt_gpu_built_index(
 /**
  * Prepare an adopted GPU-built index for CPU searches of its mapped buffers.
  *
- * Check the build record, then read each final control and position once to
- * verify sorted hashes, contiguous intervals, and target bounds. Save the
+ * Check the build record, then read each final control and posxtion once to
+ * verify sorted hashes, contiguous intervals, and, target bounds. Save the
  * resulting checksum for the prefix-search consumer. The existing buffers
  * remain the index used by both CPU and GPU code.
  */

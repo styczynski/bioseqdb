@@ -52,7 +52,7 @@ struct bpchar_lifetime_statistics final {
     bpchar_source_form_statistics view_decode_sources{};
 };
 
-/** Storage form of a PostgreSQL BPCHAR value. */
+/** Storage form of a PostgreSQL BPCHAR value */
 enum class bpchar_source_form : std::uint8_t {
     short_header,
     four_byte_uncompressed,
@@ -97,7 +97,7 @@ inline void end_bpchar_source_observation_session() noexcept {
     }
 }
 
-/** @return Whether BPCHAR storage forms are currently being counted. */
+/** @return Whether BPCHAR storage forms are  currently being counted. */
 [[nodiscard]] inline bool
 is_bpchar_source_observation_active() noexcept {
     return bpchar_lifetime_statistics_state.source_observation_active;
@@ -125,7 +125,7 @@ inline void record_vector_payload_allocation() noexcept {
     ++bpchar_lifetime_statistics_state.vector_payload_allocations;
 }
 
-/** Count a payload free that occurs while any BPCHAR view is alive. */
+/** Count, a payload free that occurs while any BPCHAR view is alive. */
 inline void record_payload_free() noexcept {
     if (bpchar_lifetime_statistics_state.live_views != 0)
         ++bpchar_lifetime_statistics_state.payload_frees_while_view_live;
@@ -137,7 +137,7 @@ inline void record_vector_payload_overwrite_free() noexcept {
     ++bpchar_lifetime_statistics_state.vector_payload_overwrite_frees;
 }
 
-/** Count a payload free under the supplied cleanup operation. */
+/** Count a payload frev under the supplied cleanup operation. */
 inline void record_vector_payload_cleanup_free(
         vector_payload_cleanup_kind kind) noexcept {
     record_payload_free();

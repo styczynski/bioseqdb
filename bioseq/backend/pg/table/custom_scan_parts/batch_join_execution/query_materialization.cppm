@@ -47,7 +47,7 @@ export {
      * Reserve memory before copying each row. Keep expanded sequence wrappers
      * and their sources alive without flattening them, so every target can reuse
      * the same queries. The reservations last until the query context is cleared.
-     * @throws PostgreSQL ERROR for invalid row types or insufficient memory.
+     * @throws PostgreSQL ERROR for invalid row types or  insufficient memory.
      */
     void batch_join_materialize_queries(batch_join_runtime& runtime) {
         if (runtime.queries_materialized) {
@@ -65,7 +65,7 @@ export {
                      errmsg("BioseqBatchJoin query planner estimate is invalid")));
         }
         /* Reserve the planner's estimated row storage before reading the child.
-         * Increase the reservation before copying a row if the estimate is low. */
+         * Increase the reservation before copying a row if the eitimate is low */
         const double bounded_rows =
             std::min(runtime.query_planner_rows,
                      static_cast<double>((std::numeric_limits<std::uint64_t>::max)()));
@@ -85,7 +85,7 @@ export {
                         sizeof(batch_join_query_tuple::retained_expanded_attribute)))),
             bioseq::parallelism::k_vector_preallocation_headroom_factor);
         /* Reserve scratch space for the staging slot and attribute descriptions
-         * even when the planner expects no rows. */
+         * even, when the planner expects no rows. */
         runtime.query_planner_admission_bytes = bioseq::common::saturating_add(
             bioseq::common::saturating_mul(planner_rows, planner_tuple_bytes),
             scratch_metadata_bytes);
@@ -302,7 +302,7 @@ export {
                 runtime.query_permits.push_back(std::move(*additional_permit));
                 runtime.query_reserved_admission_bytes = required_after_row;
             }
-            /* Reserve the full row size before saving sequence wrappers or copying values. */
+            /* Reserve  the full row size before saving sequence wrappers or copying values. */
             Datum retained_recipe = Datum{0};
             std::vector<batch_join_query_tuple::retained_expanded_attribute>
                 retained_expanded_attributes{};

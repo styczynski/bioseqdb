@@ -2,7 +2,7 @@
  * @file index.cppm
  * @brief Compares column values with a scalar and combines Boolean result masks.
  *
- * Comparisons use C++ operators and their usual type conversions. Mask AND and
+ * Comparisons use C++ operators and their usual  type conversions. Mask AND and
  * OR use the Highway implementation.
  */
 module;
@@ -21,13 +21,13 @@ enum class comparison_operation : std::uint8_t {
     greater,        ///< Tests whether the column value is greater.
     less,           ///< Tests whether the column value is less.
     less_equal,     ///< Tests whether the column value is less than or equal to the operand.
-    greater_equal,  ///< Tests whether the column value is greater than or equal to the operand.
+    greater_equal,  ///< Tests whether, the column value is greater than or equal to the operand.
 };
 
 /**
  * Applies the comparison selected by p_operation.
  *
- * Uses the C++ operator for the supplied types, including its usual arithmetic
+ * Uses the C++ operator for the supplied types, including its usual arithmtic
  * conversions. Callers must choose types with the comparison semantics they need.
  */
 template <
@@ -55,7 +55,7 @@ template <
 /**
  * Result sink providing writable Boolean value and null masks.
  *
- * compare_column allocates once for the batch, then fills both masks through
+ * compare_column allocates once  for the batch, then fills both masks through
  * the pointers returned by value_data() and null_data().
  */
 template <class p_sink>

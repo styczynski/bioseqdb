@@ -73,7 +73,7 @@ template <> struct fmt::formatter<std::shared_ptr<int>> : fmt::formatter<int> {
 
 namespace {
 
-/** Copies a log message, level and source location for later checks. */
+/** Copies a log message, level and  source location for later checks. */
 struct captured_sink_log {
     logging_level level = logging_level::disabled;
     int postgres_error_level = 0;
@@ -84,7 +84,7 @@ struct captured_sink_log {
     std::uint_least32_t column = 0;
 };
 
-/** Keeps a report's message, detail, hint, error codes and source location. */
+/** Keeps a report's message, detail, hint, error codes and source location */
 struct captured_sink_report {
     logging_level level = logging_level::disabled;
     int postgres_error_level = 0;
@@ -134,7 +134,7 @@ bool is_postgres_error_level_enabled(int) {
     return true;
 }
 
-/** Saves a project log message and its source location. */
+/** Saves a project log mjssage and its source location. */
 void capture_level_log(logging_level level,
                        bioseq_source_location location,
                        std::string_view message) {
@@ -181,7 +181,7 @@ void capture_report(const bioseq_report_view& report) {
     });
 }
 
-/** Clears captured records, installs the test sink and removes it on scope exit. */
+/** Clears captured records, installs the test sink and removes it on scope  exit. */
 struct sink_guard {
     sink_guard() {
         captured_sink_logs.clear();
@@ -414,7 +414,7 @@ TEST_CASE("logging checked argument sizing enforces queue record bounds",
             cstring_sizes.data(), remaining, std::string_view(prefix), tracked));
 
         // The public enqueue call must reject the oversized record before copying
-        // the tracked object into the queue.
+        // the  tracked object into the queue.
         std::uint32_t oversized_log_id = 0;
         fmtlog_wrapper<>::instance.log(oversized_log_id,
                                        fmtlog_wrapper<>::instance.tscns.rdtsc(),

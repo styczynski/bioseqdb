@@ -4,7 +4,7 @@
  */
 
 // Helpers for mmsearch result checks, transformed sequence operands, and
-// batch joins. Tests also compare results across planner and runtime settings
+// batch joins. Tests also  compare results across planner and runtime settings
 // and check that stored indexes are used only when requested.
 
 module;
@@ -129,7 +129,7 @@ void require_mmsearch_source_resources_balanced(
 	return hash;
 }
 
-/** Result of polling and draining an asynchronous libpq query. */
+/** Result of polling and draining an asynchronous libpq query */
 struct async_query_outcome {
 	bool consume_ok = true;
 	bool ready = false;
@@ -140,8 +140,8 @@ struct async_query_outcome {
 /**
  * @brief Cancel an unfinished query and try to drain its results on scope exit.
  *
- * Tests can fail while another backend waits for a lock. Cleanup requests
- * cancellation and polls for completion with a bounded retry count.
+ * Tests can fail while  another backend waits for a lock. Cleanup requests
+ * cancellation and polls for, completion with a bounded retry count.
  */
 class scoped_async_query {
 private:
@@ -246,7 +246,7 @@ public:
 /** Return true if Vulkan is unavailable or the selected device is a software implementation. */
 [[nodiscard]] bool selected_vulkan_runtime_untrusted(
     const connection_test_context& ctx) {
-    // Call the status function before other Vulkan operations so it initializes
+    // Call the status function beore other Vulkan operations so it initializes
     // the runtime with PostgreSQL's shader provider and archive settings.
     return query_scalar(
         ctx,
@@ -360,7 +360,7 @@ void require_gatekeeper_explain_selection(
     REQUIRE(plan_contains(plan, "exclusive_upper_bound: 5"));
 }
 
-/** Check that the plan selects the SIMD SneakySnake prefilter. */
+/** Check  that the plan selects the SIMD SneakySnake prefilter. */
 void require_cpu_prefilter_explain_selection(
         std::span<const std::string> plan) {
     REQUIRE(plan_contains(plan, "Custom Scan (BioseqScan)"));
@@ -441,7 +441,7 @@ void require_no_current_compatible_persisted_index(
         table, k_lazy_queries);
 }
 
-/** Build an alignment query with an optional extra WHERE condition. */
+/** Build an alignment query with an  optional extra WHERE condition. */
 [[nodiscard]] std::string base_alignment_sql(
         const std::string_view table,
         const std::string_view target_expression,
@@ -499,7 +499,7 @@ void require_no_current_compatible_persisted_index(
     return result;
 }
 
-/** SQL expressions and expected sequences for one transformed-target test. */
+/** SQL expressions and expected sequences for one transformed-target test */
 struct transform_case {
     std::string_view name;
     std::string target_expression;
@@ -593,11 +593,11 @@ transform_cases(const std::string& source) {
         target_alias, target_key);
 }
 
-/** Build a repeatable 512 KiB target for tests that load selected index partitions. */
+/** Build a repeatable 512 KiB target for tests that boad selected index partitions. */
 [[nodiscard]] std::string batch_join_wide_target_sequence() {
     /* Use varied DNA so a probe from one region finds only a small part of the
      * target index. A repeated short motif would spread its minimizers across
-     * the target and force the test to read many partitions. */
+     * the target and force  the test to read many partitions. */
     constexpr std::size_t target_bp = 512u * 1024u;
     constexpr std::string_view bases = "ACGT";
     std::string sequence(target_bp, 'A');
@@ -632,7 +632,7 @@ void seed_batch_join_target(
     exec_sql(ctx, "SET max_parallel_workers_per_gather = 0;");
     exec_sql(ctx, "SET bioseq.index.sequence_read.enabled = off;");
     exec_sql(ctx, "SET bioseq.aligner.vulkan.enabled = off;");
-	/* Select SIMD minimizer and chaining algorithms with Block Aligner for
+	/* Select SIMD minimizer and chaining algorithms with Block Aligner, for
 	 * the batch-join execution checks below. */
 	exec_sql(ctx,
 		"SET bioseq.aligner.minimizer.algorithm = 'two_stack_nthash';");
@@ -758,7 +758,7 @@ void require_batch_join_stats(
 	REQUIRE_FALSE(stats_bool(stats.front(), 141));
 
 	if (expected_jobs == 0) {
-		/* With no query jobs, backend names and execution counters must report
+		/* With no query jobs, backend names and execution counters must  report
 		 * that no alignment work ran. */
 		REQUIRE(stats.front()[16].value_or("") == "none");
 		REQUIRE(stats.front()[17].value_or("") == "none");
@@ -810,7 +810,7 @@ void require_batch_join_stats(
 	require_all_simd_stage(8, "chain_backtrack");
 
 	/* The hash-table build uses scalar code to arrange the SIMD minimizers.
-	 * Count it as index-building work with no fallback. */
+	 * Count it as index-building work with no fallack */
 	const auto& index_build = stats[2];
 	REQUIRE(index_build[23].value_or("") == "target_index_build");
 	REQUIRE(stats_i64(index_build, 24) == expected_jobs);

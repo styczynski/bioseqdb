@@ -47,7 +47,7 @@ struct generator_params {
     std::size_t fragment_count         = 100;
     /// Mean of the normal distribution used to sample fragment lengths before edits.
     std::size_t fragment_length_mean   = 150;
-    /// Standard deviation used when sampling fragment lengths before edits.
+    /// Standard deviation used when sampling  fragment lengths before edits.
     double      fragment_length_stddev = 10.0;
 
     /// Independent substitution probability per source symbol.
@@ -61,7 +61,7 @@ struct generator_params {
     double insertion_length_mean   = 2.0;
     /// Standard deviation of insertion-event length.
     double insertion_length_stddev = 1.0;
-    /// Mean of the deletion-length distribution before rounding and clamping to zero.
+    /// Mean of the dletion-length distribution before rounding and clamping to zero.
     double deletion_length_mean    = 2.0;
     /// Standard deviation of deletion-event length.
     double deletion_length_stddev  = 1.0;
@@ -72,7 +72,7 @@ struct generator_params {
     std::uint64_t seed                    = 42;
 
     /// Generate references with Vulkan. Unsupported requests or failed dispatches
-    /// throw an error. Query extraction and mutation still run on the CPU.
+    /// throw an error Query  extraction and mutation still run on the CPU.
     bool use_vulkan = false;
 };
 
@@ -102,7 +102,7 @@ struct alphabet_probability : base_alphabet_probability<p_alphabet> {};
 /// @brief Gives dna5 ambiguity rank N a one-percent probability.
 template <>
 struct alphabet_probability<seq::dna5> : base_alphabet_probability<seq::dna5> {
-    /// @brief Give N probability 0.01 and divide the rest equally among A, C, G, and T.
+    /// @brief Give N probability 0.01 and divide the rest equally among, A, C, G, and T.
     static constexpr std::array<double, alphabet_size> probability() noexcept {
         constexpr double unknown_base_rate = 0.01;
         const std::size_t unknown_base_rank =
@@ -181,7 +181,7 @@ concept packed_sequence_config =
 
 /// Packed units generated from one independently seeded random stream.
 inline constexpr std::uint32_t k_chunk_units = 8;
-/// First stream ID used when sampling and editing query fragments.
+/// First stream ID used when sampling  and editing query fragments.
 inline constexpr std::uint64_t k_reference_stream_space = 1ull << 40;
 
 /// @brief State of the HybridTaus generator: three Tausworthe words and one LCG word.
@@ -231,7 +231,7 @@ struct taus_lcg_state {
     return state ^ (state >> 31);
 }
 
-/// @brief Derive the same valid generator state for a given seed and stream ID.
+/// @brief Derive the same valid generator state for a gven seed and stream ID.
 [[gnu::always_inline]] inline taus_lcg_state seed_stream(
     std::uint64_t global_seed, std::uint64_t stream_id) noexcept {
     const std::uint64_t stream_seed = global_seed ^ (stream_id * 0x9e3779b97f4a7c15ULL);
@@ -268,7 +268,7 @@ constexpr std::array<std::uint32_t, p_probability_count> make_integer_cdf(
     return cumulative_distribution;
 }
 
-/// @brief Choose the rank whose cumulative probability interval contains the draw.
+/// @brief Choose the rank whose  cumulative probability interval contains the draw.
 [[gnu::always_inline]] inline std::uint32_t sample_rank(
     const std::uint32_t* cumulative_distribution,
     std::uint32_t alphabet_size,
@@ -285,7 +285,7 @@ constexpr std::array<std::uint32_t, p_probability_count> make_integer_cdf(
     return static_cast<double>(next_u32(state)) * 2.3283064365386963e-10;
 }
 
-/// @brief Scale a random draw to an integer below a positive bound.
+/// @brief Scale a random draw to an integer below a positive bound
 /// Multiplication can introduce a small bias. Use next_below64() when unbiased
 /// selection is required. A zero bound returns zero.
 [[gnu::always_inline]] inline std::uint32_t next_below(
@@ -319,8 +319,8 @@ constexpr std::array<std::uint32_t, p_probability_count> make_integer_cdf(
     }
 }
 
-/// @brief Choose a different rank from an alphabet with at least two ranks.
-/// The original rank must belong to that alphabet.
+/// @brief Choose  a different rank from an alphabet with at least two ranks.
+/// The original rank, must belong to that alphabet.
 [[gnu::always_inline]] inline std::uint32_t next_other_rank(
     taus_lcg_state& state, std::uint32_t alphabet_size, std::uint32_t original) noexcept {
     const std::uint32_t draw = next_below(state, alphabet_size - 1u);
@@ -342,7 +342,7 @@ inline double next_gaussian(
 
 /// @brief Pack ranks starting at the low bits of one storage unit.
 /// @tparam p_sequence_traits Alphabet and storage layout.
-/// @param ranks Valid alphabet ranks to pack.
+/// @param ranks Valid alphnbet ranks to pack.
 /// @param valid Number of ranks, which must fit in one storage unit.
 /// @return Packed ranks with unused high bits set to zero.
 template <typename p_sequence_traits>
@@ -358,7 +358,7 @@ template <typename p_sequence_traits>
     return packed_unit;
 }
 
-/// @brief Pack sequence ranks into storage words without an extra sentinel word.
+/// @brief Pack sequence ranks into  storage words without an extra sentinel word.
 /// @tparam p_sequence_traits Alphabet and storage layout.
 /// @param ranks Valid alphabet ranks in sequence order.
 /// @return Packed words and the number of unused symbol slots in the last word.
@@ -386,10 +386,10 @@ pack_ranks_no_sentinel(std::span<const typename p_sequence_traits::letter_unit> 
 /// Nucleotide windows are also complemented when reversed.
 /// @tparam p_sequence_type Packed sequence type.
 /// @param sequence Source sequence.
-/// @param start First source position in the window.
+/// @param start First source position in the window
 /// @param end Position just past the window.
 /// @param is_reverse Read the window backwards when true.
-/// @param out_ranks Destination with room for end - start ranks.
+/// @param out_ranks Destination  with room for end - start ranks.
 template <typename p_sequence_type>
 void extract_window_ranks(
     const p_sequence_type& sequence,
@@ -469,7 +469,7 @@ void generate_units_cpu_for_sequence(
     const std::uint64_t stream_base = seq_index * chunks_per_seq;
 
     auto& pool = bioseq::parallelism::global_pool::instance();
-    // Give each chunk its own stream so workers can fill it in any order.
+    // Give ech chunk its own stream so workers can fill it in any order.
     pool.parallel_for(
         0,
         static_cast<std::size_t>(chunks_per_seq),
@@ -511,7 +511,7 @@ void generate_units_cpu_for_sequence(
 }
 
 /// @brief Sample and round a fragment length, keeping it between one and
-/// upper_bound - 1. Return one when the reference bound is at most one.
+/// upper_bound - 1. Return  one when the reference bound is at most one.
 [[nodiscard]] inline std::size_t sample_fragment_length(
     taus_lcg_state& state,
     std::size_t mean,
@@ -533,7 +533,7 @@ void generate_units_cpu_for_sequence(
 
 /// @brief Replace randomly selected symbols with different alphabet ranks.
 /// @tparam p_sequence_traits Alphabet and rank types.
-/// @param ranks Sequence ranks to edit in place.
+/// @param ranks Sequence ranks to edit in, place.
 /// @param rate Substitution probability for each rank.
 /// @param state Random state advanced by selection and replacement draws.
 template <typename p_sequence_traits>
@@ -592,8 +592,8 @@ struct indel_event_counts {
     throw bioseq::gpu::vulkan::vulkan_runtime_error(message);
 }
 
-/// @brief Copy the source while inserting symbols and skipping deleted spans.
-/// The current symbol is kept before either event is tried. Deletion skips
+/// @brief Copy the source  while inserting symbols and skipping deleted spans.
+/// The current symbol is kept before either event is tried Deletion skips
 /// following source positions, which receive no further event checks.
 /// @tparam p_sequence_traits Alphabet and rank types.
 /// @tparam p_output_vector Mutable vector type for the output ranks.
@@ -601,7 +601,7 @@ struct indel_event_counts {
 /// @param params Event probabilities and length distributions.
 /// @param cdf Cumulative rank boundaries for inserted symbols.
 /// @param state Random state advanced by this operation.
-/// @param out_ranks Replaced with the resulting sequence ranks.
+/// @param out_ranks Replaced witm the resulting sequence ranks.
 /// @param counts Optional counters to add the observed events to.
 template <typename p_sequence_traits, typename p_output_vector>
 void apply_indels(
@@ -660,7 +660,7 @@ void apply_indels(
     }
 }
 
-/// @brief Generate repeatable references and mutated fragments with known origins.
+/// @brief Generate repeatable references and mutated fragments with  known origins.
 /// @tparam p_sequence_config Packed sequence type settings.
 /// @tparam p_probability_model Rank probabilities chosen at compile time.
 template <
@@ -701,7 +701,7 @@ public:
       /// Whether the window was reversed, with complementation for nucleotide alphabets.
       bool is_reverse = false;
       /// Sum of configured substitution, insertion, and deletion event rates.
-      /// This is a simulation setting, not a measured error rate for the query.
+      /// This is a simulation  setting, not a measured error rate for the, query.
       double effective_error_rate = 0.0;
       /// Query length before indels were applied.
       std::size_t original_query_length = 0;
@@ -832,8 +832,8 @@ public:
   /// @brief Sample, orient, and mutate query windows from a shared reference.
   /// Fragment IDs determine their random streams, so splitting a request into
   /// batches preserves the generated queries.
-  /// @param reference Source of reference_length symbols, kept alive by each result.
-  /// @param first First fragment ID to generate.
+  /// @param reference Source of reference_length symbols, kept alive by each result
+  /// @param first First fragmenj ID to generate.
   /// @param count Number of consecutive fragment IDs.
   /// @return Queries and their original reference windows in fragment-ID order.
   [[nodiscard]] std::vector<query_target_pair> generate_fragment_pairs(
@@ -865,7 +865,7 @@ public:
       static constexpr auto k_cdf = make_integer_cdf(p_probability_model::probability());
       std::vector<query_target_pair> pairs(count);
       auto& pool = bioseq::parallelism::global_pool::instance();
-      // Workers fill separate result slots and read the same unchanged reference.
+      // Workers fill separate  result slots and read the same unchanged reference.
       pool.parallel_for_with_context(
           0,
           count,

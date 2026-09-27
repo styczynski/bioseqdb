@@ -108,7 +108,7 @@ export {
     /**
      * @brief Checks whether two mmsearch calls can share one scan's parameters.
      *
-     * The parameterized primary call must explicitly require an absent index and
+     * The parameterized primary call must explicitly require an  absent index and
      * leave every other option NULL. The extra constant-query call must use the
      * two-argument form. Both then use the same alignment settings, and the extra
      * call's default index policy permits the primary's choice to recompute.
@@ -194,7 +194,7 @@ export {
      * NULL fields keep the values already in @p params. The generated decoder checks
      * the SQL row layout, and algorithm selectors are checked before conversion.
      * @return True when the record explicitly sets the index-read requirement.
-     * @throws PostgreSQL ERROR for an invalid call, record layout or selector.
+     * @throws PostgreSQL ERROR for an  invalid call, record layout or selctor.
      */
     [[nodiscard]] bool
     apply_aligner_options_override(FuncExpr* mmsearch_fe,
@@ -402,7 +402,7 @@ export {
      *
      * SIMD minimap2 uses bounded_batch_approximate. Other supported chaining
      * algorithms use exact_visited, replacing any policy left in a copied parameter
-     * object. An unknown algorithm raises a PostgreSQL error.
+     * object An unknown algorithm raises a PostgreSQL error.
      */
     void finalize_simd_chaining_policy(bioseq::simd::minimap2_parameters& params) {
         using bioseq::simd::chaining_algorithm;

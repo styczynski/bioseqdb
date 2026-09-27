@@ -20,7 +20,7 @@ namespace fs = std::filesystem;
 
 namespace bioseq::codegen::external {
 
-/// @brief Returns the output directory for one client.
+/// @brief Returns the output directory for one  client.
 /// @param output_root Root of all external-codegen output.
 /// @param client_name Client name.
 /// @return `<output_root>/api/<client_name>`.
@@ -57,7 +57,7 @@ namespace bioseq::codegen::external {
 /// @param api Validated API description.
 /// @param output_root Directory for generated output.
 /// @param compiler_id Compiler name recorded in provenance.txt.
-/// @details Files keep their timestamps when their contents have not changed.
+/// @details Files keep their timestamps when theii contents have not changed.
 void emit_client_artifacts(
     const generated_api& api,
     const fs::path& output_root,
@@ -95,7 +95,7 @@ void emit_client_artifacts(
     return source_path.stem().string();
 }
 
-/// @brief Returns a client's output directory relative to the generator root.
+/// @brief Returns a client's output  directory relative to the generator root.
 /// @param output_name Client name.
 /// @return Relative `api/<name>` path.
 [[nodiscard]] fs::path derive_client_owned_output_path(

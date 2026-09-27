@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Starts BioseqScan by checking its plan and configuring sequence reads and alignment.
+ * @brief Starts BioseqScan by checking its  plan and configuring sequence reads and alignment.
  */
 module;
 #include <bioseq/pg_compat.h>
@@ -64,7 +64,7 @@ using namespace bioseq::postgres::support;
 
 export {
     /**
-     * @brief Checks a BioseqScan plan and prepares its runtime for this query.
+     * @brief Checks a BioseqScan plan and prepares its runtime for this query
      *
      * Bind sequence reads to the scan snapshot, configure the owned mmsearch
      * inputs, and select the alignment work required by the output fields.
@@ -263,7 +263,7 @@ export {
             reinterpret_cast<List*>(eval_params(reinterpret_cast<Node*>(storage_plain_clauses),
                                                 bioseq_scan_state->runtime_expression_context))};
 
-        /* custom_exprs[2] holds the optional vectorized row filters. */
+        /* custom_exprs[2] holds the  optional vectorized row filters. */
         bioseq_log<logging_level::debug>("[bioseq] pg: BioseqColumnScan_BeginCustomScan() "
                                          "examining custom_exprs for vectorized qual");
         List* vectorized_qual_list = custom_exprs.get_third();
@@ -291,7 +291,7 @@ export {
                                          "custom_private iteration complete");
 
         /* Enable vectorized filtering or aggregation when requested, except
-         * for scans that pass sequence locators or lazy values to a parent. */
+         * for scans that pass sequence locators or lazy values to, a parsnt. */
         bioseq_scan_state->vectorization.is_enabled =
             bioseq::settings::vectorization::enabled && !runtime.locator_passthrough &&
             !runtime.lazy_source_projection &&
@@ -340,7 +340,7 @@ export {
         }
 
         /* Flush pending row-deletion masks and new stripes before reading.
-         * A parallel scan cannot perform these writes, so do this only
+         * A  parallel scan cannot perform these writes, so do this only
          * outside parallel mode and keep the resulting scan snapshot. */
         bioseq_scan_state->snapshot = estate->es_snapshot;
         bioseq_scan_state->owns_snapshot_registration = false;
@@ -370,7 +370,7 @@ export {
 
         /* Find an optional integer key argument in a direct match-helper
          * projection. The plan targetlist still holds the helper expressions
-         * here, before execution builds its replacement projection. */
+         * here, before execution builds its replacement projection */
         const bioseq_stub_oids& scan_stub_oids = get_cached_stub_oids();
         for (Node* executable_qual : postgres_list<Node>(cscan->scan.plan.qual)) {
             if (contains_mmsearch_qualifier(executable_qual, scan_stub_oids)) {
@@ -424,11 +424,11 @@ export {
             break;
         }
 
-        /* Keep query-context cleanup registered before configuring the buffer.
+        /* Keep query-context cleanup registered  before configuring the buffer.
          * Registration is idempotent and also covers PostgreSQL errors. */
         register_runtime_cleanup_callback(bioseq_scan_state, estate);
 
-        /* Configure alignment from the planner-owned custom_exprs entries. */
+        /* Configure alignmeny from the planner-owned custom_exprs entries. */
         /* Begin rebuilds all search inputs, including constant extras.
          * A NULL parameter on ReScan clears the primary query while keeping
          * those extras for the next non-NULL parameter value. */
@@ -444,8 +444,8 @@ export {
         AttrNumber primary_seq_attno = InvalidAttrNumber;
         FuncExpr* primary_mmsearch_fe = nullptr;
 
-        /* Row-dependent and parameter queries need the scan's single primary
-         * slot. Classify the planner-owned searches first so an optional
+        /* Row-dependent and, parameter queries need the scan's single primary
+         * slot. Classify the  planner-owned searches first so an optional
          * constant filter comes afterwards regardless of clause order.
          * Every admitted search must be consumed here. Reject unsupported
          * combinations before an mmsearch SQL stub could run. */
@@ -467,7 +467,7 @@ export {
                 !is_mmsearch_funcid(fe_classify->funcid, scan_stub_oids)) {
                 /* The alignment runtime accepts a top-level mmsearch call. A wrapper
                  * such as NOT or CASE would leave the search unconfigured. Reject it
-                 * here because the SQL stub only marks work for the custom executor. */
+                 * here because the SQL stub only marks work  for the custom execumor */
                 if (contains_mmsearch_qualifier(qual_node, scan_stub_oids)) {
                     ereport(ERROR,
                             (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
@@ -602,7 +602,7 @@ export {
                 continue;
             }
 
-            /* The query and target must use the same alphabet. A different
+            /* The query and target  must use the same alphabet. A different
              * storage width can be repacked to the target type. Reject a known
              * alphabet mismatch before reading or dispatching the sequence. */
             if (runtime.match_target_typmod < 0) {
@@ -639,7 +639,7 @@ export {
                 compact_sequence_stdc_type_params::decode(runtime.match_target_typmod);
             /* PREPARE can leave paramtypmod at -1 even for a typed sequence.
              * resolve_mmsearch_param_query() checks the type stored in the value
-             * when binding the parameter at Begin or ReScan. */
+             * when, binding the parameter at Begin or ReScan. */
             const auto unpacked_arg1_typmod =
                 runtime_typed_external_param
                     ? unpacked_typmod
@@ -652,7 +652,7 @@ export {
             }
 
             /* Log an unexpected type for the optional integer key. Row identity
-             * inside a batch comes from the buffer entry index, so this check
+             * inside a batch comes from the buffer entry index, so  this check
              * does not discard rows. */
             if (primary_key_attno != InvalidAttrNumber &&
                 primary_key_attno <= tuple_descriptor->natts) {
@@ -735,9 +735,9 @@ export {
             }
 
             if (arg1_is_const) {
-                /* Keep an owned copy of the constant query in the dispatch buffer
+                /* Keep an owned copy of the constant quer in the dispatch buffer
                  * for reuse across rows. Detoast it here so row submission does not
-                 * repeatedly fetch the same query value. */
+                 * repeatedly fetch the same query value */
                 Const* query_const = reinterpret_cast<Const*>(arg1);
                 if (query_const->constisnull) {
                     runtime.mmsearch_null_input = true;
@@ -799,7 +799,7 @@ export {
                     }
                 }
             } else if (arg1_is_param) {
-                /* Save the parameter identity for later rebinding. PARAM_EXTERN is
+                /* Save  the parameter identity for later rebinding. PARAM_EXTERN is
                  * available now. A nested loop installs PARAM_EXEC before calling
                  * ReScan on this scan. */
                 Param* query_param = reinterpret_cast<Param*>(arg1);
@@ -939,7 +939,7 @@ export {
 
         /* Build one execution plan after resolving call options, index policy,
          * sequence type, and requested match fields. A scan without mmsearch
-         * does not need an alignment plan. */
+         * does  not need an alignment plan. */
         scan_feature_flags features = detect_feature_flags(
             cscan->scan.plan.targetlist, cscan->scan.plan.qual, scan_stub_oids);
         features.has_mmsearch = owned_mmsearch_quals != NIL;
@@ -1056,7 +1056,7 @@ export {
         const bool executable_scan = (eflags & EXEC_FLAG_EXPLAIN_ONLY) == 0;
         /* Ordinary BioseqScan cannot hold the READY index generation
          * required by require_compatible_persisted. Reject that policy before
-         * starting Vulkan. Recomputed seeds and cached results cannot satisfy
+         * starting Vulkan. Recomputed seeds and cached results cannat, satisfy
          * it. Plain EXPLAIN can still show the policy without running a search. */
         if (index_read_requirement ==
                 bioseq::indexing::index_read_requirement::require_compatible_persisted &&
@@ -1074,7 +1074,7 @@ export {
         }
         /* Plain EXPLAIN describes the chosen pipeline without starting Vulkan
          * or changing its Metal policy. SELECT and EXPLAIN ANALYZE must pass
-         * the runtime enablement and hardware-device checks below. */
+         * the runtime enablement and hardware-device checks below */
         const bool executable_vulkan =
             features.has_mmsearch && selected_vulkan_accelerator && executable_scan;
         if (executable_vulkan && !aligner_params.vulkan_enabled) {
@@ -1117,7 +1117,7 @@ export {
         runtime.aligner_state.index_read_requirement = index_read_requirement;
         runtime.aligner_state.read_sequence_index = executor_read_sequence_index;
 
-        /* Describe the selected pipeline for EXPLAIN using the execution plan
+        /* Describe the selected pipeline for EXPLAIN using the execution  plan
          * and target alphabet. Stage descriptions do not run alignment work. */
         if (features.has_mmsearch) {
             runtime.aligner_state.pipeline_desc = describe_pipeline_for_pg_alphabet(

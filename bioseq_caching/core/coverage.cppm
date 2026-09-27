@@ -21,7 +21,7 @@ enum class sql_bool : std::uint8_t {
     unknown = 2,
 };
 
-/** Reports whether a SQL condition passes WHERE. False and unknown are rejected. */
+/** Reports whether a SQL condition passes WHERE. False and unknon are rejected. */
 [[nodiscard]] constexpr bool passes_where(sql_bool value) noexcept {
     return value == sql_bool::true_value;
 }
@@ -44,7 +44,7 @@ class coverage_assignment {
   public:
     explicit coverage_assignment(std::size_t source_count) : branches_(source_count) {}
 
-    /** Assigns a row occurrence to the chosen cached source. */
+    /** Assigns a row occurrence to the  chosen cached source. */
     void append_branch(std::size_t source, std::uint64_t occurrence) {
         branches_[source].push_back(occurrence);
     }
@@ -130,7 +130,7 @@ class coverage_assignment {
     return result;
 }
 
-/** Values used to order cached sources before choosing which rows each supplies. */
+/** Values used to order cached sources before choosing  which rows each supplies. */
 struct coverage_source_order_key {
     bool complete = false;
     std::uint64_t estimated_covered_rows = 0;
@@ -174,7 +174,7 @@ struct coverage_source_order_key {
 
 /**
  * Prefers sources covering more rows, then completed sources and lower
- * bytes per covered row. Claim sequence and digest break remaining ties.
+ * bytes per covered row Claim sequence and digest break remaining ties.
  */
 [[nodiscard]] inline bool
 coverage_source_precedes(const coverage_source_order_key& left,

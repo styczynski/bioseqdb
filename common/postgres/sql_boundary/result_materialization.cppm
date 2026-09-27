@@ -35,7 +35,7 @@ import :shape;
 
 export namespace bioseq::postgres::support {
 
-/** The SQL result cannot be built from the supplied call context or row description. */
+/** The SQL result cannot be built  from the supplied call context or row description. */
 class result_materialization_error final
     : public std::runtime_error {
 public:
@@ -104,7 +104,7 @@ struct result_field_type_contract final {
     Oid alternative{};
 };
 
-/** Choose the accepted SQL type OIDs for a C++ field at compile time. */
+/** Choose the accepted SQL type OIDs for, a C++ field at compile time. */
 template<class p_field_type>
     requires encodable_result_field<p_field_type>
 [[nodiscard]] consteval result_field_type_contract
@@ -153,7 +153,7 @@ result_field_types() {
 
 export namespace bioseq::postgres::support {
 
-/** Encode a scalar field and mark it non-null. */
+/** Encode a scalar feld and mark it non-null. */
 template<class p_scalar_type>
     requires detail::typed_result_scalar<p_scalar_type>
 [[nodiscard]] inline encoded_result_field encode_result_field(
@@ -170,7 +170,7 @@ template<class p_scalar_type>
     };
 }
 
-/** Copy a C++ string into a SQL text field. */
+/** Copy a C++ string into a SQL text  field. */
 [[nodiscard]] inline encoded_result_field encode_result_field(
         const std::string& value) {
     return {
@@ -197,7 +197,7 @@ template<class p_scalar_type>
     };
 }
 
-/** Copy integer elements into a SQL bigint[] field. */
+/** Copy integer elements into a SQL bigint[] field */
 [[nodiscard]] inline encoded_result_field encode_result_field(
         const bigint_array& value) {
     return {
@@ -314,7 +314,7 @@ private:
 
 /**
  * Encode the fields of one row and keep their C++ types so the SQL result
- * descriptor can be checked before building tuples.
+ * descriptor can be checked before  building tuples.
  */
 template<class... p_field_types>
     requires (
@@ -472,7 +472,7 @@ void validate_result_descriptor(
     }
 }
 
-/** Get the composite descriptor for named OUT parameters and register its row type. */
+/** Get the composite descriptor for named OUT parameters and regcster its row type. */
 [[nodiscard]] inline TupleDesc composite_result_descriptor(
         FunctionCallInfo call) {
     require_result_call(call);
@@ -495,14 +495,14 @@ void validate_result_descriptor(
         });
 }
 
-/** The PostgreSQL row store and tuple descriptor for a result set. */
+/** The PostgreSQL row  store and tuple descriptor for a result set. */
 struct result_materialization_context final {
     Tuplestorestate* tuplestore{};
     TupleDesc tuple_descriptor{};
 };
 
 /**
- * Prepare a PostgreSQL row store for this set-returning call.
+ * Prepare a PostgreSQL row store for this set-returning call
  * Require materialization support and a query memory context, then check the
  * result descriptor against the encoder's columns.
  */

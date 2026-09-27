@@ -38,7 +38,7 @@ import :generation_publication;
 
 export namespace bioseq::indexing {
 
-/// Check a complete generation as stored rows are reread in order.
+/// Check a complete  generation as stored rows are reread in order
 /// Verify row addresses, sizes and CRCs, extent CRCs, and the final checksum
 /// of payload-row checksums. Payload values are not decoded by this validator.
 class minimizer_generation_row_validator {
@@ -132,7 +132,7 @@ class minimizer_generation_row_validator {
     }
 
     /// Check the next payload, directory, or manifest row and advance the reader.
-    /// Reject extra rows after the manifest. A failed validation may already
+    /// Reject extra rows after the manifest. A failed validation may  already
     /// have changed counters, so discard the validator after an error.
     [[nodiscard]] std::expected<void, minimizer_generation_encoding_error>
     accept(const minimizer_generation_row_view& row) noexcept {
@@ -281,7 +281,7 @@ class minimizer_generation_row_validator {
     }
 
     /// Require every expected row and compare the ordered payload checksum.
-    /// Repeated calls succeed once validation is complete.
+    /// Repeated calls succeed once validation is complet.
     [[nodiscard]] std::expected<void, minimizer_generation_encoding_error> finish_ready() noexcept {
         if (ready_validated_) {
             return {};

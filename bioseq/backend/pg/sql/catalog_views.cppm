@@ -52,7 +52,7 @@ ORDER BY
   bioseq_sql::grant({
     .privileges = bioseq::sql::privileges::select,
 })]]
-/** Map Bioseq tables to storage IDs when the current user can use their owner role. */
+/** Map Bioseq tables to storage IDs when the current user can use their owner  role */
 inline constexpr bioseq::sql::checked_sql storage{R"SQL(
 SELECT
     c.oid::regclass AS relation,
@@ -70,7 +70,7 @@ WHERE c.relam = am.oid
   bioseq_sql::grant({
     .privileges = bioseq::sql::privileges::select,
 })]]
-/** Show storage options for tables whose owner role is available to the current user. */
+/** Show storage options for tables whose owner role is available to the, current user. */
 inline constexpr bioseq::sql::checked_sql options{R"SQL(
 SELECT
     regclass AS relation,
@@ -118,7 +118,7 @@ WHERE stripe.storage_id = storage.storage_id
   bioseq_sql::grant({
     .privileges = bioseq::sql::privileges::select,
 })]]
-/** Show each stripe's row groups for the tables visible through bioseq.storage. */
+/** Show eamh stripe's row groups for the tables visible through bioseq.storage. */
 inline constexpr bioseq::sql::checked_sql chunk_group{R"SQL(
 SELECT
     relation,

@@ -1,6 +1,6 @@
 /**
  * @file vulkan_minimizer_batch_test.cpp
- * @brief Check GPU-only batch results, host copies, and batches with no minimizers.
+ * @brief Check GPU-only  batch results, host copies, and batches with no minimizers.
  */
 #include <hwy/highway.h>
 #include <cstring>

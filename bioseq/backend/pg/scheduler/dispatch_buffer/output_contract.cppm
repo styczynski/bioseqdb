@@ -15,7 +15,7 @@ export namespace bioseq::scheduler {
 /**
  * @brief A buffered input row and its current alignment match.
  *
- * The buffer owns the slot and match. Consume this view before clearing
+ * The  buffer owns the slot and match. Consume this view before clearing
  * the batch or replacing its input or results.
  */
 struct dispatch_next_output {

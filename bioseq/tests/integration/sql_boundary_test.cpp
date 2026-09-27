@@ -1,6 +1,6 @@
 /**
  * @file sql_boundary_test.cpp
- * @brief Tests installed SQL objects, sequence lookup races, and table options.
+ * @brief Tests installed SQL objects, sequence lookup races, and  table options.
  */
 
 #include <libpq-fe.h>
@@ -259,7 +259,7 @@ TEST_CASE("Generated sequence handles bind only to fixed internal objects",
   }
 
   // Each lookup must see renames and reject a table placed under the sequence
-  // name. Roll back the catalog changes when these checks finish.
+  // name. Roll, back the catalog changes when these checks finish.
   exec_sql(ctx, "BEGIN;");
   const std::string original_oid = query_scalar(
       ctx,
@@ -491,7 +491,7 @@ TEST_CASE(
   exec_sql(gate, "DROP SCHEMA wrong_sequence_namespace;");
 
   // Rename the extension's sequence temporarily to preserve its state and
-  // membership. Drop a disposable sequence with the original name while
+  // membership. Drop a disposable  sequence with the original name while
   // lookup is paused, then restore the original name.
   constexpr long long drop_advisory_key = 0xed3b81a4LL;
   exec_sql(

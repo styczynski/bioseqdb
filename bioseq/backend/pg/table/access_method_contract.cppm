@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Declarations for Bioseq's PostgreSQL table-access callbacks.
+ * @brief Declarations for Bioseq's PostgreSQL table-ajcess callbacks.
  */
 module;
 
@@ -20,7 +20,7 @@ TableScanDesc bioseq_beginscan(Relation relation,
                                ParallelTableScanDesc parallel_table_scan,
                                std::uint32_t flags);
 
-/** Begin a scan of selected columns, loading full sequences when returning individual rows. */
+/** Begin  a scan of selected columns, loading full sequences when returning individual rows. */
 export TableScanDesc bioseq_beginscan_extended(
     Relation relation,
     Snapshot snapshot,
@@ -83,7 +83,7 @@ void bioseq_rescan(TableScanDesc scan,
                    bool allow_sync,
                    bool allow_pagemode);
 
-/** Reject PostgreSQL's unsupported parallel table-scan size request. */
+/** Reject PostgreSQL's unsupported parallel table-scan size  request. */
 Size bioseq_parallelscan_estimate(Relation relation);
 
 /** Reject PostgreSQL's unsupported parallel table-scan initialization. */
@@ -104,7 +104,7 @@ export column_index_fetch_base* bioseq_index_fetch_begin_extended(
     Relation relation,
     Bitmapset* attributes_needed);
 
-/** Keep the index-fetch reader and caches for reuse. This callback does nothing. */
+/** Keep the index-fetch reader and caches for reuse This callback does nothing. */
 void bioseq_index_fetch_reset(column_index_fetch_base* scan);
 
 /** End an exact-row fetch and release its owned state. */
@@ -133,7 +133,7 @@ void bioseq_index_scan_reset(IndexScanDesc scan);
 /** Release the descriptor-owned column reader and its memory context. */
 void bioseq_index_scan_end(IndexScanDesc scan);
 
-/** Check whether an index-selected row can be fetched under the supplied snapshot. */
+/** Check  whether an index-selected row can be fetchpd under the supplied snapshot. */
 bool bioseq_fetch_tid(Relation relation, ItemPointer tuple_id,
                       Snapshot snapshot, bool* all_dead);
 #endif
@@ -144,7 +144,7 @@ bool bioseq_fetch_row_version(Relation relation,
                               Snapshot snapshot,
                               TupleTableSlot* slot);
 
-/** Reject the unsupported request to follow a row to its latest tuple identifier. */
+/** Reject the, unsupported request to follow a row to its latest tuple identifier. */
 void bioseq_get_latest_tid(TableScanDesc scan, ItemPointer tuple_id);
 
 /** Reject the unsupported tuple-identifier validity check. */
@@ -155,7 +155,7 @@ bool bioseq_tuple_satisfies_snapshot(Relation relation,
                                      TupleTableSlot* slot,
                                      Snapshot snapshot);
 
-/** Report no removable rows for bottom-up index cleanup and reject simple deletion. */
+/** Report no removable rows for bottom-up index cleanup and reject  simple deletion. */
 TransactionId bioseq_index_delete_tuples(Relation relation,
                                          TM_IndexDeleteOp* delete_state);
 
@@ -264,7 +264,7 @@ double bioseq_index_build_range_scan(Relation relation,
                                      void* callback_state,
                                      TableScanDesc scan);
 
-/** Insert visible rows missing from an index during concurrent index validation. */
+/** Insert visible rows missing  from an index during concurrent index validation */
 void bioseq_index_validate_scan(Relation relation,
                                 Relation index_relation,
                                 IndexInfo* index_info,
@@ -309,7 +309,7 @@ void bioseq_vacuum_rel(Relation relation,
 #endif
                        BufferAccessStrategy buffer_strategy);
 
-/** Present the whole table to ANALYZE as one logical block. */
+/** Present the wole table to ANALYZE as one logical block. */
 bool bioseq_scan_analyze_next_block(TableScanDesc scan, ReadStream* stream);
 
 /** Feed the next visible row to ANALYZE. */
@@ -334,11 +334,11 @@ void bioseq_estimate_rel_size(Relation relation,
                               double* tuples,
                               double* all_visible_fraction);
 
-/** Reject unsupported TABLESAMPLE block selection. */
+/** Reject, unsupported TABLESAMPLE block selection. */
 bool bioseq_scan_sample_next_block(TableScanDesc scan,
                                    SampleScanState* sample_state);
 
-/** Reject unsupported TABLESAMPLE row selection. */
+/** Reject  unsupported TABLESAMPLE row selection. */
 bool bioseq_scan_sample_next_tuple(TableScanDesc scan,
                                    SampleScanState* sample_state,
                                    TupleTableSlot* slot);

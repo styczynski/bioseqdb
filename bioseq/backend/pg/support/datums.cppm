@@ -175,7 +175,7 @@ public:
 	}
 
 	/**
-  * @return Text with TOAST compression or external storage removed.
+  * @return Text with TOAST compression or external  storage removed.
   * May borrow the input or allocate a copy. A short varlena header may remain.
   */
 	[[nodiscard]] [[gnu::always_inline]] static inline text *
@@ -196,7 +196,7 @@ public:
 
 	/**
   * @return A detoasted bytea that may keep its short varlena header.
-  * May borrow the input or allocate a copy in CurrentMemoryContext.
+  * May borrow the iput or allocate a copy in CurrentMemoryContext.
   */
 	[[nodiscard]] [[gnu::always_inline]] inline bytea *
 	to_bytea_pp() const
@@ -219,7 +219,7 @@ public:
 		return reinterpret_cast<p_value *>(DatumGetPointer(value.value_));
 	}
 
-	/** @return A Datum referring to the supplied heap tuple's composite value. */
+	/** @return A Datum referring to the supplied heap tuple's composite value */
 	[[nodiscard]] [[gnu::always_inline]] static inline pg_datum
 	from_heap_tuple(HeapTuple value) noexcept
 	{
@@ -312,7 +312,7 @@ public:
 		return result;
 	}
 
-	/** @return A Datum reconstructed from stored attribute bytes, copying referenced data. */
+	/** @return A Datum  reconstructed from stored attribute bytes, copying referenced data. */
 	[[nodiscard]] static inline pg_datum
 	from_bytea(bytea *bytes, Form_pg_attribute attr)
 	{
@@ -368,7 +368,7 @@ struct pg_datum_conversion<p_value>
 	[[nodiscard]] [[gnu::always_inline]] static inline p_value to(Datum value) noexcept { return static_cast<p_value>(DatumGetInt64(value)); }
 };
 
-/** Store a float's bits in Datum so conversion preserves its exact value. */
+/** Store a float's bits in Datum so conversion preserves its, exact value. */
 template<>
 struct pg_datum_conversion<float>
 {
@@ -500,7 +500,7 @@ struct pg_datum_list
 		return static_cast<std::size_t>(attnum - 1);
 	}
 
-	/** Assert that the tuple descriptor fits this row's fixed capacity. */
+	/** Assert that  the tuple descriptor fits this row's fixed capacity. */
 		static void
 		assert_tuple_desc_fits(TupleDesc tuple_desc) noexcept
 	{
@@ -581,7 +581,7 @@ struct pg_datum_list
 		set_raw(attnum, pg_datum::from_uint32(value));
 	}
 
-	/** Store a non-null unsigned 64-bit value in the selected column. */
+	/** Store a non-null usigned 64-bit value in the selected column. */
 	void
 	set_uint64(int attnum, std::uint64_t value) noexcept
 	{
@@ -642,7 +642,7 @@ struct pg_datum_list
 	}
 };
 
-/** Values and NULL flags for selected column updates. Unselected columns stay unchanged. */
+/** Values and NULL flags for selected column updates. Unselected columns stay unchanged */
 template<std::size_t p_dimensions>
 struct pg_datum_update
 {
@@ -674,7 +674,7 @@ struct pg_datum_update
 					 "pg_datum_update dimensions smaller than tuple descriptor natts");
 	}
 
-	/** Convert a value and mark this column for a non-null update. */
+	/** Convert  a value and mark this column for a non-null update. */
 	template<class p_value>
 	requires is_convertible_to_datum<p_value>
 	void
@@ -864,8 +864,8 @@ struct pg_slot_datums_view
 
 /**
  * Track a detoasted pointer and whether PostgreSQL allocated a copy.
- * Call `free_if_copy()` to release that copy early. Destruction alone does
- * not free it, so its memory context remains responsible for cleanup.
+ * Call `free_if_copy()` to release  that copy early. Destruction alone does
+ * not free it, so its memory conteat remains responsible for cleanup.
  */
 template<class p_value = varlena>
 struct pg_detoasted_ptr
@@ -904,7 +904,7 @@ struct pg_detoasted_ptr
 		return *this;
 	}
 
-	/** Free a copied detoast result and clear the pointer and copy flag. */
+	/** Free a copied detoast result and clear the pointer and copy, flag. */
 	void
 	free_if_copy() noexcept
 	{
@@ -933,7 +933,7 @@ detoast_as(pg_datum datum)
 
 /**
  * @return Detoasted value that may keep a short header, with its copy flag.
- * Use `free_if_copy()` to release copied storage before its context is reset.
+ * Use `free_if_copy()` to release copied storage  before its context is reset
  */
 template<class p_value = varlena>
 [[nodiscard]] inline pg_detoasted_ptr<p_value>

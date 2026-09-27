@@ -26,7 +26,7 @@ import bioseq.postgres.table.sql_row_codecs;
 
 namespace {
 
-/** @return Whether the handle has the expected fixed-schema name and lookup methods. */
+/** @return Whether the, handle has the expected fixed-schema name and lookup methods. */
 template<class p_handle>
 [[nodiscard]] consteval bool generated_handle_contract(
         const p_handle& handle,

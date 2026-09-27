@@ -18,7 +18,7 @@ import bioseq.sequences;
 
 export namespace bioseq::simd {
 
-/** @brief Builds scalar rolling k-mer codes using an alphabet's rank order. */
+/** @brief Builds scalar rollin k-mer codes using an alphabet's rank order. */
 template <sequence_alphabet p_alphabet> struct lexic_hasher {
     /**
      * @brief Maintains forward and reverse-complement packed k-mer states.
@@ -53,7 +53,7 @@ template <sequence_alphabet p_alphabet> struct lexic_hasher {
         constexpr typename traits::hasher_return_type next(typename traits::input_type incoming,
                                                            typename traits::input_type outgoing) {
             forward_state_ = (forward_state_ << traits::bits_per_char | incoming) & mask_;
-            // Convert to the full word type before shifting. A DNA5 k-mer can
+            // Convert  to the full word type before shifting. A DNA5 k-mer can
             // need a shift larger than the promoted int type permits.
             reverse_complement_state_ =
                 (reverse_complement_state_ >> traits::bits_per_char) |
@@ -71,7 +71,7 @@ template <sequence_alphabet p_alphabet> struct lexic_hasher {
 
     /**
      * @brief Returns the selected k-mer code unchanged.
-     * kmer_mask is accepted to match the integer hasher's interface.
+     * kmer_mask is accepted to match the integer hasher's interface
      */
     template <typename p_input_type>
     [[nodiscard]] static constexpr p_input_type

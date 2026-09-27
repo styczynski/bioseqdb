@@ -34,7 +34,7 @@ export {
         FuncExpr* helper,
         AttrNumber resno) noexcept;
 
-    /** @brief Records helpers that name this scan's target or its single base source. */
+    /** @brief Records helpers that name this scan's target or its single base  source. */
     struct base_match_helper_registration_visitor {
         /** @brief Checks a helper call and records its output position and target argument. */
         [[nodiscard]] pg_walk_step operator()(pg_expression_walk_cursor,

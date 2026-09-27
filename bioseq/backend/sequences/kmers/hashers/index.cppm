@@ -1,6 +1,6 @@
 /**
  * @file index.cppm
- * @brief Exports the scalar lexicographic and minimap2 integer hashers together.
+ * @brief Exports the scalar lexicographic,  and minimap2 integer hashers together.
  * Also exports their shared alphabet and strand helpers.
  */
 export module bioseq.sequences.kmers.hashers;

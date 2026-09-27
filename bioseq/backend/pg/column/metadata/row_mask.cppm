@@ -34,9 +34,9 @@ import :core;
 
 /**
  * @brief Create empty deletion masks for a newly written stripe.
- * @param[in] storage_id Persistent storage identifier.
- * @param[in] stripe_id Stripe identifier within this storage.
- * @param[in] stripe_start_row_number First logical row number in the stripe.
+ * @param[in] storage_id Persistent storage identifier
+ * @param[in] stripe_id Stripe identifier  within this storage.
+ * @param[in] stripe_start_row_number First logical row numbed in the stripe.
  * @param[in] chunk_group_row_counts PostgreSQL integer list of chunk-group sizes.
  * @return true if every mask was inserted, or false after an insertion error.
  */
@@ -137,8 +137,8 @@ export bool save_empty_row_mask(uint64_t storage_id,
  * @param[in] stripe Stripe identifier.
  * @param[in] tuple_descriptor Table column definitions.
  * @param[in] chunk_count Number of chunk groups in the stripe.
- * @param[in] snapshot Snapshot used to read the catalog.
- * @return Skip metadata and its arrays in the current PostgreSQL memory context.
+ * @param[in] snapshot Snapshot  used to read the catalog.
+ * @return Skip metadata and, its arrays in the current PostgreSQL memory context.
  * @note A missing minimum or maximum disables min/max filtering for that chunk.
  */
 export stripe_skip_list* read_stripe_skip_list(RelFileLocator relfilelocator,
@@ -347,7 +347,7 @@ export bytea* read_chunk_row_mask(RelFileLocator relfilelocator,
 
 /**
  * @brief Save a cached mask and deleted-row count in the catalog.
- * @param[in] row_mask_entry Entry whose id identifies the row to update.
+ * @param[in] row_mask_entry Entry  whose id identifies the row to update
  * @note Missing rows are ignored.
  */
 export void

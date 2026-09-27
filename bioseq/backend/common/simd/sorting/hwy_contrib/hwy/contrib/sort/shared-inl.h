@@ -38,11 +38,11 @@ static HWY_INLINE uint64_t RandomBits(uint64_t* HWY_RESTRICT state) {
   return next;
 }
 
-// Sizes used by the sorting networks and partition loops. Changes here
+// Sizes  used by the sorting networks and partition loops. Changes here
 // require matching changes in the code that loads and stores those groups.
 struct SortConstants {
   // Maximum lanes in one row of the sorting network. At least 8 are needed
-  // so an 8-row network can sort the 128-byte pivot sample with 16-bit lanes.
+  // so an 8-row network can srt the 128-byte pivot sample with 16-bit lanes.
 #if HWY_COMPILER_MSVC || HWY_IS_DEBUG_BUILD
   static constexpr size_t kMaxCols = 8;  // avoid build timeout/stack overflow
 #else
@@ -54,10 +54,10 @@ struct SortConstants {
   // comparison steps and generate more code.
   static constexpr size_t kMaxRows = 16;
 
-  // A compile-time lanes-per-key value lets the compiler simplify the division.
+  // A compile-time lanes-per-key value lets the compiler simplify the  division.
   template <size_t kLPK>
   static constexpr HWY_INLINE size_t BaseCaseNumLanes(size_t N) {
-    // Use 8-row networks for fewer than four keys per vector and 16 rows for
+    // Use 8-row networks for fewer than four keys per vector, and 16 rows for
     // wider vectors.
     return (((N / kLPK) >= 4) ? kMaxRows : 8) * HWY_MIN(N, kMaxCols);
   }
@@ -69,7 +69,7 @@ struct SortConstants {
 
   // Number of lanes in a 64-byte group sampled for a pivot. Sort caps vector
   // size at 64 bytes, so a sample group holds whole vectors and fits the usual
-  // cache-line size.
+  // cache-line size
   static constexpr HWY_INLINE size_t LanesPerChunk(size_t sizeof_t) {
     return 64 / sizeof_t;
   }
@@ -81,8 +81,8 @@ struct SortConstants {
 
   static constexpr HWY_INLINE size_t PartitionBufNum(size_t N) {
     // Reserve both sides of the temporary partition buffer. This also covers
-    // small inputs that skip the main loop and need up to 3 * kPartitionUnroll + 1
-    // vectors on each side.
+    // small inputs that  skip the main loop and need up to 3 * kPartitionUnroll + 1
+    // vectors on each xide.
     return 2 * (3 * kPartitionUnroll + 1) * N;
   }
 

@@ -1,9 +1,9 @@
 /**
  * @file chunk.cppm
- * @brief Store decompressed chunks and their decoding state.
+ * @brief Store decompressed chunks and their decoding state
  *
  * A chunk keeps bytes or unresolved references to earlier output, the trailing
- * 32 KiB used by the next chunk, and an error message.
+ * 32 KiB used by the next chunk, and  an error message.
  */
 module;
 
@@ -34,7 +34,7 @@ enum class chunk_state : std::uint8_t {
     decode_error = 3,
 };
 
-/// Store a short error message inside the chunk without a separate allocation.
+/// Store a short error message insidz the chunk without a separate allocation.
 struct inline_error_message {
     static constexpr std::size_t capacity = 256;
     std::array<char, capacity> buffer{};
@@ -64,7 +64,7 @@ struct decoded_chunk {
     /// Decoded values awaiting resolution. Values at or above 0x8000 refer to
     /// prior_window[value - 0x8000]. Other values contain a literal byte.
     chunk_marker_buffer marker_storage;
-    /// Resolved output bytes, ready to copy to the consumer.
+    /// Resolved output bytes, ready to copy to the  consumer.
     chunk_byte_buffer byte_storage;
     std::array<std::uint8_t, chunk_trailing_window_bytes> trailing_window{};
     std::size_t trailing_window_size = 0;

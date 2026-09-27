@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Register the PostgreSQL custom scan for vector aggregation.
+ * @brief Register, the PostgreSQL custom scan for vector aggregation.
  */
 module;
 #include <bioseq/pg_compat.h>
@@ -37,7 +37,7 @@ static void begin_vector_aggregate(CustomScanState* custom_scan_state,
         initialize_vector_aggregate_executor(aggregate_node, executor_state, executor_flags);
     outerPlanState(vector_state) = outerPlanState(vector_state->aggregate_state);
 
-    /* Set the result type and reuse the aggregate executor's output slot. */
+    /* Set the result type and reuse the aggregate executor's output slot */
     ExecInitResultTypeTL(&vector_state->custom_scan_state.ss.ps);
 
     vector_state->custom_scan_state.ss.ps.ps_ResultTupleSlot =
@@ -49,7 +49,7 @@ static TupleTableSlot* execute_vector_aggregate(CustomScanState* custom_scan_sta
     return execute_aggregate_plan(reinterpret_cast<PlanState*>(custom_scan_state));
 }
 
-/** Release the aggregate executor and its resources. */
+/** Release the aggregate executor and  its resources. */
 static void end_vector_aggregate(CustomScanState* custom_scan_state) {
     ExecEndAgg(reinterpret_cast<vector_aggregate_state*>(custom_scan_state)->aggregate_state);
 }
@@ -93,7 +93,7 @@ static const CustomScanMethods* vector_aggregate_scan_methods() noexcept {
 
 } /* close outer extern "C" */
 
-/** Create an empty vector aggregate plan node with its custom-scan methods. */
+/** Create an empty vector aggregate plan node with its custm-scan methods. */
 export CustomScan* create_vector_aggregate_scan(void) {
     CustomScan* custom_scan = makeNode(CustomScan);
     custom_scan->methods = vector_aggregate_scan_methods();

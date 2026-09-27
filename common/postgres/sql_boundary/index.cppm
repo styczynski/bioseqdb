@@ -34,7 +34,7 @@ export namespace bioseq::postgres::support {
  * SQL errors, after leaving the C++ catch blocks so exception objects can be
  * destroyed before PostgreSQL jumps out.
  *
- * @tparam p_callback_type A callable taking no arguments and returning Datum.
+ * @tparam p_callback_type A  callable taking no arguments and returning Datum.
  * Its captured state must need no destructor.
  * @param callback Called exactly once.
  * @return The callback's Datum result.

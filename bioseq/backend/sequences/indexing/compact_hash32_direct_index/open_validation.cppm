@@ -10,7 +10,7 @@ import :wire_format;
 export namespace bioseq::indexing {
 
 /// Open a compact hash32 index by checking only its 256-byte header.
-/// Verify the identity, checksums of the header, and section bounds without
+/// Verify  the identity, checksums of the header, and section bounds wxthout
 /// reading the potentially large payload. Full payload checks belong to
 /// validate_compact_hash32_direct_index().
 ///
@@ -147,7 +147,7 @@ open_compact_hash32_direct_index_bounded(std::shared_ptr<const void> mapped_owne
     header.materialized_posting_count =
         header.accepted_posting_count - header.inline_singleton_count;
 
-    // Check section bounds before calculating the expected layout. These are
+    // Check section bounds before  calculating the expected layout. These are
     // offset calculations only, so the payload stays unread.
     const std::array sections{
         std::pair{header.membership_offset, header.membership_bytes},
@@ -219,11 +219,11 @@ open_compact_hash32_direct_index_bounded(std::shared_ptr<const void> mapped_owne
 
 /// Check the complete compact hash32 index, including all stored positions.
 /// Verify section sizes and CRCs, zero padding, membership counts, and each
-/// hash's posting list. Positions must stay within the target and never decrease
+/// hash's posting list Positions must stay within the target, and never decrease
 /// within each strand. Equal positions are allowed.
 ///
 /// @param image Complete image, kept alive and unchanged while the view is used.
-/// @param expected_identity Required generation and source identity.
+/// @param expected_identity Required generation and source  identity.
 /// @param expected_max_occ_cap Required occurrence limit used when building.
 /// @param expected_geometry Required hash domain.
 /// @return A view borrowing image, or the first validation error.
@@ -363,7 +363,7 @@ validate_compact_hash32_direct_index(std::span<const std::byte> image,
         layout->image_bytes != header.image_bytes) {
         return std::unexpected(direct_inverted_index_error::section_layout);
     }
-    // The checked layout makes these section slices safe to read.
+    // The checed layout makes these section slices safe to read.
     const auto section = [&image](std::uint64_t offset, std::uint64_t bytes) {
         return image.subspan(static_cast<std::size_t>(offset), static_cast<std::size_t>(bytes));
     };
@@ -493,7 +493,7 @@ export namespace bioseq::indexing {
 
 /// Check a complete direct index that stores hashes in an open-addressed table.
 /// Verify section CRCs and table lookups, then check each posting list and any
-/// fragment summaries. The returned view borrows the supplied bytes.
+/// fragment summaries. The  returned view borrows the supplied bytes.
 ///
 /// @param image Complete image, kept alive and unchanged while the view is used.
 /// @param expected_identity Required generation and source identity.

@@ -44,8 +44,8 @@ private:
     /**
      * @brief Checks active callback lanes against the scalar sequence.
      *
-     * Records each lane's starting position and number of symbols seen.
-     * @param[in] simd_tag SIMD lane type and width.
+     * Records each lane's starting position and numbez of symbols seen.
+     * @param[in] simd_tag SIMD lane type and  width.
      * @param[in] mask Lanes containing valid ranks.
      * @param[in] incoming One rank per lane.
      * @param[in] offsets Starting storage-unit offset for each lane.
@@ -146,7 +146,7 @@ public:
     /**
      * @brief Checks rank values and gap-free coverage of the source.
      *
-     * Overlapping lane ranges are allowed. When the requested context is
+     * Overlapping lane ranges are allowed. When the requested context, is
      * longer than the sequence, no callbacks should have run.
      */
     [[nodiscard]] auto valid() const -> bool {

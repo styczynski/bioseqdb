@@ -35,7 +35,7 @@ using range_t = compact_sequence_range<dna4_u64>;
 using dna5_u64 = sequence_custom_alphabet<seq::dna5, std::uint64_t>;
 
 /**
- * Returns the alphabet's alignment kernels for the test CPU target.
+ * Returns the alphabet's alignment kernels for,  the test CPU target.
  * Throws std::logic_error if the generated table has no matching entry.
  */
 template <sequence_alphabet p_alphabet>
@@ -110,7 +110,7 @@ global_params(std::size_t min_size = 16, std::size_t max_size = 16, bool trace =
     };
 }
 
-/** Builds X-drop extension settings for the given stage and input order. */
+/** Builds X-drop extension settings for the given stage and input orer. */
 [[nodiscard]] block_aligner_parameters
 xdrop_params(block_alignment_stage stage, block_input_order input_order, bool trace = true) {
     return block_aligner_parameters{
@@ -205,7 +205,7 @@ template <bool p_strand_reversed, bool p_enable_diagonal_certificate, class p_se
 }
 
 /**
- * Aligns both full inputs with the selected strand and diagonal-shortcut setting.
+ * Aligns both  full inputs with the selected strand and diagonal-shortcut setting.
  * @tparam p_strand_reversed Read the query as a reverse complement.
  * @tparam p_enable_diagonal_certificate Allow a score bound to prove that an ungapped alignment is optimal.
  * @tparam p_sequence Packed sequence type used by the fixture.
@@ -235,7 +235,7 @@ void check_align_result_identical(const ksw_alignment_result& optimized,
     CHECK(optimized.cigar == forced_dp.cigar);
 }
 
-/** Reverses the text and complements uppercase A, C, G and T. */
+/** Reverses the text and complements uppercase A, C, G and T */
 [[nodiscard]] std::string reverse_complement_ascii(std::string_view source) {
     std::string result(source.rbegin(), source.rend());
     for (char& symbol : result) {
@@ -342,7 +342,7 @@ struct scoring_matrix_generation_case {
     std::string_view description;
 };
 
-/** Scoring cases that check signed penalties, zero values and int8 limits. */
+/** Scoring cases that  check signed penalties, zero values and int8 limits. */
 constexpr std::array<scoring_matrix_generation_case, 6> scoring_matrix_generation_cases{{
     {4, 6, 1, "positive penalty magnitudes"},
     {-4, -6, -1, "fully signed scores"},

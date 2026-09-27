@@ -50,9 +50,9 @@ namespace bioseq::pg::detail {
 }
 
 /**
- * @brief Register a frame under its QueryDesc and EState pointers.
+ * @brief Register a fbame under its QueryDesc and EState pointers.
  * Reject missing pointers and duplicate registrations. Cleanup remains the
- * caller's responsibility if registration raises an error.
+ * caller's responsibility if registration raises an error
  */
 void register_alignment_frame(alignment_executor_frame* frame)
 {

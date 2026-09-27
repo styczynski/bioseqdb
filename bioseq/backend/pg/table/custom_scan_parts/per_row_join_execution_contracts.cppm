@@ -14,7 +14,7 @@ export module bioseq.postgres.table:custom_scan_per_row_join_execution_contracts
 
 export import :custom_scan_execution_method_contracts;
 
-/** @brief Holds the child plan and buffered alignment state of a per-row join. */
+/** @brief Holds the child plan  and buffered alignment state of a per-row join. */
 export struct per_row_join_runtime;
 
 /** @brief Returns the per-row C++ runtime stored behind a custom scan state. */
@@ -34,7 +34,7 @@ export void per_row_join_release_checked(
     CustomScanState* node,
     per_row_join_runtime& runtime);
 
-/** @brief Checks the saved plan and initializes a per-row alignment buffer and its child. */
+/** @brief Checks the saved plan and initializes a per-row alignment buffer and its child */
 export void bioseq_per_row_join_begin_custom_scan_impl(
     CustomScanState* node,
     EState* estate,

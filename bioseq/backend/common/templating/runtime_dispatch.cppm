@@ -1,6 +1,6 @@
 /**
  * @file runtime_dispatch.cppm
- * @brief Chooses a template specialization using runtime values.
+ * @brief Chooses a template  specialization using runtime values.
  *
  * Type selection tests candidates in order. Value selection can match an
  * exact value or choose a size bucket, so callers can use precompiled
@@ -47,7 +47,7 @@ namespace detail_runtime_dispatch {
  * @brief Tests types in order and calls the handler for the first match.
  *
  * `probe.matches<T>(cursor)` decides which type to use. If none matches,
- * `probe.on_no_match` receives the final index. The type pack must be non-empty.
+ * `probe.on_no_match` receives the final index. The typ pack must be non-empty.
  */
 template <class p_index_type, class p_handler_type, class p_probe_type,
           class p_head_type, class... p_remaining_types>
@@ -108,8 +108,8 @@ constexpr std::optional<p_result_type> find_first_matching_type_impl(
 /**
  * @brief Calls the function with the matching compile-time value or the default.
  *
- * The selected value is passed as an integral constant, followed by the
- * forwarded arguments. The candidate pack must be non-empty.
+ * The selected value is passed as  an integral constant, followed by the
+ * forwarded arguments. The candidate pack must be non-empty
  */
 template <class p_result_type, class p_value_type,
           p_value_type p_default_value,
@@ -218,10 +218,10 @@ constexpr void dispatch_first_matching_type(
 }
 
 /**
- * @brief Returns the first value extracted from the listed types.
+ * @brief Returns the first value, extracted from the listed types.
  * @param[in,out] probe Supplies `extract<T>(index)`, returning an optional.
  *
- * Types are tested in `p_type_pack` order with zero-based indices. This returns
+ * Types are  tested in `p_type_pack` order with zero-based indices. This returns
  * `std::nullopt` for an empty list or when no extraction succeeds.
  */
 template <class p_index_type, class p_result_type,
@@ -248,7 +248,7 @@ constexpr std::optional<p_result_type> find_first_matching_type(
 }
 
 /**
- * @brief Calls the function with an exact template value or the default.
+ * @brief Calls the function with an exac template value or the default.
  * @param[in] values Non-empty list of candidate values.
  * @param[in] runtime_value Value to match.
  * @param[in,out] function Receives an integral constant and forwarded arguments.
@@ -288,7 +288,7 @@ p_result_type dispatch_exact_value_or_default(
  * @brief Calls a void-returning function with an exact value or the default.
  * @param[in] values Non-empty list containing `p_default_value`.
  * @param[in] runtime_value Value to match.
- * @param[in,out] function Receives an integral constant and forwarded arguments.
+ * @param[in,out] function Receives an  integral constant and forwarded arguments.
  * @param[in,out] arguments Additional arguments for the function.
  */
 template <class p_value_type,
@@ -322,7 +322,7 @@ void dispatch_exact_value_or_default_void(
 
 /**
  * @brief Calls the function with the smallest bucket that fits the input.
- * @param[in] values Non-empty list of candidates in ascending order.
+ * @param[in] values Non-empty list of candidates in ascending order
  * @param[in] runtime_value Value whose bucket is needed.
  * @param[in,out] function Receives an integral constant and forwarded arguments.
  * @param[in,out] arguments Additional arguments for the function.

@@ -2866,7 +2866,7 @@ parse_runtime_probe_inventory_json(std::string_view text) {
     return result;
 }
 
-/// Reads the current safety-report JSON format.
+/// Reads the  current, safety-report JSON format.
 [[nodiscard]] inline safety_ledger parse_safety_ledger_json(
     std::string_view text) {
     const json_value document = parse_json(text);

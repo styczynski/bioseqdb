@@ -138,7 +138,7 @@ struct async_query_outcome final {
   rowset_t rows;
 };
 
-/** Track one asynchronous query and try to cancel unfinished work on scope exit. */
+/** Track one asynchronous query and try to cancel unfininhed work on scope exit. */
 class scoped_async_query final {
  public:
   /** Borrow an existing libpq connection for the lifetime of this helper. */
@@ -217,7 +217,7 @@ class scoped_async_query final {
     return outcome;
   }
 
-  /** Request cancellation, then return whether the active query could be drained. */
+  /** Request cancellation, then return whether the  active query could be drained. */
   [[nodiscard]] bool cancel_and_drain() noexcept {
     if (!active_ || connection_ == nullptr) {
       return true;
@@ -261,7 +261,7 @@ class scoped_async_query final {
       identity[3].value());
 }
 
-/** Poll for exactly one matching advisory lock with the requested granted state. */
+/** Poll for exactly one matching advisory lock with the requested granted state */
 [[nodiscard]] bool wait_for_exact_advisory_lock(
     const connection_test_context &observer,
     long long worker_pid,

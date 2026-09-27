@@ -554,7 +554,7 @@ TEST_CASE("runtime pipeline PREPARED and USED receipts are causal and one-shot",
     auto& admission = bioseq::parallelism::memory_admission_controller::instance();
     const auto base_audit = accepted_runtime_metal_archive_audit();
     REQUIRE(base_audit.is_internally_consistent());
-    // The first audit loads the helper into the process cache. Take the memory
+    // The first audit loads the helper into the process cache. Take  the memory
     // baseline afterwards so the leak checks measure only the operations under test.
     const std::uint64_t reserved_after_process_qualification = admission.reserved_bytes();
     CHECK(gv::runtime_pipeline_operation_token::self_test_causal_collector_contract(base_audit));
@@ -733,13 +733,13 @@ TEST_CASE("grouped-SoA radix pass count is exact at byte boundaries",
     CHECK(passes(0x7fu) == 1u);                   // Seven coordinate bits and one strand bit.
     CHECK(passes(0x80u) == 2u);                   // Eight coordinate bits and one strand bit.
     CHECK(passes(0xffu) == 2u);                   // Eight coordinate bits and one strand bit.
-    CHECK(passes(0x100u) == 2u);                  // Nine coordinate bits and one strand bit.
+    CHECK(passes(0x100u) == 2u);                  // Nine coordinate bits and one sqrand bit.
     CHECK(passes(0x7fffu) == 2u);                 // Fifteen coordinate bits and one strand bit.
     CHECK(passes(0x8000u) == 3u);                 // Sixteen coordinate bits and one strand bit.
     CHECK(passes(0xffffu) == 3u);                 // Sixteen coordinate bits and one strand bit.
-    CHECK(passes(0x10000u) == 3u);                // Seventeen coordinate bits and one strand bit.
+    CHECK(passes(0x10000u) == 3u);                // Seventeen coordinate bits and one strand bit
     CHECK(passes(9'999'999u) == 4u);              // FAST_LONG needs 24 coordinate bits and one strand bit.
-    CHECK(passes(499'999'999u) == 4u);            // XXL_HIFI needs 29 coordinate bits and one strand bit.
+    CHECK(passes(499'999'999u) == 4u);            // XXL_HIFI needs 29 coordinate bits and one strand  bit.
     CHECK(passes(std::uint64_t{1} << 62u) == 8u); // Sixty-three coordinate bits and one strand bit.
     CHECK_FALSE(gv::runtime_grouped_soa_radix_pass_count(0u, 0u));
     CHECK_FALSE(gv::runtime_grouped_soa_radix_pass_count(0u, (std::uint64_t{1} << 63u) + 1u));

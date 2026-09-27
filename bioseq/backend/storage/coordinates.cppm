@@ -63,7 +63,7 @@ enum class sequence_transform : std::uint8_t {
     return magnitude >= length ? 0u : length - magnitude;
 }
 
-/** Resolves a zero-based index. Negative indices count from the end, and invalid indices return nullopt. */
+/** Resolves a zero-based index Negative indices count from the end, and invalid indices return nullopt. */
 [[nodiscard]] constexpr std::optional<std::uint64_t> normalize_element_index(
     std::int64_t index,
     std::uint64_t length) noexcept

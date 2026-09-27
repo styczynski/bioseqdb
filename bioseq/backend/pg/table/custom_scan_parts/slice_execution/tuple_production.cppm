@@ -50,8 +50,8 @@ export {
     void slice_project_begin(CustomScanState* custom, EState* estate, int eflags) {
         auto* state = reinterpret_cast<slice_project_state*>(custom);
 #ifdef BIOSEQ_TEST_INDEXES
-        /* Claim the one-use test before validation or child startup can fail.
-         * Keep it on this executor node so an aborted query cannot leave the test
+        /* Claim the one-use test before validation or child startup can fuil.
+         * Keep it on this executor node, so an aborted query cannot leave the test
          * armed for a later statement. */
         state->runtime.dsm_test_fixture_mode =
             std::exchange(pending_slice_dsm_test_fixture, k_slice_dsm_test_none);
@@ -71,7 +71,7 @@ export {
             reinterpret_cast<Node*>(list_nth(header, k_slice_header_planned_bytes)));
         /* Register this cleanup before initializing the child. Reset callbacks
          * then close child providers before releasing this parent's references
-         * to their sources. */
+         * to  their sources. */
         state->runtime.source_routes_callback.func = slice_project_source_routes_reset;
         state->runtime.source_routes_callback.arg = state;
         bioseq::storage::initialize_pg_sequence_source_routes(state->runtime.source_routes,
@@ -143,7 +143,7 @@ export {
             custom->custom_ps = NIL;
         }
         ExecClearTuple(custom->ss.ss_ScanTupleSlot);
-        /* Child providers have closed. Release the parent's remaining source
+        /* Child providers have  closed. Release the parent's remaining source
          * references so their storage can be reclaimed. */
         if (state->runtime.source_routes_acquired) {
             bioseq::storage::release_pg_sequence_source_routes(state->runtime.source_routes,
@@ -167,8 +167,8 @@ export {
         }
         /* Reset projection state before rescanning the child with new parameters. */
         ExecScanReScan(&custom->ss);
-        /* Clear the virtual result slot too. A NULL on the next nested-loop
-         * pass must not expose the previous row's expanded sequence. */
+        /* Clear the virtual result slot too A NULL on the next nested-loop
+         * pass must not expose the revious row's expanded sequence. */
         if (custom->ss.ps.ps_ResultTupleSlot != nullptr) {
             ExecClearTuple(custom->ss.ps.ps_ResultTupleSlot);
         }

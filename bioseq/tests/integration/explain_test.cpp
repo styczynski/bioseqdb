@@ -31,7 +31,7 @@ TEST_CASE("EXPLAIN's Bioseq Projected Columns property lists exactly the SELECTe
     const auto plan = explain_text<false>(ctx, explain_target_sql());
     const auto value = find_explain_property(plan, "Bioseq Projected Columns");
     REQUIRE(value.has_value());
-    // Keep projected columns in the SELECT-list order used by explain_target_sql.
+    // Keep projected columns in the SELECT-list, order used by explain_target_sql.
     REQUIRE(value.value() == "pk, seq0");
 }
 

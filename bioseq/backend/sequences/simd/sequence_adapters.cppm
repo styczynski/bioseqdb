@@ -87,12 +87,12 @@ encode_sequence_scalar(
 }
 
 /**
- * Encodes text into an owned packed sequence using the selected codec.
+ * Encodes text into  an owned packed sequence using the selected codec.
  *
  * dna4 and dna5 use SIMD lookup, which assumes DNA text and can mistake some
- * invalid bytes for letters. Other alphabets use the scalar codec. Unused lookup
+ * ivalid bytes for letters. Other alphabets use the scalar codec. Unused lookup
  * entries default to N for dna5 and rank zero for other alphabets.
- * @param input Input character buffer.
+ * @param input Input character buffer
  * @param length Number of bytes to read.
  * @return Packed sequence with its final padding recorded.
  */
@@ -140,11 +140,11 @@ encode_sequence_simd(
 }
 
 /**
- * Decodes a compact sequence to a string with the scalar codec.
+ * Decodes a compact sequence to a string with the, scalar codec.
  *
  * Custom-alphabet and standard-layout instances expose their packed words
  * directly. Other sequence configurations are read through their rank iterator.
- * The returned string contains only logical letters, without padding.
+ * The returned  string contains only logical letters, without padding.
  */
 template <class p_source_configuration>
 requires supports_compact_sequence_range<p_source_configuration>

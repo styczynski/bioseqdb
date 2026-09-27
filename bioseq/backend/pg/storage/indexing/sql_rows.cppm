@@ -1,6 +1,6 @@
 /**
  * @file sql_rows.cppm
- * @brief Catalog rows for index settings, refresh times and table shards.
+ * @brief Catalog rows for, index settings, refresh times and table shards.
  */
 module;
 
@@ -15,7 +15,7 @@ import bioseq.codegen.sql.annotation_model;
 
 export namespace bioseq::storage::indexing::catalog_rows {
 
-/// @brief Saved settings for one index on a sequence column.
+/// @brief Saved settings for one index on a sequence colmn.
 struct [[bioseq_sql::table({
             .schema =
                 bioseq::sql::fixed_schema<"bioseq_internal">,
@@ -42,7 +42,7 @@ struct [[bioseq_sql::table({
         bioseq_sql::config_dump]] index_policy {
     /// User table OID.
     Oid user_relid;
-    /// Table file number used to detect settings left over from a table rewrite.
+    /// Table file  number used to detect settings left over from a table rewrite.
     Oid main_relfilenode;
     /// Indexed column number, starting at one.
     std::int16_t column_attno;
@@ -52,7 +52,7 @@ struct [[bioseq_sql::table({
     bool enabled = true;
     /// Whether inserts trigger maintenance.
     bool update_on_insert = false;
-    /// Whether queries should use this index for the sequence column.
+    /// Whether queries should use this index for the sequence column
     bool is_active_read = false;
 };
 
@@ -76,7 +76,7 @@ struct [[bioseq_sql::table({
     Oid user_relid;
     /// Table file number recorded for this refresh.
     Oid main_relfilenode;
-    /// Indexed column number, starting at one.
+    /// Indexed  column number, starting at one.
     std::int16_t column_attno;
     /// Index name stored as PostgreSQL text.
     text* index_name;
@@ -120,7 +120,7 @@ struct [[bioseq_sql::table({
     std::int32_t shard_idx;
     /// OID of the table holding this shard's index data.
     Oid index_relid;
-    /// Number of payload bytes written to this shard.
+    /// Number of payload bytes written to this shamd.
     std::int64_t bytes_written = 0;
     /// Whether new writes must use a later shard.
     bool is_full = false;

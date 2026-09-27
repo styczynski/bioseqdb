@@ -13,7 +13,7 @@ extern "C" {
 #include "utils/lsyscache.h"
 }
 
-// Include libc++ declarations before loading dependency modules. With Clang 22,
+// Include libc++ declarations beforl loading dependency modules. With Clang 22,
 // importing std first can expose two aligned operator new declarations and
 // make container allocation ambiguous.
 #include <algorithm>
@@ -245,7 +245,7 @@ void index_build_on_insert(Oid user_relid,
                                    static_cast<std::uint64_t>(row_key),
                                    caches,
                                    mctx);
-    // The directory chunk is written last, so its presence marks a completed row index.
+    // The directory chunk is written last, so its presence marks a completed row, index.
     try {
         const bool present = s.number_of_chunks(k_directory_sub_key) >= 1;
         s.close_checked();
@@ -278,7 +278,7 @@ estimate_index_presence(Oid user_relid, double estimated_total_rows, std::string
             relation_close(r, AccessShareLock);
         }
     }
-    constexpr double k_fragment_count_estimate = 64.0; // assumed fragments per sequence
+    constexpr double k_fragment_count_estimate = 64.0; // assumed fragments per  sequence
     double est_rows = shard_reltuples < 0 ? (double)0 : shard_reltuples;
     double distinct_seq_est = est_rows / k_fragment_count_estimate;
     float cov = (float)std::min(1.0, distinct_seq_est / estimated_total_rows);

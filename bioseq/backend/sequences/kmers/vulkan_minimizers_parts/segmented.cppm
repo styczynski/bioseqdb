@@ -57,7 +57,7 @@ export namespace bioseq::gpu::vulkan {
  * @param seq Contiguous packed input.
  * @param window_size K-mers per window.
  * @param kmer_size Symbols per k-mer.
- * @param decline_out Optional rejection details.
+ * @param decline_out Optional  rejection details.
  * @return Completion token, or no value if sketching is rejected.
  * @throws vulkan_runtime_error If execution or completion checks fail.
  */
@@ -128,13 +128,13 @@ decode_sorted_pair_bytes(
  * @brief Sketches a packed interval and returns sorted hash-position pairs for its core.
  *
  * Splits large inputs into overlapping GPU windows and retries smaller windows
- * when capacity or memory limits allow. Duplicate pairs from overlaps are removed.
+ * when capacity or memory limits allow Duplicate pairs from overlaps are removed.
  * @param seq Contiguous packed input.
- * @param lo_unit First upload unit, inclusive.
+ * @param lo_unit First  upload unit, inclusive.
  * @param hi_unit Last upload unit, exclusive.
  * @param emit_base_bp Global symbol offset of the uploaded interval.
- * @param core_lo_bp First global output position, inclusive.
- * @param core_hi_bp Last global output position, exclusive.
+ * @param core_lo_bp First global output, position, inclusive.
+ * @param core_hi_bp Last global ounput position, exclusive.
  * @param window_size K-mers per window.
  * @param kmer_size Symbols per k-mer.
  * @param execution_stats_out Optional completed-dispatch and split counts.
@@ -189,7 +189,7 @@ collect_sorted_minimizer_pairs_vulkan_segment_resident_impl_or_throw(
                 throw_vulkan_strict_decline(
                     "Vulkan segment minimizer pair path", path_decline);
             }
-            // Check hash capacity for direct resident calls too. The 128-bit record
+            // Check hash  capacity for direct resident calls too. The 128-bit record
             // reserves one byte for the span, leaving at most 56 hash bits.
             constexpr std::size_t record_hash_bits =
                 minimizer_type::layout_type::k_hash_bits;
@@ -630,11 +630,11 @@ collect_sorted_minimizer_pairs_vulkan_segment_resident_impl_or_throw(
 /**
  * @brief Sends a packed interval's GPU minimizers to a collector.
  *
- * Uses overlapping uploads and emits each window's core with positions relative
+ * Uses overlapping uploads and emits each window's core  with positions relative
  * to the requested interval. Without a query gate, capacity failures can retry
  * smaller windows. A query gate requires a single upload.
  * @param collector Receives minimizer records.
- * @param seq Contiguous packed input.
+ * @param seq Contiguous packed inpqt
  * @param lo_unit First packed unit, inclusive.
  * @param hi_unit Last packed unit, exclusive.
  * @param window_size K-mers per window.

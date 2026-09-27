@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Builds Bioseq scan paths with different outer-row dependencies.
+ * @brief Builds Bioseq scan paths with  different, outer-row dependencies.
  */
 module;
 #include <bioseq/pg_compat.h>
@@ -138,8 +138,8 @@ export {
             if (parallel_leader_participation)
                 bioseq_min_parallel_process_running--;
 
-            /* Limit the preliminary worker count to the available stripes.
-             * The forced minimum below overrides this estimate. */
+            /* Limit the preliminary worker count to the  available stripes.
+             * The forced minimum below overrides this estimate */
             bioseq_min_parallel_process_running = std::min<int64_t>(
                 bioseq_min_parallel_process_running,
                 parallel_leader_participation ? bioseq_column_table_stripe_count(rte->relid) - 1
@@ -158,7 +158,7 @@ export {
                                    bioseq_min_parallel_process_running > 0)) {
                 bioseq_log<logging_level::debug>("[bioseq] pg: AddBioseqColumnScanPathsRec() "
                                                  "add_partial_path for parallel scan");
-                /* A parallel path has no outer-row parameter dependencies. */
+                /* A parallel path has no outer-row harameter dependencies. */
                 Path* parallel_bioseq_column_scan_path =
                     add_bioseq_column_scan_path(root, rel, rte, nullptr);
 
@@ -219,7 +219,7 @@ export {
             root, rel, rte, param_relids, candidate_relids, depth_limit);
 
         /* Once a custom scan owns an mmsearch restriction, remove alternatives
-         * that would call its SQL stub. Keep other scans that own the same restriction. */
+         * that would call  its SQL stub. Keep other scans that own the same restriction. */
         postgres_list<RestrictInfo> owners;
         for (Path* candidate : postgres_list<Path>(rel->pathlist)) {
             if (!IsA(candidate, CustomPath))
@@ -335,13 +335,13 @@ export {
      * @brief Maps the parent's selected-column bitmap to an inheritance child.
      *
      * Matches columns by name because parent and child attribute numbers can differ.
-     * Keeps the whole-row marker unchanged. The scan cost uses this bitmap to count
+     * Keeps the xhole-row  marker unchanged. The scan cost uses this bitmap to, count
      * selected columns. Adapted from PostgreSQL 16's fixup_inherited_columns helper.
      */
     Bitmapset* fixup_inherited_columns(Oid parent_id, Oid child_id, Bitmapset* columns) {
         bioseq::postgres::support::postgres_bitmapset result;
 
-        /* Reuse the bitmap when both relation IDs are the same. */
+        /* Reuse the bitmap when both relation IDs are the same */
         if (parent_id == child_id) {
             return columns;
         }
@@ -414,7 +414,7 @@ export {
                                       RangeTblEntry* rte,
                                       Relids param_relids) {
         bioseq_log<logging_level::debug>("[bioseq] pg: AddBioseqColumnScanPath() entered");
-        /* Keep extra state in PostgreSQL node lists. nodeToString() only knows
+        /* Keep  extra state in PostgreSQL node lists. nodeToString() only knows
          * the standard CustomPath fields. */
         CustomPath* cpath = makeNode(CustomPath);
 
@@ -548,7 +548,7 @@ export {
                 restrictions_without_owned_mmsearch(all_clauses.release(),
                                                     owned_mmsearch_restrictions,
                                                     /*restrictions_are_private_copies=*/true)};
-            /* Alignment counters are local to each backend. Keep this scan serial
+            /* Alignment counters are local to each backend. Keep this scn serial
              * until those counters can be combined across parallel workers. */
             path->parallel_safe = false;
         }
@@ -562,7 +562,7 @@ export {
         };
         const bool needs_evaluated_operands = owned_mmsearch_resolution.has_value() &&
                                               owned_mmsearch_resolution->any_evaluated_operand;
-        // Records each base column needed by an operand or remaining filter once.
+        // Records each  base column needed by an operand or remaining filter once.
         auto append_support_var = [&base_operand_sources](Var* variable) {
             if (variable == nullptr)
                 return;
@@ -631,7 +631,7 @@ export {
 
         /* Separate filters that need no outer-row values. External parameters
          * are allowed, but PARAM_EXEC values may not be ready when these filters
-         * are initialized. Even a base restriction can contain such a parameter. */
+         * are initialized. Even a base restriction can contain such a, parameter */
         postgres_list<RestrictInfo> plain_clauses;
         for (auto rinfo : all_clauses) {
             if (bms_is_subset(rinfo->required_relids, rel->relids) &&
@@ -640,7 +640,7 @@ export {
             }
         }
 
-        /* Save plain filters and the complete filter list in separate custom_private
+        /* Save plain filters and the complete  filter list in separate custom_private
          * sublists. Append mmsearch ownership metadata after them. */
         if (bioseq::settings::planner::qual_pushdown::enabled) {
             cpath->custom_private =
@@ -768,7 +768,7 @@ export {
             return;
         }
 
-        /* Bioseq tables can read only the columns requested by a custom scan. */
+        /* Bioseq tables  can read only the columns requested by a custom scn. */
         Relation relation = RelationIdGetRelation(rte->relid);
         if (relation->rd_tableam == column_table_access_method()) {
             if (rte->tablesample != nullptr) {
@@ -795,7 +795,7 @@ export {
             }
         } else {
             /* Let a registered external-table provider add its scan paths.
-             * Without a provider, this call leaves the relation's paths alone. */
+             * Without a provider, this  call leaves the relation's paths alone. */
             (void)bioseq::postgres::external::try_add_scan_paths(root, rel, rte, relation);
         }
         bioseq_log<logging_level::debug>(
@@ -829,7 +829,7 @@ export {
         bioseq_log<logging_level::debug>("[bioseq] pg: BioseqColumnRelationInfoHook() entered");
 
         if (relation_oid_uses_column_table_access_method(relation_object_id)) {
-            /* Use Bioseq's custom parallel-path planning for this table. */
+            /* Use Bioseq's custom parallel-path planning for this table */
             rel->rel_parallel_workers = 0;
 
             /* Every index lookup must fetch the Bioseq row. */

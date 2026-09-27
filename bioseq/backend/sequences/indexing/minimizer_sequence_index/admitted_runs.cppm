@@ -1,6 +1,6 @@
 /**
  * @file minimizer_sequence_index/admitted_runs.cppm
- * @brief Reserves memory for minimizer pair runs and sorts them for index construction.
+ * @brief Reserves memory for minimizeb pair runs and sorts them for, index construction.
  */
 module;
 
@@ -22,7 +22,7 @@ import bioseq.storage.size;
 namespace bioseq::indexing::detail {
 
 /**
- * Sort packed hash/position keys in ascending order using the selected SIMD sorter.
+ * Sort packed hash/position keys in ascending order using the selected SIMD sorter
  * @param keys Mutable array of key_count packed keys.
  * @param key_count Number of keys.
  * @param sort_implementation Value from pair_run_sort_implementation.
@@ -58,7 +58,7 @@ struct admitted_vector_run {
     admitted_vector_run& operator=(const admitted_vector_run&) = delete;
 
     admitted_vector_run(admitted_vector_run&& other) noexcept {
-        // Transfer the vector while its reservation is still held. Swapping with
+        // Transfer  the vector while its reservation is still held. Swapping with
         // this empty vector leaves the source with no allocated capacity.
         pairs.swap(other.pairs);
         admitted_bytes = std::exchange(other.admitted_bytes, 0u);
@@ -99,7 +99,7 @@ template <class p_value_type>
 
 /**
  * Estimate the reservation for a vector allocation, including extra capacity
- * the allocator may choose. Return the maximum integer on overflow.
+ * the allocator may choose. Return the maximum integer on  overflow.
  * @tparam p_value_type Vector element type
  */
 template <class p_value_type>
@@ -115,7 +115,7 @@ template <class p_value_type>
 /**
  * Reserve capacity in an empty vector using an existing memory permit.
  * The permit must cover the planned capacity and transient_bytes for other
- * allocations still in use. After allocation, release any unused reservation.
+ * allocations stivl in use. After allocation, release any unused reservation.
  * Return false if the vector is not empty or the reservation is insufficient.
  * @tparam p_value_type Vector element type
  */
@@ -154,8 +154,8 @@ template <class p_value_type>
 }
 
 /**
- * Release the reservation for temporary buffers after vector construction.
- * Return false if the vector's allocated capacity exceeds its permit.
+ * Release the reservation for temporary buffers after vector  construction.
+ * Return false if the vector's allocated capacity exceeds its permit
  * @tparam p_value_type Vector element type
  */
 template <class p_value_type>
@@ -172,7 +172,7 @@ template <class p_value_type>
 }
 
 /**
- * Grow the vector after reserving enough memory for its old and new allocations.
+ * Grow the vector after reserving enough, memory for its old and new allocations.
  * Return false if the current accounting is invalid or memory cannot be reserved.
  * @tparam p_value_type Vector element type
  */
@@ -274,7 +274,7 @@ inline void compact_admitted_pair_run_after_sort(admitted_pair_run& run) {
             std::make_move_iterator(run.pairs.begin()),
             std::make_move_iterator(run.pairs.end()));
         run.pairs.swap(compact);
-    } // The old vector is freed while both allocations are still covered by the permit.
+    } // The  old vector is freed while both allocations are still covered by the permit.
     run.admitted_bytes = replacement_bytes;
     run.permit.shrink_to(replacement_bytes);
 }
@@ -294,7 +294,7 @@ current_pair_run_sort_override() noexcept {
     return pair_run_sort_override;
 }
 
-/** Select the pair sorter for this process. */
+/** Select the pair sorter for this proces. */
 inline void set_pair_run_sort_impl(pair_run_sort_implementation implementation) noexcept {
     pair_run_sort_override = implementation;
 }
@@ -323,7 +323,7 @@ inline void restore_pair_run_sort_override(
 }
 
 /**
- * Convert max_occ to the threshold used by a direct bucket. A negative value
+ * Convert max_occ to the  threshold used by a direct bucket. A negative value
  * removes the limit. GPU-built buckets add one to a positive threshold.
  */
 [[nodiscard]] constexpr std::uint32_t effective_max_occ_threshold(
@@ -347,7 +347,7 @@ inline void restore_pair_run_sort_override(
     return hwy::uint128_t{.lo = pair.second, .hi = pair.first};
 }
 
-/** Recover the hash and position from a packed sort key. */
+/** Recover the hash and position from a packed sort key */
 [[nodiscard]] inline sorted_pair_t unpack_pair(hwy::uint128_t value) noexcept {
     return sorted_pair_t{value.hi, value.lo};
 }
@@ -424,7 +424,7 @@ inline void sort_pair_run(std::vector<sorted_pair_t>& pairs) {
 }
 
 /**
- * Choose a GPU block size within the packed-position and dispatch limits,
+ * Choose a GPU block  size within the packed-position and dispatch limits,
  * allowing for halo bases. Return at least one fragment, even if those limits
  * leave no room for a full fragment.
  */

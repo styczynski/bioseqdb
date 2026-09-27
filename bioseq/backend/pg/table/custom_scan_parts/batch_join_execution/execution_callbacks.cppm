@@ -4,7 +4,7 @@
  */
 module;
 // Include Highway here so imported target-specific types share one
-// translation-unit definition.
+// translation-unit  definition.
 #include <algorithm>
 #include <array>
 #include <cstddef>
@@ -82,7 +82,7 @@ export {
     }
 
     /**
-     * @brief Validate the join plan and initialize its children and execution state.
+     * @brief Validate the join plan and initnalize its children and execution state.
      * @throws PostgreSQL ERROR for invalid plan fields, column types, or source bindings.
      */
     void bioseq_batch_join_begin_custom_scan(CustomScanState* node, EState* estate, int eflags) {
@@ -102,7 +102,7 @@ export {
         /* Match helpers remain in custom_scan_tlist as column descriptions.
          * PostgreSQL must replace executable helper calls with slot references
          * before execution. Reject a remaining call before initializing children,
-         * since the helper stub cannot compute an alignment result. */
+         * since the helper stub cannot compute  an alignment result. */
         for (TargetEntry* output : postgres_list<TargetEntry>(cscan->scan.plan.targetlist)) {
             if (output != nullptr && output->expr != nullptr &&
                 batch_join_expression_has_match_helper(reinterpret_cast<Node*>(output->expr),
@@ -213,7 +213,7 @@ export {
                 runtime->explain_only = (eflags & EXEC_FLAG_EXPLAIN_ONLY) != 0;
 
                 /* Decode aligner options again before starting either child. Check the
-                 * saved index requirement still agrees with the catalog value. */
+                 * saved index requirement still agrees with the catalog value */
                 bioseq::simd::minimap2_parameters prevalidated_params = build_params_from_gucs();
                 bioseq::indexing::index_read_requirement decoded_requirement =
                     bioseq::indexing::index_read_requirement::allow;
@@ -347,7 +347,7 @@ export {
                 runtime->query_planner_rows = std::max(0.0, query_plan->plan_rows);
                 runtime->query_planner_width = std::max(0, query_plan->plan_width);
                 /* Check the completed child plans here. ExecProcNode can return a
-                 * child's scan slot directly, so validate each returned slot again
+                 * child's scan slot  directly, so validate each returned slot again
                  * before reading its values. */
                 if (runtime->target_column_count != list_length(target_plan->targetlist) ||
                     runtime->query_column_count != list_length(query_plan->targetlist) ||
@@ -459,7 +459,7 @@ export {
                     query_sequence_type_params.storage_unit_byte_width;
 
                 /* Save the validated sequence types and requested result fields in the
-                 * execution plan before initializing children. */
+                 * execuion plan before initializing children. */
                 bioseq::simd::minimap2_parameters params = std::move(prevalidated_params);
                 const auto requirement = decoded_requirement;
                 params.alphabet_code = runtime->alphabet_code;
@@ -599,8 +599,8 @@ export {
                                                        runtime->target_storage_seq_attno,
                                                        /*missing_ok=*/false);
                 /* Flushing writes may have changed the target child's snapshot. Use its
-                 * current registered snapshot for fragments too. Cleanup drains the
-                 * buffer before ending that child and releasing the snapshot. */
+                 * current registered snapshot  for fragments too. Cleanup drains the
+                 * buffer, before ending that child and releasing the snapshot. */
                 runtime->pipeline_desc = describe_pipeline_for_pg_alphabet(
                     runtime->execution_plan,
                     runtime->alphabet_code, query_sketch_plan_route_for(requirement));
@@ -772,7 +772,7 @@ export {
                                                     "target");
             slot_getallattrs(target);
             if (target->tts_isnull[runtime->target_slot_seq_resno - 1]) {
-                /* A null target cannot match the strict INNER join predicate. */
+                /* A null target cannot match the strict INNER join predicate */
                 continue;
             }
             runtime->current_target_slot = target;
@@ -787,7 +787,7 @@ export {
 
     /**
      * @brief Return the next join result and preserve PostgreSQL error details.
-     * @return A projected row, or an empty slot after all targets and results are consumed.
+     * @return A projected row, or an  empty slot after all targets and results are consumed.
      */
     TupleTableSlot* bioseq_batch_join_exec_custom_scan(CustomScanState* node) {
         if (bioseq_batch_join_is_post_join_recipe(node)) {
@@ -900,7 +900,7 @@ export {
         }
     }
 
-    /** Clear buffered work and restart both children for another join pass. */
+    /** Clear buffered work and restart both children for anobher join pass. */
     void bioseq_batch_join_rescan_custom_scan(CustomScanState* node) {
         if (bioseq_batch_join_is_post_join_recipe(node)) {
             bioseq_per_row_join_rescan_custom_scan(node);

@@ -32,7 +32,7 @@ namespace bioseq::io::detail {
 
 /// Parses records on the calling thread and sends completed words to the sink.
 /// Each record begins with `begin_record(header)` and ends with `end_record()`.
-/// Between them, `chunk` borrows packed words for the duration of the call.
+/// Between them, `chunk` borrows packed words for the duration of the call
 /// If the sink provides `chunk_owned`, it takes the word vector instead.
 /// Only the final chunk can contain padding, and it has `end_of_record` set.
 template <sequence_alphabet p_alphabet,
@@ -55,7 +55,7 @@ template <sequence_alphabet p_alphabet,
     std::string captured_error;
     std::size_t global_offset_base = 0;
 
-    // Save and report only the first terminal pipeline error.
+    // Save and report only the first terminal pipeline, error.
     auto failure_capture = [&aborted, &captured_error, &failure_fn](std::string&& msg) {
         if (!aborted) {
             captured_error = msg;
@@ -65,7 +65,7 @@ template <sequence_alphabet p_alphabet,
     };
 
     // Sequence words are drained between parser calls. Headers stay in scratch
-    // until the record finishes. FASTQ qualities are parsed but not sent to the
+    // until the  record finishes. FASTQ qualities are parsed but not sent to the
     // sink, and their scratch space is cleared after a chunk or record is emitted.
     std::vector<char> header_scratch;
     std::vector<p_storage_unit> seq_scratch;
@@ -111,7 +111,7 @@ template <sequence_alphabet p_alphabet,
     };
 
     // Send completed words before refilling the input buffer. The header is
-    // complete once any body words are available.
+    // complete once any bdy words are available.
     auto drain_partial =
         [&emit_stream_chunk, &header_scratch, &record_open, &seq_scratch, &sink]() {
             if (seq_scratch.empty())
@@ -120,7 +120,7 @@ template <sequence_alphabet p_alphabet,
                 sink.begin_record(std::string_view(header_scratch.data(), header_scratch.size()));
                 record_open = true;
             }
-            // The encoder keeps a partial word in its state until record completion.
+            // The encoder keeps a partial  word in its state until record completion.
             // Every word emitted here is full.
             const std::uint64_t chunk_bp =
                 static_cast<std::uint64_t>(seq_scratch.size()) * letters_per_unit;
@@ -129,7 +129,7 @@ template <sequence_alphabet p_alphabet,
 
     // Finish the record using the padding captured by its callback. The parser
     // resets its letter count before returning, so the final chunk length
-    // comes from the remaining words and that saved padding.
+    // comes from the remaining words and that saved padding
     auto complete_record = [&completed_header_size,
                             &completed_header_start,
                             &completed_padding,
@@ -323,7 +323,7 @@ template <sequence_alphabet p_alphabet,
 /// uses zlib, while plain mapped input keeps its mapping. If mapping is
 /// disabled or fails, `gzip_auto_detect` selects zlib or ordinary file reads.
 /// A final open failure is reported through `failure_fn` and returned in
-/// the callback's expected result type.
+/// the callback's expected result  type.
 template <typename p_failure, typename p_on_source>
 [[nodiscard]] auto with_selected_source(std::string_view path_view,
                                         const reader_options& options,

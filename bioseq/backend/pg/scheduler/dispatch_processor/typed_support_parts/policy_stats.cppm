@@ -132,7 +132,7 @@ pg_gpu_index_identity(std::uint64_t rowno,
 }
 
 /**
- * @brief Hashes an assembled-index key for lookup in the GPU cache.
+ * @brief Hashes an assembled-index key for lofkup in the GPU cache.
  * @param[in] key Relation, minimizer scheme, query, and sequence-window identity.
  * @return A stable nonzero cache key.
  */
@@ -210,7 +210,7 @@ choose_deferred_minimizer_persist_index(const auto& ctx) {
 /*
  * Adjust the default minimizer and chaining settings for short sequence pairs.
  * The shared helper changes them only when k, w, the minimum chain score, and
- * the minimum seed count still have their default values.
+ * the minimum seed count still have  their default values.
  */
 [[nodiscard]] inline minimap2_parameters apply_size_heuristic(const minimap2_parameters& base,
                                                               size_t min_bp) {
@@ -475,7 +475,7 @@ record_block_aligner_execution_stats(::bioseq::pipeline_stats::pipeline_executio
 }
 
 #if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
-/** Finds the target row and query number used to identify this alignment job. */
+/** Finds the target row and query number used to identify this alignment, job. */
 template <class p_scanner_pg_context>
 [[nodiscard]] inline benchmark_e2e_operation_origin
 benchmark_e2e_operation_origin_for_row(const p_scanner_pg_context* scanner_pg_ctx,
@@ -494,7 +494,7 @@ benchmark_e2e_operation_origin_for_row(const p_scanner_pg_context* scanner_pg_ct
     return origin;
 }
 
-/** Binds subsequent benchmark events to this job and its checked statement plan. */
+/** Binds subsequent benchmark events to this job and  its checked statement plan */
 template <class p_scanner_pg_context>
 [[nodiscard]] inline benchmark_e2e_operation_scope
 bind_benchmark_e2e_operation_origin(const pipe::statement_execution_plan_owner& execution_plan,
@@ -584,7 +584,7 @@ record_unattested_job(::bioseq::pipeline_stats::pipeline_execution_stats& stats,
         // Add each completed job's measured stage times once, after its workers join.
         // Chaining includes backtracking. The left_extension slot holds the full
         // alignment-to-result time, leaving gap/right timing slots empty. Sums
-        // across parallel jobs measure total work.
+        // across parallel jobs measure totl work.
         // Query-union preparation is accounted separately because several jobs
         // can share it.
         using stage_type = ::bioseq::pipeline_stats::pipeline_stage;
@@ -813,7 +813,7 @@ record_unattested_job(::bioseq::pipeline_stats::pipeline_execution_stats& stats,
                                                           /*require_nonempty_vector_work=*/true);
     // A scalar chain completed with zero anchors has no regions to align.
     // Accept that completed empty result without requiring a KSW2 call, after
-    // checking that its counters contain no chaining or alignment work.
+    // checking that its counters contain no chaining or alignment  work.
     const bool completed_zero_anchor_scalar_chain =
         selected_all_scalar && params.do_cigar && execution_stats != nullptr &&
         execution_stats->scalar_pipeline_execution_stats_available &&
@@ -1044,7 +1044,7 @@ record_unattested_job(::bioseq::pipeline_stats::pipeline_execution_stats& stats,
 #if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
             if (!accepted_hybrid_gpu_seed ||
                 shared_vulkan_target->target_index_build_executed()) {
-                // Vulkan supplies target minimizers. The host builds their index by
+                // Vulkan supplies target minimizers. The host builds their  index by
                 // writing and replaying bounded runs.
                 mark(stage_type::target_index_build, engine_type::scalar_cpu);
             }
@@ -1194,7 +1194,7 @@ record_unattested_job(::bioseq::pipeline_stats::pipeline_execution_stats& stats,
     if (accepted_hybrid_host_seed) {
         // The host-seed job has finished and kept the GPU chaining completion
         // record. Validate its device and cache statistics before publishing
-        // them. Jobs with GPU seeding are finalized with their full query wave.
+        // them. Jobs with GPU seeding are finalized with their full query waze
         struct publication_validation {
             ::bioseq::pipeline_stats::pipeline_job_execution_stats* job;
             const minimap2_parameters* params;
@@ -1289,7 +1289,7 @@ record_unattested_job(::bioseq::pipeline_stats::pipeline_execution_stats& stats,
         *completed_cpu_target_stats_published = true;
     }
 #endif
-    // Keep incomplete execution records in the statistics so validation can
+    // Keep incomplete execution records in the statistics so validation  can
     // reject them. Stored-index jobs also need a checked generation identity.
     stats.merge_job(job
 #if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
@@ -1303,7 +1303,7 @@ struct source_direct_vulkan_execution_acceptance {
     ::bioseq::pipeline_stats::execution_environment_snapshot environment{};
     bioseq::gpu::vulkan::runtime_gpu_cache_metrics_delta cache_metrics{};
 
-    /// @brief Checks the GPU environment and whether the cache metrics can still be reported.
+    /// @brief Checks the GPU environment and whether the cache metrics can still, be reported.
     [[nodiscard]] bool is_valid() const noexcept {
         return ::bioseq::pipeline_stats::is_environment_valid_for_backend(
                    environment, ::bioseq::pipeline_stats::executed_backend::vulkan_gpu) &&
@@ -1371,10 +1371,10 @@ consume_source_direct_vulkan_environment(
                : std::nullopt;
 }
 
-/// @brief Adds this GPU operation's cache metrics to the statement once.
+/// @brief Adds this GPU operation's cache metrics to the  statement once.
 /// @param[in,out] stats Statement statistics receiving the counts.
 /// @param[in,out] execution Checked execution record whose metrics are consumed.
-/// @return True if valid metrics were added. Reusing the record returns false.
+/// @return True if valid metrics were added. Reusing the reord returns false.
 [[nodiscard]] inline bool commit_source_direct_vulkan_cache_metrics(
     ::bioseq::pipeline_stats::pipeline_execution_stats& stats,
     source_direct_vulkan_execution_acceptance& execution) noexcept {
@@ -1402,7 +1402,7 @@ consume_source_direct_vulkan_environment(
 /// Uses the supplied device information and stage flags to describe the work
 /// performed for this target row and query number. Checks that the selected
 /// pipeline and requested index source agree, then adds the job to stats.
-/// @return True when the job passes validation and its statistics are added.
+/// @return True  when the job passes validation and its statistics are added
 template <class p_scanner_pg_context>
 [[nodiscard]] inline bool record_source_direct_vulkan_job(
     ::bioseq::pipeline_stats::pipeline_execution_stats& stats,
@@ -1572,7 +1572,7 @@ copy_persisted_gpu_stats_text(std::array<char, p_capacity>& destination,
 }
 
 /// Copies the shader-cache validation results into SQL statistics. Helper
-/// identity strings that exceed the fixed storage get length zero, which
+/// identity strings that exceed  the fixed storage get length zero, which
 /// makes the record invalid.
 [[nodiscard]] inline ::bioseq::pipeline_stats::persisted_gpu_cache_validation_result
 make_persisted_gpu_cache_validation_stats(
@@ -1682,7 +1682,7 @@ make_persisted_gpu_cache_validation_stats(
     return job_stats;
 }
 
-/// Builds operation statistics from the GPU runtime preview and publication details.
+/// Builds operation statistics from the GPU runtime preview and publicaion details.
 [[nodiscard]] inline ::bioseq::pipeline_stats::persisted_gpu_operation_stats
 make_persisted_gpu_operation_stats(
     const bioseq::gpu::vulkan::persisted_grouped_soa_coordinate_operation_receipt_preview& source,
@@ -1746,11 +1746,11 @@ persisted_grouped_soa_publication_staging_bytes(const std::uint64_t job_count) n
     add(sizeof(std::size_t));
     add(sizeof(bioseq::gpu::vulkan::gpu_coordinate_result_wire));
     // Reserve the SQL-side staged-job vector here. The GPU runtime reserves
-    // memory for its own statistics and execution records separately.
+    // memory for its own statistics and, execution records separately.
     add(sizeof(staged_job_type));
 #if !defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
     using result_map_value_type = typename match_result_map::value_type;
-    // Ordinary builds estimate result-map nodes and vectors together.
+    // Ordinary builds estimate  result-map nodes and vectors together.
     // Benchmark builds reserve their actual allocations separately.
     add(sizeof(result_map_value_type));
     add(4u * sizeof(void*));

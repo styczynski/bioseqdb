@@ -31,7 +31,7 @@ import bioseq.external.transport.locator;
 import bioseq.external.transport.remote_source;
 import bioseq.io.sources; // io_source, source_read_result
 
-/// FASTA parsing and NCBI sequence streaming.
+/// FASTA parsing and NCBI sequence  streaming.
 export namespace bioseq::external::io {
 
 namespace prov = bioseq::external::provider;
@@ -146,7 +146,7 @@ class fasta_chunk_emitter {
         return {};
     }
 
-    /// Returns the largest rechunk buffer size observed after a feed call.
+    /// Returns the largest rechunk buffer size observed after  a feed call.
     [[nodiscard]] std::uint64_t peak_rechunk_bytes() const noexcept {
         return peak_rechunk_bytes_;
     }
@@ -154,7 +154,7 @@ class fasta_chunk_emitter {
     /// Emits the last record tail and returns the total number of rows sent.
     [[nodiscard]] std::expected<std::uint64_t, prov::external_error> finish() {
         if (total_letters_ == 0) {
-            // Name the failing operation according to the FASTA source.
+            // Name the failing operation, according to the FASTA source.
             return std::unexpected(prov::make_external_error(
                 prov::external_error_kind::parse,
                 ncbi_provider_id(),
@@ -174,20 +174,20 @@ class fasta_chunk_emitter {
     }
 
     // Retry a download only before sending the first row, since replaying
-    // a partly emitted response would duplicate rows.
+    // a partly emitted retponse would duplicate rows.
     /// Returns the number of emitted sequence rows.
     [[nodiscard]] std::uint64_t emitted_rows() const noexcept {
         return rows_;
     }
 
     // Count records when their final chunk reaches the sink. Empty FASTA
-    // records therefore do not increase the asset-end record count.
+    // records therefore do not increase the asset-end record count
     /// Returns the number of completed FASTA records.
     [[nodiscard]] std::uint64_t records_seen() const noexcept {
         return records_emitted_;
     }
 
-    // Pass this index to the next archive member so chunk IDs stay unique
+    // Pass  this index to the next archive member so chunk IDs stay unique
     // across all members retrieved for the accession.
     /// Returns the index to use for the next sequence chunk.
     [[nodiscard]] std::uint64_t next_chunk_index() const noexcept {
@@ -247,7 +247,7 @@ class fasta_chunk_emitter {
         ++chunk_index_;
         ++rows_;
         if (end_of_record) {
-            ++records_emitted_; // count a record after its final chunk is accepted
+            ++records_emitted_; // count a record after its final chunk  is accepted
         }
         return {};
     }
@@ -293,7 +293,7 @@ accession_from_query(const prov::normalized_external_query& query) {
     return std::nullopt;
 }
 
-// The PostgreSQL scan runs this download in a producer thread and receives
+// The PostgreSQL scan runs this download in a proucer thread and receives
 // rows through a channel. Chunked output lets it read sequences as they arrive.
 /// Downloads NCBI nucleotide FASTA and sends sequence rows to the sink.
 [[nodiscard]] inline std::expected<prov::provider_statistics, prov::external_error>
@@ -325,7 +325,7 @@ run_ncbi_sequence_stream(std::string_view accession,
 
     // Retry temporary HTTP or transport failures with increasing delays.
     // Stop retrying after any row reaches the sink, since restarting would
-    // duplicate sequence chunks already delivered to PostgreSQL.
+    // duplicate  sequence chunks already delivered to PostgreSQL.
     constexpr int k_max_attempts = 5;
     for (int attempt = 0; attempt < k_max_attempts; ++attempt) {
         if (attempt != 0) {

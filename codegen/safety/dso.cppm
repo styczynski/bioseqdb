@@ -86,11 +86,11 @@ inline void require_unique_global_export(
 
 }  // namespace dso_detail
 
-/// Checks that each SQL function has the expected generated wrapper and C export.
+/// Checks that each SQL function has the expected generated wrapper and C export
 ///
-/// Each public symbol and its `pg_finfo_` companion must appear once as a
+/// Each public symbol and its `pg_finfo_` companion, must appear once as a
 /// global dynamic export, with the inspection tool recorded. The external-data
-/// extension must own only `bioseq_external_handler`.
+/// extension must own  only `bioseq_external_handler`.
 inline void validate_dso_ownership(
     const safety_ledger& production,
     const dso_inventory& inventory,

@@ -25,7 +25,7 @@ extern "C" {
 #include <utility>
 #include <vector>
 
-// Input rows and matches remain in the buffer while the executor reads
+// Input rows and matches remain  in the buffer while the executor reads
 // output cursors.
 module bioseq.postgres.scheduler.dispatch_buffer:output;
 
@@ -35,7 +35,7 @@ namespace bioseq::scheduler {
 
 /**
  * @brief Return the next scan or join match with its copied input row.
- * @return Borrowed pointers, or nullopt after the last output.
+ * @return Borrowed pointers, or nullopt after the last output
  * @note An invalid cursor or missing match raises a PostgreSQL error.
  */
 [[nodiscard]] std::optional<tuple_dispatch_buffer::next_output>

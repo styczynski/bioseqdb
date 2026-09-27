@@ -40,8 +40,8 @@ enum class fasta_parser_progress : std::uint8_t {
 enum class parse_outcome : std::uint8_t {
     complete = 0,   ///< A record was emitted. The cursor advanced past it.
     incomplete,     ///< Need more bytes. Refill and call again.
-    at_end_of_file, ///< The input is exhausted and no more bytes will arrive.
-    abort,          ///< A parse error was reported through the failure callback.
+    at_end_of_file, ///< The input is exhausted and no more bytes will arrive
+    abort,          ///< A parse  error was reported through the failure callback.
 };
 
 /// Parser outcome and the input position from which the caller should continue.
@@ -50,7 +50,7 @@ struct record_parse_result {
     std::size_t cursor = 0;
 };
 
-/// State for one FASTA record, aligned to keep concurrent parser states apart.
+/// State for one FASTA record, aligned to keep cncurrent parser states apart.
 template <typename p_storage_unit, std::size_t p_bits_per_char, std::size_t p_letters_per_unit>
 struct alignas(64) fasta_parser_state {
     fasta_parser_progress progress = fasta_parser_progress::at_header_sigil;
@@ -67,7 +67,7 @@ struct alignas(64) fasta_parser_state {
         body.reset();
     }
 
-    /// Attaches the header and sequence buffers that receive this record.
+    /// Attaches the header and sequence buffers that receive  this record.
     void attach_to_batch(std::vector<char>& header_buf,
                          std::vector<p_storage_unit>& seq_buf) noexcept {
         header_storage = &header_buf;
@@ -76,7 +76,7 @@ struct alignas(64) fasta_parser_state {
 };
 
 /// Continues one FASTA record from the supplied input position.
-/// An incomplete result keeps the state for the next refill. At completion,
+/// An incomplete result keeps the state for the next refill. At, completion,
 /// the parser calls `emit_record` and resets its record state. EOF ends a
 /// trailing sequence body.
 ///
@@ -156,7 +156,7 @@ template <sequence_alphabet p_alphabet,
     }
 
     // For dna4 packed into 64-bit words, the encoder skips line breaks and
-    // stops at the next header in one pass. Other encodings process one body
+    // stops at the next header in one  pass. Other encodings process one body
     // line at a time.
     constexpr bool use_multiline_encoder = std::is_same_v<p_alphabet, seq::dna4> &&
                                            std::is_same_v<p_storage_unit, std::uint64_t> &&
@@ -247,7 +247,7 @@ template <sequence_alphabet p_alphabet,
         }
     }
 
-    // Finish the packed sequence, emit its offsets, and reset for the next record.
+    // Finish the packed sequence, emit its offsets, and reset for the next record
     if (state.progress == fasta_parser_progress::finished_record) {
         const std::size_t header_size = state.header_storage->size() - state.header_start_offset;
         const std::size_t seq_start = state.body.record_start_offset;

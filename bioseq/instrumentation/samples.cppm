@@ -16,7 +16,7 @@ import bioseq.instrumentation.configuration;
 
 export namespace bioseq::instrumentation {
 
-/** @brief Timing, program location, and counters captured in one sample. */
+/** @brief Timing, program location, and counters captured in one  sample. */
 struct alignas(64) sample_record {
     std::uint64_t timestamp_ns = 0;
     std::uint64_t cycles = 0;

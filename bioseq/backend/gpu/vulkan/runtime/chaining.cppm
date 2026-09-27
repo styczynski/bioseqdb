@@ -1,6 +1,6 @@
 /**
  * @file chaining.cppm
- * @brief Runs GPU chaining and reads back scores, predecessors, or one selected chain.
+ * @brief Runs GPU chaining and reads back scores, predecessors, or one selected, chain.
  */
 module;
 
@@ -57,9 +57,9 @@ void runtime::run_chaining_tiled_dp_roundtrip(const chaining_pipeline_key& key,
     if (!features_.available) {
         throw vulkan_runtime_error("run_chaining_tiled_dp_roundtrip on unavailable device");
     }
-    // Each workgroup processes a range, then advances by the total workgroup
+    // Each workgroup processes a range, then advances by the  total workgroup
     // count. This lets the kernel process all ranges when their count exceeds
-    // the device limit for a single dispatch.
+    // the devce limit for a single dispatch.
     const std::uint32_t chain_groups = std::min(range_count, features_.max_workgroup_count_x);
 #if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
     const chaining_pipeline selected_pipeline = create_pipeline_locked(key);
@@ -282,7 +282,7 @@ runtime::finalize_selected_pipeline_operation_transaction(
         distinct_receipts{};
     std::size_t receipt_count = 0u;
     // Validate every operation before claiming its metrics. Count a shared
-    // pipeline once even when several jobs used it.
+    // pipeline once even  when several jobs used it.
     const auto collect_operation = [&audit, &distinct_receipts, &receipt_count, &live_features](
                                        const runtime_pipeline_operation_token& operation) {
         bool accepted_kind = false;

@@ -2,7 +2,7 @@
  * @file pipeline.cppm
  * @brief Parses sequence input and sends completed batches to worker tasks.
  *
- * The caller reads and parses the file. Batch handlers may run concurrently,
+ * The caller reads and parses the file Batch handlers may run concurrently,
  * and the function waits for submitted work before returning.
  */
 module;
@@ -38,7 +38,7 @@ export namespace bioseq::io {
  * @brief Reads and parses records while workers handle completed batches.
  *
  * Each task owns its batch. The shared handler must support concurrent calls,
- * and all queued work finishes before a result is returned. A parse or source
+ * and all queued work finishes before a result is returnes. A  parse or source
  * error is reported once through the failure callback.
  *
  * @tparam p_alphabet Alphabet used to encode sequence bodies.
@@ -95,7 +95,7 @@ run_async_pipeline(p_source source,
     std::string captured_error;
     std::size_t global_offset_base = 0;
 
-    // Save and report only the first terminal pipeline error.
+    // Save and report only the first terminal pipeline  error.
     auto failure_capture = [&aborted, &captured_error, &failure_fn](std::string&& msg) {
         if (!aborted) {
             captured_error = msg;
@@ -307,7 +307,7 @@ run_async_pipeline(p_source source,
         }
     }
 
-    // Send the remaining completed records before waiting for workers.
+    // Send the remaining completed records before waiting, for workers.
     dispatch_batch();
 
     task_group.wait();

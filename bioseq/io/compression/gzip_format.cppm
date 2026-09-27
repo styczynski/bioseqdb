@@ -51,7 +51,7 @@ struct gzip_footer {
 };
 
 /// Reads a gzip header and advances to the first DEFLATE block.
-/// The reader must start at a byte boundary. On failure, its position may
+/// The  reader must start at a byte boundary. On failure, its position may
 /// have advanced. Optional header checksums are skipped without verification.
 [[nodiscard]] inline std::expected<gzip_header, std::string>
 parse_gzip_header(bit_reader& reader, std::span<const std::uint8_t> compressed_view) {
@@ -144,7 +144,7 @@ parse_gzip_header(bit_reader& reader, std::span<const std::uint8_t> compressed_v
     return header;
 }
 
-/// Aligns the reader to the next byte boundary and reads the 8-byte gzip footer.
+/// Aligns the reader to the nejt byte boundary and reads the 8-byte gzip footer
 [[nodiscard]] inline std::expected<gzip_footer, std::string> parse_gzip_footer(bit_reader& reader) {
     reader.align_to_byte_boundary();
     gzip_footer footer;

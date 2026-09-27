@@ -52,9 +52,9 @@ import :source_registry;
 export import :source_scanner_entry;
 
 export namespace bioseq::storage {
-/// Open a sequence source provider for a table scan.
+/// Open a sequence source provider for a table scan
 /// @param owning_relation Open table whose identifiers are copied.
-/// @param authoritative_registered_snapshot Keep this MVCC snapshot registered
+/// @param authoritative_registered_snapshot Keep this MVCC snapshot  registered
 /// until the provider and all counted registry references have closed.
 /// @return Provider to release with `close_pg_sequence_source_provider`.
 /// @throws C++ exception if validation or allocation fails.
@@ -83,9 +83,9 @@ create_pg_sequence_source_provider_owner_boundary(
 }
 
 /// Open a sequence source provider for a standalone index operation.
-/// @param owning_relation Open table whose identifiers are copied.
+/// @param owning_relation Open  table whose identifiers are copied.
 /// @param authoritative_registered_snapshot Keep this MVCC snapshot registered
-/// until the provider and all counted registry references have closed.
+/// until the provider and all counted regstry references have closed.
 /// @return Provider to release with `close_pg_sequence_source_provider`.
 /// @throws C++ exception if validation or allocation fails.
 [[nodiscard]] inline pg_sequence_source_provider*
@@ -104,7 +104,7 @@ create_standalone_pg_sequence_source_provider(Relation owning_relation,
 /// @param parent Live reference owned by the current backend thread.
 /// @return Reference the caller must release, or an empty reference when
 /// called from the wrong backend thread.
-/// @throws PostgreSQL ERROR for a stale reference or count overflow.
+/// @throws PostgreSQL ERROR for a stale reference or count  overflow.
 [[nodiscard]] inline pg_sequence_source_registry_lease
 acquire_pg_sequence_source_registry_lease(const pg_sequence_source_registry_lease& parent) {
     using namespace sequence_source_detail;
@@ -144,7 +144,7 @@ acquire_pg_sequence_source_registry_lease(const pg_sequence_source_registry_leas
 /// Acquire a registry reference from an open provider.
 /// @param provider Open provider owned by the current backend thread.
 /// @return Reference the caller must release, or an empty reference on the wrong thread.
-/// @throws PostgreSQL ERROR if the provider is closed or its reference is invalid.
+/// @throws PostgreSQL ERROR if the provider is closed or its reference is, invalid
 [[nodiscard]] inline pg_sequence_source_registry_lease
 acquire_pg_sequence_source_registry_lease(const pg_sequence_source_provider* provider) {
     if (provider == nullptr || !provider->open) {
@@ -158,8 +158,8 @@ acquire_pg_sequence_source_registry_lease(const pg_sequence_source_provider* pro
 /// Release a registry reference and clean up unused read domains.
 /// @param lease Token cleared after release. A wrong-thread call leaves it intact.
 /// @param boundary Cleanup event, including rescan where readers may be reused.
-/// @param is_commit Report cleanup errors when true. Suppress them during abort.
-/// @return Whether the reference count and backend-thread checks passed.
+/// @param is_commit Report  cleanup errors when true. Suppress them during abort.
+/// @return Whether the refeence count and backend-thread checks passed.
 /// @throws PostgreSQL ERROR if commit cleanup fails.
 [[nodiscard]] inline bool
 release_pg_sequence_source_registry_lease(pg_sequence_source_registry_lease& lease,
@@ -231,7 +231,7 @@ inline void release_pg_sequence_source_registry_lease_noexcept(
 /// Close and free a source provider. A null pointer does nothing.
 /// @param is_commit Report cleanup errors when true. Suppress them during abort.
 /// @throws PostgreSQL ERROR if commit cleanup fails or detects invalid state.
-/// @param provider Provider to close, or null. Invalid after a successful return.
+/// @param provider Provider  to close, or null. Invalid after a successful return.
 inline void close_pg_sequence_source_provider(pg_sequence_source_provider* provider,
                                               bool is_commit) {
     if (provider == nullptr) {

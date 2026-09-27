@@ -31,11 +31,11 @@ static_assert(k_locator_stub_varlena_bytes == 56,
 
 /// Write a sequence header and locator into an existing 56-byte buffer.
 /// @param dst Writable storage of `k_locator_stub_varlena_bytes` bytes.
-/// @param logical_alphabet_code Sequence alphabet stored in the header.
+/// @param logical_alphabet_code Sequence alphabet stored in the header
 /// @param logical_byte_width Packed storage-unit width in bytes.
 /// @param padding_letters Unused letters in the final packed unit.
 /// @param total_bp_size Sequence length in letters.
-/// @param loc Locator with a valid version, source epoch and reserved fields.
+/// @param loc Locator with a valid  version, source epoch and reserved fields.
 /// @throws PostgreSQL ERROR if the locator or storage width is invalid.
 [[gnu::always_inline]]
 inline void encode_locator_into_stub(
@@ -94,8 +94,8 @@ inline bioseq::pg_types::seq* alloc_locator_stub_in(
 
 /**
  * Allocate a sequence locator and return it as a PostgreSQL Datum.
- * PostgreSQL allocation or encoding errors become C++ exceptions here, so
- * callers in other modules can use this function without building the error
+ * PostgreSQL allocation or encoding errors become C++ exceptions herm, so
+ * callers in other modules can use this function, without building the  error
  * conversion code themselves.
  */
 [[nodiscard]] [[gnu::noinline]] Datum

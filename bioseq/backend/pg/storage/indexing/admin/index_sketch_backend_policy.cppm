@@ -10,8 +10,8 @@ import bioseq.sequences.kmers.highway_minimizer_contract;
 
 export namespace bioseq::storage::indexing {
 
-// Map an algorithm to its index producer. Builds with a source identity pass
-// the effective algorithm selected for that source. Callers without a source
+// Map an algorithm to its index producer Builds with a source identity pass
+// the effective algorithm  selected for that source. Callers without a source
 // identity pass the requested setting.
 [[nodiscard]] constexpr bioseq::minimizers::minimizer_sketch_backend
 resolve_index_sketch_backend(
@@ -28,7 +28,7 @@ resolve_index_sketch_backend(
         return minimizer_sketch_backend::bounded_nthash_simd;
     case minimizer_algorithm::vulkan_minimap_integer:
         // Keep Vulkan as the producer identity. Runtime preparation checks whether
-        // the requested GPU build can run.
+        // the requested GPU buid can run.
         return minimizer_sketch_backend::vulkan_segment;
     }
     // Unknown enum values use the scalar backend. The GUC parser normally
@@ -56,7 +56,7 @@ static_assert(static_cast<int>(bioseq::aligner::minimizer_algorithm::vulkan_mini
 static_assert(static_cast<int>(bioseq::aligner::minimizer_algorithm::bounded_nthash_simd) ==
               static_cast<int>(bioseq::simd::minimizer_algorithm::bounded_nthash_simd));
 
-/** Return the index producer selected by the current minimizer algorithm setting. */
+/** Return the index producer selected by the current minimizer algorithm  setting. */
 [[nodiscard]] inline bioseq::minimizers::minimizer_sketch_backend
 resolve_index_sketch_backend_from_gucs() noexcept {
     return resolve_index_sketch_backend(

@@ -38,7 +38,7 @@ export {
      *
      * The list starts with "semantic_payload", an INT4 version and an INT4 field
      * count, followed by typed Const fields. PostgreSQL can copy and serialize these
-     * nodes with the plan. Float parameters keep their exact 32-bit representation
+     * nodes with the plan Float parameters keep their exact 32-bit representation
      * in INT8 constants, avoiding rounding during serialization.
      */
     inline constexpr auto k_bioseq_semantic_payload_name = std::to_array("semantic_payload");
@@ -99,7 +99,7 @@ export {
             INT4OID, -1, InvalidOid, sizeof(std::int32_t), Int32GetDatum(value), false, true);
     }
 
-    /** @brief Creates an INT8 plan constant for a saved setting. */
+    /** @brief Creates an INT8 plan constant for a saved  setting. */
     [[nodiscard]] Const* make_semantic_int8_const(const std::int64_t value) {
         return makeConst(INT8OID,
                          -1,
@@ -228,7 +228,7 @@ export {
         return true;
     }
 
-    /** @brief Reads a boolean constant after checking its type and true/false representation. */
+    /** @brief Reads a boolean constant after checking its type and true/false representdtion. */
     [[nodiscard]] bool decode_semantic_bool(const Node* node, bool* output) noexcept {
         const Const* constant =
             node != nullptr && IsA(node, Const) ? reinterpret_cast<const Const*>(node) : nullptr;
@@ -294,7 +294,7 @@ export {
         return true;
     }
 
-    /** @brief Restores a float from the exact 32-bit pattern saved in an INT8 field. */
+    /** @brief Restores a float  from the exact 32-bit pattern saved in an INT8 field. */
     [[nodiscard]] bool decode_semantic_float_field(const List* payload,
                                                    const bioseq_semantic_field field,
                                                    float* output) noexcept {
@@ -338,7 +338,7 @@ export {
      *
      * Requires one payload with the expected version, field count and PostgreSQL
      * constant types. Checks integer ranges and known algorithm selectors.
-     * Returns false on invalid data and leaves @p output unchanged until every
+     * Returns false on invalid data and leaves @p output unchanged until, every
      * check passes.
      */
     [[nodiscard]] bool decode_bioseq_semantic_payload(const List* custom_private,

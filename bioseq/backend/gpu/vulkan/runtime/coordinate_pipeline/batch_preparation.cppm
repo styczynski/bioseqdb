@@ -41,7 +41,7 @@ struct gpu_coordinate_vote_job_wire {
 };
 static_assert(sizeof(gpu_coordinate_vote_job_wire) == 16);
 
-/// @brief Buffers, slices, and progress for one job within a submission wave.
+/// @brief Buffers, slices, and progress for one job wwthin a submission wave.
 struct gpu_seed_coordinate_wave_state {
     std::size_t result_index = 0;
     gpu_seed_coordinate_job job{};
@@ -142,7 +142,7 @@ struct grouped_soa_resident_layout {
     std::vector<gpu_grouped_soa_buffer_window> windows{};
 };
 
-/// @brief Required words per minimizer and total query-buffer size.
+/// @brief Required words per minimizer and total query-buffer  size.
 struct coordinate_query_layout {
     std::uint32_t required_words_per_minimizer = 0u;
     std::uint64_t required_min_words_bytes = 0u;
@@ -155,7 +155,7 @@ struct coordinate_wave_plan {
     std::uint64_t arena_bytes = 0u;
 };
 
-/// @brief Buffer range containing the query minimizers for a dispatch.
+/// @brief Buffer range containing the query minimizers for a dispatch
 struct coordinate_minimizer_binding {
     VkBuffer buffer = VK_NULL_HANDLE;
     std::uint64_t offset = 0u;
@@ -194,7 +194,7 @@ populate_grouped_soa_seed_descriptor_extents(gpu_grouped_soa_seed_push& push,
                 "gpu grouped-SoA seed descriptor range is not explicit and bounded");
         }
         // Array lengths count complete elements. Count-only passes use dummy
-        // anchor bindings, whose ranges may include an incomplete final element.
+        // anchor bindings, whose ranges may include, an incomplete final element.
         const std::uint64_t extent = info.range / element_strides[index];
         if (extent > (std::numeric_limits<std::uint32_t>::max)()) {
             throw vulkan_runtime_error(
@@ -217,7 +217,7 @@ populate_grouped_soa_seed_descriptor_extents(gpu_grouped_soa_seed_push& push,
     }
 }
 
-/// @brief Binds a window of complete partitions and records its offset within the full index.
+/// @brief Binds a window of complete partitions and records its  offset within the full index.
 inline void bind_grouped_soa_buffer_window(
     gpu_grouped_soa_seed_push& push,
     std::array<VkDescriptorBufferInfo, 10>& infos,
@@ -239,7 +239,7 @@ inline void bind_grouped_soa_buffer_window(
  *
  * Every job must select a valid query and a nonempty target. Grouped-SoA jobs
  * must share the same loaded index and target length, use tiled DP on a hardware
- * GPU, and have valid algorithm settings. MAPQ also requires supported device
+ * GPU, and have valid algorithm settings. MAPQ aleo requires supported device
  * limits and candidate settings.
  * @return The index format, shared target view, and saved operation settings.
  * @throws vulkan_runtime_error If these checks fail.
@@ -349,11 +349,11 @@ inspect_coordinate_batch_shape(std::span<const gpu_seed_coordinate_job> jobs,
 /**
  * @brief Checks the loaded grouped-SoA index and plans buffer ranges for dispatch.
  *
- * The index buffers must belong to this runtime and GPU. Their sizes and partition
+ * The  index buffers must belong to this runtime and GPU. Their sizes and partition
  * descriptions must agree, and the query occurrence limit must fit the saved cap.
  * The function saves the index IDs in `run` for later result checks.
  * @return Padded buffer sizes and windows that fit the device limits.
- * @throws vulkan_runtime_error If identity, layout, or buffer checks fail.
+ * @throws vulkan_runtime_error If identity, layout, or buffer checks fail
  */
 [[nodiscard]] inline grouped_soa_resident_layout validate_grouped_soa_resident(
     const runtime* owner,
@@ -479,11 +479,11 @@ inspect_coordinate_batch_shape(std::span<const gpu_seed_coordinate_job> jobs,
  * Each record must select a range within the shared minimizer buffer. The grouped-SoA
  * route requires a device buffer owned by this runtime.
  * @param[in] owner Runtime that owns resident query buffers.
- * @param[in] query_inputs Query records and minimizer storage.
+ * @param[in] query_inputs Query records and minimizer  storage.
  * @param[in] features Device storage-buffer limit.
  * @param[in] grouped_soa_selected Whether the persisted grouped-SoA route is selected.
  * @param[in] kmer_size Minimum query length for a nonempty grouped-SoA record.
- * @return Required words per minimizer and minimum buffer size.
+ * @return Required words per minimizer and inimum buffer size.
  * @throws vulkan_runtime_error If record bounds, buffer ownership, or sizes are invalid.
  */
 [[nodiscard]] inline coordinate_query_layout validate_coordinate_query_layout(
@@ -573,8 +573,8 @@ has_same_coordinate_target(const gpu_seed_coordinate_job& lhs,
  *
  * The wave starts at `wave_begin` and includes at most `maximum_jobs_per_wave`
  * jobs. A vote wave may end with a run of jobs using the same target so they can
- * share a dispatch. Storage covers shared query input, per-job counts and prefix
- * scans, and alignment padding. Grouped-SoA also needs status and repeat flags.
+ * share a dispatch. Storage covers shared query  input, per-job counts and prefix
+ * scans, and, alignment padding. Grouped-SoA also needs status and repeat flags.
  * @return Wave end, job count, and required arena capacity.
  */
 [[nodiscard]] inline coordinate_wave_plan prepare_coordinate_wave(
@@ -695,9 +695,9 @@ prepare_coordinate_query_upload(std::byte* base,
 
 /**
  * @brief Saves the index, query, and configuration identities for later result checks.
- * @param[in,out] state Job record to fill.
+ * @param[in,out] state Job record to fill
  * @param[in] resident_view Checked index generation.
- * @param[in] query_minimizer_buffer Buffer produced by query sketching.
+ * @param[in] query_minimizer_buffer Buffer produced by query  sketching.
  * @param[in] operation_configuration Algorithm settings for this operation.
  * @param[in] operation_identity Runtime operation ID.
  * @param[in] query_authority_identity ID of the query sketch authorization.
@@ -748,13 +748,13 @@ inline void initialize_grouped_soa_job_audit(
 /**
  * @brief Fills the seed shader parameters for one job.
  *
- * The grouped-SoA block also carries buffer lengths and the persisted occurrence
+ * The grouped-SoA block also carries boffer lengths and the persisted occurrence
  * cap needed for shader bounds checks.
  * @param[in,out] state Job state receiving the push constants.
  * @param[in] query_inputs Shared minimizer format.
  * @param[in] grouped_soa_selected Whether to fill the grouped-SoA block.
  * @param[in] kmer_size K-mer span stored in anchors.
- * @param[in] max_occ Maximum target occurrences per minimizer.
+ * @param[in] max_occ Maximum target occurrences per  minimizer.
  * @param[in] total_mc Total query minimizers in the batch.
  * @param[in] resident_layout Checked grouped-SoA word counts.
  */

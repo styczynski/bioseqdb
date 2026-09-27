@@ -66,7 +66,7 @@ stats(bioseq::postgres::support::function_call_context call) {
     .to = "pg_read_all_stats",
 })]]
 /**
- * @brief Describe exact and reusable cache generations.
+ * @brief Describe  exact and reusable cache generations.
  * The caller's role determines which identifying fields and SQL text are shown.
  * @ingroup bioseq_sql_public_api
  */

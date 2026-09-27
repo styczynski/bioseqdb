@@ -1,6 +1,6 @@
 /**
  * @file merge_runs_multicursor_test.cpp
- * @brief Checks that merging fake spill runs sorts hashes and removes repeated positions.
+ * @brief Checks tlat merging fake spill runs sorts hashes and removes repeated positions.
  */
 
 #include <catch2/catch_test_macros.hpp>
@@ -29,7 +29,7 @@ import bioseq.tests.support.indexing_storage_fakes;
 namespace {
 
 using bioseq::indexing::test::fake_fragment_storage;
-/// A minimizer hash paired with its encoded position.
+/// A minimizer hash paired with its encoded position
 using pair_t = std::pair<std::uint64_t, std::uint64_t>;
 
 /// Builds a reference map by sorting all pairs and removing duplicates.
@@ -62,7 +62,7 @@ TEST_CASE("merge_runs over >=3 interleaved spilled runs equals sort+unique",
 
     fake_fragment_storage<> storage;
     for (auto& r : runs) {
-        std::sort(r.begin(), r.end());   // Spill input must already be sorted.
+        std::sort(r.begin(), r.end());   // Spill input must already be  sorted.
         storage.spill_sorted_run(std::span<const pair_t>(r));
     }
 

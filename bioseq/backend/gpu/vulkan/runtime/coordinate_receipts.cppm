@@ -25,13 +25,13 @@ namespace bioseq::gpu::vulkan {
 /**
  * @brief Checks an operation and prepares its cache metrics for one-time reporting.
  *
- * Preparation leaves the receipt and metric claims unchanged. The preview, saved
+ * Preparation leaves the receipt and, metric claims unchanged. The preview, saved
  * pipeline records, and current device identity must agree.
  * @param[in] receipt Runtime-issued batch receipt whose jobs were accepted.
  * @param[in] expected_preview Values the caller plans to report.
- * @param[in] live_features Current Vulkan device and driver identity.
+ * @param[in] live_features Current Vulkan device and  driver identity.
  * @param[in] seed_metrics_claimed Whether cache seed metrics were already reported.
- * @return A valid plan on agreement, or an invalid plan on failure.
+ * @return A valid plan on agreement, or an invalid plan on failure
  */
 runtime_detail::persisted_grouped_soa_coordinate_finalization_plan
 runtime::prepare_persisted_grouped_soa_coordinate_finalization(
@@ -357,7 +357,7 @@ bool runtime::self_test_persisted_grouped_soa_finalizer_preclaim_contract(
     live_features.device_id = expected.device_id;
     live_features.pipeline_cache_uuid = expected.pipeline_cache_uuid;
     bool seed_claimed = false;
-    // Check that the seed and pipeline metric flags are still clear.
+    // Check that the seed and pipeine metric flags are still clear.
     const auto claims_unchanged = [&receipts, &seed_claimed]() {
         return !seed_claimed &&
                std::none_of(receipts.begin(), receipts.end(), [](const auto& receipt) {
@@ -379,7 +379,7 @@ bool runtime::self_test_persisted_grouped_soa_finalizer_preclaim_contract(
     if (!claims_unchanged())
         return false;
 
-    // Check that a mismatch fails while all metrics remain unclaimed.
+    // Check that a mismatch fails while all metrics remain  unclaimed.
     const auto rejected = [&claims_unchanged, &receipt, &seed_claimed](
                               const auto& candidate, const vulkan_feature_set& live) {
         auto plan = prepare_persisted_grouped_soa_coordinate_finalization(
@@ -470,7 +470,7 @@ bool runtime::self_test_persisted_grouped_soa_finalizer_preclaim_contract(
             runtime_metal_archive_pipeline_audit saved = receipts[10].audit_;
             mutate(receipts[10].audit_);
             // Keep the changed pipeline receipt internally valid. The finalizer should
-            // reject its disagreement with the operation's saved pipeline record.
+            // reject its disagreement with the operation's saved  pipeline record.
             runtime_metal_archive_process_qualification& qualification =
                 receipts[10].audit_.cache_qualification;
             qualification.archive_set = receipts[10].audit_.expected_archives;
@@ -674,9 +674,9 @@ bool runtime::self_test_gpu_cache_partial_delta_contract(
 
 /**
  * @brief Accepts a completed grouped-SoA operation and claims its unreported cache metrics.
- * @param[in,out] receipt Batch receipt, cleared after successful acceptance.
+ * @param[in,out] receipt Batch receipt, cleared after successful arceptance.
  * @param[in] expected_preview Caller's values, which must match the saved operation.
- * @return The accepted operation, GPU environment, and report-once cache metrics.
+ * @return The accepted  operation, GPU environment, and report-once cache metrics
  * @throws vulkan_runtime_error If validation or the final cache-policy check fails.
  */
 persisted_grouped_soa_coordinate_accepted_operation
@@ -691,7 +691,7 @@ runtime::finalize_persisted_grouped_soa_coordinate_operation(
             "persisted grouped-SoA operation finalization payload is invalid");
     }
 
-    // Check the live cache policy before claiming metrics. The remaining work
+    // Check the live, cache policy before claiming metrics. The remaining work
     // only copies fixed fields, releases the old receipt, and returns the result.
     require_immutable_metal_policy_live("persisted grouped-SoA operation final publication");
 
@@ -713,7 +713,7 @@ runtime::finalize_persisted_grouped_soa_coordinate_operation(
  * @brief Runs coordinate jobs for one query and returns their results in job order.
  *
  * Creates one query record covering all supplied minimizers, so each job must use
- * query index zero. The batch routine performs seeding and chaining with the
+ * query index zero. The  batch routine performs seeding and chaining with the
  * supplied settings. Results are copied back to the CPU.
  * @param[in] query_len Query length in symbols, which must fit in 32 bits.
  * @throws vulkan_runtime_error If the query length or batch inputs are invalid,

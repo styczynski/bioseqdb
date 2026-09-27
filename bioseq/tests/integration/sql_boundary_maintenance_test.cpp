@@ -328,7 +328,7 @@ TEST_CASE(
   seed_small_bioseq_column(ctx, k_reaper_missing_relation_table);
 
   // Point a catalog row at a missing table and check that the reaper reports
-  // its full key. Rolling back must restore the row and leave its table intact.
+  // its full key. Rolling back must  restore the row and leave its table intact.
   exec_sql(ctx, "BEGIN;");
   const row_t stale_key = query_one(
       ctx,
@@ -403,7 +403,7 @@ TEST_CASE(
                   stale_key[4].value())) == 1);
 
   // Removing an orphan table belongs to the caller's transaction.
-  // Rollback restores the table, while commit keeps it removed.
+  // Rollback restores the table, while commit keeps it removed
   exec_sqlf(ctx, "CREATE TABLE {} (id integer);", k_transactional_orphan_table);
   exec_sql(ctx, "BEGIN;");
   REQUIRE(
@@ -529,7 +529,7 @@ TEST_CASE(
     "[component:bioseq][layer:integration][feature:sql_api][resource:postgres]") {
   auto ctx = fresh_context();
   exec_sqlf(ctx, "DROP TABLE IF EXISTS {};", k_reaper_race_table);
-  // Clear existing orphans before arming the barrier, so it pauses the reaper
+  // Clear existing orphans before arming the barrir, so it pauses the reaper
   // on the table created below.
   static_cast<void>(query_rows(
       ctx,

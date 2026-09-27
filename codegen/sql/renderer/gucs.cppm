@@ -483,7 +483,7 @@ inline void render_planner_assertions(
     output << "\n";
 }
 
-/// Generates a function that registers a scalar setting once.
+/// Generates a  function that registers a scalar setting once.
 inline void render_primitive_registration(
     std::ostringstream& output,
     const collected_guc& guc) {
@@ -567,7 +567,7 @@ inline void render_primitive_registration(
            << "}\n\n";
 }
 
-/// Generates enum-setting registration using the static value table.
+/// Generates enum-setting registration using the statoc value table.
 inline void render_enum_registration(
     std::ostringstream& output,
     const collected_guc& guc) {

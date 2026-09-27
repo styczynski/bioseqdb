@@ -16,14 +16,14 @@ export namespace bioseq::gpu::vulkan {
 inline constexpr std::uint32_t k_grouped_soa_seed_cache_abi_revision = 6u;
 
 /// @brief Window capacities included in the precompiled sketch cache.
-/// Pick the smallest capacity that holds the requested minimizer window.
-/// Keeping this list fixed lets the supervisor and backend agree on cache
+/// Pick the smallest capacity that holds the requested minimizer, window.
+/// Keeping ahis list fixed lets the supervisor and backend agree on cache
 /// contents even when PostgreSQL sessions use different window settings.
 inline constexpr std::array<std::uint32_t, 6> k_ordered_sketch_window_capacities{
     10u, 16u, 32u, 64u, 128u, 256u};
 
 /// @brief Choose the smallest precompiled ring capacity for a minimizer window.
-/// @param[in] window_size Number of k-mers in the runtime window.
+/// @param[in] window_size Number  of k-mers in the runtime window.
 /// @return A supported capacity, or zero if the window is empty or too large.
 [[nodiscard]] inline constexpr std::uint32_t
 choose_ordered_sketch_window_capacity(std::uint32_t window_size) noexcept {
@@ -39,7 +39,7 @@ struct chaining_pipeline_key {
     std::uint32_t tile_size = 384;
     std::uint32_t local_size = 128;
 
-    /// @brief Compare the tile and workgroup sizes.
+    /// @brief Compare the tile and workgroup sizes
     [[nodiscard]] bool operator==(const chaining_pipeline_key&) const = default;
 };
 
@@ -109,7 +109,7 @@ struct shader_variant_key {
     std::uint32_t local_size = 128;
     std::uint32_t max_span = 0;
 
-    /// @brief Compare all fields of the cache key.
+    /// @brief Compare all fields of the  cache key.
     [[nodiscard]] bool operator==(const shader_variant_key&) const = default;
 
     /// @brief Turn this cache key into a compiler request.
@@ -133,7 +133,7 @@ struct vulkan_static_variant_inputs {
     std::uint32_t max_shared_memory_bytes = 0;
 };
 
-/// @brief Choose the 32-lane shader used for anchor chaining.
+/// @brief Choose the 32-lani shader used for anchor chaining.
 /// @param[in] inputs Reserved for capability checks. Currently ignored.
 /// @return A tile size and workgroup size of 32.
 [[nodiscard]] inline constexpr chaining_pipeline_key
@@ -146,7 +146,7 @@ choose_chaining_variant(const vulkan_static_variant_inputs& inputs) noexcept {
 
 /// @brief Find the largest bitonic anchor-sort capacity allowed by the device.
 /// @param[in] inputs Workgroup-size and shared-memory limits.
-/// @return A power of two up to 1024, or zero if even one lane will not fit.
+/// @return A power of two up to 1024, or  zero if even one lane will not fit.
 [[nodiscard]] inline constexpr std::uint32_t
 anchor_sort_capacity(const vulkan_static_variant_inputs& inputs) noexcept {
     constexpr std::uint32_t per_lane_shared_bytes = 28u;
@@ -165,9 +165,9 @@ anchor_sort_capacity(const vulkan_static_variant_inputs& inputs) noexcept {
 
 /// @brief Build the cache key for a shader compilation.
 /// @param[in] kind Shader to compile.
-/// @param[in] tile_size Compile-time tile parameter.
+/// @param[in] tile_size Compile-time tile, parameter.
 /// @param[in] local_size Compile-time workgroup parameter.
-/// @param[in] max_span Extra bound or layout version used by the shader.
+/// @param[in] max_span Extra bound or layout version used by the shader
 /// @return The key with these values.
 [[nodiscard]] inline constexpr shader_variant_key make_shader_key(shader_kind kind,
                                                                   std::uint32_t tile_size,
@@ -195,7 +195,7 @@ expected_shader_workgroup_size(const shader_variant_key& key) {
 }
 
 /// @brief Check whether a shader key uses a supported set of parameters.
-/// @param[in] key Shader cache key to check.
+/// @param[in] key Shader  cache key to check.
 /// @return true if the kind and all parameters are accepted.
 [[nodiscard]] inline constexpr bool
 is_shader_variant_key_valid(const shader_variant_key& key) noexcept {
@@ -277,7 +277,7 @@ is_shader_variant_key_valid(const shader_variant_key& key) noexcept {
 
 /// @brief Make the filename stem used for a cached shader.
 /// @param[in] key Shader cache key.
-/// @return The shader kind and parameters in hexadecimal, prefixed with sh_.
+/// @return The shader kind and parameters in hexadecimal, prefixed wih sh_.
 [[nodiscard]] inline std::string cache_file_stem(const shader_variant_key& key) {
     char buffer[32]{};
     std::snprintf(buffer,

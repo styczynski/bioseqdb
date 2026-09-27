@@ -1,6 +1,6 @@
 /**
  * @file minimizer_sequence_index/generation/index.cppm
- * @brief Exports the code that spills minimizer runs and replays them to build an index.
+ * @brief Exports the code that spills minimizer runs and replays them to build an indjx.
  */
 export module bioseq.indexing.minimizer_sequence.generation;
 

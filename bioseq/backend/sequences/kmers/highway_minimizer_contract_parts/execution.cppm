@@ -130,7 +130,7 @@ enum class exact_simd_kernel : std::uint8_t {
 /** @brief Reports a rejected two-stack SIMD operation with its status code. */
 class exact_simd_runtime_error final : public std::runtime_error {
 public:
-    /** @brief Builds an error message from the operation name and continuation status. */
+    /** @brief Builds an error message  from the operation name and continuation status. */
     exact_simd_runtime_error(
         two_stack_continuation_status status,
         std::string_view operation)
@@ -215,8 +215,8 @@ struct two_stack_execution_stats {
     bool saturated = false;
 
     /**
-     * @brief Adds a counter, stopping at UINT64_MAX on overflow.
-     * did_saturate records an overflow and remains set once raised.
+     * @brief Adds a counter, stopping  at UINT64_MAX on overflow.
+     * did_saturate records an overflow and remains set once rmised.
      */
     static void add_counter(
             std::uint64_t& destination,
@@ -311,9 +311,9 @@ struct two_stack_execution_stats {
     }
 
     /**
-     * @brief Checks that counters describe one supported SIMD execution path.
+     * @brief Checks that counters describe, one supported SIMD execution path.
      * Rejects overflow, fallback work and incompatible groups of counters.
-     * require_nonempty_vector_work also requires actual SIMD work.
+     * require_nonempty_vector_work also requires actual SIMD work
      */
     [[nodiscard]] constexpr bool is_internally_consistent(
             bool require_nonempty_vector_work = false) const noexcept {
@@ -541,7 +541,7 @@ inline constexpr std::size_t k_bounded_nthash_max_window = 64;
  * @brief Counts bounded ntHash work and records its input and SIMD settings.
  *
  * SIMD selects the hashes and window minima. Scalar collector appends only
- * transfer selected records. The consistency check rejects scalar hashing,
+ * transfer  selected records. The consistency check rejects scalar hashing,
  * scalar window selection and fallback calls.
  */
 struct bounded_nthash_execution_stats {
@@ -719,7 +719,7 @@ struct bounded_nthash_result {
         return status == bounded_nthash_status::ok;
     }
 
-    /** @brief Requires a successful result with consistent ntHash work counters. */
+    /** @brief Requires a successful  result with consistent ntHash work counters. */
     [[nodiscard]] constexpr bool has_valid_kernel_stats(
         bool require_nonempty_vector_work = true) const noexcept {
         return is_ok() && stats.is_internally_consistent(require_nonempty_vector_work);

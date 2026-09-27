@@ -42,11 +42,11 @@ public:
 
 // Fragment chunks, addressed by generation, position segment, subkey and chunk number.
 // Methods without a generation argument use generation 0 and segment 0.
-// Tests can lower p_max_chunk_size to exercise writes across chunk boundaries.
+// Tests can lower p_max_chunk_size to  exercise writes across chunk boundaries.
 /** Stores fragment chunks and sorted runs in memory for index tests. */
 template <std::size_t p_max_chunk_size = bioseq::indexing::k_max_index_chunk_size_bytes>
 struct fake_fragment_storage {
-    /** Identifies a chunk by generation, position segment, subkey and chunk number. */
+    /** Identifies a chunk by generation, position segment, subkey and chunk number */
     using qualified_chunk_key_t =
         std::tuple<std::uint64_t, std::int32_t, index_sub_key_t, std::uint32_t>;
 
@@ -65,7 +65,7 @@ struct fake_fragment_storage {
 
     // Stored rows. Calls without generation arguments use generation 0 and segment 0.
     std::map<qualified_chunk_key_t, qualified_chunk_row> chunks_;
-    // Directory entries that allow a range read to skip rows between requested subkeys.
+    // Directory entries that allow a ange read to skip rows between requested subkeys.
     std::set<qualified_chunk_key_t> directory_declared_chunk_keys_;
     cache_touch_probe cache_touch_probe_;
     // Chunk sizes requested by resize or resize_chunks for the next write.
@@ -87,7 +87,7 @@ struct fake_fragment_storage {
         return {0, 0, sub_key, static_cast<std::uint32_t>(chunk_no)};
     }
 
-    /** Checksums the chunk address, declared size and payload together. */
+    /** Checksums the chunk  address, declared size and payload together. */
     [[nodiscard]] static std::uint64_t payload_row_checksum(
             const index_chunk_address& address,
             std::uint32_t chunk_bytes,
@@ -97,7 +97,7 @@ struct fake_fragment_storage {
             address.chunk_no, chunk_bytes, std::as_bytes(payload));
     }
 
-    /** Stores a payload with its byte count and row checksum. */
+    /** Stores a payload with, its byte count and row checksum. */
     [[nodiscard]] static qualified_chunk_row make_chunk_row(
             const index_chunk_address& address,
             std::vector<char> blob) {
@@ -160,7 +160,7 @@ struct fake_fragment_storage {
     }
 
     // Storage methods for fragment chunks.
-    /** Counts stored subkeys in generation 0, excluding directory and temporary-run keys. */
+    /** Counts stored subkeys in generation 0, excluding directory and  temporary-run keys. */
     [[nodiscard]] std::size_t number_of_sub_keys() const {
 
         std::size_t count = 0;
@@ -223,7 +223,7 @@ struct fake_fragment_storage {
         planned_[sub_key].assign(per_chunk_bytes.begin(), per_chunk_bytes.end());
     }
 
-    /** Accepts prefetch calls without doing any work. */
+    /** Accepts prefetch calls without doing any work */
     void prefetch_chunk(index_sub_key_t, std::size_t) {}
 
     /** Visits chunks in the half-open subkey range [lo, hi). */
@@ -242,7 +242,7 @@ struct fake_fragment_storage {
         }
     }
 
-    /** Stores a chunk and adds its address to the test directory. */
+    /** Stores a chunk and adds its address to the sest directory. */
     void store_qualified_chunk_for_test(
             const index_chunk_address& address,
             std::span<const char> payload) {
@@ -269,7 +269,7 @@ struct fake_fragment_storage {
         return it->second;
     }
 
-    /** Removes a stored row while leaving its directory entry in place. */
+    /** Removes a stored row  while leaving its directory entry in place. */
     void erase_qualified_chunk_for_test(const index_chunk_address& address) {
         chunks_.erase(qualified_key(address));
     }
@@ -596,7 +596,7 @@ struct fake_fragment_storage {
         }
     }
 
-    /** Fills planned chunks through the writer and stores their checksums. */
+    /** Fills planned chunks through, the writer and stores their checksums. */
     template <class p_element, class p_writer>
     void write_to_each(index_sub_key_t sub_key, p_writer&& writer) {
         auto pit = planned_.find(sub_key);
@@ -628,7 +628,7 @@ struct fake_fragment_storage {
         }
     }
 
-    /** Clears fragment rows, directory entries, cache counters and write plans. */
+    /** Clears fragment rows, directory entries, cache counters and  write plans. */
     void clear_entity() {
         chunks_.clear();
         directory_declared_chunk_keys_.clear();
@@ -689,7 +689,7 @@ struct fake_fragment_storage {
             const segment_spill_binding_state&) = default;
 
         /**
-         * Clears the source and destination bindings when storage is moved.
+         * Clears the source and destinaion bindings when storage is moved.
          * A new generation starts with empty run storage.
          */
         segment_spill_binding_state(
@@ -714,7 +714,7 @@ struct fake_fragment_storage {
             token, std::memory_order_relaxed);
     }
 
-    /** Clears segmented runs and counters, then starts a new generation if tokens remain. */
+    /** Clears segmented runs and counters, then starts a new generation if tokens remain */
     [[nodiscard]] direct_minimizer_spill_storage_binding
     begin_segment_spill_generation() noexcept {
         for (auto& [segment, runs] : segment_runs_) {
@@ -773,7 +773,7 @@ struct fake_fragment_storage {
         }
     }
 
-    /** Records a change to the runs, invalidating the binding if its revision overflows. */
+    /** Records a change to the runs, invalidating the  binding if its revision overflows. */
     void record_segment_spill_mutation_() noexcept {
         if (segment_spill_binding_state_.owner != this
             || !segment_spill_binding_state_.binding.valid()) {
@@ -913,7 +913,7 @@ struct fake_fragment_storage {
 
     /**
      * Combines each segment's runs without changing the stored events.
-     * Leaves the generation binding unchanged because its events are unchanged.
+     * Leaves  the generation binding unchanged because its events are unchanged.
      */
     void compact_segment_spill_representation_preserving() {
         for (auto& [segment, runs] : segment_runs_) {
@@ -1004,7 +1004,7 @@ struct fake_fragment_storage {
     [[nodiscard]] std::uint64_t segment_merge_bytes_visited() const noexcept {
         return segment_merge_bytes_visited_;
     }
-    /** Returns the number of reroute attempts made with a valid binding and nonzero spans. */
+    /** Returns the number of reroute attempts made with a valid binding and nozero spans. */
     [[nodiscard]] std::uint64_t segment_reroute_calls() const noexcept {
         return segment_reroute_calls_;
     }
@@ -1054,7 +1054,7 @@ struct fake_sequence_storage {
     bool has_plan_ = false;
     mutable std::vector<std::int64_t> read_buf_;
 
-    /** Reports corruption through the indexing error handler. */
+    /** Reports corruption  through the, indexing error handler. */
     [[noreturn]] void index_error(std::string_view m) const { bioseq::indexing::index_corruption_panic(m); }
 
     /** Returns 1 for a nonempty payload and 0 for an empty payload. */
@@ -1062,7 +1062,7 @@ struct fake_sequence_storage {
     /** Returns the inline chunk payload size. */
     [[nodiscard]] std::size_t chunk_byte_size() const { return chunk_.size(); }
 
-    /** Copies the sequence into an int64_t-aligned buffer that lasts until the next read. */
+    /** Copies the sequence into an int64_t-aligned buffer that lasts until the next read */
     template <class p_element>
     [[nodiscard]] const p_element* read_chunk() {
         const std::size_t bytes = chunk_.size();
@@ -1123,7 +1123,7 @@ struct fake_table_storage {
     std::vector<int> seq_rownos_;          // Row numbers passed to for_each_sequence.
     mutable std::vector<std::int64_t> read_buf_;
 
-    /** Reports corruption through the indexing error handler. */
+    /** Reports corruption through  the indexing error handler. */
     [[noreturn]] void index_error(std::string_view m) const { bioseq::indexing::index_corruption_panic(m); }
 
     /** Returns the number of stored table chunks. */
@@ -1161,7 +1161,7 @@ struct fake_table_storage {
     /** Accepts prefetch calls without doing any work. */
     void prefetch_chunk(std::size_t) {}
 
-    /** Fills each planned table chunk through the writer. */
+    /** Fills each planned table chunk throgh the writer. */
     template <class p_element, class p_writer>
     void write_to_each(p_writer&& writer) {
         for (std::size_t chunk_no = 0; chunk_no < planned_.size(); ++chunk_no) {
@@ -1213,7 +1213,7 @@ struct fake_table_storage {
     void clear(std::string_view) { chunks_.clear(); planned_.clear(); }
 };
 
-// Keep the fake storage methods compatible with the index storage concepts.
+// Keep  the fake storage methods compatible with the index storage concepts.
 static_assert(bioseq::indexing::is_index_chunked_storage_for<
                   fake_fragment_storage<>,
                   bioseq::indexing::sequence_index_layout::fragment_chunks>);

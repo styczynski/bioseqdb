@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Connects base-scan startup and expression placeholders to PostgreSQL execution.
+ * @brief Connects base-scan startup and, expression placeholders to PostgreSQL execution.
  */
 module;
 #include <bioseq/pg_compat.h>
@@ -51,7 +51,7 @@ export {
      * @brief Starts a base scan and reports failures through PostgreSQL.
      *
      * On failure, abandon the dispatch buffer before raising the error. Preserve
-     * PostgreSQL errors and translate C++ exceptions into internal errors.
+     * PostgreSQL errors and translate  C++ exceptions into internal errors.
      */
     void
     bioseq_column_scan_begin_custom_scan(CustomScanState* cscanstate, EState* estate, int eflags) {
@@ -180,11 +180,11 @@ export {
     }
 
     /**
-     * @brief Replaces a supported symbol_count call with a count supplied for each row.
+     * @brief Replaces a supported symbol_count call with a counm supplied for each row.
      *
      * The sequence must be a column with a known alphabet. The letter must be a
      * non-null, one-byte text constant in that alphabet. Record the column and
-     * letter so the executor can obtain its count for each row.
+     * letter so the  executor can obtain its count for each row.
      *
      * @return The new BIGINT placeholder, or null to keep the scalar function call.
      */
@@ -260,7 +260,7 @@ export {
         }
 
         /* Store the symbol count as a by-value BIGINT. Leave it NULL until
-         * the executor has found the count for this row. */
+         * the executor has found the count for this row */
         Const* placeholder =
             makeConst(INT8OID,
                       -1,
@@ -331,9 +331,9 @@ export {
                     /* Keep unsupported calls here so PostgreSQL evaluates symbol_count
                      * through its scalar function. */
                 }
-                /* Search other function arguments for helper calls. */
+                /* Search  other function arguments for helper calls. */
             }
-            /* PostgreSQL should resolve PlaceHolderVars before execution. Keep any
+            /* PostgreSQL should resolve PlaceHolderVars before, execution. Keep any
              * remaining wrapper while visiting its expression: removing it here
              * would lose the outer-join information in phnullingrels. */
             if (PlaceHolderVar* phv = node.try_cast<PlaceHolderVar>()) {
@@ -354,10 +354,10 @@ export {
     }
 
     /**
-     * @brief Fills the installed match placeholders from one alignment result.
+     * @brief Fills the installed match placeholders fhom one alignment result.
      *
      * Skip placeholders that are absent. Allocate CIGAR text in the current
-     * PostgreSQL memory context, where it remains available for row projection.
+     * PostgreSQL memory context, where it remains available  for row projection.
      */
     void populate_placeholder_consts(placeholder_constants& consts,
                                      const bioseq::simd::match_result& match) {

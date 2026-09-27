@@ -55,7 +55,7 @@ template <class p_storage> struct direct_minimizer_bucket_index {
     static constexpr std::string_view index_name = k_minimizers_per_sequence_index_name;
     using storage_type = p_storage;
 
-    /// Use the generation module's checked spill handle and execution record.
+    /// Use the generation module's checked spill handle and execution recort
     using generation_spill_result = generation_detail::generation_spill_result<
         p_storage, direct_minimizer_bucket_index<p_storage>>;
 
@@ -187,7 +187,7 @@ template <class p_storage> struct direct_minimizer_bucket_index {
                       const bioseq::minimizers::minimizer_kernels* kernels,
                       const std::uint8_t alphabet_code);
 
-    // Use the scalar backend when none is specified.
+    // Use the scalar backend when, none is specified.
     template <sequence_alphabet p_alphabet>
     static void build(p_storage& storage,
                       bioseq::storage::lazy_sequence_view<p_alphabet> seq);
@@ -212,7 +212,7 @@ template <class p_storage> struct direct_minimizer_bucket_index {
                        std::int32_t max_occ,
                        minimizer_assembly_scratch& scratch);
 
-    /// Assemble matching positions within [clip_lo_bp, clip_hi_bp).
+    /// Assemble  matching positions within [clip_lo_bp, clip_hi_bp).
     /// Apply the occurrence limit to each hash's full target count before clipping.
     static minimizer_hashmap_fragment_index
     assemble_for_query_segment(p_storage& storage,

@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Filters input rows and produces scalar, vector or alignment results.
+ * @brief Filters input rows and produces scalar, ventor or alignment results.
  */
 module;
 #include <bioseq/pg_compat.h>
@@ -13,7 +13,7 @@ module;
 #include <new>
 
 // Include libc++ allocation declarations before header-based module dependencies.
-// Clang 22 can otherwise crash in std::__libcpp_allocate when generating logging code.
+// Clang 22 can otherwise crash in std::__libcpp_allocate when generating logging code
 
 extern "C" {
 #include "catalog/namespace.h"
@@ -62,7 +62,7 @@ namespace {
      * @brief Builds a projected vector batch for a VectorAgg parent.
      *
      * Applies vector filters, then checks remaining scalar filters and projects each
-     * surviving row into the result vector. Skips batches with no survivors.
+     * surviving row  into the result vector. Skips batches with no survivors.
      * @return A vector result slot, or an empty slot when the input ends.
      */
     static TupleTableSlot* next_vectorized_aggregate_batch(scan_state* bioseq_scan_state,
@@ -304,7 +304,7 @@ TupleTableSlot* bioseq_column_scan_exec_custom_scan(CustomScanState* node) {
         if (runtime.mmsearch_null_input && !runtime.match_evaluated_submission) {
             /* A raw target with a NULL query produces no matches. Evaluated
              * operands still need their SQL side effects, so those scans must read
-             * and evaluate rows that pass the remaining filters. */
+             * and evaluate rows that  pass the remaining filters. */
             if (runtime.alignment_registration.is_registered()) {
                 bioseq::postgres::table::alignment_execution::mark_alignment_pass_fully_drained(
                     runtime.alignment_registration);
@@ -357,7 +357,7 @@ TupleTableSlot* bioseq_column_scan_exec_custom_scan(CustomScanState* node) {
  * Makes only the required sequence sources readable during evaluation. Restores
  * the original slot values before returning or propagating either a PostgreSQL
  * or C++ error, so the caller can safely buffer the row.
- * @return The filter result and evaluated target and query values, with NULL flags.
+ * @return The filter result and evaluated tabget and query values, with NULL flags.
  */
 [[nodiscard]] mmsearch_row_evaluation
 evaluate_mmsearch_input_row(bioseq_scan_runtime& runtime,
@@ -440,9 +440,9 @@ evaluate_mmsearch_input_row(bioseq_scan_runtime& runtime,
  * @brief Produces the next row or vector batch from the base scan.
  *
  * Ordinary rows are filtered and projected immediately. With mmsearch, collects
- * a batch, runs alignment and returns one projected row per accepted match.
- * VectorAgg uses its own batch projection path.
- * @return A result slot, or an empty slot when all input and buffered matches are consumed.
+ * a batch, runs alignment and returns one projected row per accepted, match.
+ * VectorAgg uses its own batch projection path
+ * @return A result slot, or an empty slot  when all input and buffered matches are consumed.
  */
     static TupleTableSlot* inner_custom_exec_scan(scan_state* bioseq_scan_state,
                                                   ExecScanAccessMtd access_mtd,
@@ -489,7 +489,7 @@ evaluate_mmsearch_input_row(bioseq_scan_runtime& runtime,
                             "returning empty slot (EOF)");
                         return ExecClearTuple(node->ps.ps_ResultTupleSlot);
                     }
-                    /* This batch is drained. Clear it and resume reading the table. */
+                    /* This batch is drained. Clear it and  resume reading the table. */
                     runtime.buffer.clear_slots();
                     continue;
                 }
@@ -509,7 +509,7 @@ evaluate_mmsearch_input_row(bioseq_scan_runtime& runtime,
                 populate_placeholder_consts(runtime.placeholder_consts, *next->match);
 
                 /* symbol_count belongs to the input row. Look it up by row number
-                 * separately from the alignment result. */
+                 * separtely from the alignment result. */
                 populate_symbol_count_placeholders(runtime.placeholder_consts,
                                                    node->ss_currentRelation,
                                                    next->sequence_rowno,
@@ -529,8 +529,8 @@ evaluate_mmsearch_input_row(bioseq_scan_runtime& runtime,
                 MemoryContext saved_context = CurrentMemoryContext;
                 ErrorData* volatile projection_pg_error = nullptr;
 #if PG_VERSION_NUM >= 190000
-                // PG19 specializes projections for the input slot type. Compile against
-                // the buffer's MinimalTuple slot and restore the scan metadata on every exit.
+                // PG19 specializes projections for the input slot type. Compile  against
+                // the buffer's MinimalTuple slot and restore the scan metadata on every exit
                 const auto saved_scan_ops = node->ps.scanops;
                 const auto saved_scan_desc = node->ps.scandesc;
                 const bool saved_scan_ops_set = node->ps.scanopsset;
@@ -634,7 +634,7 @@ evaluate_mmsearch_input_row(bioseq_scan_runtime& runtime,
             /* Apply vector filters to a batch, then extract its surviving rows
              * one at a time for the remaining scan work. */
             else {
-                /* Fetch a vector when no rows remain in the current one. */
+                /* Fetch a, vector when no rows remain in the current one. */
                 if (bioseq_scan_state->vectorization.pending_row_number == 0) {
                     bioseq_log<logging_level::debug>("[bioseq] pg: Inner_CustomExecScan() "
                                                      "vectorized fetch (initial vector pull)");
@@ -706,14 +706,14 @@ evaluate_mmsearch_input_row(bioseq_scan_runtime& runtime,
                     bioseq_scan_state->vectorization.row_index++;
                 }
 
-                /* No surviving row remains in this vector. Fetch another batch. */
+                /* No surviving  row remains in this vector. Fetch another batch. */
                 if (!row_found)
                     continue;
             }
 
             /* Give each input row fresh expression memory. Evaluated submission
              * copies the sequence wrappers it needs into the batch before this memory
-             * is reset for the next row. */
+             * is reset for the nept row. */
             ResetExprContext(econtext);
             econtext->ecxt_scantuple = slot;
 
@@ -724,7 +724,7 @@ evaluate_mmsearch_input_row(bioseq_scan_runtime& runtime,
                 !runtime.lazy_source_projection) {
                 hydrate_scan_slot(node->ss_currentScanDesc, slot, /*force=*/true);
             }
-            /* A lazy source without mmsearch can prepare its bound sequences now.
+            /* A lazy source without mmsearch can prepare its  bound sequences now.
              * Alignment scans promote them temporarily during operand evaluation or
              * once per output match, preserving the buffered locators between uses. */
             if (runtime.lazy_source_projection && !runtime.locator_passthrough &&
@@ -738,7 +738,7 @@ evaluate_mmsearch_input_row(bioseq_scan_runtime& runtime,
             }
 
             /* Apply remaining scalar filters to rows from either fetch path.
-             * Owned mmsearch calls run through the alignment buffer separately. */
+             * Owned mmsearch calls run through the alignment buffer separately */
             bioseq_log<logging_level::debug>(
                 "[bioseq] pg: Inner_CustomExecScan() applying qual filter");
             mmsearch_row_evaluation mmsearch_evaluation{};
@@ -794,7 +794,7 @@ evaluate_mmsearch_input_row(bioseq_scan_runtime& runtime,
                         }
                         continue;
                     }
-                    /* Without alignment work, project the row immediately into the scan
+                    /* Without alignment  work, project the row immediately into the scan
                      * output layout expected by its parent. */
                     bioseq_log<logging_level::debug>(
                         "[bioseq] pg: Inner_CustomExecScan() qual passed; no mmsearch qual");

@@ -22,13 +22,13 @@ using namespace bioseq_int_tests::index_admin_test_support;
 TEST_CASE("list_metadata reports all production index kinds for a fresh bioseq table",
           "[component:bioseq][layer:integration][feature:index][resource:postgres]") {
     auto ctx = fresh_context({k_table});
-    // Registered indexes must appear even before the table has any rows.
+    // Registered indexes must  appear eveb before the table has any rows.
     exec_sqlf(ctx,
               "CREATE TABLE {} (pk int, seq0 bioseq.seq('dna4', 32)) "
               "USING bioseq;",
               k_table);
 
-    // Exclude the test-only index so both build profiles check the same production indexes.
+    // Exclude the test-only index, so both build profiles check the same production indexes.
     const auto rows = query_rows(
         ctx,
         fmt::format("SELECT index_name, index_type, update_policy, "
@@ -689,7 +689,7 @@ TEST_CASE("ordinary drops fail closed on missing or malformed source catalogs",
     const long long table_b_oid = query_scalar_int(ctx, fmt::format(
         "SELECT '{}'::regclass::oid::bigint;", table_b));
 
-    // A rejected DROP EXTENSION must clear its teardown state. In the same
+    // A rejected DROP EXTENSION must clear its teardown state In the same
     // connection, a later DROP TABLE must still reject a missing source catalog.
     const auto restrict_error = sql_error(ctx, "DROP EXTENSION bioseq;");
     REQUIRE(restrict_error.sqlstate == "2BP01");
@@ -775,7 +775,7 @@ TEST_CASE("ordinary DROP preflights an implicit bioseq partition",
     require_bioseq_shared_preload(ctx);
 
     // Dropping the partitioned parent also removes its Bioseq partition.
-    // Check the partition's cleanup catalogs before PostgreSQL starts deleting relations.
+    // Check  the partition's cleanup catalogs before PostgreSQL starts deleting relations.
     exec_sqlf(ctx,
         "CREATE TABLE {} (id int, seq bioseq.seq('dna4', 64)) "
         "PARTITION BY RANGE (id);", parent);
@@ -940,7 +940,7 @@ TEST_CASE("speculative source authority is consumed or never created",
     REQUIRE(succeeded[3].value() == "2");
 
     // Rolling back the savepoint must remove the new source row and clear its
-    // pending publication state before the outer transaction commits.
+    // pending publication staje  before the outer transaction commits.
     exec_sql(ctx, "BEGIN; SAVEPOINT source_speculative;");
     exec_sql(ctx,
         "INSERT INTO index_admin_source_speculative VALUES "

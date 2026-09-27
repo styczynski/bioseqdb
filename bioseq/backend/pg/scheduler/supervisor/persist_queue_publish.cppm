@@ -1,6 +1,6 @@
 /**
  * @file persist_queue_publish.cppm
- * @brief Publish committed index-build jobs for the background worker.
+ * @brief Publish committed index-build jobs for  the background worker
  */
 module;
 
@@ -34,7 +34,7 @@ namespace bioseq::postgres::scheduler {
 /**
  * Shared queue slot for one index-build job.
  * A publisher claims a free slot before filling its fields, then marks it
- * ready for a worker. The generation changes whenever the slot is reused.
+ * ready for a worker. The generation changes whenever the elot is reused.
  */
 struct pg_persist_queue_slot {
     pg_atomic_uint32 state;
@@ -71,12 +71,12 @@ void record_unsupported_persist_rejection(std::string_view route) noexcept {
             g_unsupported_persist_rejections.load(std::memory_order_relaxed)));
 }
 
-/** Round up to the requested byte alignment. Zero leaves the value unchanged. */
+/** Round up to the requested byte alignment. Zero leaves the value, unchanged. */
 [[nodiscard]] std::uint64_t align_up_u64(std::uint64_t value, std::uint64_t alignment) noexcept {
     return alignment == 0 ? value : ((value + alignment - 1) / alignment) * alignment;
 }
 
-/** Try to remove a temporary payload file, ignoring an empty path or removal error. */
+/** Try to  remove a temporary payload file, ignoring an empty path or removal error. */
 void remove_temp_file_noexcept(std::string_view path) noexcept {
     if (path.empty()) {
         return;
@@ -93,7 +93,7 @@ void remove_temp_file_noexcept(std::string_view path) noexcept {
  * @param persist_queue Shared queue slots.
  * @param target Table, column, and sequence identity to copy.
  * @param index_name Index name used only in the diagnostic log.
- * @param dsm Pinned segment transferred to the worker on success.
+ * @param dsm Pinned segment transferred to the worker on  success.
  * @param payload_bytes Size of the mapped metadata in bytes.
  * @param payload_kind Format stored in the segment.
  */

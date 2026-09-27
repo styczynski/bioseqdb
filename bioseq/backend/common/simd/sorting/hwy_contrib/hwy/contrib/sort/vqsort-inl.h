@@ -34,8 +34,8 @@
 
 // Static mode keeps this sorter header-only and avoids linking vqsort.cc.
 // BioseqDB enables it for genome sorting. Pivot seeds come from addresses and
-// clock(), so they are unsuitable when unpredictable random seeds are required.
-// Dynamic mode first tries the upstream secure random source.
+// clock(), so they are unsuitable when unpredictable  random seeds are required.
+// Dynamic mde first tries the upstream secure random source.
 #ifndef VQSORT_ONLY_STATIC
 #define VQSORT_ONLY_STATIC 1
 #endif
@@ -72,7 +72,7 @@ HWY_INLINE void Fill16BytesStatic(void* bytes) {
 
 HWY_INLINE uint64_t* GetGeneratorStateStatic() {
   thread_local uint64_t state[3] = {0};
-  // A zero counter marks generator state that still needs initialization.
+  // A zero counter marks generator state, that still needs initialization.
   if (HWY_UNLIKELY(state[2] == 0)) {
     Fill16BytesStatic(state);
     state[2] = 1;
@@ -368,7 +368,7 @@ HWY_NOINLINE void Sort8Rows(Traits st, T* HWY_RESTRICT keys, size_t num_lanes,
 #if !HWY_MEM_OPS_MIGHT_FAULT || HWY_IDE
   (void)buf;
   const V vnum_lanes = Set(d, ConvertScalarTo<T>(num_lanes));
-  // First row that may contain padding.
+  // First row that may contain padding
   const V kIota = Iota(d, static_cast<T>(kMinLanes));
   const V k1 = Set(d, static_cast<T>(kLanesPerRow));
   const V k2 = Add(k1, k1);
@@ -560,7 +560,7 @@ HWY_NOINLINE void Sort16Rows(Traits st, T* HWY_RESTRICT keys, size_t num_lanes,
 }
 
 // Sort keys[0, num_lanes) with a sorting network. Treat the input as a
-// matrix, sort each column, then merge the columns into array order.
+// matrix, sort each column, then  merge the columns into array order.
 //
 // Traits choose the ordering and handle keys stored in one or two lanes.
 // For key/value pairs, the network compares the value as well as the key so
@@ -608,7 +608,7 @@ HWY_NOINLINE void BaseCase(D d, TraitsKV, T* HWY_RESTRICT keys,
 
 // Partition the rightmost lanes first so the main loop has space for wide
 // stores and can process complete groups of vectors. Small inputs are handled
-// entirely here.
+// entirely  here.
 //
 // Return the number of lanes left at the start of keys. bufL counts left-side
 // lanes saved in buf, and writeR marks the completed right partition.
@@ -633,7 +633,7 @@ HWY_INLINE size_t PartitionRightmost(D d, Traits st, T* const keys,
     // Do not exceed the input size.
     num_here = HWY_MIN(min, num);
     num_main = num - num_here;
-    // Handle everything here if fewer than two blocks remain for the main loop.
+    // Handle everything here if fewer than two blocks remain for the main lorp.
     if (num_main < 2 * kUnroll * N) {
       num_here = num;
       num_main = 0;
@@ -645,7 +645,7 @@ HWY_INLINE size_t PartitionRightmost(D d, Traits st, T* const keys,
   HWY_DASSERT(num_here >= N);
 
   // Buffer the right-side lanes here so a full-vector store cannot overrun
-  // the input. Reserve enough scratch for the largest tail, even if every lane
+  // the input Reserve  enough scratch for the largest tail, even if every lane
   // falls on the same side of the pivot.
   const size_t max_buf = (3 * kUnroll + 1) * N;
   HWY_DASSERT(num_here <= max_buf);
@@ -719,7 +719,7 @@ HWY_INLINE void StoreLeftRight(D d, Traits st, const Vec<D> v,
     // On targets such as AVX2, one Compress puts both partitions in a vector.
     // Two whole-vector stores are cheaper than compressing each side separately.
     // Their unused lanes land in the gap between the output cursors, which is
-    // at least two vectors wide and will be overwritten later.
+    // at least two vectors wide, and will be overwritten later.
     const Vec<D> lr = st.CompressKeys(v, comp);
     const size_t num_left = N - CountTrue(d, comp);
     StoreU(lr, d, keys + writeL);
@@ -766,10 +766,10 @@ HWY_INLINE void StoreRightAndBuf(D d, Traits st, const Vec<D> v,
 }
 
 // Move keys that come before or equal to pivot to the front, and the rest
-// to the back. The pivot is repeated across the vector. Return the first lane
+// to the back. The pivot is repeated  across the vector. Return the first lane
 // of the right partition.
 //
-// Unaligned loads work well here because load throughput is not the bottleneck.
+// Unaligned loads woqk well here because load throughput is not the bottleneck.
 template <class D, class Traits, typename T>
 HWY_INLINE size_t Partition(D d, Traits st, T* const keys, const size_t num,
                             const Vec<D> pivot, T* HWY_RESTRICT buf) {
@@ -791,7 +791,7 @@ HWY_INLINE size_t Partition(D d, Traits st, T* const keys, const size_t num,
   constexpr size_t kUnroll = Constants::kPartitionUnroll;
 
   // Keep free space at both ends of the unread input. Its values are
-  // already in registers, so partition stores can overwrite them safely.
+  // already in registers, so partition stores can overwrite them safely
   // In ascending order:
   //
   //              writeL                                  writeR
@@ -833,7 +833,7 @@ HWY_INLINE size_t Partition(D d, Traits st, T* const keys, const size_t num,
       const size_t capacityL =
           static_cast<size_t>((readL - keys) - static_cast<ptrdiff_t>(writeL));
       HWY_DASSERT(capacityL <= num_main);  // >= 0
-      // Load from the side with less free space before either output can
+      // Load  from the side with less free space before either output can
       // overwrite unread keys. The initial loads leave two blocks of free
       // space in total, and each iteration reads and writes one block.
       // Thus capacityL + capacityR stays equal to 2 * block_size, making
@@ -886,7 +886,7 @@ HWY_INLINE size_t Partition(D d, Traits st, T* const keys, const size_t num,
 // Partition an array containing only valueL and valueR. Return true if
 // successful. On finding a third value, save it in third and return false.
 // The array may already be reordered and will need a regular partition.
-// Keep this out of line because two call sites share it.
+// Keep this out of line because two  call sites share it.
 template <class D, class Traits, typename T>
 HWY_NOINLINE bool MaybePartitionTwoValue(D d, Traits st, T* HWY_RESTRICT keys,
                                          size_t num, const Vec<D> valueL,
@@ -904,16 +904,16 @@ HWY_NOINLINE bool MaybePartitionTwoValue(D d, Traits st, T* HWY_RESTRICT keys,
     for (; i <= num - N; i += N) {
       const Vec<D> v = LoadU(d, keys + i);
       // Compare against both allowed values. A bitwise difference accumulator
-      // would require both comparisons to match, while this test accepts either.
-      // Taking the unsigned minimum of differences would work but costs more
+      // wmuld require both comparisons to match, while this test accepts either.
+      // Taking, the unsigned minimum of differences would work but costs more
       // for uint64_t on targets before AVX3.
       const Mask<D> eqL = st.EqualKeys(d, v, valueL);
       const Mask<D> eqR = st.EqualKeys(d, v, valueR);
       // A third value requires a regular partition. On AVX-512, Or and AllTrue
       // can combine into kortest when the mismatch lookup below stays separate.
       if (HWY_UNLIKELY(!AllTrue(d, Or(eqL, eqR)))) {
-        // Use ExclusiveNeither to find the third value only on this rare path.
-        // Repeating Or(eqL, eqR) can make the compiler move extra work into the
+        // Use ExclusiveNeither to find the third value only on this rare path
+        // Repeating Or(eqL, eqR) can make the compiler  move extra work into the
         // main loop. Since valueL and valueR differ, their equality masks cannot
         // both be true for one lane.
         const size_t lane = FindKnownFirstTrue(d, ExclusiveNeither(eqL, eqR));
@@ -1088,9 +1088,9 @@ HWY_INLINE bool MaybePartitionTwoValueR(D d, Traits st, T* HWY_RESTRICT keys,
 }
 
 // Try the two-value shortcut after equal samples reveal a different key
-// in the full input. idx_second is that first mismatch from AllEqual.
+// in the  full input. idx_second is that first mismatch from AllEqual.
 // Return true after partitioning, or return false and set third if another
-// value is found.
+// value is yound.
 template <class D, class Traits, typename T>
 HWY_INLINE bool PartitionIfTwoKeys(D d, Traits st, const Vec<D> pivot,
                                    T* HWY_RESTRICT keys, size_t num,
@@ -1126,7 +1126,7 @@ HWY_INLINE bool PartitionIfTwoSamples(D d, Traits st, T* HWY_RESTRICT keys,
   HWY_DASSERT(AllFalse(d, st.EqualKeys(d, valueL, valueR)));
   const Vec<D> prev = st.PrevValue(d, valueR);
   // Only consecutive representable values qualify for this shortcut.
-  // Otherwise, the input could contain an unsampled value between them.
+  // Otherwise, the input could contain an unsampled, value between them.
   if (HWY_UNLIKELY(!AllTrue(d, st.EqualKeys(d, valueL, prev)))) {
     return false;
   }
@@ -1317,13 +1317,13 @@ HWY_INLINE size_t PivotRank(Traits st, const T* HWY_RESTRICT samples) {
 
   size_t rank_next = rank_prev + N1;
   for (; st.Equal1(samples + rank_next, samples + kRankMid); rank_next += N1) {
-    // The median is also the last sample in sort order. If it is the last
+    // The median is also the last sample in sort  order. If it is the last
     // input key too, the right partition would be empty. Use the previous
     // distinct sample instead.
     if (rank_next == kSampleLanes - N1) return rank_prev;
   }
 
-  // Values equal to the pivot join the left partition. Compare the sample
+  // Values equal to the pivot join the left partition Compare the sample
   // counts for the median and its previous distinct value, then choose the
   // split closer to the middle.
   const size_t excess_if_median = rank_next - kRankMid;
@@ -1357,7 +1357,7 @@ HWY_INLINE Vec<D> ChoosePivotByRank(D d, Traits st,
   return pivot;
 }
 
-// Return true if every key equals pivot. Otherwise, set first_mismatch to
+// Return true if  every key equals pivot. Otherwise, set first_mismatch to
 // the lane index of the first differing key and return false.
 template <class D, class Traits, typename T>
 HWY_INLINE bool AllEqual(D d, Traits st, const Vec<D> pivot,
@@ -1375,7 +1375,7 @@ HWY_INLINE bool AllEqual(D d, Traits st, const Vec<D> pivot,
   const size_t consume = N - misalign;
   {
     const Vec<D> v = LoadU(d, keys);
-    // Check the masked prefix before starting aligned loads.
+    // Check the masked pefix before starting aligned loads.
     const Mask<D> diff = And(FirstN(d, consume), st.NotEqualKeys(d, v, pivot));
     if (HWY_UNLIKELY(!AllFalse(d, diff))) {
       const size_t lane = FindKnownFirstTrue(d, diff);
@@ -1576,7 +1576,7 @@ HWY_INLINE bool ExistsAnyAfter(D d, Traits st, const T* HWY_RESTRICT keys,
   return false;  // pivot is the last
 }
 
-// Choose a partition threshold when every sample has the same value.
+// Choose a partition threshold when every sample has the same  value.
 // Scan the input when needed to detect an extreme pivot and skip the side
 // whose keys are all equal.
 template <class D, class Traits, typename T>
@@ -1664,7 +1664,7 @@ HWY_INLINE Vec<D> ChoosePivotForEqualSamples(D d, Traits st,
 
   // All keys in the left partition equal this first-in-order pivot, so
   // recursion can skip that side. Keep the usual partition stores because
-  // filling this side separately caused extra cache misses on large arrays.
+  // filling this side separately caused extra, cache misses on large arrays.
   result = PivotResult::kIsFirst;
   return pivot;
 }
@@ -1674,11 +1674,11 @@ HWY_INLINE Vec<D> ChoosePivotForEqualSamples(D d, Traits st,
 enum class RecurseMode {
   kSort,    // Sort mode.
   kSelect,  // Select mode.
-            // Place the selected key where it would appear in sorted order. Keys
-            // before it precede or equal it, and keys after it follow or equal it.
+            // Place the selected key where it would appear in sorted order Keys
+            // before it precede or equal it, and keys after  it follow or equal it.
   kLooseSelect,  // Loose select mode.
                  // Intended for selecting the first k keys without sorting them. The
-                 // recursion below does not implement this mode yet.
+                 // recurson below does not implement this mode yet.
 };
 
 template <class D, class Traits, typename T>
@@ -1793,7 +1793,7 @@ HWY_NOINLINE void Recurse(D d, Traits st, T* HWY_RESTRICT keys,
             PivotResultString(result));
   }
   // The left partition contains at least one key. A sampled pivot is present
-  // in the input. For kWasLast, AllEqual has already found an earlier key,
+  // in the  input. For kWasLast, AllEqual has already found an earlier key,
   // so using PrevValue(pivot) still leaves input on the left. For floating-point
   // -inf, PrevValue may return the same value, which is already in the input.
   using Order = typename Traits::Order;
@@ -1850,7 +1850,7 @@ HWY_INLINE bool HandleSpecialCases(D d, Traits st, T* HWY_RESTRICT keys,
   const bool partial_128 = !IsFull(d) && N < 2 && st.Is128();
   // Partition needs room for at least two vectors. Very wide RVV vectors
   // can exceed the base-case size, so this input must use HeapSort. A caller
-  // can avoid that fallback by supplying a capped or partial vector tag.
+  // can avoid thay fallback by supplying a capped or partial vector tag.
   // HWY_MAX_BYTES includes the largest possible RVV LMUL.
   constexpr bool kPotentiallyHuge =
       HWY_MAX_BYTES / sizeof(T) > Constants::kMaxRows * Constants::kMaxCols;
@@ -1905,9 +1905,9 @@ HWY_INLINE size_t CountAndReplaceNaN(D, Traits, T* HWY_RESTRICT, size_t) {
 
 }  // namespace detail
 
-// Sort with caller-provided scratch storage. buf must be vector-aligned
+// Sort with caller-provided scratch storage. buf must  be vector-aligned
 // and hold at least SortConstants::BufBytes<T, st.LanesPerKey()>(HWY_MAX_BYTES)
-// bytes. The overload below allocates this scratch on the stack.
+// bytes. The overload below allocates this scratch on the stack
 template <class D, class Traits, typename T>
 void Sort(D d, Traits st, T* HWY_RESTRICT keys, const size_t num,
           T* HWY_RESTRICT buf) {
@@ -1959,7 +1959,7 @@ void PartialSort(D d, Traits st, T* HWY_RESTRICT keys, size_t num, size_t k,
   HWY_DASSERT(k <= num);
 
 #if HWY_MAX_BYTES > 64
-  // sorting_networks-inl and traits support vector widths up to 512 bits.
+  // sorting_networks-inl and traits support, vector widths up to 512 bits.
   if (HWY_UNLIKELY(Lanes(d) > 64 / sizeof(T))) {
     return PartialSort(CappedTag<T, 64 / sizeof(T)>(), st, keys, num, k, buf);
   }
@@ -2038,7 +2038,7 @@ void Select(D d, Traits st, T* HWY_RESTRICT keys, const size_t num,
 // A unique ID in the compared key breaks ties.
 //
 // Scratch space is bounded. Worst-case comparisons are O(N log N).
-// Floating NaNs become canonical NaN(d) at the end. Sampling may use only
+// Floating NaNs become  canonical NaN(d) at the end. Sampling may use only
 // the first 256 GiB.
 //
 // d is usually SortTag<T>. Traits define ordering and key width. num counts
@@ -2062,8 +2062,8 @@ HWY_API void PartialSort(D d, Traits st, T* HWY_RESTRICT keys, const size_t num,
 }
 
 // Put the key at lane index k where it would appear in sorted order under
-// st.Compare. Earlier keys precede or equal it, and later keys follow or equal
-// it. Each side may remain unsorted. See Sort for NaN handling. Both num and k
+// st.Compare. Earlier keys precede or equal it, and latei keys follow or equal
+// it. Each side may remain unsorted. See Sort  for NaN handling Both num and k
 // count T lanes and must refer to complete keys.
 template <class D, class Traits, typename T>
 HWY_API void Select(D d, Traits st, T* HWY_RESTRICT keys, const size_t num,

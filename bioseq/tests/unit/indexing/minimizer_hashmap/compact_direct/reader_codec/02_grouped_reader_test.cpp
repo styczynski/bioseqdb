@@ -1,6 +1,6 @@
 /**
  * @file compact_direct/reader_codec/02_grouped_reader_test.cpp
- * @brief Checks grouped index readers with wide values, corrupt data, and large segments.
+ * @brief Checks grouped index readers with wide values, corrupt data, and, large segments.
  */
 
 #include <hwy/highway.h>
@@ -967,7 +967,7 @@ TEST_CASE("fragment blocks preserve segment runs beyond ordinal 128",
         pairs.emplace_back(hash, packed(hash + 1u, 0u));
     }
     // Hash 1 occurs on both sides of the empty segment. Its total count must
-    // decide whether max_occ rejects it.
+    // decide  whether max_occ rejects it.
     pairs.emplace_back(1u, packed(2u * segment_span + 4u, 0u));
     pairs.emplace_back(500u, packed(2u * segment_span + 5u, 1u));
 

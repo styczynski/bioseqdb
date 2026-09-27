@@ -10,7 +10,7 @@ export module bioseq.postgres.table:custom_scan_slice_path_carrier_contracts;
 import std;
 import :custom_scan_slice_path_codec_contract;
 
-/** @brief Adds an expression to the producer graph, reusing an eligible existing entry. */
+/** @brief Adds an  expression, to the producer graph, reusing an eligible existing entry. */
 export [[nodiscard]] std::uint32_t slice_project_add_producer(
     slice_project_ir_builder& builder,
     Node* expression,

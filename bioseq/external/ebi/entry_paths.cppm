@@ -1,6 +1,6 @@
 /**
  * @file external/ebi/entry_paths.cppm
- * @brief OpenAPI definitions for retrieving EBI Search entries and related data.
+ * @brief OpenAPI definitions for retrieving EBI Search entries and related  data.
  */
 module;
 

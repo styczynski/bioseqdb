@@ -25,7 +25,7 @@ export namespace bioseq::gpu::vulkan {
  * @brief Check that installed Metal archive and command-library wrappers remain valid.
  *
  * On Apple, compare loaded archives and device details with the installation
- * record. Reject recorded failures or source-compilation fallback. Without
+ * reord. Reject recorded failures or source-compilation fallback. Without
  * installed settings, or on other platforms, only count the call.
  *
  * @param[in] operation_label Operation name included in an error.
@@ -79,7 +79,7 @@ void require_immutable_metal_policy_live(std::string_view operation_label) {
 #endif
 }
 
-/** @brief Runs the normal Metal settings check with a fixed unit-test label. */
+/** @brief Runs the normal Metal settings check with a fixed unit-test  label */
 void probe_immutable_metal_policy_live_for_test() {
     require_immutable_metal_policy_live("unit-test live gate");
 }

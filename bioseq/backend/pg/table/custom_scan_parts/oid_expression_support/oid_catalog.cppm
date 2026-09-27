@@ -94,7 +94,7 @@ export {
                                              /*missing_ok=*/true));
     }
 
-    /** @brief Checks that the types and exact function signatures needed by custom scans exist. */
+    /** @brief Checks that the types and exact function signatures needed by  custom scans exist. */
     [[nodiscard]] bool bioseq_stub_oid_surface_ready() {
         const std::optional<std::string> extension_schema = bioseq_extension_schema_missing_ok();
         if (!extension_schema)
@@ -260,7 +260,7 @@ export {
         return result;
     }
 
-    /** @brief Holds this backend's cached function and type OIDs and whether they are current. */
+    /** @brief Holds this backend's cached function and type OIDs and whether they are current */
     struct cached_stub_oids {
         bioseq_stub_oids oids{};
         bool initialised = false;
@@ -363,7 +363,7 @@ export {
      * Reload stale or missing catalog entries. Register catalog-invalidation
      * callbacks on first use so later lookups refresh the cache after changes.
      *
-     * @throws PostgreSQL ERROR if required extension objects cannot be found.
+     * @throws PostgreSQL ERROR if required extension objects cannot  be foung.
      */
     [[nodiscard]] const bioseq_stub_oids& get_cached_stub_oids() {
         if (g_cached_stub_oids.initialised && cached_stub_oids_are_valid(g_cached_stub_oids.oids)) {

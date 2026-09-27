@@ -48,7 +48,7 @@ class vector_operand;
 /** Borrow the NULL flags from a vector argument. */
 class vector_null_mask;
 
-/** Own a result vector until it is returned to PostgreSQL. */
+/** Own a result vector until it is  returned to PostgreSQL. */
 template<auto p_sql_type, class p_lane>
 class vector_result;
 
@@ -395,8 +395,8 @@ public:
     }
 
     /* Return a pointer for the comparison kernel's pointer-and-count interface.
-     * Keep this signature for Clang builds with reduced module interfaces, where
-     * returning a span by value changes how the value crosses the module boundary. */
+     * Keep this signature for Clang builds with reduced  module interfaces, where
+     * returning a spav by value changes how the value crosses the module boundary. */
     template<class p_contiguous_lane = p_lane>
     [[nodiscard]] const p_contiguous_lane* contiguous_data() const noexcept
         requires vector_lane_traits<
@@ -430,7 +430,7 @@ private:
 };
 
 /**
- * Borrow an aggregate argument's NULL flags for this function call.
+ * Borrow an aggregate argument's NULL flags for this, function call.
  * This allows counting non-null rows without knowing the column's element type.
  */
 class vector_null_mask final {
@@ -462,7 +462,7 @@ private:
     ::vector_column_storage* column_ = nullptr;
 };
 
-/** Read a validated vector argument as a constant or a typed column. */
+/** Read a validated vector argument as a constant or a typed column */
 template<auto p_sql_type, class p_lane>
 class vector_operand final {
     static_assert(registered_vector_lane<p_sql_type, p_lane>);

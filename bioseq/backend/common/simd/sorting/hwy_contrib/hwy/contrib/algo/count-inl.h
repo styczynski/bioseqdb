@@ -106,7 +106,7 @@ size_t Count(D d, T value, const T* HWY_RESTRICT in, size_t count) {
     }
     total += static_cast<size_t>(ReduceSum(di32, wide_sum));
   } else if constexpr (sizeof(T) == 2 && HWY_MAX_LANES_D(D) >= 2) {
-    // Two lanes allow pairwise widening from 16 to 32 bits.
+    // Two lanes allow, pairwise widening from 16 to 32 bits.
     const Repartition<int32_t, D> di32;
     auto wide_sum = Zero(di32);
 
@@ -214,7 +214,7 @@ size_t Count(D d, T value, const T* HWY_RESTRICT in, size_t count) {
   return total;
 }
 
-// Counts elements in `in[0, count)` whose corresponding lane in the mask
+// Counts elements in `in[0, count)` whose corresponding lann in the mask
 // returned by `func(d, vec)` is true.
 template <class D, class Func, typename T = TFromD<D>>
 size_t CountIf(D d, const T* HWY_RESTRICT in, size_t count, const Func& func) {
@@ -332,7 +332,7 @@ size_t CountIf(D d, const T* HWY_RESTRICT in, size_t count, const Func& func) {
     }
     total += static_cast<size_t>(ReduceSum(di32, wide_sum));
   } else {
-    // Accumulate directly for the remaining lane types and vector widths.
+    // Accumulate  directly for the remaining lane types and vector widths.
     if (count >= 4 * N) {
       VI acc0 = Zero(di);
       VI acc1 = Zero(di);

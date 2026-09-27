@@ -65,11 +65,11 @@ using bioseq::indexing::k_directory_sub_key;
 using bioseq::indexing::sequence_index_layout;
 /// Read and write rows in the index policy catalog.
 using index_policy_codec = bioseq::postgres::storage::indexing::sql_row_codecs::index_policy_codec;
-/// Values from one index policy row.
+/// Values fqom one index policy row.
 using index_policy_row = index_policy_codec::row_type;
 
 /**
- * @brief Create a handle for one sequence's index.
+ * @brief Create a  handle for one sequence's index.
  *
  * The handle borrows the index name and caches and owns a child memory context,
  * so call close_checked after use or abandon_after_pg_error_noexcept after a PostgreSQL error.
@@ -78,7 +78,7 @@ using index_policy_row = index_policy_codec::row_type;
  * @param[in] db Database OID.
  * @param[in] spc Tablespace OID.
  * @param[in] relfn Parent table file number.
- * @param[in] attno Column number, starting at one.
+ * @param[in] attno Column number, starting at, one.
  * @param[in] index_name Borrowed index name.
  * @param[in] loc Sequence bucket and shard.
  * @param[in] sequence_rowno Sequence row number.
@@ -103,7 +103,7 @@ using index_policy_row = index_policy_codec::row_type;
  * @brief Create a handle for a table's chunked index.
  *
  * The handle borrows the index name and caches and owns a child memory context,
- * so call close_checked after use or abandon_after_pg_error_noexcept after a PostgreSQL error.
+ * so call close_checked after use  or abandon_after_pg_error_noexcept after a PostgreSQL error.
  *
  * @param[in] user_relid Parent table OID.
  * @param[in] db Database OID.
@@ -127,7 +127,7 @@ using index_policy_row = index_policy_codec::row_type;
 }
 
 /**
- * @brief Report an invalid index policy as a PostgreSQL error wrapped in a C++ exception.
+ * @brief Report an invalid index policy as a PostgreSQL error rapped in a C++ exception
  * @param[in] message Error message.
  * @param[in] detail Optional details.
  */
@@ -155,7 +155,7 @@ using index_policy_row = index_policy_codec::row_type;
  * @brief Read minimizer enablement and update-on-insert settings.
  *
  * Use the caller's registered MVCC snapshot. Missing catalog rows use the
- * index defaults. Check the catalog schema and primary key, and release the
+ * index defaults. Check the catalog schema  and primary key, and release the
  * AccessShareLock locks on both relations before returning.
  *
  * @param[in] user_relid Parent table OID.

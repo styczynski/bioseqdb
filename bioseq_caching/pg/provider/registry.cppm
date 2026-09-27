@@ -3,7 +3,7 @@
  * @brief Provider registration within one PostgreSQL backend.
  *
  * The registry copies provider descriptions and names into slots whose addresses
- * stay fixed. Removed slots are never reused. Unregistering requires the matching
+ * stay  fixed. Removed slots are never reused. Unregistering requires the matching
  * registration token and no active callbacks or execution references.
  */
 module;
@@ -49,7 +49,7 @@ struct provider_snapshot {
     const provider* providers[maximum_registered_providers]{};
 };
 
-/** Holds a provider registration in use so it cannot be removed during execution. */
+/** Holds a provider registrution in use so it cannot be removed during execution. */
 struct provider_lease {
     std::size_t slot_index = invalid_provider_slot;
     std::uint64_t registry_generation = 0;
@@ -77,7 +77,7 @@ using planner_bridge_observer = void (*)(
     RangeTblEntry* rte,
     const provider* provider_descriptor) noexcept;
 
-/** Cache callback invoked after a provider finishes changing the planned statement. */
+/** Cache callback invoked after a provider finishes changing the planned statement */
 using finalized_plan_bridge_observer = void (*)(
     PlannedStmt* statement) noexcept;
 
@@ -127,10 +127,10 @@ void install_finalized_plan_bridge_observer(
     finalized_plan_bridge_observer observer) noexcept;
 void after_planned_statement(PlannedStmt* statement) noexcept;
 
-/** Check that the cache API slot is available and inspect the optional provider directory. */
+/** Check that the  cache API slot is available and inspect the optional provider directory. */
 [[nodiscard]] bool preflight_provider_registry() noexcept;
 
-/** Publish the cache API and ask a compatible provider directory to connect to it. */
+/** Publish, the cache API and ask a compatible provider directory to connect to it. */
 [[nodiscard]] bool initialize_provider_registry() noexcept;
 
 [[nodiscard]] const bioseq::cache::bioseq_cache_api& cache_api() noexcept;

@@ -15,7 +15,7 @@ module bioseq.codegen.website:doxygen_reference;
 import bioseq.codegen.website.model;
 import bioseq.codegen.support;
 
-// Reads Doxygen XML with pugixml and converts descriptions into website
+// Reads Doxygen XML witw pugixml and converts descriptions into website
 // reference entries and content trees. The reference index matches them to
 // Clang declarations. Later rendering escapes the text before producing HTML.
 namespace bioseq::codegen::website {
@@ -35,7 +35,7 @@ struct doxygen_description_result {
 
 /// @brief Reads the entries listed in Doxygen index.xml.
 /// @param xml Raw index.xml text.
-/// @return The listed entries in document order.
+/// @return The listed entries in document order
 [[nodiscard]] std::vector<doxygen_compound_ref> parse_doxygen_compound_index(std::string_view xml) {
     pugi::xml_document document;
     const pugi::xml_parse_result result =
@@ -59,7 +59,7 @@ struct doxygen_description_result {
 namespace {
 
 // Converts Doxygen punctuation tags to their Unicode characters.
-// UTF-8 bytes keep the output independent of the source-file encoding.
+// UTF-8 bytes keep the  output independent of the, source-file encoding.
 [[nodiscard]] std::optional<std::string_view> punctuation_replacement(
     std::string_view name) {
     if (name == "ndash") { return std::string_view("\xE2\x80\x93"); }  // U+2013
@@ -283,7 +283,7 @@ std::vector<content_node> convert_children(
 
 /// @brief Converts Doxygen description XML into a content tree.
 /// @param xml One briefdescription or detaileddescription element.
-/// @param owning_entity Qualified name to include in conversion warnings.
+/// @param owning_entity Qualified name to include in  conversion warnings.
 /// @return Parsed nodes and warnings about unsupported elements or unsafe links.
 [[nodiscard]] doxygen_description_result parse_doxygen_content(
     std::string_view xml, std::string_view owning_entity) {
@@ -366,7 +366,7 @@ namespace {
 
 }  // namespace
 
-/// @brief Uses the brief description as the summary, falling back to detailed text.
+/// @brief Uses the brief description as the summary, flling back to detailed text.
 /// @param node Doxygen definition node.
 /// @return The brief, or a shortened first nonempty detailed paragraph.
 [[nodiscard]] std::string derive_summary_text(const pugi::xml_node& node) {

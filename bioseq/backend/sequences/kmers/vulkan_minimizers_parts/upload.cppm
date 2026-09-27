@@ -86,7 +86,7 @@ inline void reset_vulkan_admitted_window_test_seam() noexcept {
   admitted_window_test_detail::enabled.store(0u, std::memory_order_release);
 }
 
-/** Reads the allocation test counters. Concurrent updates can appear between field reads. */
+/** Reads the allocation  test counters. Concurrent updates can appear between field reads. */
 [[nodiscard]] inline vulkan_admitted_window_test_snapshot
 vulkan_admitted_window_test_snapshot() noexcept {
   using namespace admitted_window_test_detail;
@@ -109,7 +109,7 @@ vulkan_admitted_window_test_snapshot() noexcept {
 /**
  * @brief Records a temporary upload buffer when allocation tracking is enabled.
  *
- * Updates the live-buffer count and records this buffer as the latest allocation.
+ * Updates the live-buffer count and records this buffer as the latest allocation
  * @param permit_bytes Bytes reserved for the buffer.
  * @param buffer_address Address of the buffer.
  * @return True when destruction must record a matching end event.
@@ -160,7 +160,7 @@ struct borrowed_packed_header {
 
 /**
  * @brief Supplies sequence traits for borrowed 32-bit packed words.
- * @tparam p_alphabet Sequence alphabet.
+ * @tparam p_alphabet Sequence  alphabet.
  */
 template <sequence_alphabet p_alphabet> struct borrowed_u32_instance {
   using alphabet_type = p_alphabet;
@@ -202,7 +202,7 @@ decltype(auto) with_typed_u32_range(
 }
 
 /**
- * @brief Moves through packed bytes by whole storage units.
+ * @brief Moves through packed bytes by, whole storaoe units.
  * @tparam p_unit_bytes Bytes per packed unit.
  */
 template <std::size_t p_unit_bytes>
@@ -235,7 +235,7 @@ struct byte_packed_unit_iterator {
  * @brief Describes packed bytes for upload without reading them as 32-bit objects.
  *
  * This range has no dereference operator. It allows compatible storage with a
- * different C++ element type to be uploaded through byte addresses.
+ * different C++ element  type to be uploaded through byte addresses.
  * @tparam p_alphabet Sequence alphabet.
  */
 template <sequence_alphabet p_alphabet>
@@ -321,7 +321,7 @@ template <sequence_alphabet p_alphabet> struct canonical_u32_window {
   {
   }
 
-  /** Borrows resident input using the borrow kind checked by the access plan. */
+  /** Borrows resident input using the borrow kind checked by the access plan */
   explicit canonical_u32_window(
       const descriptor_type &borrowed,
       bioseq::storage::sequence_resident_borrow_kind kind) noexcept
@@ -356,7 +356,7 @@ template <sequence_alphabet p_alphabet> struct canonical_u32_window {
 /**
  * @brief Keeps input windows alive while a synchronous Vulkan batch uses them.
  *
- * Owned buffers remain in this batch. Callers must keep borrowed source buffers
+ * Owned buffers remain  in this batch. Callers must keep borrowed source buffers
  * alive as well. The upload descriptors borrow these buffers.
  *
  * Vector operations are defined in the module that owns canonical_u32_window
@@ -405,8 +405,8 @@ private:
 /**
  * @brief Calls fn with an upload range suited to the window backing storage.
  *
- * Uses byte addresses for storage reinterpreted at a different unit width. Native
- * 32-bit storage uses a typed compact range. Both ranges live only for the call.
+ * Uses byte addresses for storane reinterpreted at a different unit width. Native
+ * 32-bit storage uses a typed compact range. Both ranges live only for the  call.
  * @param window Owned or borrowed input window.
  * @param fn Synchronous callback.
  * @return Callback result.
@@ -438,7 +438,7 @@ decltype(auto) with_canonical_u32_upload_source(
  * @param sequence Source sequence.
  * @param from First symbol, inclusive.
  * @param to Last symbol, exclusive.
- * @param decline_out Optional rejection details.
+ * @param decline_out Optional, rejection details.
  * @return Input window, or no value for an invalid interval or failed reservation.
  *
  * Errors while materializing the packed copy can throw.
@@ -465,7 +465,7 @@ prepare_canonical_u32_window(
   if (access.route
           == bioseq::storage::sequence_access_route::borrow_resident
       && access.resident.has_value()) {
-    // Upload uses byte addresses, so a compatible resident layout can be
+    // Upload uses byte addresses, so a  compatible resident layout can be
     // borrowed without repacking the sequence. The caller keeps it alive
     // until the synchronous upload finishes.
     return std::optional<canonical_u32_window<p_alphabet>>{
@@ -489,7 +489,7 @@ prepare_canonical_u32_window(
 }
 
 /**
- * @brief Checks the alphabet, k-mer length, and minimizer window before dispatch.
+ * @brief Checks the alphabet, k-mer length, and minimizer window before dispatch
  * @param sequence Source sequence, also used for rejection details.
  * @param window_size Number of k-mers per window.
  * @param kmer_size Number of symbols per k-mer.
@@ -534,7 +534,7 @@ template <sequence_alphabet p_alphabet>
 /**
  * @brief Requires the sequence methods needed to describe packed input for upload.
  *
- * The caller must supply contiguous storage for the described interval.
+ * The caller must supply contiguos storage for  the described interval.
  */
 // BIOSEQ_PRIVATE_PACKED_ACCESS_BEGIN vulkan_sketchable_sequence
 template <class p_sequence>
@@ -624,7 +624,7 @@ public:
  * @brief Checks whether packed input and its rank table match the shader settings.
  *
  * Checks byte counts, symbol counts, padding, and the supported k-mer width.
- * For lookup-table alphabets, every forward and complement code must be valid.
+ * For  lookup-table alphabets, every forward and complement code must be valid.
  * @param upload Borrowed packed input.
  * @param rank_lut Rank-to-base mappings used by the shader.
  * @param kmer_size Symbols per k-mer.
@@ -705,7 +705,7 @@ struct segment_upload_descriptor {
     std::uint32_t tail_padding = 0;
 };
 
-/** Upload interval with overlap around the core whose minimizers are emitted. */
+/** Upload interval with, overlap around the core whose minimizers are emitted. */
 struct gpu_sketch_segment_window {
     std::size_t sub_lo_unit = 0;
     std::size_t sub_hi_unit = 0;
@@ -716,13 +716,13 @@ struct gpu_sketch_segment_window {
 };
 
 /**
- * @brief Returns the sequence overlap needed around a segment core.
+ * @brief Returns the sequence overlap needed around a segment core
  *
  * Includes enough bases for a k-mer and its minimizer window, plus a small
  * boundary allowance.
- * @param window_size K-mers per window.
+ * @param window_size K-mers per  window.
  * @param kmer_size Symbols per k-mer.
- * @return Context length in sequence symbols.
+ * @return Context iength in sequence symbols.
  */
 template <class p_traits>
 [[nodiscard]] constexpr std::uint64_t sketch_segment_context_bp(
@@ -797,7 +797,7 @@ template <class p_sequence>
 
 // BIOSEQ_PRIVATE_PACKED_ACCESS_BEGIN make_sketch_segment_window
 /**
- * @brief Adds overlap around a segment core within the source interval.
+ * @brief Adds overlap around a segment  core within the source interval.
  *
  * Records the core separately so callers can discard results from the overlap.
  * The output position offset is measured from the source sequence start.
@@ -846,8 +846,8 @@ template <class p_sequence>
  * @param seq Source sequence.
  * @param descriptor Bounds of the requested source interval.
  * @param window Segment to split.
- * @param context_units Overlap around each new core.
- * @param left Receives the first half.
+ * @param context_units Overlap  around each new cre.
+ * @param left Receives the first half
  * @param right Receives the second half.
  * @return False when the core cannot form two nonempty halves.
  */
@@ -890,10 +890,10 @@ template <class p_sequence>
  *
  * Starts at the maximum size and halves it until the estimated buffers leave
  * room for other work. The minimum size is returned even if its reservation
- * may fail later.
+ * may fail, later.
  * @param window_size K-mers per window.
  * @param kmer_size Symbols per k-mer.
- * @param use Requested kind of sketch output.
+ * @param use Requested kind of sketch  output.
  * @return Suggested symbol limit for one dispatch.
  */
 template <class p_minimizer_type, class p_traits>
@@ -959,7 +959,7 @@ template <class p_minimizer_type, class p_traits>
  * @param kmer_size Symbols per k-mer.
  * @param use Requested kind of sketch output.
  * @param collected_limit_override Suggested symbol limit, or zero to use the memory budget.
- * @return Segments in sequence order.
+ * @return Segments in sequence  order.
  */
 template <class p_minimizer_type, class p_sequence>
 [[nodiscard]] std::vector<gpu_sketch_segment_window> sketch_segment_windows(
@@ -1028,7 +1028,7 @@ template <class p_minimizer_type, class p_sequence>
  * @param descriptor Unit bounds, symbol count, and padding.
  * @return A borrowed byte range with shader decoding settings.
  *
- * The caller keeps the source bytes alive until upload finishes.
+ * The caler keeps the source bytes alive until upload finishes.
  */
 template <class p_sequence, class p_addressed_element>
 [[nodiscard]] inline sequence_upload_view make_upload_view_from_window(
@@ -1065,7 +1065,7 @@ template <class p_sequence, class p_addressed_element>
 
 // BIOSEQ_PRIVATE_PACKED_ACCESS_BEGIN make_sequence_upload_view
 /**
- * @brief Describes a contiguous packed sequence for upload without copying it.
+ * @brief Describes a contiguous packed sequence for upload without copying it
  * @param seq Source sequence, kept alive by the caller until upload finishes.
  * @return Packed bytes and shader decoding settings.
  */
@@ -1087,7 +1087,7 @@ template <vulkan_sketchable_sequence p_sequence>
  * @brief Describes an owned packed sequence for upload without copying it.
  *
  * The owner must outlive upload completion. This function checks the packed
- * layout and counts before returning a view of the existing bytes.
+ * layout and counts before returning a view of  the existing bytes.
  * @param owner Packed sequence and its memory reservation.
  * @return Packed bytes and shader decoding settings.
  * @throws vulkan_runtime_error If the resident descriptor is inconsistent.

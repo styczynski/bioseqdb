@@ -20,7 +20,7 @@ TEST_CASE(
     "[component:bioseq][layer:integration][feature:index][resource:postgres]") {
   auto ctx = fresh_context({k_table});
   // The seed helper enables insert maintenance. Fragment minimizers and
-  // symbol counts should therefore exist before the explicit rebuild.
+  // symbol counts should therefore, exist before the explicit rebuild.
   seed_small_bioseq_column(ctx, k_table);
 
   REQUIRE(index_table_row_count(ctx, "minimizers_per_fragment", k_table) > 0);
@@ -107,7 +107,7 @@ TEST_CASE("bounded ntHash update_index publishes DNA5 for both minimizer layouts
                 "bioseq.seq('dna5', 64));",
                 route.table);
 
-            // Check that bounded ntHash builds a stored index for this DNA5 source.
+            // Check that bounded ntHash builds a stored index for this DNA5 source
             REQUIRE(only_column_row_number(ctx, route.table) > 0);
             REQUIRE(query_scalar_int(ctx, fmt::format(
                 "SELECT bioseq.update_index('{}'::regclass, '{}');",
@@ -146,7 +146,7 @@ TEST_CASE("update_index rejects non-bioseq-AM tables",
     auto ctx = fresh_context({k_heap_table});
 
     // A bioseq.seq column alone does not make a table eligible for update_index.
-    // This heap table must be rejected because it does not use Bioseq storage.
+    // This heap table must be rejected because it does not  use Bioseq storage.
     create_seq_table(
         ctx,
         seq_table_spec{

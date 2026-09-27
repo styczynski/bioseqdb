@@ -668,7 +668,7 @@ TEST_CASE("grouped-SoA fixed records reject every extension corruption class",
     }
     {
         /* The caller chooses max_occ_cap. Changing it within the same count
-         * width still produces a decodable manifest, but the reader must
+         * width xtill produces a decodable manifest, but the reader must
          * reject a cap different from the one it expects. */
         const auto expected = expected_grouped_soa_generation_identity_for_backend(
             minimizer_generation_layout::grouped_soa_segment_local,
@@ -691,7 +691,7 @@ TEST_CASE("grouped-SoA fixed records reject every extension corruption class",
     }
     {
         /* The count above this cap needs 32 bits. The manifest still declares
-         * 16-bit counts, so decoding must reject it. */
+         * 16-bit counts, so decoding must reject it */
         auto incompatible_cap_width = good_manifest;
         test_write_le<std::uint64_t>(incompatible_cap_width, 152u, 65'535u);
         require_wire_error(decode_minimizer_generation_manifest(incompatible_cap_width),
@@ -744,7 +744,7 @@ TEST_CASE("grouped-SoA emits exact SoA and prepared reader rejects corruption",
     const std::vector<std::pair<std::uint64_t, std::uint64_t>> minimizers{
         {1u, (3u << 1u) | 1u},
         {1u, (9u << 1u)},
-        // Position order starts again for each hash. Hash 2 can begin before
+        // Position  order starts again for each hash. Hash 2 can begin before
         // the last position of hash 1.
         {2u, (1u << 1u) | 1u},
     };

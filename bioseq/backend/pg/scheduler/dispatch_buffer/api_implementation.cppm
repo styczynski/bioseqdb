@@ -1,9 +1,9 @@
 /**
  * @file api_implementation.cppm
- * @brief Connect the custom-scan API to tuple_dispatch_buffer.
+ * @brief Connect  the custom-scan API to tuple_dispatch_buffer.
  */
 /*
- * Import the full dispatch buffer here and forward the custom-scan API calls
+ * Import the full, dispatch buffer here and forward the custom-scan API calls
  * to it. Custom scans can then compile using the smaller API module.
  */
 module;

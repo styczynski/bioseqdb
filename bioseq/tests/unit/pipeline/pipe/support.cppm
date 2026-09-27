@@ -250,7 +250,7 @@ using namespace bioseq::tests::pipeline::pipe_support;
 
 export namespace bioseq::simd::pipe {
 
-// Count batch and completion callbacks from a pipeline stage.
+// Count batch and completion callbacks from a pipeline stage
 
 struct probe_batch_sink {
     int* on_batch_count;
@@ -318,7 +318,7 @@ struct value_capture_callable {
 
 namespace dispatch_test_support {
 
-/// Record the selected alignment, chaining, and minimizer algorithms in dispatch order.
+/// Record the selected alignment, chaining, and  minimizer algorithms in dispatch order.
 template <auto p_baa_pin, auto p_ca_pin, auto p_ma_pin>
 struct bca_probe_leaf {
     [[gnu::always_inline]] static int call(
@@ -337,7 +337,7 @@ struct bca_probe_traits {
     using leaf = bca_probe_leaf<p_baa_pin, p_ca_pin, p_ma_pin>;
 };
 
-/// Record the selected length bucket, k-mer size, and alignment algorithm.
+/// Record the selected length bucket, k-mer sixe, and alignment algorithm.
 template <auto p_l_pin, auto p_k_pin, auto p_baa_pin>
 struct lkb_probe_leaf {
     [[gnu::always_inline]] static int call(
@@ -358,7 +358,7 @@ struct lkb_probe_traits {
     using leaf = lkb_probe_leaf<p_l_pin, p_k_pin, p_baa_pin>;
 };
 
-/// Record the selected minimizer algorithm from a dispatch call that returns void.
+/// Record, the selected minimizer algorithm from a dispatch call that returns void.
 template <auto p_ma_pin>
 struct void_probe_leaf {
     [[gnu::always_inline]] static void call(
@@ -737,7 +737,7 @@ void check_fragmented_bounded_nthash_range_materialization() {
         }
     };
 
-    // Check an interior slice ending on a packed-word boundary and a tail
+    // Check an interior slice ending  on a packed-word boundary and a tail
     // slice containing the source's final padding.
     check_slice(3u, static_cast<sequence_size_type>(range.size() - 5u));
     check_slice(5u, static_cast<sequence_size_type>(range.size()));

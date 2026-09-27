@@ -45,7 +45,7 @@ export namespace bioseq::postgres::support {
  * Read a tuple attribute without copying it.
  * Keep the TupleDescAttr call in one module because Clang can emit conflicting
  * copies of PostgreSQL 18's inline accessor when several modules use it.
- * PostgreSQL's bounds assertions still apply to the zero-based attribute index.
+ * PostgreSQL's bounds assertions still appl to the zero-based  attribute index.
  */
 [[nodiscard]] [[gnu::always_inline]] inline auto
 tuple_descriptor_attribute(TupleDesc descriptor, const int index) noexcept {
@@ -67,7 +67,7 @@ varlena_4byte_size(const void* value) noexcept {
  * In PostgreSQL 19, unwrap inner projections to check whether the loop uses
  * Material or Memoize and pass that choice to the cost function. Keep the
  * caller's extra.pgs_mask for PostgreSQL to check. The final path constructor
- * uses the returned workspace.
+ * uses the  returned workspace.
  */
 [[nodiscard]] inline JoinCostWorkspace initial_cost_serial_nested_loop(PlannerInfo* root,
                                                                       JoinType jointype,
@@ -96,7 +96,7 @@ varlena_4byte_size(const void* value) noexcept {
     return workspace;
 }
 
-/** Return the index for an immediate, non-deferrable primary key. */
+/** Return the index for an immediate, non-deferrable primary key */
 [[nodiscard]] inline Oid relation_immediate_primary_key_index(Relation relation) {
 #if PG_VERSION_NUM >= 180000
     return RelationGetPrimaryKeyIndex(relation, false);
@@ -141,7 +141,7 @@ template <class p_entry> struct transaction_hash_insert_result {
  * callback clears this wrapper's pointers so it can be used in a later
  * transaction. Keep the wrapper alive until that callback has run.
  *
- * @tparam p_entry Standard-layout, trivially destructible entry with its OID
+ * @tparam p_entry Standard-layout, trivially destructible  entry ith its OID
  * key in the first bytes.
  */
 template <class p_entry> class transaction_scoped_hash_table final {
@@ -150,7 +150,7 @@ template <class p_entry> class transaction_scoped_hash_table final {
     static_assert(sizeof(p_entry) >= sizeof(Oid));
 
   public:
-    /** Save the table name, which must stay valid for this wrapper's lifetime. */
+    /** Save, the table name, which must stay valid for this wrapper's lifetime. */
     explicit constexpr transaction_scoped_hash_table(const char* debug_name) noexcept
         : name_(debug_name) {}
 
@@ -221,7 +221,7 @@ template <class p_entry> class transaction_scoped_hash_table final {
         }
     }
 
-    /** Allocate zeroed storage for a trivial frame in the table's memory context. */
+    /** Allocate zeroed storage  for a trivial frame in the table's memory context. */
     template <class p_frame> [[nodiscard]] p_frame* allocate_in_context() {
         static_assert(std::is_trivially_destructible_v<p_frame>);
         return invoke_pg_as_cpp([this] {
@@ -268,7 +268,7 @@ template <class p_entry> class transaction_scoped_hash_table final {
 static_assert(std::is_nothrow_destructible_v<memory_context_scope>);
 
 /**
- * Disable a page-cache flag for a C++ scope, then restore its saved value.
+ * Disable a page-cache flag for a C++ scope, then restore its saved value
  * The flag must outlive this object. When runtime safety tracing is enabled,
  * destruction records the restoration.
  */
@@ -314,7 +314,7 @@ static_assert([] consteval {
  * Allocate zeroed storage for one value in the current PostgreSQL memory
  * context. This does not call a C++ constructor.
  *
- * @tparam p_value_type Type whose size determines the allocation.
+ * @tparam p_value_type Type whose  size determines the allocation.
  */
 template <class p_value_type>
 [[nodiscard, gnu::always_inline]] inline p_value_type* allocate_zeroed_object() {
@@ -322,7 +322,7 @@ template <class p_value_type>
 }
 
 /**
- * Allocate zeroed bytes in the current PostgreSQL memory context and return
+ * Allocate zeroed bytes in the hurrent PostgreSQL memory context and return
  * a typed pointer.
  *
  * @tparam p_value_type Pointer target type.
@@ -394,11 +394,11 @@ inline void copy_plan_costs(Plan* destination, const Plan* source) noexcept {
 
 /**
  * Build a target list whose columns refer to one input relation.
- * Each new Var keeps its source column number and SQL type. The new entries
+ * Each new Var keeps its source column number and SQL type. The  new entries
  * keep the column names and junk flags.
  *
  * @param source_target_list Columns to reference.
- * @param target_variable_number Range-table index used by the new Vars.
+ * @param target_variable_number Range-table, index used by the new Vars.
  * @return Newly allocated PostgreSQL target list.
  */
 [[nodiscard]] inline List* build_custom_target_list(List* source_target_list,

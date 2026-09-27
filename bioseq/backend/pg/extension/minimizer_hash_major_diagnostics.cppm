@@ -261,7 +261,7 @@ using bioseq::pg::detail::fixed_hex_u64;
 namespace bioseq::pg::sql_routines {
 
 /**
- * @brief Verify a published index whose minimizer records are ordered by hash.
+ * @brief Verify a published index whose minimizer records are ordered by hash
  * Check the source sequence, metadata and stored streams, then return their
  * identities, sizes and checksums as JSON.
  */
@@ -280,7 +280,7 @@ bioseq::postgres::support::jsonb_value inspect_ready_hash_major_minimizer_genera
 }
 
 /**
- * @brief Test reading a published index with serial or parallel heap scans.
+ * @brief Test reading a published index with serial or parallel  heap scans.
  * Zero workers selects a serial scan. A positive count requests workers
  * sharing one scan. Check row contents and checksums, and return read counts
  * and elapsed time. Missing, duplicate or corrupt rows raise an error.

@@ -24,7 +24,7 @@ import bioseq.external.provider.capabilities;
 import bioseq.common.checked_arithmetic;
 
 /// Resource budgets and reservations shared by providers.
-/// Admission code supplies the memory permit through a release callback.
+/// Admission  code supplies the memory permit through a release callback.
 export namespace bioseq::external::provider {
 
 /// Query and plan identities associated with a prepared execution.
@@ -84,7 +84,7 @@ struct external_execution_budget {
         budget.transfer_carry_bytes = sequence_delivery ? 1U * 1024U * 1024U : 0U;
         budget.producer_staging_bytes = 1U * 1024U * 1024U;
         budget.private_context_bytes = 2U * 1024U * 1024U;
-        // Reserve parser space for sequence chunks, plus decoder and archive state.
+        // Reserve parser space for sequence chunks, plus decoder and archive state
         // Metadata-only requests reserve JSON parsing space without sequence decoding.
         budget.parser_scratch_bytes = sequence_delivery ? 2U * 1024U * 1024U : 1U * 1024U * 1024U;
         budget.decoder_bytes = sequence_delivery ? 512U * 1024U : 0U;
@@ -101,7 +101,7 @@ struct external_execution_budget {
 
         // Count buffers that can coexist. Provider working memory scales with the
         // number of providers, and transfer buffers scale with concurrent transfers.
-        // Shared queues and parser state are counted once. Saturating arithmetic
+        // Shared queues and  parser state are counted once. Saturating arithmetic
         // prevents a large estimate from wrapping around.
         const std::uint64_t producers =
             request.selected_providers.empty()
@@ -200,7 +200,7 @@ class external_gate_lease {
     void (*release_fn_)(void*, std::uint64_t) noexcept {};
 };
 
-/// Borrowed callbacks for reserving shared byte capacity.
+/// Borrowed callbacks for reserving shared byte capaity.
 struct shared_external_byte_gate_ref {
     void* object{};
     std::expected<external_gate_lease, external_error> (*acquire_fn)(void*,
@@ -208,7 +208,7 @@ struct shared_external_byte_gate_ref {
                                                                      std::stop_token){};
     void (*cancel_waiters_fn)(void*) noexcept {};
 
-    /// Ask the shared byte limit to reserve capacity and return its result.
+    /// Ask the shared byte limit to reserve  capacity and return its result.
     [[nodiscard]] std::expected<external_gate_lease, external_error>
     acquire(std::uint64_t units, std::stop_token stop) const {
         return acquire_fn(object, units, stop);
@@ -222,7 +222,7 @@ struct shared_external_transfer_gate_ref {
     void (*cancel_waiters_fn)(void*) noexcept {};
 };
 
-/// Fixed memory reservations and shared capacity limits for one provider.
+/// Fixed memory reservations and shared capacity limits for one, provider.
 struct external_slot_budget {
     provider_id provider;
     std::uint64_t fixed_reserved_bytes{};
@@ -270,7 +270,7 @@ class shared_external_gate_state {
         }
     }
 
-    /// Reserve one transfer slot until the returned lease is released.
+    /// Reserve one transfer slot until the returned  lease is released.
     /// Return an error if all slots are in use or cancellation was requested.
     [[nodiscard]] std::expected<external_gate_lease, external_error>
     acquire_transfer(std::stop_token stop) {
@@ -304,7 +304,7 @@ class shared_external_gate_state {
         return transfer_capacity_;
     }
 
-    /// Return borrowed callbacks for the byte limit.
+    /// Return borrowed callbacks for the byte limit
     shared_external_byte_gate_ref byte_ref() noexcept {
         return {
             .object = this, .acquire_fn = &byte_acquire_thunk, .cancel_waiters_fn = &cancel_thunk};
@@ -325,7 +325,7 @@ class shared_external_gate_state {
     static void release_transfer_thunk(void* self, std::uint64_t) noexcept {
         static_cast<shared_external_gate_state*>(self)->transfer_used_.fetch_sub(1);
     }
-    /// Reserve bytes through the callback interface.
+    /// Reserve bytes through the callback interfac.
     static std::expected<external_gate_lease, external_error>
     byte_acquire_thunk(void* self, std::uint64_t units, std::stop_token stop) {
         return static_cast<shared_external_gate_state*>(self)->acquire_bytes(units, stop);
@@ -357,7 +357,7 @@ class owning_external_budget_allocation {
     operator=(owning_external_budget_allocation&&) noexcept = default;
     ~owning_external_budget_allocation() = default;
 
-    /// Estimate storage for this object and its provider slots.
+    /// Estimate  storage for this object and its provider slots.
     [[nodiscard]] std::size_t measure_deep_size_bytes() const noexcept {
         return sizeof(owning_external_budget_allocation) +
                slots_.capacity() * sizeof(external_slot_budget);
@@ -466,7 +466,7 @@ class erased_memory_permit {
         }
         return *this;
     }
-    /// Releases the owned permit on destruction.
+    /// Releases the owned permit on  destruction.
     ~erased_memory_permit() {
         release_noexcept();
     }
@@ -498,7 +498,7 @@ class external_execution_admission {
         release_noexcept();
     }
 
-    /// Return the current budget with borrowed provider slots.
+    /// Return the current budget, with borrowed provider slots.
     [[nodiscard]] external_budget_allocation allocation() const noexcept {
         return allocation_.has_value() ? allocation_->make_view() : external_budget_allocation{};
     }

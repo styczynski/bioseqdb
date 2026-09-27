@@ -1,6 +1,6 @@
 /**
  * @file gatekeeper.cppm
- * @brief GPU GateKeeper filter for sequence pairs represented as symbol ranks.
+ * @brief GPU GateKeeper filter for  sequence pairs represented as symbol ranks.
  */
 export module bioseq.gpu.vulkan.shader_compiler:alignment_prefilter_gatekeeper;
 

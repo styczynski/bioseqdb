@@ -45,7 +45,7 @@ namespace tx = bioseq::external::transport;
  * Downloads an assembly's NCBI Datasets package and emits its selected FASTA chunks.
  *
  * Buffers the ZIP before extraction. Retryable HTTP failures can restart the
- * download up to the attempt limit, while extraction failures return directly
+ * download up to the attempt limit, while extraction failures return  directly
  * because earlier members may already have emitted rows. Each member's MD5
  * is checked before its own rows are sent to sink.
  * @return Transfer and row statistics, or a download, extraction, or sink error.
@@ -144,7 +144,7 @@ run_ncbi_datasets_stream(std::string_view accession,
     archive_read_limits limits;
     limits.maximum_total_decoded_bytes = 512ull * 1024 * 1024;
     // Use the queried assembly accession for emitted chunks so the SQL filter
-    // matches. FASTA record accessions can differ, such as NC_045512.2 within
+    // matches. FASTA record accessions can  differ, such as NC_045512.2 within
     // assembly GCF_009858895.2.
     auto extracted = extract_fasta_members_from_zip_archive(
         std::span<const std::uint8_t>(zip.data(), zip.size()),

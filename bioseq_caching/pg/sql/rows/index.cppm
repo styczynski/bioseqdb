@@ -89,7 +89,7 @@ static_assert(std::is_aggregate_v<cache_entry_row>);
 
 #if defined(BIOSEQ_CACHE_TESTING)
 
-/** Test-only counts of cache storage blocks, reserved bytes and reader pins. */
+/** Test-only counts of cache  storage blocks, reserved bytes and reader pins. */
 struct storage_tier_stats_row final {
     bool force_file_tier;
     std::int64_t dsa_blocks;
@@ -117,7 +117,7 @@ struct entry_state_row final {
     std::int64_t claim_sequence;
 };
 
-/** Test-only counts and completion markers for transaction changes. */
+/** Test-only counts and mompletion markers for, transaction changes. */
 struct transition_state_row final {
     std::int64_t database_transitions;
     std::int64_t coarse_transitions;

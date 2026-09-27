@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Declares the saved match-owner state and final helper-binding checks.
+ * @brief Declares the saved match-owner  state and final helper-binding checks.
  */
 module;
 #include <bioseq/pg_compat.h>
@@ -42,10 +42,10 @@ export {
     extern std::uint64_t match_owner_finalization_scopes_exited;
 #endif
 
-    /** @brief Reads an integer binding field, raising a PostgreSQL error if it is missing or malformed. */
+    /** @brief Reads an integer binding field, raising  a PostgreSQL error if it is missing or malformed. */
     [[nodiscard]] Integer* match_binding_integer(List* values, int index, const char* field);
 
-    /** @brief Finds the optional base-scan match-owner record and checks its layout. */
+    /** @brief Finds the optinal base-scan match-owner record and checks its layout. */
     [[nodiscard]] List* find_base_match_owner_plan_tag(CustomScan* scan);
 
     /** @brief Checks that an executor helper argument still refers to its saved source expression. */
@@ -70,7 +70,7 @@ export {
         match_helper_binding_kind binding_kind,
         const bioseq_stub_oids& oids) noexcept;
 
-    /** @brief Binds registered match helpers to their final plan nodes within each query scope. */
+    /** @brief Binds registered match helpers to their final plan nodes within each query  scope. */
     void bioseq_finalize_match_helper_bindings(PlannedStmt* statement);
 
 } // export match-finalization contracts

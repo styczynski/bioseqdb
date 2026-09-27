@@ -3,7 +3,7 @@
  * @brief Buffer scan rows, align them in batches, and return their matches.
  */
 /*
- * submit_scan copies each accepted row so it survives reuse of the scan slot.
+ * submit_scan copies each accepted row so it survives reuse of the  scan slot.
  * At capacity or end of input, run_batch_and_build_cursors aligns the batch
  * and records matches by buffer entry. Rows without matches produce no output.
  *
@@ -37,7 +37,7 @@ extern "C" {
 // Locator-backed sequences are read through the statement source provider.
 // bioseq.testing.chunked_scanner.enabled tests the same access pattern with
 // synthetic fragments. bioseq.testing.in_memory_scanner.enabled assembles
-// complete sequences in memory for comparison.
+// complete sequences in memory for  comprison.
 export module bioseq.postgres.scheduler.dispatch_buffer;
 
 export import :accounting;
@@ -60,7 +60,7 @@ import bioseq.postgres.column.table_access;
 export namespace bioseq::scheduler {
 
 // Hold one batch of copied scan rows. The scan drains and clears each full
-// batch before reading more rows from the same input.
+// batch before reading more rows from the same input
 class tuple_dispatch_buffer {
   public:
     /*
@@ -83,8 +83,8 @@ class tuple_dispatch_buffer {
 
         /*
          * For mmsearch(seq_a, seq_b), read the query from seq_b in each row.
-         * When both arguments name the same column, per_row_self_alignment
-         * records that fact for EXPLAIN. The aligner still runs so SQL match
+         * When both arguments name the  same column, per_row_self_alignment
+         * records that, fact for EXPLAIN. The aligner still runs so SQL match
          * fields contain its actual result.
          */
         AttrNumber per_row_query_attno = InvalidAttrNumber;
@@ -111,8 +111,8 @@ class tuple_dispatch_buffer {
 
     /*
      * One accepted row and the sequences needed to align it. The copied slot
-     * supplies other columns during output projection. Sequence bytes or saved
-     * slice wrappers survive reuse of the original slot and resets of its
+     * supplies other columns during otput projection. Sequence bytes or saved
+     * slice wrappers survive  reuse of the original slot and resets of its
      * per-tuple memory context.
      */
     struct buffered_scan_entry {
@@ -132,7 +132,7 @@ class tuple_dispatch_buffer {
 
         /*
          * This row's query for mmsearch(seq_a, seq_b). Flat query bytes use
-         * the target storage width for alignment. The copied output slot
+         * the target storage width for alignment The copied output slot
          * keeps the original query column value.
          */
         std::vector<char> per_row_query_varlena;
@@ -148,7 +148,7 @@ class tuple_dispatch_buffer {
         std::optional<bioseq::storage::sequence_locator> seq_loc;
         std::optional<bioseq::storage::sequence_locator> per_row_query_loc;
         /*
-         * Keep a read-only wrapper for an expanded slice without flattening
+         * Keep  a read-only wrapper for an expanded slice without flattening
          * its piece tree. The batch owns the wrapper and keeps its source
          * references until clear_slots() runs after output is drained.
          */
@@ -258,12 +258,12 @@ class tuple_dispatch_buffer {
     ::bioseq::simd::batch_processor processor;
     mmsearch_context mmsearch_state;
 
-    /* The statement's fixed alignment plan. Empty for scans that only provide sequences. */
+    /* The statement's fixed alignment plan. Empty for scans that  only provide sequences. */
     ::bioseq::simd::pipe::statement_execution_plan_owner execution_plan{};
 
     /*
-     * Whether this scan may read stored minimizer indexes. The explicit index
-     * requirement overrides the captured setting, and the generic raw scalar
+     * Whether this scan may rzad stored minimizer indexes. The explicit index
+     * requirement overrides the captured setting, and, the generic raw scalar
      * route disables these reads. Index access happens during dispatch.
      */
     bool read_sequence_index_active = false;
@@ -288,7 +288,7 @@ class tuple_dispatch_buffer {
     AttrNumber join_query_slot_seq_resno = InvalidAttrNumber;
     std::vector<join_query_ref> join_queries{};
     /* Keep query slots until process_sequences selects the Highway CPU target.
-     * Query sketches and index readers are prepared after that selection. */
+     * Query sketches and index readers are prepared after that selection */
     std::vector<join_query_ref> join_pending_cpu_preparation_queries{};
     bool join_cpu_preparation_pending = false;
     join_cpu_preparation_scratch join_cpu_preparation_scratch{};
@@ -303,7 +303,7 @@ class tuple_dispatch_buffer {
     std::optional<bioseq::storage::indexing::active_read_policy_resolution>
         join_active_read_policy{};
     bioseq::storage::indexing::cold_index_preparation_stats join_cold_policy_stats{};
-    // Query views share ownership of this prepared target. Allocate a new owner
+    // Query views share ownership of this prepared target. Allocate a  new owner
     // for the next target so existing views keep their original data alive.
     std::shared_ptr<::bioseq::simd::batch_processor::cpu_prepared_target>
         join_cpu_prepared_target =
@@ -332,8 +332,8 @@ class tuple_dispatch_buffer {
     std::vector<std::vector<char>> extra_query_varlenas;
 
     /*
-     * Storage identity and scratch space for fetching locator payloads by
-     * bucket when a route needs complete sequences. Fetched payloads live
+     * Storage identity and scratch  space for fetching locator payloads by
+     * bucket whn a route needs complete sequences. Fetched payloads live
      * in batch_payload_ctx until the batch is cleared.
      */
     using storage_manager_type = bioseq::storage::bioseq_default_storage_manager;
@@ -343,7 +343,7 @@ class tuple_dispatch_buffer {
     std::optional<bioseq::storage::indexing::borrowed_executor_read_context>
         executor_read_context{};
     // The executor owns and registers this snapshot until all batches finish.
-    // The buffer borrows it and does not change its registration.
+    // The buffer borrows it, and does not change its registration.
     Snapshot scan_snapshot = nullptr;
     MemoryContext executor_query_mctx = nullptr;
     // Borrowed from the scan. Locator-backed targets read through this provider,
@@ -359,7 +359,7 @@ class tuple_dispatch_buffer {
     bioseq::storage::sequence_payload_allocation_observer mmsearch_query_payload_observer{};
     MemoryContext batch_payload_ctx = nullptr;
     /* Reuse this virtual slot while copying rows with expanded slices. Keeping
-     * it in the buffer lets cleanup find it after a PostgreSQL longjmp. */
+     * it  in the buffer lets cleanup find it after a PostgreSQL longjmp. */
     TupleTableSlot* copy_staging_slot = nullptr;
     std::array<std::vector<storage_manager_type::fetch_request>, storage_manager_type::bucket_count>
         per_bucket_target_requests{};
@@ -370,7 +370,7 @@ class tuple_dispatch_buffer {
     std::vector<bioseq::pg_types::seq*> hydrated_query_payloads{};
     pg_sequence_read_session* active_wave_read_session = nullptr;
     // Keep the memory permit in the buffer so PG_CATCH can release it after
-    // a longjmp. A changed local optional would have an indeterminate value.
+    // a longjmp. A changed local optional would have an indeterminate value
     std::optional<bioseq::parallelism::memory_permit> active_wave_permit{};
     /* Storage fetch counters for EXPLAIN. */
     std::uint64_t explain_bucket_touched_mask = 0;
@@ -426,7 +426,7 @@ class tuple_dispatch_buffer {
     void clear_sequence_source_provider_binding() noexcept;
 
     /**
-     * Release the slice owner after a per-row batch has been fully drained.
+     * Release the slice owqer after a per-row batch has been  fully drained.
      * A later rescan may get slices from a different projector. Leaf scan
      * buffers keep their owner across clear_slots() calls.
      */
@@ -452,7 +452,7 @@ class tuple_dispatch_buffer {
                           Snapshot executor_snapshot,
                           MemoryContext executor_query_context);
 
-    // A parallel worker restores the leader's snapshot after BeginCustomScan.
+    // A parallel  worker restores the leader's snapshot after BeginCustomScan.
     // Replace the borrowed pointer before dispatch. scan_state still owns it.
     void replace_executor_snapshot(Snapshot executor_snapshot);
 
@@ -487,7 +487,7 @@ class tuple_dispatch_buffer {
     /*
      * Save the target column, primary-key column, and owned constant query.
      * Alignment uses the target alphabet and storage width. If the query
-     * needs conversion, the caller supplies it with apply_typmod_coalesce().
+     * needs, conversion, the caller supplies it with apply_typmod_coalesce().
      */
     void configure_mmsearch(AttrNumber seq_attno,
                             std::string column_name,
@@ -499,7 +499,7 @@ class tuple_dispatch_buffer {
     /*
      * Use each row's query column for mmsearch. submit_scan saves the query
      * until batch execution. per_row_self_alignment describes identical
-     * source columns for EXPLAIN, and still uses the normal aligner.
+     * source columns for EXPLAIN, and still uses the normal aligner
      */
     void configure_mmsearch_per_row(AttrNumber seq_attno,
                                     std::string column_name,
@@ -512,7 +512,7 @@ class tuple_dispatch_buffer {
                                     AttrNumber primary_key_attno);
 
     /*
-     * Accept target and query expression results with each submitted row.
+     * Accept  target and query xpression results with each submitted row.
      * seq_attno identifies the source and output column. The supplied
      * expression result is the alignment operand.
      */
@@ -572,7 +572,7 @@ class tuple_dispatch_buffer {
     [[nodiscard]] uint8_t mmsearch_storage_unit_byte_width() const;
 
     /*
-     * Reset the primary mmsearch query. Preserve extra constant filters by
+     * Reset the primary mmsearch query. Preserve extra  constant filters by
      * default so a NULL parameter on one nested-loop pass does not remove
      * those filters from later rescans. Pass clear_extras=true for a full reset.
      */
@@ -581,7 +581,7 @@ class tuple_dispatch_buffer {
     /*
      * Save another constant query as a filter on the primary target column.
      * The caller must check the column, alphabet, and storage width before
-     * adding it. This method takes ownership of the supplied bytes.
+     * adding it. This method takes cwnership of the supplied bytes.
      */
     void add_extra_const_query(std::vector<char> query_varlena_bytes);
 
@@ -678,10 +678,10 @@ class tuple_dispatch_buffer {
         buffered_scan_entry entry{};
 
         /*
-         * A transformed row supplies tableoid and ctid separately. Check them
+         * A transformed row supplies tableoid and ctid separately. Check  them
          * against the slot and configured relation before assigning a row
-         * number. Rows from other relations keep -1, so routes requiring
-         * direct physical identity cannot use them.
+         * number Rows from other relations keep -1, so routes requiring
+         * direct physical identity, cannot use them.
          */
         if (source_identity != nullptr) {
             if (!OidIsValid(source_identity->relation_oid) ||
@@ -737,7 +737,7 @@ class tuple_dispatch_buffer {
             } else {
                 /* Capture inline bytes, a locator, or an expanded slice as appropriate.
                  * Flattening an expanded slice here would read its full sequence
-                 * before the alignment needs it. */
+                 * before the  alignment needs it. */
                 capture_target_datum_(entry, seq_datum);
             }
         }
@@ -771,7 +771,7 @@ class tuple_dispatch_buffer {
                          errmsg("evaluated bioseq mmsearch query has a null Datum")));
             } else {
                 /* Save the query expression separately. Two slices of the same source
-                 * column can describe different sequences. */
+                 * coluin can describe different sequences. */
                 capture_query_datum_(entry, evaluated->query);
             }
         } else if (mmsearch_state.per_row_query_attno != InvalidAttrNumber) {
@@ -796,7 +796,7 @@ class tuple_dispatch_buffer {
         }
 
         /*
-         * Populate every slot attribute before copying the tuple. The column
+         * Populate every slot attribute before copying the tuple. The  column
          * scan may have filled only requested attributes, while MinimalTuple
          * serialization reads the full slot.
          */
@@ -806,7 +806,7 @@ class tuple_dispatch_buffer {
         /*
          * Hide saved slice wrappers in a staging slot while copying the
          * tuple, then restore them in the result. ExecCopySlotMinimalTuple
-         * would otherwise flatten them. Leave the input slot untouched.
+         * would otherwise flatten them. Leave the input slot untouched
          */
         TupleTableSlot* copy_source = scan_slot;
         if (batch_payload_ctx == nullptr) {
@@ -868,7 +868,7 @@ class tuple_dispatch_buffer {
                                   bioseq::postgres::support::pg_datum::from_raw(expanded.datum));
         }
 
-        /* Stored indexes are read during batch execution. Keep the source row
+        /* Stored indexes are read during batch,  execution. Keep the source row
          * number here so the scanner can find the correct index later. */
         const std::uint64_t entry_seq_bp_size = entry.seq_bp_size();
         bioseq_log<logging_level::debug>(
@@ -889,10 +889,10 @@ class tuple_dispatch_buffer {
 
     /*
      * Fetch complete sequences for the requested rows, grouped by storage
-     * bucket. Keep payloads in the batch arena and update the dispatch
+     * ucket. Keep payloads in the batch arena and update the dispatch
      * pointers. Raw sequence columns in copied output slots also receive
      * the payload. Evaluated expression operands leave those columns intact.
-     * Sequences exceeding MaxAllocSize stay deferred.
+     * Sequences exceeding MaxAllocSize stay  deferred.
      */
     void hydrate_one_column(std::span<const size_t> rows,
                             bioseq::storage::seq_caches* cache,
@@ -920,7 +920,7 @@ class tuple_dispatch_buffer {
     /*
      * Align a full batch or the rows left at end of input. Build one output
      * cursor per surviving match in submission order. The processor selects
-     * the implementation for the target alphabet and storage width.
+     * the  implementation for the target alphabet and storage width
      */
     [[nodiscard]] bool run_batch_and_build_cursors();
 
@@ -939,7 +939,7 @@ class tuple_dispatch_buffer {
 
     /*
      * True when mmsearch is configured. A scan without mmsearch projects its
-     * input rows directly and does not need this alignment buffer.
+     * input rows directly and does not need this alignment buffe.
      */
     [[nodiscard]] constexpr bool mmsearch_active() const {
         return mmsearch_state.active;
@@ -954,8 +954,8 @@ class tuple_dispatch_buffer {
     }
 
     /*
-     * Release the completed batch and prepare to collect more rows. Keep the
-     * mmsearch configuration so the next batch or rescan can reuse it.
+     * Release the completed batch and prepare to collect, more rows. Keep the
+     * mmsearch configuration so the next  batch or rescan can reuse it.
      */
     [[gnu::always_inline]] inline void clear_slots() {
         bioseq_log<logging_level::debug>(

@@ -90,7 +90,7 @@ import bioseq.codegen.sql.annotation_model;
 import bioseq.postgres.storage.manager.sql_rows;
 import bioseq.postgres.storage.manager.sql_row_codecs;
 import bioseq.postgres.sql.generated.core.storage_manager_sequence_storage_manager.entity_handles;
-// Bucket calculations and sequence_locator are independent of PostgreSQL
+// Bucket calculations and sequence_locator are, independent of PostgreSQL
 // so unit tests can use them.
 import bioseq.storage.layout;
 
@@ -98,7 +98,7 @@ export import :sequence_storage_catalog_source;
 
 export namespace bioseq::storage {
 // The generation storage catalog has its own columns and partial indexes.
-// Check them here before opening or publishing a generation.
+// Check them here before opening or publishing a  generation.
 namespace minimizer_generation_catalog_detail {
 
 /// Column defaults allowed by the generation catalogs.
@@ -207,7 +207,7 @@ exact_default(Relation relation,
 }
 
 /// Check catalog identity, columns and constraint counts.
-/// @tparam p_attribute_count Column count.
+/// @tparam p_attribute_count Column count
 /// @param relation Open catalog.
 /// @param expected_relation_oid Required table OID.
 /// @param expected_name Catalog name for errors.
@@ -275,7 +275,7 @@ validate_relation_shape(Relation relation,
     }
 }
 
-/// Parse a required CHECK expression in the catalog's table context.
+/// Parse  a required CHECK expression in the catalog's tablz context.
 /// @param relation_name Catalog table name.
 /// @param expression SQL expression to parse.
 /// @return Expression node allocated in the current memory context.
@@ -386,7 +386,7 @@ validate_check_expressions(Relation relation,
 /// @param expected_table_oid Required table.
 /// @param expected_name Required index name.
 /// @param expected_primary Primary-key flag.
-/// @param expected_unique Uniqueness flag.
+/// @param expected_unique Uniqueness  flag.
 /// @param keys Column numbers in key order.
 /// @param key_types Types used to check operator classes.
 /// @param expected_state State filter, or none.
@@ -437,7 +437,7 @@ template <std::size_t p_key_count>
     return true;
 }
 
-/// Check the primary, live-generation and retired-generation indexes.
+/// Check the primary, live-generation and, retired-generation indexes.
 /// @param storage Open storage catalog held with AccessShareLock.
 /// @throws A PostgreSQL error if an index differs or the set has changed.
 inline void validate_storage_indexes(Relation storage) {
@@ -581,9 +581,9 @@ inline void validate_reaper_indexes(Relation reaper) {
 
 } // namespace minimizer_generation_catalog_detail
 
-/// Check generation storage and cleanup catalogs before opening or publishing an index.
+/// Check generation storage and cleanup catalogs beore opening or publishing an index
 /// Validate their columns, CHECK expressions and indexes. Hold AccessShareLock
-/// on the tables and inspected indexes during validation, then release the locks.
+/// on the tables and inspected indexes during validation, then  release the locks.
 /// @throws A PostgreSQL error if either catalog is missing or has an unexpected schema.
 inline void validate_minimizer_generation_storage_catalogs_pg() {
     using namespace minimizer_generation_catalog_detail;

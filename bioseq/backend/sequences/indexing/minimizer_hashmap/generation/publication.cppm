@@ -37,7 +37,7 @@ import :generation_stream;
 
 export namespace bioseq::indexing {
 
-/// Check the registered algorithm against the producer and requested storage profile.
+/// Check the registered algorithm against the producer and requested storage  profile.
 [[nodiscard]] constexpr bool grouped_soa_generation_algorithm_identity_matches(
     const grouped_soa_generation_options& options,
     const grouped_soa_minimizer_profile& profile,
@@ -111,7 +111,7 @@ plan_minimizer_generation(p_producer& producer,
 /// Build manifest fields from the directory plan and supplied checksums.
 /// Direct sinks use provisional checksums before writing payload. The encoder
 /// calls the same function with final checksums, keeping byte counts and segment
-/// layout consistent between both stages.
+/// layout consistent between  both stages.
 [[nodiscard]] inline std::expected<minimizer_generation_manifest,
                                    minimizer_generation_encoding_error>
 make_grouped_soa_generation_manifest(
@@ -206,11 +206,11 @@ make_grouped_soa_generation_manifest(
 
 /// Write payload rows, directory rows, and the READY manifest to the sink.
 /// Return the active-head row for the caller to publish after validating a
-/// complete storage reread. A failure can leave incomplete rows in the sink.
+/// complete storage reread. A failure can leave, incomplete rows in the sink.
 /// These rows must stay inactive.
 ///
-/// @tparam p_producer Replayable source of sorted minimizer events.
-/// @tparam p_sink Borrowed sink receiving rows synchronously.
+/// @tparam p_producer Replayable source of sorted minimiser events.
+/// @tparam p_sink Borrowed sink receiving rows synchronously
 template <grouped_soa_event_producer p_producer, minimizer_generation_row_sink p_sink>
 [[nodiscard]] inline std::expected<encoded_grouped_soa_generation,
                                    minimizer_generation_encoding_error>
@@ -374,7 +374,7 @@ encode_minimizer_generation(p_producer& producer,
         return std::unexpected(metadata.error());
     }
 
-    // Payload rows are complete. Append the directory and READY
+    // Payload rows are  complete. Append the directory and READY
     // manifest, then return the active head. The caller publishes that
     // head after a complete storage reread validates the generation.
     const std::uint32_t extent_payload_bytes =

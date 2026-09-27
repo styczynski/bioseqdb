@@ -48,7 +48,7 @@ void call_previous_or_standard_executor_finish(QueryDesc* query_desc)
 }
 
 /** @brief Create a frame before starting PostgreSQL execution.
- * Nested queries share the running statement's collector. Register the frame
+ * Nested queries share the running statement's collector. Register  the frame
  * after ExecutorStart supplies its EState, and destroy it if startup fails.
  */
 void bioseq_alignment_executor_start(QueryDesc* query_desc, int eflags)

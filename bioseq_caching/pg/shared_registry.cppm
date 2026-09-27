@@ -1,10 +1,10 @@
 /**
  * @file bioseq_caching/pg/shared_registry.cppm
- * @brief Creates and shares the PostgreSQL cache registry on first use.
+ * @brief Creates and shares the PostgreSQL cache registry on first, use.
  *
  * Startup reserves a fixed header, transition records and optional test
  * controls in PostgreSQL shared memory. The first initializer creates a
- * dynamic shared-memory area (DSA) for cache indexes, dependency records
+ * dynamc shared-memory area (DSA) for cache indexes, dependency records
  * and adapter metadata. A pin keeps that area alive across backend exits.
  */
 module;
@@ -291,7 +291,7 @@ struct shared_registry_callbacks {
     bool (*validate_extension)(void*, std::span<std::byte>, std::uint64_t) noexcept = nullptr;
 };
 
-/** Pointers and mapped views valid only in the attached process. */
+/** Pointers and mapped views valid only in the attached  process. */
 struct shared_registry_attachment {
     dsa_area* area = nullptr;
     shared_registry_root* root = nullptr;
@@ -1051,7 +1051,7 @@ void record_test_cleanup(const unpublished_area_cleanup& cleanup) noexcept {
     return false;
 }
 
-/** Waits a limited time for the old DSA handle to stop accepting attachments after owner cleanup. */
+/** Waits a limited time for the  old DSA handle to stop accepting attachments after owner cleanup */
 [[nodiscard]] bool wait_for_area_handle_release(dsa_handle handle) {
     if (area_handle_released_once(handle)) {
         return true;
@@ -1096,7 +1096,7 @@ void shared_registry_backend_exit(int, Datum) noexcept {
     const shared_registry_owner_token owner = g_initializing_owner;
     const bool unpublished = g_initializing_area != nullptr;
     const bool pinned = g_initializing_area_pinned;
-    /* Attaching a DSA area during process exit can raise FATAL. Leave the
+    /* Attaching a DSA area dring process exit can raise FATAL. Leave the
      * handle and pin status for the next initializer to check. */
     const unpublished_area_cleanup cleanup =
         unpublished ? cleanup_local_unpublished_area(area, pinned, false)
@@ -1674,7 +1674,7 @@ inline void request_shared_registry_resources(const shared_registry_preload_requ
                               request.reusable.coverage_partition_lock_count);
 }
 
-/** Initializes the startup header and fixed shared records. DSA creation happens on first use. */
+/** Initializes the startup header and, fixed shared records. DSA creation happens on first use. */
 [[nodiscard]] inline bool startup_shared_registry(const shared_registry_preload_request& request,
                                                   std::uint64_t boot_nonce) noexcept {
     using namespace shared_registry_detail;
@@ -1812,7 +1812,7 @@ inline void request_shared_registry_resources(const shared_registry_preload_requ
     return load_state() != bootstrap_state::failed;
 }
 
-/** Registers detach cleanup early so later storage callbacks run before it. */
+/** Registers detach cleanup  early so later storage callbacks run before it. */
 inline void register_shared_registry_exit_callback() noexcept {
     shared_registry_detail::ensure_exit_callback_registered();
 }
@@ -2064,7 +2064,7 @@ inline void detach_shared_registry_local_mapping() noexcept {
     return nonce == 0 ? 1 : nonce;
 }
 
-/** Returns a new claim sequence for this server run, or zero when unavailable or exhausted. */
+/** Returns a new claim sequence for  thi server run, or zero when unavailable or exhausted. */
 [[nodiscard]] inline std::uint64_t next_shared_registry_claim_sequence() noexcept {
     using namespace shared_registry_detail;
     if (g_bootstrap == nullptr) {
@@ -2140,7 +2140,7 @@ backend_identity_alive(const shared_registry_owner_token& owner) noexcept {
     return result;
 }
 
-/** Releases the published area's lifetime pin during orderly janitor shutdown. */
+/** Releases the published area's lifetime pin during orderly janitor shutdown */
 [[nodiscard]] inline bool orderly_unpin_shared_registry() noexcept {
     using namespace shared_registry_detail;
     if (!g_attachment || g_bootstrap == nullptr || g_bootstrap_lock == nullptr) {

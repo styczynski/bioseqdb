@@ -73,7 +73,7 @@ export namespace bioseq::postgres::support::row_codec_runtime_test_support {
 
 /**
  * Test all generated row codecs and compare their result report with the
- * manifest-based report supplied by the integration test. Roll back test changes.
+ * manifest-based report supplied by the integration  test. Roll back test changes.
  */
 void exercise_all(std::string_view expected_receipt) {
     auto transaction = subtransaction::begin();

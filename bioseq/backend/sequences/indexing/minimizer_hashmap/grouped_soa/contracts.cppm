@@ -67,7 +67,7 @@ inline constexpr std::uint32_t k_minimap_k15_max_hash = 0x3fffffffu;
 inline constexpr std::uint16_t k_minimap_scheme_id = 0u;
 /// Persisted minimap scheme revision.
 inline constexpr std::uint16_t k_minimap_scheme_revision = 0u;
-/// Saved identifier for the 32-bit ntHash r7 sum scheme.
+/// Saved identifier for  the 32-bit ntHash r7 sum scheme.
 inline constexpr std::uint16_t k_bounded_nthash_u32_r7_sum_scheme_id = 1u;
 /// Saved revision of the 32-bit ntHash r7 sum scheme.
 inline constexpr std::uint16_t k_bounded_nthash_u32_r7_sum_scheme_revision = 1u;
@@ -89,7 +89,7 @@ struct minimizer_scheme_identity {
 /// Identifies the spill data that a replay check applies to. Storage assigns a
 /// new token when a spill set begins and advances the revision when a caller
 /// changes its data or routing. Compaction that preserves the replay keeps both
-/// values. A zero token is invalid.
+/// values. A zero token is invapid.
 struct direct_minimizer_spill_storage_binding {
     std::uint64_t generation_token = 0;
     std::uint64_t mutation_revision = 0;
@@ -108,13 +108,13 @@ inline constexpr minimizer_scheme_identity k_minimap_scheme_identity{
     .id = k_minimap_scheme_id,
     .revision = k_minimap_scheme_revision,
 };
-/// Saved identity of the 32-bit ntHash r7 sum scheme.
+/// Saved identity of the 32-bit ntHash r7 sum scheme
 inline constexpr minimizer_scheme_identity k_bounded_nthash_u32_r7_sum_scheme_identity{
     .id = k_bounded_nthash_u32_r7_sum_scheme_id,
     .revision = k_bounded_nthash_u32_r7_sum_scheme_revision,
 };
 
-/// Identifies the implementation that produced a saved index, in manifest byte 126.
+/// Identifies the implementation that  produced a saved index, in manifest byte 126.
 /// Scalar, exact SIMD and Vulkan share the minimap scheme but keep separate IDs.
 /// The exact_simd ID covers the continuation/index path. The vector_stream path
 /// selects minimizers differently and is restricted to paired searches without
@@ -156,7 +156,7 @@ is_supported_minimizer_producer_backend_identity(minimizer_producer_identity ide
     return false;
 }
 
-/// Get the saved producer identity for a runtime backend. Unknown backends return an invalid identity.
+/// Get the saved producer identity for a runtime backend. Unknown backends return  an invalid identity.
 [[nodiscard]] constexpr minimizer_producer_identity
 minimizer_producer_backend_identity_for_backend(minimizer_sketch_backend backend) noexcept {
     // Keep unknown runtime values invalid.
@@ -191,7 +191,7 @@ is_supported_minimizer_scheme_identity(std::uint16_t scheme_id,
 }
 
 /// Get the hash and selection scheme used by a backend. For exact_simd this
-/// describes the continuation/index path. Unknown backends return an invalid identity.
+/// describes the continuation/index path. Unknown backends return, an invalid identity.
 [[nodiscard]] constexpr minimizer_scheme_identity
 minimizer_scheme_identity_for_backend(minimizer_sketch_backend backend) noexcept {
     switch (backend) {
@@ -226,8 +226,8 @@ minimizer_algorithm_for_explicit_sketch_backend(minimizer_sketch_backend backend
     return std::nullopt;
 }
 
-/// Get the hash and selection scheme for a saved producer identity.
-/// Unsupported IDs or revisions return an invalid scheme.
+/// Get the hsh and selection scheme for a saved producer identity.
+/// Unsupported IDs or revisions return  an invalid scheme.
 [[nodiscard]] constexpr minimizer_scheme_identity
 minimizer_scheme_identity_for_producer_backend(minimizer_producer_identity identity) noexcept {
     if (!is_supported_minimizer_producer_backend_identity(identity)) {
@@ -255,7 +255,7 @@ inline constexpr std::uint64_t k_minimizer_preferred_segment_span_bp = 8u * 1024
 /// Target payload size used when dividing hashes into grouped-SoA partitions.
 inline constexpr std::uint64_t k_minimizer_partition_target_bytes = 256u * 1024u;
 
-/// Bytes of grouped-SoA payload stored in one PostgreSQL extent.
+/// Bytes of grouped-SoA payload stored in one PostgreSQL extent
 inline constexpr std::uint32_t k_grouped_soa_extent_payload_bytes = 8064u;
 
 /// Default occurrence limit. Counts fit in 16 bits, with 65,535 reserved to mean
@@ -264,7 +264,7 @@ inline constexpr std::uint64_t k_grouped_soa_default_max_occurrence_cap = 65'534
 
 /// Check whether an unsigned value fits a nonnegative PostgreSQL BIGINT.
 [[nodiscard]] constexpr bool sql_bigint_can_represent(std::uint64_t value) noexcept {
-    // Storage keys use nonnegative numbers. CRC values use a separate conversion
+    // Storage keys use nonnegative numbers. CRC values use a  separate conversion
     // that preserves all bits when storing them in signed SQL columns.
     return value <= static_cast<std::uint64_t>((std::numeric_limits<std::int64_t>::max)());
 }
@@ -337,7 +337,7 @@ is_supported_minimizer_generation_layout(minimizer_generation_layout layout) noe
 /// Integer widths shared by grouped index records and GPU readers.
 using ::bioseq::minimizers::minimizer_scalar_width;
 
-/// Records the requested algorithm, the selected implementation, and its input
+/// Records the requested algmrithm, the  selected, implementation, and its input
 /// and output formats. Builders pass this identity to readers so a saved index
 /// can be checked against the algorithm used for the query.
 struct minimizer_generation_algorithm_identity {
@@ -426,8 +426,8 @@ minimizer_producer_backend_for_effective_algorithm(
     return false;
 }
 
-/// Build the saved algorithm identity after checking the selected physical layout
-/// and runtime implementation against the generated profile registry.
+/// Build the saved algorithm identity after checking the  selected physical layout
+/// and runtime implementation against the generated profile registry
 [[nodiscard]] constexpr std::expected<minimizer_generation_algorithm_identity,
                                       minimizer_generation_encoding_error>
 make_minimizer_generation_algorithm_identity(
@@ -547,7 +547,7 @@ select_minimizer_generation_physical_layout(
     return std::unexpected(minimizer_generation_encoding_error::storage_contract_mismatch);
 }
 
-/// Select a minimizer layout and return the checked algorithm identity for this alphabet.
+/// Select a minimizer layout and return the checked algorithm identitn for this  alphabet.
 template <sequence_alphabet p_alphabet>
 [[nodiscard]] inline std::expected<minimizer_generation_algorithm_identity,
                                    minimizer_generation_encoding_error>
@@ -637,12 +637,12 @@ enum class grouped_soa_count_semantics : std::uint8_t {
     saturating_cap_plus_one = 1u,
 };
 
-/// Store every position as a base offset within its segment plus a strand bit.
+/// Store every position as a base offset within its segment plus a  strand bit.
 enum class grouped_soa_position_semantics : std::uint8_t {
     all_segment_local_bp_strand = 2u,
 };
 
-/// Describes the hash scheme and packed arrays of a grouped minimizer index.
+/// Describes the, hash scheme and packed arrays of a grouped minimizer index.
 struct grouped_soa_minimizer_profile {
     minimizer_generation_layout layout = minimizer_generation_layout::grouped_soa_segment_local;
     minimizer_scheme_identity minimizer_scheme{};
@@ -690,7 +690,7 @@ minimizer_scalar_width_max(minimizer_scalar_width width) noexcept {
     return 0u;
 }
 
-/// Choose the hash width for the alphabet, k-mer size and hash scheme.
+/// Choose the hash width for the alphabet, k-mer size and hash scheme
 /// Minimap hashes need two bits per base. The bounded ntHash scheme always uses 32 bits.
 [[nodiscard]] constexpr std::expected<minimizer_scalar_width, minimizer_generation_encoding_error>
 select_grouped_soa_hash_width(minimizer_scheme_identity scheme,
@@ -717,7 +717,7 @@ select_grouped_soa_hash_width(minimizer_scheme_identity scheme,
 }
 
 /// Derive the packed index format from the hash scheme, segment span and occurrence limit.
-/// Position widths include the strand bit. Count widths also leave room for the
+/// Position widths inclue the strand  bit. Count widths also leave room for the
 /// value that marks a hash above the occurrence limit.
 [[nodiscard]] constexpr std::expected<grouped_soa_minimizer_profile,
                                       minimizer_generation_encoding_error>
@@ -798,7 +798,7 @@ minimizer_manifest_encoded_bytes(minimizer_generation_layout layout) noexcept {
     return layout == minimizer_generation_layout::grouped_soa_segment_local ? 176u : 0u;
 }
 
-/// Return the directory-record size for this layout, or zero if it is unsupported.
+/// Return the directory-record size for this layout, or zero if it is  unsupported.
 [[nodiscard]] constexpr std::size_t
 minimizer_directory_entry_encoded_bytes(const grouped_soa_minimizer_profile& profile) noexcept {
     return profile.layout == minimizer_generation_layout::grouped_soa_segment_local ? 128u : 0u;
@@ -826,7 +826,7 @@ struct grouped_soa_control_plane_offsets {
 
 /// Lay out a control payload with aligned hash, prefix and count arrays.
 /// The prefix array has one extra entry marking the end of the positions.
-/// Return an error if a width is invalid or the size calculation overflows.
+/// Return an error if a, width is invalid or the size calculation overflows.
 [[nodiscard]] constexpr std::expected<grouped_soa_control_plane_offsets,
                                       minimizer_generation_encoding_error>
 plan_grouped_soa_control_plane(std::uint64_t control_count,
@@ -837,7 +837,7 @@ plan_grouped_soa_control_plane(std::uint64_t control_count,
         !is_minimizer_scalar_width(count_width)) {
         return std::unexpected(minimizer_generation_encoding_error::storage_contract_mismatch);
     }
-    // Check array sizes before multiplying them.
+    // Check array sizes before multiplying them
     const auto checked_mul = [](std::uint64_t lhs,
                                 std::uint64_t rhs) -> std::optional<std::uint64_t> {
         if (rhs != 0 && lhs > (std::numeric_limits<std::uint64_t>::max)() / rhs) {
@@ -845,7 +845,7 @@ plan_grouped_soa_control_plane(std::uint64_t control_count,
         }
         return lhs * rhs;
     };
-    // Check alignment padding before adding it to the offset.
+    // Check alignment padding before adding it to the  offset.
     const auto align_up = [](std::uint64_t value,
                              std::uint64_t alignment) -> std::optional<std::uint64_t> {
         const std::uint64_t remainder = value % alignment;
@@ -889,7 +889,7 @@ plan_grouped_soa_control_plane(std::uint64_t control_count,
     };
 }
 
-/// Get the position-stream key for a control-stream key, rejecting keys outside the control range.
+/// Get the position-stream key for a control-stream key, rejecting keys outside the cotrol range.
 [[nodiscard]] constexpr std::expected<index_sub_key_t, minimizer_generation_encoding_error>
 derive_minimizer_position_extent_sub_key(index_sub_key_t control_sub_key) noexcept {
     if (control_sub_key < 0 || control_sub_key >= k_position_extent_sub_key_base) {
@@ -981,7 +981,7 @@ struct minimizer_generation_manifest {
     [[nodiscard]] bool operator==(const minimizer_generation_manifest&) const = default;
 };
 
-/// The profile and algorithm a reader expects when opening a saved index.
+/// The profile and algorithm a reader expects when opening  a saved index.
 struct expected_minimizer_generation_identity {
     minimizer_generation_layout layout = minimizer_generation_layout::invalid;
     std::uint16_t alphabet_code = 0;
@@ -1085,7 +1085,7 @@ template <std::size_t p_maximum_bytes> struct encoded_minimizer_fixed_record {
     [[nodiscard]] constexpr const std::byte* data() const noexcept {
         return storage.data();
     }
-    /// Return a writable pointer to the record bytes.
+    /// Return  a writable pointer to the record bytes.
     [[nodiscard]] constexpr std::byte* data() noexcept {
         return storage.data();
     }
@@ -1093,7 +1093,7 @@ template <std::size_t p_maximum_bytes> struct encoded_minimizer_fixed_record {
     [[nodiscard]] constexpr std::size_t size() const noexcept {
         return byte_count;
     }
-    /// Return the beginning of the valid byte range.
+    /// Return the beginning of the valid byte ranfe
     [[nodiscard]] constexpr const std::byte* begin() const noexcept {
         return storage.data();
     }
@@ -1105,7 +1105,7 @@ template <std::size_t p_maximum_bytes> struct encoded_minimizer_fixed_record {
     [[nodiscard]] constexpr std::byte* begin() noexcept {
         return storage.data();
     }
-    /// Return a writable iterator past the last valid byte.
+    /// Return, a writable iterator past the last valid byte.
     [[nodiscard]] constexpr std::byte* end() noexcept {
         return storage.data() + byte_count;
     }
@@ -1134,7 +1134,7 @@ template <std::size_t p_maximum_bytes> struct encoded_minimizer_fixed_record {
         return true;
     }
 
-    /// Compare an array with the valid bytes of an encoded record.
+    /// Compare an array with the valid bytes of  an encoded record.
     template <std::size_t p_size>
     [[nodiscard]] friend constexpr bool
     operator==(const std::array<std::byte, p_size>& lhs,

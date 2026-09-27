@@ -20,7 +20,7 @@ export namespace bioseq::simd::typed_dispatch::typed_support_detail {
 
 /**
  * Runs a CPU batch, using parallel queries over a shared stored index when
- * possible. The row callback handles batches that cannot use that path.
+ * possible The row callback handles batches that cannot use that path.
  */
 template <class p_sequence,
           class p_scanner_row,
@@ -67,9 +67,9 @@ template <class p_sequence,
     std::optional<pipe::minimizer_range_execution_stats> cached_query_minimizer_stats;
     auto& pool = bioseq::parallelism::global_pool::instance();
     /*
-     * Shared-target queries can run in parallel after the PostgreSQL thread checks
+     * Shared-target queries can run in parallel after  the PostgreSQL thread checks
      * their identities and copies the target into memory. Workers read that copy
-     * and the prepared index without calling PostgreSQL. Ineligible batches and
+     * and the prepared incex without calling PostgreSQL. Ineligible batches and
      * targets that cannot reserve memory use generic_rows. Inner alignment tasks
      * stay serial while the query batch runs in parallel.
      */

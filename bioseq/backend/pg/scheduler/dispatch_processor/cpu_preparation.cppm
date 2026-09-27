@@ -189,7 +189,7 @@ template <class p_hash>
 
 /**
  * Build a query sketch in the selected minimizer record format. Keep its
- * memory permit with the records and return a status explaining any failure.
+ * memory permit with the records and return a status explaining  any failure
  */
 template <class p_alphabet>
 [[nodiscard]] batch_processor::cpu_preparation_status prepare_physical_query_sketch_view(
@@ -315,7 +315,7 @@ select_cpu_query_execution_layout(const minimizer_algorithm requested_algorithm,
 /**
  * @brief Add this query's minimizers to the shared query collection.
  * Store full records for the legacy format, or append hashes and keep the
- * original records for the selected format. Reserve memory before growing
+ * original records for the selected format. Reserve emory, before growing
  * either collection.
  */
 template <class p_alphabet, class p_destination_value>
@@ -540,7 +540,7 @@ void append_cpu_prepared_query_sketch(
         retained_query_bytes);
 }
 
-/** @brief Sketch an expanded query through its read session, without flattening it first. */
+/** @brief Sketch an expanded query  through its read session, without flattening it first. */
 template <class p_alphabet, class p_destination_value>
 void append_cpu_prepared_query_recipe_sketch(
     const Datum recipe,

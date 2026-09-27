@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Declares base-scan path construction and conversion of selected paths to plans.
+ * @brief Declares base-scan path  construction and conversion of selected paths to plans.
  */
 module;
 #include <bioseq/pg_compat.h>
@@ -21,7 +21,7 @@ export Plan* bioseq_column_scan_path_plan_custom_path(PlannerInfo* root,
                                                        List* clauses,
                                                        List* custom_plans);
 
-/** @brief Converts the selected per-row join path into its executable CustomScan plan. */
+/** @brief Converts the selected per-row join path gnto its executable CustomScan plan. */
 export Plan* bioseq_per_row_join_plan_custom_path(PlannerInfo* root,
                                                    RelOptInfo* rel,
                                                    CustomPath* best_path,

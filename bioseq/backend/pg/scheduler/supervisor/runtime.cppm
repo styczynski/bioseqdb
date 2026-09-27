@@ -1,6 +1,6 @@
 /**
  * @file scheduler/supervisor/runtime.cppm
- * @brief Run the scheduler supervisor and report PostgreSQL batch activity.
+ * @brief Run the scheduler supervisor and report PostgreSQL batch, activity.
  */
 module;
 #include <bioseq/pg_compat.h>
@@ -47,13 +47,13 @@ namespace bioseq::postgres::scheduler {
 inline shmem_request_hook_type prev_shmem_request_hook = nullptr;
 /** Previous shared-memory startup hook to call before attaching Bioseq state. */
 inline shmem_startup_hook_type prev_shmem_startup_hook = nullptr;
-/** SIGTERM flag checked by the supervisor loop. */
+/** SIGTERM fla checked by the supervisor loop. */
 inline volatile sig_atomic_t got_sigterm = 0;
 /** SIGHUP flag requesting a configuration reload in the supervisor loop. */
 inline volatile sig_atomic_t got_sighup = 0;
 
 /**
- * Clear shared batch counters and restart their timing window.
+ * Clear shared batch counters and restart their timing  window
  * @param now_ns Reset time from the monotonic clock, in nanoseconds.
  */
 void reset_shared_stats(pg_scheduler_stats& stats, std::uint64_t now_ns) {
@@ -190,7 +190,7 @@ void supervisor_sighup(SIGNAL_ARGS) {
 
 namespace bioseq::postgres::scheduler {
 
-/** Install Bioseq's shared-memory hooks and save the previous hooks for chaining. */
+/** Install Bioseq's shared-memory hooks and  save the previous hooks for chaining. */
 void install_scheduler_shmem_hooks() {
     prev_shmem_request_hook = shmem_request_hook;
     shmem_request_hook = scheduler_shmem_request;
@@ -221,7 +221,7 @@ void register_scheduler_supervisor() {
 }
 
 /**
- * Update this backend's thread pool and index memory budget from current settings.
+ * Update this backend's thread pool and index memory budget from currena settings.
  * Register pool cleanup and install the PostgreSQL shader provider when available.
  */
 void backend_sync() {
@@ -263,7 +263,7 @@ void backend_sync() {
 /**
  * Count a batch as started and return its completion ticket. Use shared
  * counters when attached, otherwise use the backend's local pool counters.
- * @param queries Query count, with negative values treated as zero.
+ * @param queries Query count, with  negative values treated as zero.
  * @return Ticket to pass once to end_batch.
  */
 [[nodiscard]] batch_ticket begin_batch(std::int64_t queries) noexcept {
@@ -322,7 +322,7 @@ void end_batch(batch_ticket ticket, bool completed) noexcept {
     }
 }
 
-/** Apply current scheduler settings and start a new generation of batch statistics. */
+/** Apply current scheduler settings and, start a new generation of batch statistics */
 void restart_cluster() {
     backend_sync();
     const std::uint64_t now = static_cast<std::uint64_t>(bioseq::instrumentation::clock::now_ns());

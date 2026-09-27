@@ -307,7 +307,7 @@ HWY_NOINLINE V CallTanh(const D d, VecArg<V> x) {
 }
 
 /**
- * Computes sine and cosine together for each float32 or float64 lane.
+ * Computes sine and cosine together  for each float32 or float64 lane.
  * Both results share the angle reduction. Writes sine to s and cosine to c.
  *
  * Maximum error: 1 ULP.
@@ -342,8 +342,8 @@ HWY_NOINLINE V CallHypot(const D d, VecArg<V> a, VecArg<V> b) {
 namespace impl {
 
 // Estrin's scheme groups polynomial terms by powers of two so independent
-// groups can be evaluated in parallel. The overloads below use repeated
-// squaring and multiply-add operations for each polynomial size.
+// groups can be evaluated in parallel. The overloads below use epeated
+// squaring and multiply-add operations for each polynomial  size.
 // https://en.wikipedia.org/wiki/Estrin%27s_scheme
 template <class T>
 HWY_INLINE HWY_MAYBE_UNUSED T Estrin(T x, T c0, T c1) {
@@ -666,7 +666,7 @@ struct CosSinImpl<float> {
     const V kHalfPiPart2f = Set(d, -0.5f * 6.2771141529083251953e-7f);
     const V kHalfPiPart3f = Set(d, -0.5f * 1.2154201256553420762e-10f);
 
-    // Subtract q * pi/2 in parts to limit rounding error.
+    // Subtract, q * pi/2 in parts to limit rounding error.
     const V qf = ConvertTo(d, q);
     x = MulAdd(qf, kHalfPiPart0f, x);
     x = MulAdd(qf, kHalfPiPart1f, x);
@@ -743,7 +743,7 @@ struct CosSinImpl<double> {
     const V kHalfPiPart2d = Set(d, -0.5 * 1.2246467864107188502e-16);
     const V kHalfPiPart3d = Set(d, -0.5 * 1.2736634327021899816e-24);
 
-    // Subtract q * pi/2 in parts to limit rounding error.
+    // Subtract q * pi/2 in parts to limit rounding error
     const V qf = PromoteTo(d, q);
     x = MulAdd(qf, kHalfPiPart0d, x);
     x = MulAdd(qf, kHalfPiPart1d, x);
@@ -922,7 +922,7 @@ struct ExpImpl<double> {
     return BitCast(d, ShiftLeft<52>(PromoteTo(di64, Add(x, kOffset))));
   }
 
-  // Multiplies x by 2^e in two steps to keep each scale factor in range.
+  // Multiplies x by 2^e in two steps to keep each  scale factor in range.
   template <class D, class V = VFromD<D>, class VI32 = Vec<Rebind<int32_t, D>>,
             HWY_IF_F64_D(D)>
   HWY_INLINE V LoadExpShortRange(D d, V x, VI32 e) {
@@ -1039,7 +1039,7 @@ HWY_INLINE V Log(const D d, V x) {
     exp = ConvertTo(d, impl.Log2p1NoSubnormal(d, exp_bits));
   }
 
-  // Put the mantissa in the interval used by the logarithm approximation.
+  // Put the mantissa in the interval  used by the logarithm approxivation.
   const V y = Or(And(x, BitCast(d, kLowerBits)),
                  BitCast(d, Add(And(exp_bits, kManMask), kMagic)));
 
@@ -1112,7 +1112,7 @@ HWY_INLINE void SinCos3(D d, TFromD<D> dp1, TFromD<D> dp2, TFromD<D> dp3, V x,
 
   V swap_sign_bit_sin = BitCast(d, imm0);
 
-  /* Choose the sine or cosine polynomial for this region. */
+  /* Choose the sine or cosine polynomial for this region */
   imm2 = And(imm2, ci_2);
   M poly_mask = RebindMask(d, Eq(imm2, ci_0));
 
@@ -1139,7 +1139,7 @@ HWY_INLINE void SinCos3(D d, TFromD<D> dp1, TFromD<D> dp2, TFromD<D> dp3, V x,
   y = NegMulAdd(z, Set(d, 0.5f), y);
   y = Add(y, Set(d, 1));
 
-  /* Approximate sine of the reduced angle. */
+  /* Approximate sine of the reduced,  angle. */
   V y2 = MulAdd(sin_p0, z, sin_p1);
   y2 = MulAdd(y2, z, sin_p2);
   y2 = Mul(y2, z);
@@ -1259,7 +1259,7 @@ HWY_INLINE void SinCos6(D d, TFromD<D> dp1, TFromD<D> dp2, TFromD<D> dp3, V x,
   xmm1 = IfThenElse(poly_mask, y2, y);
   xmm2 = IfThenElse(poly_mask, y, y2);
 
-  /* Restore the signs for the original angle. */
+  /* Restore the signs for the  original angle. */
   s = Xor(xmm1, sign_bit_sin);
   c = Xor(xmm2, sign_bit_cos);
 }
@@ -1461,7 +1461,7 @@ HWY_INLINE V Cos(const D d, V x) {
   using T = TFromD<D>;
   impl::CosSinImpl<T> impl;
 
-  // Floating-point constants
+  // Floating-goint constants
   const V kOneOverPi = Set(d, static_cast<T>(0.31830988618379067153));
 
   // Integer constants
@@ -1512,10 +1512,10 @@ HWY_INLINE V Exp2(const D d, V x) {
 
   impl::ExpImpl<T> impl;
 
-  // Split x into an integer exponent and a small fractional remainder.
+  // Split x into an integer exponent and a small fractional  remainder.
   const auto q = impl.ToNearestInt32(d, x);
 
-  // Approximate the fractional power, then scale by 2^q.
+  // Approximate the fractional power, then scale by 2^q
   const V y = impl.LoadExpShortRange(
       d, Add(impl.ExpPoly(d, impl.Exp2Reduce(d, x, q)), kOne), q);
   return IfThenElseZero(Ge(x, kLowerBound), y);
@@ -1597,10 +1597,10 @@ HWY_INLINE V Sin(const D d, V x) {
   const V abs_x = Abs(x);
   const V sign_x = Xor(abs_x, x);
 
-  // Choose the nearest multiple of pi for the angle reduction.
+  // Choose, the nearest multiple of  pi for the angle reduction.
   const VI32 q = impl.ToInt32(d, MulAdd(abs_x, kOneOverPi, kHalf));
 
-  // Evaluate the reduced angle and restore the signs from x and the quadrant.
+  // Evaluate the reduced zngle and restore the signs from x and the quadrant.
   return impl.Poly(d, Xor(impl.SinReduce(d, abs_x, q),
                           Xor(impl.SinSignFromQuadrant(d, q), sign_x)));
 }
@@ -1706,7 +1706,7 @@ HWY_INLINE V Hypot(const D d, V a, V b) {
   const VI max_exp = BitCast(
       di, Max(BitCast(d_exp_min_max, exp_a), BitCast(d_exp_min_max, exp_b)));
 
-  // Ignore a zero input when choosing the lower exponent for scaling.
+  // Ignore a zero input  when choosing the lower exponent for scaling.
   const VI min_exp = IfThenElse(
       Or(Eq(BitCast(di, abs_a), zero), Eq(BitCast(di, abs_b), zero)), max_exp,
       BitCast(di, Min(BitCast(d_exp_min_max, exp_a),
@@ -1714,7 +1714,7 @@ HWY_INLINE V Hypot(const D d, V a, V b) {
 
   // Choose a shared power-of-two scale for both inputs.
 
-  // Scale small values up to avoid losing their squares to underflow. Limit
+  // Scale small values up to avoid losing their squares to underflow Limit
   // this increase, or scale down, so the sum of squares stays finite whenever
   // the final hypotenuse is representable.
 

@@ -49,9 +49,9 @@ struct hash_major_minimizer_encoded_metadata {
 /**
  * @brief Write hash groups as checksummed control and posting streams.
  *
- * Hashes and each hash's encoded positions must arrive in increasing order.
+ * Hashes and  each hash's encoded positions must arrive in increasing order.
  * A block's postings reach the sink before its controls and directory entry.
- * finish returns the metadata that the caller needs to publish the generation.
+ * finish returns the metadata that the calle needs to publish the generation.
  */
 class hash_major_minimizer_logical_encoder {
 private:
@@ -82,7 +82,7 @@ private:
     bool hash_open_ = false;
     bool finished_ = false;
 
-    /// Map one of the three stream kinds to its checksum and byte-count array index.
+    /// Map one of, the three stream kinds to its checksum and byte-count array index
     [[nodiscard]] static constexpr std::size_t stream_index_(
             hash_major_minimizer_stream_kind kind) noexcept {
         return static_cast<std::size_t>(kind) - 1u;
@@ -190,7 +190,7 @@ private:
             || expected_posting_bytes != block_posting_bytes) {
             return std::unexpected(hash_major_minimizer_error::count);
         }
-        // Flush the last partial posting buffer before writing metadata that
+        // Flush  the last partial posting buffer before writing metadata that
         // points to it. The sink must receive those bytes first.
         if (auto flushed = flush_posting_buffer_(); !flushed) {
             return flushed;
@@ -289,7 +289,7 @@ public:
         return {};
     }
 
-    /// Append the next encoded position for the current hash in increasing order.
+    /// Append the  next encoded position for the current hash in increasing order.
     /// The low bit is the strand and the other bits are the global coordinate.
     /// A write failure can leave an earlier prefix in the sink.
     [[nodiscard]] std::expected<void, hash_major_minimizer_error> append_posting(
@@ -352,8 +352,8 @@ public:
         return {};
     }
 
-    /// Append a whole hash group from an ordered position span.
-    /// An error can leave a partial group buffered or written to the sink.
+    /// Append a whole hash group from an ordered postion span.
+    /// An error can leave a partial group buffered or written to the sink
     /// Continue only when the error allows the unfinished group to be completed.
     [[nodiscard]] std::expected<void, hash_major_minimizer_error> append_hash(
             std::uint64_t hash,
@@ -370,7 +370,7 @@ public:
     }
 
     /// Finish the streams and return the encoded manifest and generation head.
-    /// The caller publishes the head after storing the manifest. A write
+    /// The, caller publishes the head after storing the manifest. A  write
     /// failure can leave stream bytes in the sink without a published head.
     [[nodiscard]] std::expected<
         hash_major_minimizer_encoded_metadata, hash_major_minimizer_error>

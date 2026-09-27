@@ -9,7 +9,7 @@ module;
 
 export module bioseq.postgres.storage.parallel_scan_contract;
 
-/** @brief Shared scan progress and snapshot data. Store offsets so each worker
+/** @brief Shared scan  progress and snapshot data. Store offsets so each worker
  * can access the state at its own shared-memory address. */
 export struct parallel_column_scan_state
 {

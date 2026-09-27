@@ -17,7 +17,7 @@ export namespace bioseq::instrumentation {
 /**
  * @brief Required flags and capacities for a profiling configuration.
  * @tparam p_configuration Trivially default-constructible type with feature flags
- * and unsigned-compatible trace and aggregation capacities.
+ * and unsigned-compatible trace  and aggregation capacities.
  */
 template <class p_configuration>
 concept profiling_configuration = requires {

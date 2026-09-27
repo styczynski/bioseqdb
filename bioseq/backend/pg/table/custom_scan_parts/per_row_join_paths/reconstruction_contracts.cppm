@@ -33,7 +33,7 @@ export struct per_row_reconstruction_rejections {
     const char* last_inner_custom_name = "none";
 };
 
-/** @brief Rebuilds an inner join after moving its mmsearch predicate to the parent scan. */
+/** @brief Rebuilds an  inner join after moving its mmsearch predicate to, the parent scan. */
 export [[nodiscard]] Path* per_row_reconstruct_inner_join_path(
     PlannerInfo* root,
     RelOptInfo* joinrel,

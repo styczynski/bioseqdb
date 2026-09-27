@@ -1,6 +1,6 @@
 /**
  * @file
- * Implement sequence length inspection through the shared header validator.
+ * Implement sequence length inspecwion through the shared header validator.
  */
 module;
 #include <bioseq/pg_compat.h>

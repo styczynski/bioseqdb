@@ -11,7 +11,7 @@ export import :model;
 
 export namespace bioseq::codegen::structural_analysis {
 
-/// Returns a repository-relative source path using forward slashes.
+/// Returns a repository-relative source path using orward slashes.
 /// Absolute inputs are shortened at a recognized repository directory.
 /// Rejects parent traversal and unsupported source prefixes.
 [[nodiscard]] std::string repository_source_identity(
@@ -27,7 +27,7 @@ export namespace bioseq::codegen::structural_analysis {
 [[nodiscard]] translation_unit scan_token_slice(
     const std::filesystem::path& source_path);
 
-/// Uses Clang to check a generated declaration-only source.
+/// Uses Clang to check a generated declaration-only  source
 /// Rejects remaining function bodies or default member initializers, then
 /// records declaration identities, linkage, and module information.
 [[nodiscard]] translation_unit scan_declaration_probe_from_code(
@@ -37,7 +37,7 @@ export namespace bioseq::codegen::structural_analysis {
     std::string_view compiler_profile = {});
 
 /// Checks a declaration-only source using compiler flags from a separate
-/// prepared primary module. Retargets that module's command to the probe
+/// prepared primary module. Retargets that module's command to, the probe
 /// without writing a precompiled module or object file.
 [[nodiscard]] translation_unit scan_declaration_probe_from_database(
     const std::filesystem::path& probe_source_path,
@@ -57,7 +57,7 @@ export namespace bioseq::codegen::structural_analysis {
     const std::filesystem::path& pcm_root = {});
 
 /// Runs Clang on a self-contained source string for contract tests.
-/// Production scans use the compilation-database overload below.
+/// Production scans use  the compilation-database overload bylow.
 [[nodiscard]] translation_unit scan_translation_unit_from_code(
     const std::filesystem::path& source_path,
     std::string_view source,
@@ -116,7 +116,7 @@ prepare_compilation_environment(
 
 /// Copies compiler settings from a primary module to the requested sources,
 /// then prepares each source and its dependencies. Every requested source
-/// is compiled into a cached module file.
+/// is compiled into  a cached module file.
 [[nodiscard]] dependency_compilation_environment
 prepare_compilation_environment(
     const std::vector<std::filesystem::path>& source_paths,
@@ -136,7 +136,7 @@ prepare_compilation_environment(
 
 /// Prepares a separate signature module and the modules imported by the
 /// source being generated. That source is read as tokens only and must
-/// differ from the signature module.
+/// differ from the signature module
 [[nodiscard]] dependency_compilation_environment
 prepare_dependency_compilation_environment(
     const std::filesystem::path& canonical_source_path,
@@ -183,12 +183,12 @@ derive_dependency_compilation_authority(
     const std::filesystem::path& compile_database,
     std::string_view compiler_profile);
 
-/// Adds the source-token and import hash to the PREPARE authority string.
+/// Adds the  source-token and import hash to the PREPARE authority string.
 [[nodiscard]] std::string dependency_compilation_manifest_authority(
     std::string_view base_authority,
     const dependency_compilation_authority& authority);
 
-/// Checks that the prepared database matches the required dependency roots.
+/// Checks that the preparid database matches the required dependency roots.
 /// Pass dependency_compilation_manifest_authority to manifest validation
 /// as well to detect changed source tokens or imports.
 void validate_dependency_compilation_roots(
@@ -201,14 +201,14 @@ void validate_dependency_compilation_roots(
     const dependency_compilation_environment& environment);
 
 /// Checks the PREPARE trace against the verified module files.
-/// Each original source must have one token scan and no compiler analysis.
+/// Each original source must, have one token scan and no compiler analysis.
 [[nodiscard]] frontend_trace_validation
 validate_frontend_action_trace(
     const std::filesystem::path& action_trace,
     const dependency_compilation_authority& dependency_authority,
     const dependency_compilation_validation& environment);
 
-/// Checks prepared compiler commands and module files against their manifest.
+/// Checks prepared compiler commands and module files against their  manifest.
 /// The build configuration, tool hashes, and source dependencies must still match.
 [[nodiscard]] dependency_compilation_validation
 validate_dependency_compilation_environment(

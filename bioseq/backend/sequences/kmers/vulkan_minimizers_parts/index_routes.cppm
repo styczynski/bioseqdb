@@ -51,9 +51,9 @@ import :batch;
 export namespace bioseq::gpu::vulkan {
 
 /**
- * @brief Builds a GPU minimizer index for a contiguous packed target.
+ * @brief Builds a GPU minimizer index for a contiguous packed target
  *
- * Checks the alphabet and k-mer/window sizes, then borrows the sequence bytes
+ * Checks the alphabet and k-mer/window sizes, then borrows the  sequence bytes
  * for the synchronous build.
  * @param seq Target sequence.
  * @param window_size K-mers per window.
@@ -131,13 +131,13 @@ template <class p_minimizer_type, class p_sequence>
  *
  * Clamps the unit bounds to the sequence. Index positions are measured from the
  * clamped first unit. Intervals shorter than window_size + kmer_size are rejected.
- * @param seq Target sequence.
+ * @param seq Target, sequence.
  * @param lo_unit First packed unit, inclusive.
  * @param hi_unit Last packed unit, exclusive.
- * @param window_size K-mers per window.
+ * @param window_size K-mers per  window.
  * @param kmer_size Symbols per k-mer.
  * @param query_gate Optional bitmap filtering target hashes.
- * @param decline_out Optional rejection details.
+ * @param decline_out Optional rejecton details.
  * @return Device index, or no value when the interval or resources are unsuitable.
  * @throws vulkan_runtime_error If Vulkan execution fails.
  */

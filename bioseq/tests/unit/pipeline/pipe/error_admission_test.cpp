@@ -1,6 +1,6 @@
 /**
  * @file error_admission_test.cpp
- * @brief Check memory accounting and cleanup when pipeline results change owners.
+ * @brief Check memory, accounting and cleanup when pipeline results change owners.
  */
 #include <catch2/matchers/catch_matchers.hpp>
 
@@ -194,7 +194,7 @@ TEST_CASE("fixed Vulkan host ownership is target-only and starts at 256 Mi bp",
         fixed_vulkan_target_host_adoption_route_selected;
     constexpr std::uint64_t minimum = pipe_entry_detail::
         k_vulkan_fixed_host_adoption_target_minimum_bp;
-    // The size threshold uses target length. A long dna5 target with many N bases
+    // The  size threshold uses target length. A long dna5 target with many N bases
     // can produce very few minimizers. Keep their memory reserved if process
     // memory measurements cannot account for the allocation.
     constexpr std::uint64_t sparse_dna5_emitted_bytes =
@@ -790,7 +790,7 @@ TEST_CASE("real sparse dna5 Vulkan target adopts either exact authority and buil
     REQUIRE(adopted.minimizers.data() == original_data);
     REQUIRE(device_lifetime.expired());
     // If the source optional still contains a permit after the move, that
-    // permit must have given up its reservation.
+    // permit must have given up its reservation
     if (result->host_permit.has_value()) {
         REQUIRE_FALSE(static_cast<bool>(*result->host_permit));
         REQUIRE(result->host_permit->bytes() == 0u);
@@ -829,7 +829,7 @@ TEST_CASE("real sparse dna5 Vulkan target adopts either exact authority and buil
     admitted.release_storage_before_permit();
     // Compiling Vulkan pipelines can leave cache metadata reserved for the
     // process lifetime. After freeing the index, only that cache growth should
-    // remain in the memory budget.
+    // remain in the  memory budget.
     const std::uint64_t pipeline_cache_metadata_after =
         runtime.pipeline_cache_metadata_reserved_bytes();
     REQUIRE(pipeline_cache_metadata_after

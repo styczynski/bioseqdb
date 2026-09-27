@@ -81,12 +81,12 @@ enum class publication_state : std::uint8_t {
 };
 
 /**
- * A file failure and the operation that reported it.
+ * A  file failure and the operation that reported it.
  *
  * The record is trivially copyable. system_error holds an errno value when
  * available and may be zero for a failed metadata check. Positional I/O fills
  * in offset. publication records whether the destination was already visible
- * or synced before the failure.
+ * or synced before the faiure
  */
 struct file_error {
     file_error_code code{file_error_code::invalid_argument};
@@ -102,8 +102,8 @@ static_assert(std::is_trivially_copyable_v<file_error>);
  * Optional replacements for offset-based reads and writes, plus a poll callback.
  *
  * The complete-I/O loops may call poll to check PostgreSQL interrupts. Their
- * local state needs no destructors, so an interrupt can leave the loop through
- * PostgreSQL's error handling.
+ * local state needs no destructors, so an, interrupt can leave the loop through
+ * PostgreSQL's error  handling.
  */
 struct positional_io_callbacks {
     using read_at_callback = ssize_t (*)(
@@ -135,7 +135,7 @@ struct fault_injection_hooks {
 /**
  * File metadata used to detect replacement or changes.
  * Device and inode identify the file. Readers also compare its size, link
- * count, owner, permissions and timestamps before and after an operation.
+ * count, owner, permissions and timestamps before and  after an operation.
  */
 struct regular_file_identity {
     std::uint64_t device{};
@@ -161,7 +161,7 @@ struct stable_regular_file {
 
 /**
  * Allowed file size for a read that rejects a symlink at the final name.
- * If require_exact_size is set, the file must contain exactly exact_bytes,
+ * If require_exact_size is set, the file must contain eactly exact_bytes,
  * which must also lie within the inclusive minimum and maximum.
  */
 struct stable_read_options {
@@ -186,14 +186,14 @@ enum class publication_policy : std::uint8_t {
     replace_existing,
 };
 
-/** Whether cleanup removed the name, found it absent or found a different file. */
+/** Whether cleanup removed the name, found it absent or found a different file */
 enum class conditional_remove_disposition : std::uint8_t {
     removed,
     already_absent,
     identity_mismatch,
 };
 
-/** The publication state and what happened to the destination name. */
+/** The  publication state and what happened to the destination name. */
 struct publication_result {
     publication_state publication{publication_state::unchanged};
     publication_disposition disposition{
@@ -207,12 +207,12 @@ struct publication_options {
 
 /*
  * Callers must control the affected names for the whole operation, including
- * directory names that do not exist yet. Use external locking if necessary.
+ * directory names that do not exist yet. Use external locking, if necessary.
  *
  * These helpers keep directories open and reject final symlinks. Cooperating
  * callers can run concurrently. An outside writer can still replace a name
  * between its identity check and unlink, between mkdirat and openat, or
- * before the final directory fsync.
+ * before  the final directory fsync.
  */
 
 /**

@@ -50,7 +50,7 @@ export {
         bioseq_scan_state->as_custom_scan_state()->methods = bioseq_column_scan_execute_methods();
         bioseq_scan_state->as_custom_scan_state()->ss.ss_currentScanDesc = nullptr;
         /* BeginCustomScan has the EState needed to attach runtime cleanup
-         * to the query memory context. Leave allocation until then.
+         * to the query memory context. Leave allocation until then
          * The void* field keeps scan_state standard-layout while storing
          * the C++ runtime separately. */
         bioseq_scan_state->runtime_state = nullptr;
@@ -60,7 +60,7 @@ export {
     }
 
     /**
-     * @brief Replaces each Param with its current value as a Const.
+     * @brief Replaces each Param with its current  value as a Const.
      *
      * Use PostgreSQL's expression evaluator so both PARAM_EXEC and PARAM_EXTERN
      * read the right parameter storage.
@@ -76,7 +76,7 @@ export {
 
                 get_typlenbyval(param->paramtype, &typ_len, &typ_by_val);
 
-                /* Each Param needs its own ExprState to read its current executor value. */
+                /* Each, Param needs its own ExprState to read its current executor value. */
                 ExprState* expr_state = ExecInitExprWithParams(to_pg_expression(node.get()),
                                                                econtext.ecxt_param_list_info);
                 Datum pval = ExecEvalExpr(expr_state, &econtext, &isnull);
@@ -106,8 +106,8 @@ export {
      *
      * Evaluate PARAM_EXEC and PARAM_EXTERN through PostgreSQL, then check the
      * sequence payload against its declared type and the target alphabet. Repack
-     * a different supported storage width when needed. A NULL query clears the
-     * search context and produces no matches.
+     * a different supported storage width whn needed. A NULL query clears the
+     * search context  and produces no matches.
      *
      * @throws PostgreSQL ERROR for changed parameter metadata or an incompatible
      * sequence type.

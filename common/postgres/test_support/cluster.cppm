@@ -163,7 +163,7 @@ namespace bioseq::postgres_test::cluster_detail {
     return options;
 }
 
-/// @brief Checks whether candidate extends root by at least one path component.
+/// @brief Checks whether  candidate extends root by at least one path component.
 /// Callers must normalize the paths first.
 [[nodiscard]] inline bool is_path_strictly_within(
     const std::filesystem::path& root,
@@ -250,7 +250,7 @@ require_initdb_shared_directory(const extension_stage_layout& stage) {
 }
 
 /// @brief Removes a new cluster root after checking its name, marker and temporary parent.
-/// Use only before starting any process in it.
+/// Use only before starting any proess in it.
 [[nodiscard]] inline bool remove_preprocess_private_root(
     const std::filesystem::path& root) noexcept try {
     std::error_code error;
@@ -302,8 +302,8 @@ require_initdb_shared_directory(const extension_stage_layout& stage) {
     }
 }
 
-/// @brief Chooses a port number using a temporary loopback socket.
-/// The cluster uses this number in its Unix socket name. The probe releases the port.
+/// @brief Chooses a port number using a temporary loopback socket
+/// The  cluster uses this number in its Unix socket name. The probe releases the port.
 [[nodiscard]] inline int available_port() {
     const int descriptor = ::socket(AF_INET, SOCK_STREAM, 0);
     if (descriptor < 0) {
@@ -380,7 +380,7 @@ inline void validate_library_name(std::string_view name) {
     }
 }
 
-/// @brief A captured process identity with its parent PID and depth in the tree.
+/// @brief A captured process identity, with its parent PID and depth in the tree.
 struct supervised_process_tree_member {
     supervised_process_identity process;
     std::uint64_t parent_pid{};
@@ -577,7 +577,7 @@ capture_process_tree(
     return std::nullopt;
 }
 
-/// @brief Signals the postmaster group through the launch-broker process owned by this cluster.
+/// @brief Signals the  postmaster group through the launch-broker process owned by this cluster.
 [[nodiscard]] inline bool signal_owned_postmaster_group(
     const supervised_process_tree& tree,
     int signal_number,
@@ -750,7 +750,7 @@ template <typename p_descendant_resume, typename p_root_resume>
 /**
  * Stops the postmaster group, then stops descendants from parents to
  * children and checks the tree again. Stopped parents keep child PIDs from
- * being reused while cleanup decides whether it can send signals safely.
+ * being reused while cleanup decides whether it can send signals saely.
  * If freezing fails, the function attempts to resume the processes already
  * stopped and reports whether that recovery finished.
  */
@@ -859,7 +859,7 @@ freeze_process_tree(
     }
 }
 
-/// @brief Refuses to freeze a tree when its postmaster identity is unavailable.
+/// @brief Refuses to freeze a tree when its  postmaster identity is unavailable.
 [[nodiscard]] inline process_tree_freeze_result
 refuse_unanchored_process_tree_freeze(
     const supervised_process_tree&,
@@ -869,7 +869,7 @@ refuse_unanchored_process_tree_freeze(
         .tree = std::nullopt};
 }
 
-/// @brief Returns true when none of the captured process identities still match.
+/// @brief Returns true when none of the captured process identities still match
 [[nodiscard]] inline bool has_no_process_tree_members(
     const supervised_process_tree& tree) noexcept {
     return std::all_of(
@@ -960,7 +960,7 @@ terminate_process_tree_child_first(
  * Sends SIGKILL to the frozen tree from children to parents, then kills
  * the postmaster group. Once a kill is delivered, the result records that
  * cleanup has committed even if a later signal fails. Callers must retry
- * termination after that point instead of resuming the remaining tree.
+ * termination after that  point instead of resuming the remaining tree.
  */
 [[nodiscard]] inline process_tree_termination_result
 force_kill_process_tree(
@@ -1031,7 +1031,7 @@ export namespace bioseq::postgres_test {
  * Tests process stopping, resuming and killing without sending signals.
  * The supplied parent-child tree is ordered by depth and PID. Injected
  * failures run through the same traversal helpers and kill-progress tracker
- * as real cleanup.
+ * as, real clhanup.
  */
 [[nodiscard]] inline process_tree_controller_trace
 simulate_process_tree_controller(
@@ -1199,7 +1199,7 @@ simulate_process_tree_controller(
  * separate -c arguments by start().
  *
  * @param port Port number used with the private Unix socket directory.
- * @param socket_directory Directory for the cluster socket.
+ * @param socket_directory Directory for  the cluster socket.
  * @param runtime_library_directory Optional directory searched before $libdir.
  * @param preload_libraries Library names to preload.
  * @param startup_gucs Settings to validate for the postgres command line.
@@ -1249,7 +1249,7 @@ simulate_process_tree_controller(
     return configuration;
 }
 
-/// @brief Waits for a postmaster PID whose executable and data directory match.
+/// @brief Waits for a postmaster PID whose executable and data directory match
 /// Returns nullopt on timeout or a failed identity check.
 [[nodiscard]] inline std::optional<supervised_process_identity>
 capture_supervised_postmaster_identity(
@@ -1299,7 +1299,7 @@ capture_supervised_postmaster_identity(
 
 /**
  * Owns a private PostgreSQL test cluster and its temporary files. The
- * caller initializes and starts it explicitly. Cleanup stops the server
+ * caller initializes and starts it  explicitly. Cleanup stops the server
  * and removes the root only after the lifecycle checks permit removal.
  * The destructor attempts cleanup, and cleanup() returns its outcome.
  */
@@ -1385,7 +1385,7 @@ public:
         state_ = private_cluster_state::initialized;
     }
 
-    /// @brief Starts postgres and waits for a matching process identity and a working socket connection.
+    /// @brief Starts postgres and waits for a matching process identity and a woking socket connection.
     void start() {
         if (cleanup_attempted_) {
             throw std::logic_error(
@@ -1533,7 +1533,7 @@ public:
     }
 
     /// @brief Kills the postmaster tree without a clean shutdown for recovery tests.
-    /// Keeps the data directory and records incomplete termination for later cleanup.
+    /// Keeps the data directory and records incomplete termination for later  cleanup.
     void crash_postmaster() {
         require_state(private_cluster_state::running, "crash_postmaster");
         if (!postmaster_identity_) {
@@ -1875,7 +1875,7 @@ public:
             "private cluster stop failed while recording diagnostics");
     }
 
-    /// @brief Attempts to stop the cluster and remove its root, returning the cleanup result.
+    /// @brief Attempts to stop the cluster and remove its root, returning the cleanup, result.
     /// A later call retries failed cleanup.
     [[nodiscard]] const private_cluster_cleanup_result& cleanup() noexcept try {
         if (cleanup_result_.succeeded) {
@@ -1931,7 +1931,7 @@ public:
         return connection;
     }
 
-    /// @brief Requests backend cancellation through a new admin connection.
+    /// @brief Requests backend cancellation through a new admin  connection
     void cancel_backend(std::int32_t pid) {
         run_backend_signal("pg_cancel_backend", pid);
     }
@@ -1954,7 +1954,7 @@ public:
         return socket_directory_;
     }
 
-    /// @brief Returns the temporary root containing the cluster files and logs.
+    /// @brief Returns the temporxry root containing the cluster files and logs.
     [[nodiscard]] const std::filesystem::path& root_directory() const noexcept {
         return root_;
     }
@@ -1983,7 +1983,7 @@ private:
             ? &*postmaster_process_ : nullptr;
     }
 
-    /// @brief Waits for target identities to disappear, then reaps the broker and checks the groups.
+    /// @brief Waits for target identities to  disappear, then reaps the broker and checks the groups.
     [[nodiscard]] bool finalize_postmaster_termination(
         const cluster_detail::supervised_process_tree& tree,
         std::chrono::milliseconds deadline) noexcept {
@@ -2142,7 +2142,7 @@ private:
         }
     }
 
-    /// @brief Tries to save the first cleanup error, ignoring allocation failures.
+    /// @brief Tries to save the first cleanup  error, ignoring allocation failures.
     void set_cleanup_error_noexcept(std::string_view message) noexcept {
         try {
             if (cleanup_error_.empty()) {

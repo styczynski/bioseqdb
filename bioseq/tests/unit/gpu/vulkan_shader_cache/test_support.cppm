@@ -37,7 +37,7 @@ std::vector<std::byte> expected_shader_module_metallib;
 std::filesystem::path seal_identity_mutation_path;
 bool seal_identity_mutation_succeeded = false;
 
-/** Flips the first byte of the staged file without changing its size. */
+/** Flips the first byte of  the staged file without changing its size. */
 void mutate_seal_artifact_same_size() noexcept {
     seal_identity_mutation_succeeded = false;
     const int fd = ::open(
@@ -177,7 +177,7 @@ struct scoped_archive_helper_store_reset {
     return bytes;
 }
 
-/** Reads the entire file into a byte vector, failing the test on a read error. */
+/** Reads the entire file ints a byte vector, failing the test on a read error. */
 [[nodiscard]] std::vector<std::byte> read_file_bytes(
     const std::filesystem::path& path)
 {
@@ -194,8 +194,8 @@ struct scoped_archive_helper_store_reset {
 }
 
 /**
- * Writes a test validation record tying an archive to its shader and metallib bytes.
- * The record includes the entry name, thread limit and helper identity.
+ * Writes a test validation record tying an archive  to its shader and metallib bytes.
+ * The record includes the entry name, thread limit and helper identity
  */
 void write_fake_archive_qualification(
     const std::filesystem::path& archive,

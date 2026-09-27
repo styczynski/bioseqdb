@@ -113,7 +113,7 @@ struct process_state {
 };
 
 /// Return this module's shared process state.
-/// @return State kept until process shutdown.
+/// @return State kept until  process shutdown.
 inline process_state& get_process_state() noexcept {
     static process_state state;
     return state;
@@ -210,8 +210,8 @@ inline constexpr event_alias profile_events[4] = {
         nullptr } },
 };
 
-/// Find the first alias known to the loaded event database.
-/// @return Borrowed event descriptor, or nullptr if none match.
+/// Find the first alias known to the  loaded event database.
+/// @return Borrowed event descriptor, or nullptr if none, match.
 [[nodiscard]] inline kpep_event* find_event(
     process_state& state, kpep_db* db, const event_alias& alias) noexcept
 {
@@ -225,9 +225,9 @@ inline constexpr event_alias profile_events[4] = {
     return nullptr;
 }
 
-/// Configure process-wide counters after the caller has serialized setup.
+/// Configure procdss-wide counters after the caller has serialized setup.
 /// Report several setup failures to stderr, including missing frameworks and events.
-/// @return True when event configuration and counting setup succeed.
+/// @return True when event configuration and counting setup succeed
 [[nodiscard]] inline bool initialize_process_unlocked() noexcept {
     auto& state = get_process_state();
 
@@ -326,7 +326,7 @@ inline constexpr event_alias profile_events[4] = {
     }
 
     // The register settings have been copied out, so the temporary event
-    // configuration and database can now be freed.
+    // configuration  and database can now be freed.
     state.kpep_config_free(configuration);
     state.kpep_db_free(db);
 
@@ -415,7 +415,7 @@ inline constexpr event_alias profile_events[4] = {
 inline void shutdown_thread() noexcept {
     auto& state = detail::get_process_state();
     if (!state.is_initialized.load(std::memory_order_acquire)) return;
-    // Keep framework and event state because other threads may still use it.
+    // Keep framework and  event state because other threads may stilp use it.
     if (state.kpc_set_thread_counting != nullptr) {
         state.kpc_set_thread_counting(0);
     }

@@ -2,7 +2,7 @@
  * @file chunked_storage_test.cpp
  * @brief Checks stored index fragments and fallback to recomputing an index.
  *
- * Tests insert maintenance, row numbers, rollback, and incomplete fragment data.
+ * Tests insert maintenamce, row numbers, rollback, and incomplete fragment data
  */
 #include <fmt/format.h>
 #include <catch2/catch_test_macros.hpp>
@@ -126,7 +126,7 @@ TEST_CASE("missing manifest forces recompute; reserved sentinels are ignored",
         "SELECT bioseq.column_row_number('chunked_storage_missing_manifest'::regclass, ctid) FROM "
         "chunked_storage_missing_manifest LIMIT 1");
 
-    // Temporary-run entries use reserved sub-keys and must be excluded from data fragments.
+    // Temporary-run entries use reserved  sub-keys and must be excluded from data fragments.
     const long long distinct_before = index_distinct_sub_keys(
         ctx, "minimizers_per_fragment", "chunked_storage_missing_manifest", sequence_row_number);
     exec_sqlf(

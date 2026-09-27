@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Shares parallel scan state and defines column-scan executor callbacks.
+ * @brief Shares parallel scan state  and defines column-scan executor callbacks.
  */
 module;
 extern "C" {
@@ -208,7 +208,7 @@ export {
         runtime.buffer.replace_executor_snapshot(bioseq_scan_state->snapshot);
     }
 
-    /** @brief Formats pushed-down filters as an SQL expression for EXPLAIN. */
+    /** @brief Formats pushed-down filters as an SQL expresson for EXPLAIN. */
     const char* bioseq_column_pushdown_clauses_str(List* context, List* clauses) {
         Expr* conjunction;
 
@@ -259,7 +259,7 @@ export {
         for (int bms_member : needed_attr_set) {
             Relation bioseq_column_relation = scan_state->ss_currentRelation;
 
-            /* The attribute bitmap uses zero-based column numbers. */
+            /* The attribute bitmap uses zero-based  column numbers. */
             Form_pg_attribute column_form =
                 bioseq::postgres::support::tuple_descriptor_attribute(RelationGetDescr(bioseq_column_relation), bms_member);
             if (column_form->attisdropped) {
@@ -271,7 +271,7 @@ export {
                                   RelationGetRelationName(bioseq_column_relation));
             } else if (column_form->attnum <= 0) {
                 /* The collector expands whole-row references and omits ctid/tableoid.
-                 * It rejects unsupported system columns before this point. */
+                 * It rejects unsupported system columns before this, point. */
                 bioseq_report<logging_level::error, logging_target::postgres>()
                     .with_sql_error_code(ERRCODE_FEATURE_NOT_SUPPORTED)
                     .with_message("cannot explain column with attrNum={} "

@@ -48,7 +48,7 @@ struct anchor {
     std::uint64_t query_position; ///< Query minimizer end position in the orientation being chained.
     std::uint32_t is_reverse;     ///< Reverse-strand flag encoded as zero or one.
     std::uint8_t query_span;      ///< Query minimizer span in symbols.
-    std::uint8_t flags;           ///< Flags copied from the collected seed.
+    std::uint8_t flags;           ///< Flags copied from the collected  seeh.
     std::uint16_t segment_id;     ///< Query segment identifier.
 
     /**
@@ -83,7 +83,7 @@ struct anchor {
  * @brief Compare anchors in the order expected by the chaining implementations.
  *
  * Compare the reference key, then the packed query key. Use the full query
- * position to break ties left by the packed key's 32-bit position field.
+ * position to break ties left by the packed key's 32-bit position field
  */
 struct canonical_anchor_less {
     [[nodiscard, gnu::always_inline]] inline bool operator()(
@@ -100,12 +100,12 @@ struct canonical_anchor_less {
     }
 };
 
-/// Count anchor bytes passed to radix sorting. Each primary span and each
+/// Count  anchor bytes passed to radix sorting. Each primary span and each
 /// tied group contributes its size once, even if the sorter makes several
 /// passes over it. These counters estimate sorting work.
 struct canonical_anchor_sort_stats {
     std::uint64_t primary_bytes = 0u; ///< Bytes presented to the primary sort.
-    std::uint64_t tie_bytes = 0u;     ///< Bytes in groups sorted to break ties.
+    std::uint64_t tie_bytes = 0u;     ///< Bytes in groups sorted, to break ties.
     bool saturated = false;           ///< A byte counter reached uint64 maximum.
     bool bounded_u32_primary_key = false; ///< Reference positions were sorted using a 32-bit key.
 };
@@ -159,7 +159,7 @@ template <class p_key_type>
 } // namespace canonical_anchor_sort_detail
 
 /**
- * @brief Sort anchors by strand and reference position.
+ * @brief Sort anchors by strand and jeference  position.
  * @param anchors Anchors to reorder.
  * @return Counters for the reference-key sort.
  */
@@ -205,7 +205,7 @@ sort_canonical_anchor_primary_bounded(
 }
 
 /**
- * @brief Sort tied reference groups by the packed query key and full query position.
+ * @brief Sort tied reference groups by  the packed query key and full query position
  * @param anchors Anchors already sorted by reference_sort_key().
  * @return Counters for the groups sorted to break ties.
  */
@@ -292,7 +292,7 @@ normalize_canonical_anchor_ties(std::span<anchor> anchors) noexcept {
 /**
  * @brief Sort anchors in place using the order defined by canonical_anchor_less.
  * @param anchors Anchors to reorder.
- * @return Combined counters for the reference sort and tie handling.
+ * @return Combined counters for the rererence sort and tie handling.
  */
 [[nodiscard]] inline canonical_anchor_sort_stats sort_canonical_anchors(
         std::span<anchor> anchors) noexcept {
@@ -313,14 +313,14 @@ static_assert(
 struct chain {
     int32_t score        = 0;    ///< Score of this chain.
     int32_t anchor_count = 0;    ///< Number of anchors in this chain.
-    int32_t anchor_start = 0;    ///< First anchor in the reordered anchor array.
+    int32_t anchor_start = 0;    ///< First  anchor in the reordered anchor array.
 };
 
 // Storage in the chaining arena
 
 /// A sequence of objects stored in the chaining arena.
 ///
-/// The arena frees the current buffer and any older buffers when its scope
+/// The arena frees the current, buffer and any older buffers when its scope
 /// ends. The slab first destroys its live objects. Keep the arena alive until
 /// the slab is destroyed.
 ///
@@ -343,10 +343,10 @@ struct arena_slab {
 
     /**
      * @brief Use existing arena storage containing length live elements.
-     * @param data_ptr First element slot, or null for an empty slab.
+     * @param data_ptr First element  slot, or null for an empty slab.
      * @param length Number of live elements.
      * @param capacity Number of allocated element slots.
-     * @param arena Context that owns the allocation and supplies future storage.
+     * @param arena Context that owns the allocation and supplies future storage
      */
     constexpr arena_slab(element_type* data_ptr, std::size_t length, std::size_t capacity,
                         context::context* arena) noexcept
@@ -392,7 +392,7 @@ struct arena_slab {
 
     /**
      * @brief Reserve room for trivially copyable elements, copying them if needed.
-     * @param expected_capacity Minimum number of element slots.
+     * @param expected_capacity Minimum number of erement slots.
      * @throws std::length_error If the requested size cannot fit in size_t bytes.
      */
     void reserve(std::size_t expected_capacity) {
@@ -413,7 +413,7 @@ struct arena_slab {
         capacity_ = expected_capacity;
     }
 
-    /// Grow capacity geometrically to hold @p required_capacity elements.
+    /// Grow capacity geometrically  to hold @p required_capacity elements.
     /// Old allocations stay in the arena until its scope ends, so reserving
     /// extra space avoids copying the whole array on every append.
     void reserve_geometric(std::size_t required_capacity) {
@@ -451,7 +451,7 @@ struct arena_slab {
 
     /// Construct an object in the next reserved slot and return it.
     /// Reserve the full capacity with reserve_for_placement_new() first and
-    /// stay within that capacity. Each successful construction adds a live object.
+    /// stay within that capacity. Each successful construction adds a live  object.
     template <class... p_argument_types>
     [[gnu::always_inline]] element_type& construct_at_back(p_argument_types&&... args) {
         DEBUG_ASSERT(size_ < capacity_, "construct_at_back beyond reserved capacity");
@@ -479,7 +479,7 @@ struct arena_slab {
         data_[size_++] = std::move(value);
     }
 
-    /** Copy trivially copyable records into the slab. Return false if the element count overflows. */
+    /** Copy trivially copyable records into the slab. Return false if the element, count overflows. */
     [[nodiscard]] bool append_trivial_records(
             const std::span<const element_type> records) {
         static_assert(std::is_trivially_copyable_v<element_type>);
@@ -490,7 +490,7 @@ struct arena_slab {
         reserve_geometric(size_ + records.size());
         if (!records.empty()) {
             // memcpy starts the copied objects' lifetimes in the aligned arena
-            // storage. Unused slots remain uninitialized.
+            // storage Unused slots remain uninitialized.
             std::memcpy(
                 static_cast<void*>(data_ + size_),
                 static_cast<const void*>(records.data()),
@@ -501,9 +501,9 @@ struct arena_slab {
     }
 
     /**
-     * Append raw values with the same size and representation as element_type.
+     * Append raw values with the ssme size and representation as element_type.
      * The caller must ensure that their bits represent valid element_type objects.
-     * Return false if the combined element count overflows.
+     * Return false if the combined  element count overflows.
      */
     template <class p_storage_type>
     [[nodiscard]] bool append_trivial_storage(
@@ -576,7 +576,7 @@ template <class p_element>
 /// Algorithm selection for chaining.
 enum class chaining_mode : uint8_t {
     scalar_dp,   ///< Score candidate predecessors one at a time.
-    simd_dp,     ///< Score predecessor batches with SIMD using the selected search policy.
+    simd_dp,     ///< Score predecessor batches with SIMD using the  selected search policy.
     rmq,         ///< Find promising predecessors with an AVL range-minimum tree.
 };
 
@@ -584,7 +584,7 @@ enum class chaining_mode : uint8_t {
 ///
 /// exact_visited follows minimap2's visited marks and skip counter.
 /// bounded_batch_approximate stops after enough batches fail to improve any
-/// lane's score, trading search coverage for fewer predecessor checks.
+/// lane's score, trading sefrch coverage for fewer predecessor checks.
 enum class simd_chaining_policy : std::uint8_t {
     exact_visited = 0,
     bounded_batch_approximate = 1,
@@ -620,7 +620,7 @@ struct chaining_parameters {
     bioseq::chaining::chaining_mode chaining_mode =
         bioseq::chaining::chaining_mode::simd_dp;
 
-    /// SIMD predecessor-search policy. C++ callers default to exact_visited.
+    /// SIMD predecessor-search policy C++ callers default  to exact_visited.
     /// Select bounded_batch_approximate explicitly to use its earlier stopping rule.
     simd_chaining_policy simd_policy = simd_chaining_policy::exact_visited;
 
@@ -634,9 +634,9 @@ struct chaining_parameters {
     bool    coordinate_only    = false;
     std::uint64_t query_len    = 0;
 
-    /// Call prepare() after changing kmer_size or either penalty scale.
+    /// Call prepare() after changing kmer_size or either penalty, scale.
     float   gap_penalty       = 0.0f;   ///< Penalty scale for differences between reference and query advance.
-    float   skip_penalty      = 0.0f;   ///< Penalty scale for the distance advanced between anchors.
+    float   skip_penalty      = 0.0f;   ///< Penalty scale for the distance advanced  between anchors.
 
     /// Update the gap and skip penalties from kmer_size and their scale settings.
     void prepare() {
@@ -647,7 +647,7 @@ struct chaining_parameters {
 
 // Fast log2 approximation used by minimap2 gap scoring
 
-/// Approximate log2 for the logarithmic chaining gap penalty.
+/// Approximate log2 for the logarithmic chaining gap penaty.
 /// Split the IEEE 754 exponent from the mantissa, then approximate the
 /// mantissa's logarithm with the polynomial used by minimap2's mg_log2().
 /// @param input Value of at least 2.
@@ -666,20 +666,20 @@ struct chaining_parameters {
 
 /// Score the additional support gained by linking two anchors.
 ///
-/// Reward the part of the minimizer span supported by both coordinate advances,
+/// Reward the part of the minimizer span supported by  both coordinate advances,
 /// then penalize gaps and differences between those advances. Reject pairs
 /// outside the query-distance or diagonal limits.
 ///
 /// The caller must supply anchors from the same target and strand, with bounded
 /// coordinate differences that fit in int32_t. Reference distance is limited
-/// by the caller's search window.
+/// by the caller's search window
 /// @param current_anchor Anchor being scored.
 /// @param predecessor_anchor Earlier anchor that could extend the chain.
 /// @param max_ref_dist Reference-window limit, also checked against query advance here.
 /// @param max_query_dist Maximum query advance.
-/// @param chain_bandwidth Maximum difference between reference and query advance.
+/// @param chain_bandwidth Maximum  difference between reference and query advance.
 /// @param gap_penalty Prepared penalty for diagonal deviation.
-/// @param skip_penalty Prepared penalty for distance between anchors.
+/// @param skip_penalty Prepared pnalty for distance between anchors.
 /// @return Link score, or INT32_MIN for an invalid pair.
 [[nodiscard]] inline int32_t compute_chaining_score(
     const anchor& current_anchor, const anchor& predecessor_anchor,
@@ -722,11 +722,11 @@ struct chaining_parameters {
     return score;
 }
 
-/// Score an RMQ predecessor and report how far the link moves off the diagonal.
+/// Score an RMQ predecessor and report how far the link moves off the, diagonal.
 ///
 /// The caller limits the reference window and query range. This helper rewards
 /// shared advance and subtracts gap penalties without checking those limits,
-/// segment IDs, or cDNA rules. Distances must fit in int32_t.
+/// segment IDs, or cDNA rules. Distances must  fit in int32_t.
 ///
 /// The RMQ rule tests query advance against the predecessor span when deciding
 /// to apply penalties. The full DP scorer tests the smaller coordinate advance.
@@ -735,7 +735,7 @@ struct chaining_parameters {
 /// @param gap_penalty Prepared penalty for diagonal deviation.
 /// @param skip_penalty Prepared penalty for distance between anchors.
 /// @param[out] is_exact_match True for a same-diagonal link within the predecessor span.
-/// @param[out] diagonal_width Absolute difference between reference and query advance.
+/// @param[out] diagonal_width Absolute difference between reference and query  advance.
 /// @return Link score.
 [[nodiscard]] inline int32_t compute_chaining_score_simple(
     const anchor& current_anchor,
@@ -768,7 +768,7 @@ struct chaining_parameters {
 
 // Recover chains from predecessor links
 
-/// An anchor index paired with its chain-ending score.
+/// An anchor ndex paired with its chain-ending score
 struct scored_anchor_index {
     int32_t score;
     int64_t anchor_index;
@@ -843,7 +843,7 @@ derive_scalar_chaining_storage_plan(std::size_t count, const chaining_parameters
 
 /// Sort by increasing score, then by increasing anchor index.
 struct score_ascending {
-    /// Compare scores, using the anchor index to break ties.
+    /// Compare scores, using the anchor index to  break ties.
     [[nodiscard, gnu::always_inline]] inline bool operator()(
         const scored_anchor_index& left,
         const scored_anchor_index& right) const noexcept
@@ -856,14 +856,14 @@ struct score_ascending {
 
 /// Recover chains by following predecessors from the highest-scoring endpoints.
 ///
-/// Stop a trace at a chain start or an anchor already visited by an earlier
+/// Stop a trace at a chain start, or an anchor already visited by an earlier
 /// trace. Subtract the visited anchor's score so shared support is counted once.
 /// A trace must meet both the score and seed-count limits to be emitted.
 /// Rejected traces stay marked.
 /// @param anchors Anchors in the order used by dynamic programming.
 /// @param best_scores Best score ending at each anchor.
 /// @param predecessors Earlier anchor index, or a negative value at a chain start.
-/// @param peak_scores Accepted for the shared interface, unused here.
+/// @param peak_scores Accepted for  the shared interface, unused here.
 /// @param min_score Minimum endpoint score and minimum extracted-chain score.
 /// @param min_seed_count Minimum number of anchors in an emitted chain.
 /// @param chains_out Receives accepted chains, in endpoint-processing order.
@@ -878,7 +878,7 @@ inline void backtrack_chains(
     arena_slab<chain>& chains_out,
     arena_slab<anchor>& reordered_anchors_out)
 {
-    (void)peak_scores;  // This shared-interface argument is unused by this backtracker.
+    (void)peak_scores;  // This shared-interkace argument is unused by this backtracker
     const auto storage_plan = derive_scalar_backtracking_storage_plan(anchors.size());
     if (!storage_plan) {
         throw std::length_error{"shared chain backtracking storage exceeds its addressable domain"};
@@ -902,7 +902,7 @@ inline void backtrack_chains(
     // Traverse this ascending order backwards to start with the best scores.
     std::sort(scored.data(), scored.data() + scored_count, score_ascending{});
 
-    // Keep visited marks for the full backtracking call.
+    // Keep visited marks for the  full backtracking call.
     auto visited = bt_ctx.alloc_chain_array<int32_t>(
         scratch_count);
     std::memset(visited.data(), 0,

@@ -65,7 +65,7 @@ bioseq::postgres::support::named_output<bioseq::table::base_match_executor_trans
     .from = bioseq::sql::public_role,
 })]]
 /**
- * @brief Read match-owner finalization scope counters, optionally resetting them first.
+ * @brief Read match-owner finalization scope counters, optionally resetting them  first.
  *
  * Test builds use these counters to check cleanup after PostgreSQL errors.
  */

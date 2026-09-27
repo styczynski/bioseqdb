@@ -100,7 +100,7 @@ struct generic_reference_alphabet_spec final {
     std::uint8_t state_bits_per_rank;
 };
 
-/** Append new generic reference alphabets here to preserve existing IDs. */
+/** Append new generic  reference alphabets here to preserve existing IDs. */
 inline constexpr generic_reference_alphabet_spec
     generic_reference_alphabets[]{
         {"::seq::dna5", 1u, "dna5", 3u},
@@ -226,7 +226,7 @@ struct minimizer_registry_spec {
     const std::vector<std::string> both_storages{"u32", "u64"};
     // DNA4 implementations have fixed IDs and exported names. Alphabets in
     // generic_reference_alphabets add reference implementations through the
-    // adapter that stores alphabet ranks in state lanes.
+    // adapter that stores alphpbet ranks in state lanes.
     add_owner(1u, "minimap2_reference_l15_k15", "minimap2_reference",
               "minimizer_minimap2_reference", "minimizer_record_l15_k15",
               both_storages, "::seq::dna4", 0u,
@@ -403,7 +403,7 @@ struct minimizer_registry_spec {
         {29u, 63u, "minimizer_record_l63_k15", "bounded_nthash_l63_k15", "bounded_nthash_l63_dna5"},
     };
     for (const auto& band : fixed_bands) {
-        // Zero K/W values mark the bounded ntHash profile. The generated code
+        // Zero K/W values mark the bounded ntHash profile The generated code
         // replaces them with inclusive limits and checks requests with the shared
         // shape predicate.
         add_export_profiles(owner(band.dna4_bounded_owner), 0u, 0u,
@@ -431,8 +431,8 @@ struct minimizer_registry_spec {
             }
         }
     };
-    // Two-stack hashes need two bits per base in the record. Put compact
-    // layouts first so the first matching profile uses them. Larger split
+    // Two-stack hashes need two bits per, base in the record. Put compact
+    // layouts first so the  first matching profile uses them. Larger split
     // records handle requests that do not fit those layouts.
     add_two_stack_slice("minimizer_record_l15_k15", 0u, 15u, 8u, "u16");
     add_two_stack_slice("minimizer_record_l15_k15", 0u, 15u, 16u, "u32");

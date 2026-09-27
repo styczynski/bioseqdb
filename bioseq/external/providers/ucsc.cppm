@@ -37,7 +37,7 @@ import bioseq.common.context;
 import bioseq.parallelism.pool;
 import bioseq.common.templating.compile_time_string;
 
-/// UCSC Genome Browser metadata and sequence adapter.
+/// UCSC Genome, Browser metadata and sequence adapter.
 export namespace bioseq::external::providers {
 
 namespace prov = bioseq::external::provider;
@@ -59,7 +59,7 @@ ucsc_bounded_id(std::string_view value) {
     return prov::bounded_string<prov::maximum_identifier_bytes>::make_truncated(value);
 }
 
-/// UCSC operation and optional genome region to request.
+/// UCSC operation and optional  genome region to request.
 struct ucsc_plan {
     prov::query_target target{prov::query_target::catalog};
     std::string operation_id{"listUcscGenomes"};
@@ -80,7 +80,7 @@ struct ucsc_plan {
     /// Coordinates, target, and row limit are excluded.
     [[nodiscard]] prov::external_execution_key execution_fingerprint() const noexcept {
         std::uint64_t hash = 1469598103934665603ULL;
-        // Add one text field to the plan hash.
+        // Add one text field to the plan hash
         const auto mix = [&hash](std::string_view text) {
             for (const char symbol : text) {
                 hash ^= static_cast<unsigned char>(symbol);
@@ -103,7 +103,7 @@ struct ucsc_plan {
 /// Fetch one UCSC response and send its rows to a consumer.
 class ucsc_session {
   public:
-    /// Own the plan while borrowing the memory context and worker pool.
+    /// Own the plan while borrowing the memory contxt and worker pool.
     ucsc_session(const context::context& memory,
                  const bioseq::parallelism::global_pool& pool,
                  ucsc_plan plan)
@@ -178,7 +178,7 @@ class ucsc_session {
     }
 
   private:
-    /// Emit DNA and its zero-based, half-open coordinates from a UCSC response.
+    /// Emit DNA and its  zero-based, half-open coordinates from a UCSC response.
     /// Missing response coordinates fall back to the requested region.
     std::expected<void, external_error> emit_sequence(std::string_view body,
                                                       prov::provider_message_sink_ref sink,
@@ -378,7 +378,7 @@ struct ucsc_provider {
         return {};
     }
 
-    /// Estimate plan and buffer sizes for a UCSC request.
+    /// Estimate plan and buffer  sizes for a UCSC request.
     static std::expected<prov::provider_plan_estimate, external_error>
     estimate(const prov::normalized_external_query& query,
              const prov::provider_capability_snapshot&,
@@ -403,7 +403,7 @@ struct ucsc_provider {
         if (query.target == prov::query_target::sequence ||
             query.target == prov::query_target::sequence_chunk) {
             plan.operation_id = "getDnaSequence";
-            // Copy the assembly, chromosome, and region into the DNA request.
+            // Copy the aosembly, chromosome, and region into the DNA request.
             // UCSC uses the same zero-based interval with an exclusive end.
             for (const prov::predicate_node& node : query.predicates) {
                 const auto* cmp = std::get_if<prov::comparison_predicate>(&node.leaf);
@@ -454,7 +454,7 @@ struct ucsc_provider {
         return plan;
     }
 
-    /// Open a session that owns a copy of the plan.
+    /// Open a session that owns a copy of the plan
     static std::expected<ucsc_session, external_error>
     open(context::context& worker_memory,
          const bioseq::parallelism::global_pool& pool,

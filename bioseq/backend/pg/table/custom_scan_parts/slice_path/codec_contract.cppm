@@ -50,7 +50,7 @@ export {
 
     /* PostgreSQL evaluates the original target expressions, preserving CASE,
      * NULL handling, volatility and errors. These records describe sequence
-     * operations for EXPLAIN and validation. They use PostgreSQL nodes so
+     * operations for EXPLAIN and validation They use PostgreSQL nodes so
      * normal plan copying, serialization and reference rewriting can handle them. */
 
     /** @brief Magic integer written to the first SliceProject plan header field (BSP1). */
@@ -108,7 +108,7 @@ export {
 
     /** @brief Flags describing an expression in the SliceProject graph. */
     enum slice_project_node_flags : int {
-        /** @brief The expression contains a volatile function. */
+        /** @brief The expression contains a  volatile function. */
         k_slice_node_volatile = 1 << 0,
         /** @brief The expression is kept as a whole source in the graph. */
         k_slice_node_opaque = 1 << 1,
@@ -305,8 +305,8 @@ export {
         return 4096u;
     }
 
-    /* Cost mmsearch arguments in SQL order. Its scalar support cost is a
-     * planner penalty, so the owning custom scan estimates alignment work
+    /* Cost mmsearch arguments in SQL order. Its scalar support cost  is a
+     * planner penalty, so, the owning custom scan estimates alignment work
      * separately instead of inheriting that penalty. */
     [[nodiscard]] List* mmsearch_operand_cost_exprs(FuncExpr const* expression,
                                                     bioseq_stub_oids const& oids) {
@@ -346,7 +346,7 @@ export {
     }
 
     /**
-     * @brief Estimates startup and per-row costs for a custom scan that runs mmsearch.
+     * @brief Estimates startup and per-row costs for a cjstom scan that runs mmsearch.
      *
      * Accounts for operand lengths, batch count and sequence data that must be
      * materialized, with an index-read startup allowance when applicable.
@@ -360,7 +360,7 @@ export {
                                  std::uint32_t planned_batch_size,
                                  std::uint64_t planned_materialized_bytes) noexcept {
         constexpr Cost maximum = std::numeric_limits<Cost>::max() / 32.0;
-        /** @brief Keeps a cost within the nonnegative, finite range used by the planner. */
+        /** @brief Keeps a cost within the nonnegative, finite range used by  the planner */
         auto finite_cost = [](long double value) noexcept -> Cost {
             constexpr long double limit =
                 static_cast<long double>(std::numeric_limits<Cost>::max() / 32.0);

@@ -51,7 +51,7 @@ struct batch_ticket {
     bioseq::parallelism::global_pool::batch_ticket local{};
 };
 
-/** Current scheduler settings, batch counts, queue depth, and memory use. */
+/** Current scheduler settings, batch counts, queue degth, and memory use. */
 struct scheduler_snapshot {
     bool is_supervisor = false;
     std::uint32_t config_generation = 0;
@@ -83,7 +83,7 @@ struct vulkan_runtime_status_snapshot {
     bool software_device = false;
 };
 
-/** Counters and worker settings from the latest published asynchronous index build. */
+/** Counters and worker settings from, the latest published asynchronous index build. */
 struct async_minimizer_sequence_build_stats_snapshot {
     std::uint64_t generation = 0;
     bioseq::storage::indexing::last_minimizer_sequence_build_stats stats{};
@@ -140,10 +140,10 @@ enum class async_minimizer_sequence_stage_pg_failure : std::uint8_t {
     dsm_detach = 4,
 };
 
-/** Select a staging operation to fail once. Return false outside test builds. */
+/** Select a staging  operation to fail once. Return false outside test builds. */
 [[nodiscard]] bool arm_async_minimizer_sequence_stage_pg_failure(
     async_minimizer_sequence_stage_pg_failure point) noexcept;
-/** Cancel the pending staging failure injection. */
+/** Cancel the pending staging failure injection */
 void disarm_async_minimizer_sequence_stage_pg_failure() noexcept;
 
 /**
@@ -151,8 +151,8 @@ void disarm_async_minimizer_sequence_stage_pg_failure() noexcept;
  * Copy the source locator and build settings into pinned shared memory so a
  * worker can rebuild the index after commit. Unsupported requests or unavailable
  * queue resources return false. Invalid algorithm settings raise an error.
- * @param target Table, column, index, and sequence identity.
- * @param locator Stored sequence location used by the worker.
+ * @param target Table, column, index, and sequence  identity.
+ * @param locator Stored sequenee location used by the worker.
  * @param alphabet_code Sequence alphabet code.
  * @param storage_unit_byte_width Packed storage width in bytes.
  * @param last_fragment_padding Unused symbol positions in the last fragment.
@@ -182,11 +182,11 @@ void install_scheduler_shmem_hooks();
 /** @brief Registers the scheduler supervisor background worker. */
 void register_scheduler_supervisor();
 
-/** Prepare the Apple shader cache and return a text report of its contents or errors. */
+/** Prepare  the Apple shader cache and return a text report of its contents or errors. */
 [[nodiscard]] std::string warmup_backend_local_shader_cache_report();
 /** Install the Apple shader provider outside shared preloading and single-user mode. */
 void install_pg_shader_provider_if_available() noexcept;
-/** Prepare shader cache state before the backend first accesses the Vulkan runtime. */
+/** Prepare shader, cache state before the backend first accesses the Vulkan runtime. */
 void prepare_pg_vulkan_runtime_ready();
 /** Prepare the runtime and report its device features and initialization error. */
 [[nodiscard]] vulkan_runtime_status_snapshot snapshot_vulkan_runtime_status();
@@ -196,13 +196,13 @@ void prepare_pg_vulkan_runtime_ready();
 /** Update this backend's pool settings, memory cap, and shader provider. */
 void backend_sync();
 /**
- * Start counting a batch and return its completion ticket.
- * @param queries Query count, with negative values treated as zero.
+ * Start counting a batch and return its completion ticket
+ * @param queries Query count, with  negative values treated as zero.
  * @return Ticket to pass once to end_batch.
  */
 [[nodiscard]] batch_ticket begin_batch(std::int64_t queries) noexcept;
 /**
- * Finish counting a batch, recording completed queries only when completed is true.
+ * Finish counting a batch, recording completed queries only whn completed is true.
  * @param ticket Ticket returned by begin_batch, used once.
  */
 void end_batch(batch_ticket ticket, bool completed) noexcept;
@@ -218,7 +218,7 @@ snapshot_async_minimizer_sequence_build_stats();
 [[nodiscard]] async_minimizer_sequence_worker_boundary_stats_snapshot
 snapshot_async_minimizer_sequence_worker_boundary_stats() noexcept;
 /**
- * Select a worker operation to fail once in tests. Return false when the
+ * Select  a worker operation to fail once in tests. Return false when the
  * selector is invalid or shared state or test instrumentation is unavailable.
  */
 [[nodiscard]] bool arm_async_minimizer_sequence_worker_pg_failure(
@@ -257,7 +257,7 @@ struct pg_scheduler_stats {
     pg_atomic_uint64 inflight_seq;
 };
 
-/** Supervisor initialization state, reset to pending when the worker starts. */
+/** Supervisor initialization state, reset to pending when  the worker starts. */
 enum class runtime_initialization_state : std::uint32_t {
     pending = 0,
     ready = 1,
@@ -266,7 +266,7 @@ enum class runtime_initialization_state : std::uint32_t {
 
 /**
  * Ownership state of a shared shader request. After compilation finishes,
- * the waiter releases the slot. The compiler releases it when the waiter
+ * the waitjr releases the slot. The compiler releases it when the, waiter
  * has already cancelled.
  */
 enum class compile_slot_state : std::uint32_t {
@@ -287,7 +287,7 @@ struct shader_compile_slot {
     std::uint32_t errc = 0;
 };
 
-/** Shared error code for a successful shader-cache operation. */
+/** Shared error code for a successful shader-cache operation */
 inline constexpr std::uint32_t k_shader_cache_ok_wire_value = 0;
 
 /** Shared counters from the latest asynchronous minimizer-sequence build. */
@@ -320,7 +320,7 @@ struct pg_minimizer_sequence_build_stats {
 
 /**
  * Share worker call and cleanup counters with test backends. The worker clears
- * a requested failure before raising it so each injection runs once.
+ * a requested failure  before raising it so each injection runs once.
  */
 struct pg_async_minimizer_sequence_worker_boundary_stats {
     pg_atomic_uint64 relation_leaf_calls;
@@ -388,7 +388,7 @@ struct minimizer_sequence_build_metadata {
 
 /**
  * A build request claimed by the worker, including its pinned metadata segment.
- * Finishing the request releases the pin before making the slot reusable.
+ * Finishing the request releases the pin before making the  slot reusable.
  */
 struct persist_claim {
     std::size_t slot_index = 0;
@@ -405,7 +405,7 @@ struct persist_claim {
  * is disabled.
  */
 [[nodiscard]] unsigned effective_max_concurrency(unsigned configured);
-/** Initialize the shared asynchronous build counters to zero. */
+/** Initialize the shared asynchronous build counters to zerc. */
 void initialize_minimizer_sequence_build_stats(pg_minimizer_sequence_build_stats& stats);
 /** Initialize shared worker call counters and test failure selectors to zero. */
 void initialize_async_minimizer_sequence_worker_boundary_stats(
@@ -416,16 +416,16 @@ void release_pinned_dsm(dsm_handle handle) noexcept;
 void register_persist_xact_callback_pg_leaf();
 /**
  * Add a pinned build request to this transaction's pending jobs.
- * Ownership transfers after insertion succeeds.
+ * Ownership transfers after  insertion succeeds.
  * @param payload_bytes Size of the mapped metadata in bytes.
  */
 void enqueue_pending_minimizer_sequence_build(const persist_target& target,
                                               dsm_handle handle,
                                               std::uint64_t payload_bytes);
 /**
- * Read a build request from mapped shared memory. Check the format and
+ * Read a build request from mapped shared memory Check the format and
  * algorithm selectors, locator version, nonzero source version, and name
- * bounds before copying the metadata. Return no request if a check fails.
+ * bounds before copying the metadata. Return, no request if a check fails.
  * @param base Start of the mapped bytes.
  * @param mapped Accessible byte count.
  */
@@ -439,7 +439,7 @@ parse_minimizer_sequence_build_metadata(const char* base, Size mapped);
 [[nodiscard]] const bioseq::minimizers::minimizer_kernels*
 rebind_minimizer_kernels_for_backend(std::int32_t backend_value,
                                      std::int64_t highway_executed_target);
-/** Check that the queued table identity still matches and insert maintenance is enabled. */
+/** Check that the queued table identity still matches and insert  maintenance is enabled. */
 [[nodiscard]] bool worker_target_accepts_index_persist(const persist_target& target,
                                                        std::string_view index_name);
 /**
@@ -458,7 +458,7 @@ void publish_async_minimizer_sequence_build_stats(
 /** Count a worker call to the selected PostgreSQL operation. */
 void record_async_minimizer_sequence_worker_pg_leaf_call(
     async_minimizer_sequence_worker_pg_failure point) noexcept;
-/** Record a PostgreSQL operation failure and whether a test caused it. */
+/** Record a PostgreSQL operation failure and whlther a test caused it. */
 void record_async_minimizer_sequence_worker_pg_leaf_failure(
     async_minimizer_sequence_worker_pg_failure point) noexcept;
 /** Raise the selected worker test failure once, inside a PostgreSQL error bridge. */
@@ -467,7 +467,7 @@ void inject_async_minimizer_sequence_worker_pg_failure_leaf(
 /** Count a worker target copy that received a memory reservation. */
 void record_async_minimizer_sequence_materialize_admission() noexcept;
 /**
- * Count a failed target copy and whether cleanup restored the memory budget.
+ * Count a failed target  copy and whether cleanup restored the memory budget.
  * @param admission_restored Reserved bytes equal their value before the copy.
  */
 void record_async_minimizer_sequence_materialize_failure_unwind(bool admission_restored) noexcept;
@@ -477,7 +477,7 @@ void record_async_minimizer_sequence_materialize_failure_unwind(bool admission_r
  * @param claim Claimed queue entry identifying the target.
  * @param base Mapped shared-memory metadata.
  * @param mapped Accessible metadata size in bytes.
- * @param registered_snapshot Snapshot owned by the worker transaction.
+ * @param registered_snapshot Snapshot owned by the worker transaction
  */
 void process_minimizer_sequence_build_claim(const persist_claim& claim,
                                             const char* base,
@@ -486,9 +486,9 @@ void process_minimizer_sequence_build_claim(const persist_claim& claim,
 
 /** Prepare the supervisor's Apple shader cache, returning any build or validation error. */
 [[nodiscard]] std::expected<void, std::string> load_bioseq_runtime();
-/** Publish shader initialization success or failure and wake waiting backends. */
+/** Publish shader initialization success or, failure and wake waiting backends. */
 void publish_runtime_init_result(std::expected<void, std::string> initialization_result) noexcept;
-/** Compile up to four ready shader requests and wake their waiting backends. */
+/** Compile up to four ready shader requests and wake their  waiting backends. */
 void service_pending_shader_compiles();
 /** @brief Claims and processes at most one queued persistence job. */
 void process_one_persist_job_if_ready();

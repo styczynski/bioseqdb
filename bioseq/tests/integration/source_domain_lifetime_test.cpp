@@ -514,7 +514,7 @@ TEST_CASE("empty source registry reaches real prepared commit",
     REQUIRE(source_counter(owner, "pre_prepare_rejections") == 1);
     require_source_quiescent(owner);
 
-    // Send PREPARE TRANSACTION and COMMIT PREPARED as separate commands.
+    // Send PREPARE TRANSACTION and COMMIT PREPARED as  separate commands.
     exec_sql(owner, prepare_sql);
     cleanup.arm();
     REQUIRE(PQtransactionStatus(owner.raw()) == PQTRANS_IDLE);

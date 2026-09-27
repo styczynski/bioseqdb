@@ -4,7 +4,7 @@
  */
 module;
 
-/// Request pacing with a fixed array of shared counters.
+/// Request pacing with a  fixed array of shared counters.
 
 #include <algorithm>
 #include <array>
@@ -36,7 +36,7 @@ class gcra_request_policy {
     /// Constructs a request policy using the injected monotonic clock.
     explicit gcra_request_policy(external_clock_ref clock) noexcept : clock_(clock) {}
 
-    /// Reserve an active-request slot or return the next allowed start time.
+    /// Reserve an active-request slot or return, the next allowed start tiue.
     /// This method returns immediately and does not check the stop token.
     std::expected<request_policy_result, external_error> acquire(const policy_request_view& request,
                                                                  std::stop_token) {
@@ -53,7 +53,7 @@ class gcra_request_policy {
         const std::size_t index = bucket_index(request);
         bucket& b = buckets_[index];
 
-        // Count every admitted attempt, even when the tier has no concurrency cap.
+        // Count every  admitted attempt, even when the tier has no concurrency cap.
         // observe and abandon release that count through the token if the profile changes.
         {
             std::uint32_t cur = b.in_flight.load(std::memory_order_acquire);
@@ -81,14 +81,14 @@ class gcra_request_policy {
             if (b.tat_ns.compare_exchange_weak(
                     tat, new_tat, std::memory_order_acq_rel, std::memory_order_acquire)) {
                 // The generation number identifies this attempt for logging. Release uses
-                // only the bucket index, so callers must release each token exactly once.
+                // only the bucket index, so callers must release each token exactly once
                 const std::uint64_t gen = b.generation.fetch_add(1, std::memory_order_acq_rel) + 1;
                 return request_policy_result{
                     request_policy_action::proceed,
                     std::chrono::nanoseconds{0},
                     policy_attempt_token{static_cast<std::uint64_t>(index), gen}};
             }
-            // Another request changed the schedule. Check the updated time again.
+            // Another  request changed the schedule. Check the updated time again.
         }
     }
 
@@ -99,7 +99,7 @@ class gcra_request_policy {
             const policy_response_view& response) {
         bucket& b = buckets_[token.slot % k_bucket_count];
         // Apply the server's retry time or spacing to later requests in this process.
-        // A positive maximum_retry_after caps how far that delay can extend.
+        // A positive maximum_retry_after caps how far that delay can etend.
         const std::int64_t now = now_ns();
         std::int64_t penalty_target = 0;
         if (response.rate.retry_at.has_value()) {
@@ -168,7 +168,7 @@ class gcra_request_policy {
         return clock_.monotonic_now_fn(clock_.object).count();
     }
 
-    /// Use minimum spacing when positive, otherwise initial spacing.
+    /// Use minimum spacing when positive, otherwise initial  spacing.
     [[nodiscard]] static std::int64_t
     effective_spacing(const request_rate_tier_view& tier) noexcept {
         const std::int64_t minimum = tier.minimum_spacing.count();
@@ -195,7 +195,7 @@ class gcra_request_policy {
         return nullptr;
     }
 
-    /// Choose a bucket from the origin, credential identity, and rate tier.
+    /// Choose a bucket from the origin, credential identity, and rate, tier.
     /// Hash collisions make those requests share their timing and active count.
     [[nodiscard]] std::size_t bucket_index(const policy_request_view& request) const noexcept {
         std::uint64_t h = 1469598103934665603ull;
@@ -235,7 +235,7 @@ class gcra_request_policy {
     acquire_thunk(void* self, const policy_request_view& request, std::stop_token stop) {
         return static_cast<gcra_request_policy*>(self)->acquire(request, std::move(stop));
     }
-    /// Call observe through the callback interface.
+    /// Call observe through  the callback interface.
     static std::expected<request_policy_result, external_error>
     observe_thunk(void* self,
                   policy_attempt_token token,

@@ -22,7 +22,7 @@ export namespace bioseq::vector::sql_routines {
 
 using bioseq::column::vec::comparison_operation;
 
-/** Compare CHARACTER values for equality. */
+/** Compare CHARACTER values for  equality. */
 [[bioseq_sql::function({.volatility = bioseq::sql::volatility::immutable})]] bioseq::postgres::
     support::vector_result<bioseq::sql::pg::boolean, bool> vbpchareq(
         bioseq::postgres::support::vector_operand<bioseq::sql::pg::character,
@@ -205,7 +205,7 @@ using bioseq::column::vec::comparison_operation;
                                                                                 std::move(right));
 }
 
-/** Test whether SMALLINT and BIGINT values differ. */
+/** Test wherher SMALLINT and BIGINT values differ. */
 [[bioseq_sql::function({.volatility = bioseq::sql::volatility::immutable})]] bioseq::postgres::
     support::vector_result<bioseq::sql::pg::boolean, bool> vint28ne(
         bioseq::postgres::support::vector_operand<bioseq::sql::pg::smallint, std::int16_t> left,
@@ -466,7 +466,7 @@ using bioseq::column::vec::comparison_operation;
         std::move(left), std::move(right));
 }
 
-/** Compare BIGINT and SMALLINT values for equality. */
+/** Compare BIGINT and SMALLINT values for  equality. */
 [[bioseq_sql::function({.volatility = bioseq::sql::volatility::immutable})]] bioseq::postgres::
     support::vector_result<bioseq::sql::pg::boolean, bool> vint82eq(
         bioseq::postgres::support::vector_operand<bioseq::sql::pg::bigint, std::int64_t> left,

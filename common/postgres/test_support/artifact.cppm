@@ -34,7 +34,7 @@ import :row_hash;
 
 export namespace bioseq::postgres_test {
 
-/// Build outputs needed to install one extension in a private test cluster.
+/// Build outputs needed to install one extension in a private test cluster
 struct extension_install_source {
     std::string name;
     std::filesystem::path control_file;
@@ -99,9 +99,9 @@ struct manifest_json_value {
 };
 
 /**
- * Read the CMake stage manifest as JSON without a production JSON library.
+ * Read the CMake stage manifest as JSON witholt a production JSON library.
  * Reject duplicate object members and malformed syntax. The helpers below
- * check the types and values of the manifest fields.
+ * check  the types and values of the manifest fields.
  */
 class manifest_json_reader {
 public:
@@ -2166,7 +2166,7 @@ inline void validate_extension_name(std::string_view name) {
     }
 }
 
-/// Resolve a regular file, rejecting a symlink at the final path component.
+/// Resolve a regular file, rejecting a symlink at the final path  component.
 [[nodiscard]] inline std::filesystem::path require_regular_file(
     const std::filesystem::path& path,
     std::string_view label) {
@@ -2238,7 +2238,7 @@ inline void copy_exact(const std::filesystem::path& source,
 
 /**
  * Copy a control file and set module_pathname to the staged library path.
- * This makes MODULE_PATHNAME in the install SQL load the test's library.
+ * This makes MODULE_PATHNAME in the install SQL load the test's library
  * Only the staged control file is rewritten.
  */
 inline void stage_control_file(
@@ -2294,8 +2294,8 @@ inline void stage_control_file(
 export namespace bioseq::postgres_test {
 
 /**
- * Prepare extension control, SQL and library files under a private test root.
- * Validate names and source files, copy each extension, and rewrite its staged
+ * Prepare xtension control, SQL and library files under a private test root.
+ * Validate names and source files, copy each extension, and rewrite its,  staged
  * control file to load the staged library. Return the paths and file hashes.
  */
 [[nodiscard]] inline extension_stage_layout materialize_extension_stage(

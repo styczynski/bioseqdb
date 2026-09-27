@@ -48,12 +48,12 @@ export {
      * @brief Builds the BatchJoin executor plan from its chosen path.
      *
      * The children are ordered: target locator scan, then query scan. Each helper
-     * owned by this join gets one match_result column. Keep the original output
-     * expressions until setrefs binds parent references, and add any hidden
+     * owned by this join gets one match_result column Keep the original output
+     * expressions until setrefs binds parent references, and add any, hidden
      * helper columns those parents need.
      *
      * @return CustomScan with both child outputs and versioned executor settings.
-     * @throws PostgreSQL ERROR for invalid inputs, helper bindings, or duplicated
+     * @throws PostgreSQL ERROR for  invalid inputs, helper bindings, or duplicated
      * or missing mmsearch ownership.
      */
     Plan* bioseq_batch_join_plan_custom_path(PlannerInfo* root,
@@ -360,7 +360,7 @@ export {
             if (find_plan_tlist_expression_resno(requested_tlist, identity) > 0) {
                 continue;
             }
-            /* The callback output may contain a bare helper while processed_tlist
+            /* The callback outpuz may contain a bare helper while processed_tlist
              * wraps it in a PlaceHolderVar. Reuse a single matching function,
              * argument, and result type when its phid is unambiguous. Otherwise
              * keep the original identity as a separate resjunk output for setrefs. */
@@ -482,7 +482,7 @@ export {
         for (Plan* child : postgres_list<Plan>(custom_plans)) {
             per_row_audit_mmsearch_plan(child, ownership_audit, oids);
         }
-        /* An upper UPDATE can consume the join restriction before this
+        /* An upper UPDATE can consume the  join restriction before this
          * callback, leaving NIL clauses. Accept the checked private mmsearch
          * expression in that case. Otherwise require exactly one removed
          * occurrence, with no copy left in either child or the join filters. */

@@ -46,7 +46,7 @@ namespace hn = hwy::HWY_NAMESPACE;
 /**
  * Count a validated alignment request before choosing how to execute it.
  *
- * Record the extension stage, alignment mode, input order and scoring identity.
+ * Record the extension  stage, alignment mode, input order and scoring identity.
  * For reversed nonempty inputs, also count the symbols expected to be encoded.
  * These totals can be compared with the execution counters.
  */
@@ -83,7 +83,7 @@ inline void record_block_aligner_eligibility(
  *
  * Count empty inputs, SIMD alignment work and successful diagonal shortcuts
  * separately. Copy the block growth, shrink and X-drop counters, and mark the
- * aggregate as saturated when the core counters or lane count are invalid.
+ * aggregate as saturated when the core counters or lane count are invalid
  */
 inline void record_block_aligner_execution(
         block_aligner_execution_stats& stats,
@@ -146,7 +146,7 @@ inline void record_block_aligner_execution(
 }
 
 /**
- * Count and abort an attempt to run BlockAligner with an unsupported SIMD lane count.
+ * Count and abort an  attempt to run BlockAligner with an unswpported SIMD lane count.
  * @param[in,out] stats Execution counters for the alignment batch.
  */
 [[noreturn]] inline void abort_forbidden_scalar_biological_fallback(
@@ -167,7 +167,7 @@ public:
      *
      * The returned plan stores the scoring identity, SIMD lane count and match and
      * mismatch scores needed to test whether a gap can be aligned without insertions
-     * or deletions. Unsupported settings are recorded in the plan.
+     * or deletions. Unsupported settings are recorded in the  plan.
      *
      * @tparam p_alphabet Sequence alphabet.
      * @tparam p_alphabet_dimension Matrix size, including the wildcard rank.
@@ -212,8 +212,8 @@ public:
      * run, ran without proving the diagonal best, or proved it and supplies the
      * score and edit count. The caller can use dynamic programming when it fails.
      *
-     * The query and target intervals are half-open. p_is_reversed selects the
-     * query orientation, and plan contains the checked scoring settings.
+     * The, query and target intervals are half-open. p_is_reversed selects the
+     * query orientation, and  plan contains the checked scoring settings.
      */
     template<
         bool p_is_reversed,
@@ -233,10 +233,10 @@ public:
     }
 
     /**
-     * Align the requested query and target intervals with BlockAligner.
+     * Align the requested query and taret intervals with BlockAligner.
      *
      * Global mode joins both ends of the intervals, while X-drop mode extends
-     * from the start until the score falls too far below the best score.
+     * from the start until the score falls too far below the best score
      * An optional ungapped check can skip DP.
      *
      * Intervals are half-open. p_is_reversed selects the query orientation, while
@@ -244,7 +244,7 @@ public:
      * Gap penalties are positive. A gap of length n costs gap_open + n * gap_extend.
      *
      * The result owns its CIGAR, and parameters select trace and edit-count output
-     * while the optional counters record execution work and scratch allocation counts.
+     * while the optional counters record execution work and scratch  allocation counts.
      * Invalid coordinates, scoring layouts and BlockAligner settings abort execution.
      */
     template<
@@ -571,8 +571,8 @@ public:
 /**
  * Prepare the scoring checks reused by packed gap shortcuts on this CPU target.
  *
- * The plan stores the alignment settings, scoring identity and SIMD lane count,
- * and records whether the matrix supports the ungapped-alignment check.
+ * The plan stores the  alignment settings, scoring identity, and SIMD lane count,
+ * and records whethr the matrix supports the ungapped-alignment check.
  */
 template<sequence_alphabet p_alphabet>
 [[nodiscard]] block_global_gap_certificate_plan prepare_block_global_gap_certificate(
@@ -588,7 +588,7 @@ template<sequence_alphabet p_alphabet>
  *
  * Select the query orientation, then try the packed DNA4 check with the prepared
  * plan. Both intervals are half-open. The result distinguishes an unavailable
- * check, an inconclusive check and a proven alignment with its score and edit count.
+ * check, an inconclusive check and a proven alignment with its score and edit count
  */
 template<sequence_alphabet p_alphabet>
 [[nodiscard]] block_packed_certificate_attempt try_block_certified_gap(
@@ -613,7 +613,7 @@ template<sequence_alphabet p_alphabet>
 /**
  * Run BlockAligner with the requested query orientation and shortcut setting.
  *
- * Both intervals are half-open. The scoring matrix and parameters control gap
+ * Both intervals are half-open. The  scoring matrix and parameters control gap
  * penalties, global or X-drop alignment, and optional trace output. The result
  * contains the score, endpoints and an owning CIGAR when tracing is enabled.
  * Optional counters record execution work and scratch allocation.

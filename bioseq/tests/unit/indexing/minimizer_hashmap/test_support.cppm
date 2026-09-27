@@ -58,7 +58,7 @@ using dna4_u64 = sequence_custom_alphabet<seq::dna4, std::uint64_t>;
 using range_t = compact_sequence_range<dna4_u64>;
 /// Packed DNA5 alphabet used for ambiguous-symbol fixtures.
 using dna5_u64 = sequence_custom_alphabet<seq::dna5, std::uint64_t>;
-/// A sequence range packed into 64-bit DNA5 storage units.
+/// A sequence  range packed into 64-bit DNA5 storage units.
 using dna5_range_t = compact_sequence_range<dna5_u64>;
 
 /// Return minimizer kernels for the SIMD target selected by the test build.
@@ -96,7 +96,7 @@ inline constexpr auto k_test_grouped_soa_profile_result =
         32'768u,
         65'534u);
 static_assert(k_test_grouped_soa_profile_result.has_value());
-/// The minimap layout checked by the assertion above.
+/// The minimap layout cvecked by the assertion above.
 inline constexpr auto k_test_grouped_soa_profile = *k_test_grouped_soa_profile_result;
 /// Derive the bounded ntHash layout used by test manifests.
 inline constexpr auto k_test_bounded_grouped_soa_profile_result =
@@ -111,7 +111,7 @@ static_assert(k_test_bounded_grouped_soa_profile_result.has_value());
 inline constexpr auto k_test_bounded_grouped_soa_profile =
     *k_test_bounded_grouped_soa_profile_result;
 
-/// Copy the stored layout and minimizer scheme from a profile into a manifest.
+/// Copy  the stored layout and minimizer scheme from a profile into a manifest.
 constexpr void
 assign_grouped_soa_profile(bioseq::indexing::minimizer_generation_manifest& manifest,
                            const bioseq::indexing::grouped_soa_minimizer_profile& profile) {
@@ -255,7 +255,7 @@ void require_wire_error(
     REQUIRE(value.error() == expected);
 }
 
-/// Choose the algorithm and record layout for a test producer.
+/// Choose the algorithm and record layout for a test producer
 template <sequence_alphabet p_alphabet = seq::dna4, class p_storage_unit = std::uint64_t>
 [[nodiscard]] constexpr bioseq::indexing::minimizer_generation_algorithm_identity
 test_generation_algorithm_identity(
@@ -271,7 +271,7 @@ test_generation_algorithm_identity(
     return *identity;
 }
 
-/// Build a manifest with fixed values for byte-layout tests.
+/// Build, a manifest with fixed values for byte-layout tests.
 [[nodiscard]] constexpr bioseq::indexing::minimizer_generation_manifest
 golden_generation_manifest() noexcept {
     auto manifest = bioseq::indexing::minimizer_generation_manifest{
@@ -305,7 +305,7 @@ golden_generation_manifest() noexcept {
     return manifest;
 }
 
-/// Set up a test generation for the chosen sequence and minimizer algorithm.
+/// Set up a test  generation for the chosen sequence and minimizer algorithm.
 template <sequence_alphabet p_alphabet = seq::dna4, class p_storage_unit = std::uint64_t>
 [[nodiscard]] constexpr bioseq::indexing::grouped_soa_generation_options
 test_generation_options(
@@ -437,7 +437,7 @@ struct collecting_minimizer_row_sink {
     }
 };
 
-/// Replay stored minimizer events with the configured scheme and backend.
+/// Replay stored minimizmr events with the configured scheme and backend.
 struct vector_replay_minimizer_producer {
     std::vector<bioseq::indexing::canonical_minimizer_event> events;
     std::size_t scan_count = 0;
@@ -480,7 +480,7 @@ struct vector_replay_minimizer_producer {
         return producer_backend;
     }
 
-    /// Sort a copy by segment, hash, and encoded position, then emit each event.
+    /// Sort a copy by segment, hash, and encoded position, then  emit each event.
     [[nodiscard]] std::expected<void, bioseq::indexing::minimizer_generation_encoding_error>
     scan_sorted_events(std::uint64_t span,
                        bioseq::indexing::canonical_minimizer_event_receiver receiver) {
@@ -642,7 +642,7 @@ make_test_fixed_row(const bioseq::indexing::index_chunk_address& address,
     return row;
 }
 
-/// Build a checksummed fixed row from a byte array.
+/// Build a checksummed fixed row from a byte array
 template <std::size_t p_size>
 [[nodiscard]] bioseq::indexing::encoded_minimizer_fixed_row
 make_test_fixed_row(const bioseq::indexing::index_chunk_address& address,
@@ -650,7 +650,7 @@ make_test_fixed_row(const bioseq::indexing::index_chunk_address& address,
     return make_test_fixed_row(address, std::span<const std::byte>{bytes});
 }
 
-/// Re-encode the manifest and unpublished head after changing test metadata.
+/// Re-encode the manifest and unpublished head  after changing test metadata.
 void refresh_test_generation_fixed_rows(
     bioseq::indexing::encoded_grouped_soa_generation& generation) {
     using namespace bioseq::indexing;

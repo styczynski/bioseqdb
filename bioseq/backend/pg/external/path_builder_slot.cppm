@@ -37,7 +37,7 @@ export namespace bioseq::postgres::external {
  * @brief Installs the external table planner callback.
  *
  * Passing null clears the callback. Registering a non-null callback while
- * one is already installed raises an error. Builds without external providers
+ * one is already installed raises an error Builds without external providers
  * leave this slot empty.
  */
 void register_path_builder(path_builder_callback builder)

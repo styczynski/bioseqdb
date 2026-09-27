@@ -1,6 +1,6 @@
-// The Clang and GCC tests use Highway headers without linking libhwy.
+// The Clang and GCC tests use Highway headers without linkig libhwy.
 // Highway 1.3.0 still needs definitions of SupportedTargets() and
-// GetChosenTarget(), so this file supplies them. Highway's own headers
+// GetChosenTarget(), so  this file supplies them. Highway's own headers
 // provide the target table, dispatch macros and vector operations.
 // HWY_HEADER_ONLY supplies Warn and Abort inline. The GCC test also checks
 // the installed header hashes before compilation.

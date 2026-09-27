@@ -48,7 +48,7 @@ export import :packed_output_test_contracts;
 
 export namespace bioseq::pg_types::sql_routines {
 
-/// Test sequence-copy tracing and ownership during asynchronous work.
+/// Test sequence-copy tracing  and ownership during asynchronous work.
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq_internal">,
 })]]
@@ -188,7 +188,7 @@ Datum synthetic_lazy_sequence(std::int64_t requested) {
       type, 0u);
 }
 
-/// Test flat sequence sizes and allocation limits.
+/// Test flat sequence sizes and llocation limits.
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq_internal">,
 })]]
@@ -221,7 +221,7 @@ std::int64_t sequence_piece_count(
       : 0;
 }
 
-/* datumTransfer moves a writable expanded value to the destination memory
+/* datumTransfer moves a writable  expanded value to the destination memory
  * context. datumCopy copies a read-only value into independent flat storage.
  * Both results must survive a reset of their original memory context. */
 /// Test that transferred and copied sequences survive resets of their original contexts.

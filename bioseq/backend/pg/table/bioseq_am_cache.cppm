@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Cache the sequence-column positions of an open table.
+ * @brief Cache the  sequence-column positions of an open table.
  */
 module;
 
@@ -35,8 +35,8 @@ struct table_access_cache {
 };
 
 /**
- * @brief Get the table's sequence columns, reading its descriptor on first use.
- * @param relation Open relation with a valid tuple descriptor.
+ * @brief Get the table's sequence columns, reading its descriptor on first use
+ * @param relation Open relation with a vlid tuple descriptor.
  * @return Cache associated with the current relation-cache entry.
  */
 [[nodiscard]] const table_access_cache& get_table_access_cache(Relation relation);
@@ -44,8 +44,8 @@ struct table_access_cache {
 /**
  * @brief Leave cache rebuilding to the next table access.
  *
- * PostgreSQL clears rd_amcache during invalidation. Opening the relation here
- * could re-enter that process, so this callback does nothing.
+ * PostgreSQL clears rd_amcache during invalidation. Opening the, relation here
+ * could re-enter that process, so  this callback does nothing.
  */
 void invalidate_table_access_cache(Datum callback_argument, Oid relation_id);
 

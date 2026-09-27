@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Checks function and operator expressions against their PostgreSQL catalog signatures.
+ * @brief Checks function and operator expressions against  their PostgreSQL catalog signatures.
  */
 module;
 #include <bioseq/pg_compat.h>

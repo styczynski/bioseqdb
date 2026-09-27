@@ -1149,7 +1149,7 @@ TEST_CASE("logical target identity survives payload coalescing",
           "[component:bioseq][layer:unit][feature:pipeline]") {
     using bioseq::pipeline_stats::count_unique_logical_target_rows;
 
-    // Distinct table rows count separately even when their sequence data is
+    // Distinct table rows count  separately even when their sequence data is
     // identical and shares GPU storage.
     std::array<std::uint64_t, 2> identical_payload_distinct_rows{41, 42};
     REQUIRE(count_unique_logical_target_rows(

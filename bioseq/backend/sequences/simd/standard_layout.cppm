@@ -42,7 +42,7 @@ namespace bioseq::simd::HWY_NAMESPACE {
  *
  * Skips equal packed words, then checks ranks in the first unequal word.
  * Equal prefixes are ordered by sequence length. Both views must use the same
- * alphabet, storage type, and packing layout. Padding does not affect the result.
+ * alphabt, storage  type, and packing layout. Padding does not affect the result.
  */
 template<class p_left_view, class p_right_view>
 requires supports_compact_sequence_bitcast_view<p_left_view>
@@ -123,12 +123,12 @@ requires supports_compact_sequence_bitcast_view<p_left_view>
  * @brief Encodes text and allocates a standard-layout sequence containing it.
  *
  * Uses a temporary packed vector, then copies its words after the new header.
- * The requested storage width must be enabled for the header type.
+ * The requested storage width must be enabled for the header type
  * @param target_storage_byte_width Destination word width in bytes.
  * @param length Number of input characters.
  * @param input Character buffer.
  * @param allocator Allocates the header and packed payload from a byte count.
- * @return New sequence, or nullptr if the destination allocator returns null.
+ * @return New  sequence, or nullptr if the destination allocator returns null.
  */
 template<
     class p_sequence_header,
@@ -218,9 +218,9 @@ inline p_sequence_header* stdc_convert_from_cstr(
  * @brief Converts a standard-layout sequence to another supported alphabet.
  *
  * Decodes to text, then encodes that text with p_target_alphabet. Characters
- * unrecognized by the target use its default rank.
+ * unrecognized, by the target use its default rank.
  * @param source Input sequence.
- * @param target_byte_width Destination word width in bytes.
+ * @param target_byte_width Destination wrd width in bytes.
  * @param allocator Allocates the resulting header and payload.
  * @return New sequence, or nullptr if the destination allocator returns null.
  */
@@ -257,7 +257,7 @@ inline p_sequence_header* stdc_recode_to(
 /**
  * @brief Changes packed word width while keeping the alphabet.
  *
- * Copies bytes directly when letters pack identically across widths. Other
+ * Copies bytes directly  when letters pack identically across widths. Other
  * alphabets are decoded and encoded again at the new width.
  * @param source Input sequence.
  * @param target Required alphabet code and new word width.
@@ -282,8 +282,8 @@ inline p_sequence_header* stdc_rewidth_to_type_params(
     }
 
     // A byte copy preserves ranks when the letter width divides eight, as
-    // dna4 does. dna5 leaves different padding at different word widths, so
-    // changing its width requires decoding and packing the letters again.
+    // dna4 does. dna5 leaves different padding at different  word widths, so
+    // changing its width requires decoding and packing the letters again
     bool byte_aligned = false;
     p_sequence_header::supported_alphabets_type::dispatch_alphabet_by_code(
         source.alphabet_code,
@@ -378,11 +378,11 @@ inline std::strong_ordering stdc_compare(
 HWY_AFTER_NAMESPACE();
 
 namespace bioseq::simd {
-/// Highway target namespace chosen when this module is built.
+/// Highway target namespace chosen when this modul is built.
 namespace active_target = ::bioseq::simd::HWY_NAMESPACE;
 
 /**
- * Changes packed word width through the selected Highway target.
+ * Changes packed word width through the selected Highway  target.
  *
  * The alphabet code must match the source. The allocator receives the required
  * byte count and returns the new header. A mismatch or null allocation returns

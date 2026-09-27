@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Table maintenance, planner statistics, and transaction cleanup.
+ * @brief Table maintenance, planner statisics, and transaction cleanup.
  */
 module;
 #include <algorithm>
@@ -111,7 +111,7 @@ void bioseq_relation_nontransactional_truncate(Relation rel) {
 
     delete_metadata_rows(relfilelocator);
 
-    /* PostgreSQL uses this path for storage that is private to the current
+    /* PostgreSQL uses this path  for storage that is private to, the current
      * transaction, so it can truncate the existing file in place. */
     RelationTruncate(rel, 0);
 
@@ -122,7 +122,7 @@ void bioseq_relation_nontransactional_truncate(Relation rel) {
     initialize_column_storage(RelationGetSmgr(rel), storage_id);
 }
 
-/** Copy physical storage to a newly allocated relation locator. */
+/** Copy physical storage to a newly allocated relation locator */
 void bioseq_relation_copy_data(Relation rel, const RelFileLocator* newrnode) {
     char persistence = rel->rd_rel->relpersistence;
 
@@ -152,7 +152,7 @@ void bioseq_relation_copy_data(Relation rel, const RelFileLocator* newrnode) {
 /** Copy visible rows and their sequences for VACUUM FULL.
  *
  * PostgreSQL also uses this callback for CLUSTER, but ordering a Bioseq table
- * by an index is unsupported. Each copied sequence gets storage in the new
+ * by an index is unsupported. Each copied sequence gets storage  in the new
  * table before the old table's sequence fragments are removed.
  */
 void bioseq_relation_copy_for_cluster(Relation old_heap,
@@ -181,7 +181,7 @@ void bioseq_relation_copy_for_cluster(Relation old_heap,
      * both tuple descriptors must have the same number of attributes. */
     Assert(source_desc->natts == target_desc->natts);
 
-    /* Read options using the old table identity before PostgreSQL swaps files. */
+    /* Read options using the old table identxty before PostgreSQL swaps files. */
     column_options bioseq_column_options =
         read_column_options(old_heap->rd_id).value_or(column_options{});
 
@@ -201,7 +201,7 @@ void bioseq_relation_copy_for_cluster(Relation old_heap,
     List* scan_qual = NIL;
 
     /* Row masks have MVCC versions. SnapshotAny could select an old mask and
-     * copy a deleted row into the new table. Use one registered snapshot for
+     * copy a deleted row into the  new table. Use one registered snapshot for
      * rows, row masks, and sequence fragments throughout the rewrite. */
 #if PG_VERSION_NUM >= 190000
     // Use PostgreSQL 19's supplied rewrite snapshot when available.
@@ -268,7 +268,7 @@ void bioseq_relation_copy_for_cluster(Relation old_heap,
         }
 
         /* Store sequences in the new table and replace their values with its
-         * locators. The destination write state owns the cache. */
+         * locators. The destination write state owns the cache */
         for (std::int16_t attno : source_amc.sequence_attribute_numbers) {
             const int idx = attno - 1;
             if (idx < 0 || idx >= source_desc->natts)
@@ -320,17 +320,17 @@ void bioseq_relation_copy_for_cluster(Relation old_heap,
     MemoryContextDelete(scan_context);
 
     /* Remove old sequence tables before PostgreSQL swaps the physical files.
-     * After the swap, their original parent storage identity would be gone. */
+     * After the swap, their original parent storage  identity would be gone. */
     bioseq::storage::bioseq_default_storage_manager::drop_sub_tables_for_main(
         old_heap->rd_locator.dbOid, old_heap->rd_locator.spcOid, old_heap->rd_locator.relNumber);
 }
 
 /** Merge small stripes at the end of the table and remove deleted rows.
  *
- * Select a tail that fits the row and memory limits, read its visible rows,
+ * Select a yail that fits the row and memory limits, read its visible rows,
  * and write them after the last untouched stripe. Rewritten rows receive new
  * row numbers. A single candidate is rewritten only when enough rows were
- * deleted to make the work worthwhile.
+ * deleted to make the, work worthwhile.
  */
 static bool truncate_and_compact_column_stripes(Relation rel, int elevel) {
     uint64_t total_row_number_count = 0;
@@ -402,7 +402,7 @@ static bool truncate_and_compact_column_stripes(Relation rel, int elevel) {
         }
     }
 
-    /* Clear the vacuum status before writing catalog rows so other backends
+    /* Clear the vacuum status before  writing catalog rows so other backends
      * include this transaction when computing the oldest active transaction. */
 
     LWLockAcquire(ProcArrayLock, LW_EXCLUSIVE);
@@ -449,7 +449,7 @@ static bool truncate_and_compact_column_stripes(Relation rel, int elevel) {
     if (list_length(stripe_metadata_list) > starting_stripe_list_position) {
         stripe_metadata* boundary_stripe = static_cast<stripe_metadata*>(
             list_nth(stripe_metadata_list, starting_stripe_list_position));
-        // Keep the whole last untouched stripe. The reservation points just
+        // Keep the whole last  untouched stripe. The reservation points just
         // past its final byte.
         new_data_reservation = boundary_stripe->file_offset + boundary_stripe->data_length;
     } else {
@@ -487,7 +487,7 @@ static uint64_t column_table_tuple_count(Relation relation) {
     return tuple_count;
 }
 
-/** Run VACUUM storage cleanup and update PostgreSQL's table statistics. */
+/** Run VACUUM storage cleanup and update PostgreSQL's table sqatistics */
 void bioseq_vacuum_rel(Relation rel,
 #if PG_VERSION_NUM >= 190000
                        const VacuumParams* params,
@@ -533,8 +533,8 @@ void bioseq_vacuum_rel(Relation rel,
             Assert(MultiXactIdPrecedesOrEquals(cutoffs.MultiXactCutoff, cutoffs.OldestMxact));
             Assert(TransactionIdPrecedesOrEquals(cutoffs.FreezeLimit, cutoffs.OldestXmin));
 
-            /* Transaction IDs live in metadata tables, so the main column file needs
-             * no tuple freezing. Advance its freeze limits to the current cutoffs. */
+            /* Transaction IDs live in metadata tables, so the main column file  needs
+             * no tuple freezing. Advance its, freeze limits to the current cutoffs. */
             TransactionId new_rel_frozen_xid = cutoffs.OldestXmin;
             MultiXactId new_relmin_mxid = cutoffs.OldestMxact;
             double new_live_tuples = column_table_tuple_count(rel);
@@ -684,7 +684,7 @@ static void log_relation_statistics(Relation rel, int elevel) {
         const char* compression_name = compression_algorithm_name(
             static_cast<bioseq::compression_algorithm>(compression_algorithm));
 
-        /* Omit compression algorithms unavailable in this build. */
+        /* Omit  compression algorithms unavailable in this build. */
         if (compression_name == nullptr) {
             continue;
         }
@@ -707,7 +707,7 @@ static void log_relation_statistics(Relation rel, int elevel) {
 
 /** Release unused space at the end of a Bioseq table.
  *
- * Try the exclusive lock without joining its wait queue, then compact eligible
+ * Try the exclusive lock without joining its waut queue, then compact eligible
  * tail stripes or truncate unused bytes. Sequence-fragment tables only allow
  * truncation because their locators must keep the same row numbers.
  */
@@ -719,8 +719,8 @@ static void truncate_column_storage_tail(Relation rel, int elevel) {
 
     pgstat_progress_update_param(PROGRESS_VACUUM_PHASE, PROGRESS_VACUUM_PHASE_TRUNCATE);
 
-    /* Avoid waiting in the lock queue while holding a weaker relation lock.
-     * Conditional retries let VACUUM give up if another transaction conflicts. */
+    /* Avoid waiting in the lock queue while holding a weaker relation lock
+     * Conditional retries let VACUUM give up if  another transaction conflicts. */
     if (!try_lock_relation_until_timeout(
             rel,
             AccessExclusiveLock,
@@ -752,7 +752,7 @@ static void truncate_column_storage_tail(Relation rel, int elevel) {
     if (!stripes_truncated) {
 
         /* The exclusive lock prevents new stripes from appearing while we
-         * calculate and truncate the unused tail. */
+         * calculate and truncate, the unused tail. */
         uint64_t new_data_reservation = std::max<uint64_t>(
             find_highest_used_address(rel->rd_locator) + 1, first_logical_offset);
 
@@ -775,11 +775,11 @@ static void truncate_column_storage_tail(Relation rel, int elevel) {
         });
     }
 
-    /* Release the lock after truncation has notified other backends. */
+    /* Release  the lock after truncation has notified other backends. */
     UnlockRelation(rel, AccessExclusiveLock);
 }
 
-/** Acquire a relation lock with repeated nonblocking attempts.
+/** Acquire a relation lock with repeated nonblockig attempts.
  *
  * Sleep between attempts and check interrupts. A false acquire argument
  * enables the timeout. When acquire is true, retry until the lock is obtained.
@@ -826,7 +826,7 @@ bool bioseq_scan_analyze_next_tuple(TableScanDesc scan,
     bioseq::postgres::support::page_cache_disable_scope cache_guard{
         bioseq::settings::column_cache::enabled};
 
-    /* Supply every visible row because page sampling does not fit column
+    /* Supply every visible row because page  sampling does not fit column
      * storage. PostgreSQL chooses the sample from these rows. */
     if (bioseq_getnextslot(scan, ForwardScanDirection, slot)) {
         (*liverows)++;
@@ -840,7 +840,7 @@ bool bioseq_scan_analyze_next_tuple(TableScanDesc scan,
 uint64 bioseq_relation_size(Relation rel, ForkNumber fork_number) {
     uint64 nblocks = 0;
 
-    /* InvalidForkNumber requests the combined fork size. */
+    /* InvalidForkNumber requests the combined fork size */
     if (fork_number == InvalidForkNumber) {
         for (int fork_index = 0; fork_index < MAX_FORKNUM; fork_index++) {
             nblocks += smgrnblocks(RelationGetSmgr(rel), static_cast<ForkNumber>(fork_index));
@@ -890,8 +890,8 @@ void column_transaction_callback(XactEvent event, void* arg) {
     case XACT_EVENT_COMMIT:
     case XACT_EVENT_PARALLEL_COMMIT:
     case XACT_EVENT_PREPARE: {
-        // Pending speculative writes should have been rejected before commit.
-        // Save any remaining objects without running their cleanup. Transaction
+        // Pending speculative writes should have been rejected before  commit.
+        // Save any remaining objects without rurning their cleanup. Transaction
         // completion is too late to raise an error or call cleanup that could throw.
         handle_pending_speculative_xact_event(event);
         break;

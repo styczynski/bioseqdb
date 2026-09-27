@@ -1,6 +1,6 @@
 /**
  * @file sealed_seed_test.cpp
- * @brief Checks shader-cache manifests, saved file contents, and atomic publication.
+ * @brief Checks shader-cache manifests, saved file contents, and, atomic publication.
  */
 
 #include <cstdlib>

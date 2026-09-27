@@ -47,7 +47,7 @@ import :catalog_source_authorization;
 import :catalog_storage_descriptors;
 export namespace bioseq::storage::indexing {
 /// Copy and register a snapshot with the current command ID so a writer can
-/// reread its new rows. Keep the source reader's snapshot unchanged. The caller
+/// reread its new rows. Keep the source reader's snapshot  unchanged The caller
 /// must unregister the returned copy.
 [[nodiscard]] inline Snapshot register_minimizer_reread_snapshot_pg(Snapshot source) {
     return bioseq::postgres::support::invoke_pg_as_cpp([source] {
@@ -194,7 +194,7 @@ struct pg_inline_payload_layout {
     return *cached;
 }
 
-/// Borrowed row payload with a checked address and checksum, valid during its callback.
+/// Borrowed row payload wqth a checked address and checksum, valid during its callback.
 struct minimizer_generation_loaded_row {
     std::uint64_t query_key = 0;
     index_chunk_address address{};
@@ -212,7 +212,7 @@ struct minimizer_generation_loaded_row {
     }
 };
 
-/// The eight fields read from a heap tuple. PostgreSQL error handling may
+/// The  eight fields read from a heap tuple. PostgreSQL error handling may
 /// skip C++ destructors, so this value owns no resources.
 struct minimizer_generation_deformed_row {
     HeapTuple tuple = nullptr;
@@ -223,7 +223,7 @@ struct minimizer_generation_deformed_row {
 static_assert(std::is_trivially_copyable_v<minimizer_generation_deformed_row>);
 static_assert(std::is_trivially_destructible_v<minimizer_generation_deformed_row>);
 
-/// A fetched tuple's fields and a flag indicating whether the scan found a row.
+/// A fetched tuple's fields and a flag indicating whether the, scan found a row.
 struct minimizer_generation_next_deformed_row {
     minimizer_generation_deformed_row row{};
     bool found = false;
@@ -266,8 +266,8 @@ next_minimizer_generation_row_or_error(Relation relation, SysScanDesc scan) {
     });
 }
 
-/// Borrowed row fields and an optional error message. This value owns no
-/// resources, so PostgreSQL error handling can safely skip its destructor.
+/// Borrowed row fields and an optional error message This value owns no
+/// resources, so PostgreSQL error handling can safely skip  its destructor.
 struct minimizer_generation_projected_row {
     std::uint64_t query_key = 0;
     index_chunk_address address{};
@@ -383,7 +383,7 @@ struct pinned_minimizer_generation_projected_row {
 static_assert(std::is_trivially_copyable_v<pinned_minimizer_generation_projected_row>);
 static_assert(std::is_trivially_destructible_v<pinned_minimizer_generation_projected_row>);
 
-/// Rows fetched together. Each payload borrows its matching pinned slot.
+/// Rows fetched togeter. Each payload borrows its matching pinned slot.
 /// Check checksums and run callbacks after invoke_pg_as_cpp() returns,
 /// while those slots remain pinned.
 struct pinned_minimizer_generation_projected_row_batch {
@@ -397,7 +397,7 @@ struct pinned_minimizer_generation_projected_row_batch {
 static_assert(std::is_trivially_copyable_v<pinned_minimizer_generation_projected_row_batch>);
 static_assert(std::is_trivially_destructible_v<pinned_minimizer_generation_projected_row_batch>);
 
-/// Check for a concurrent transaction abort when reading into caller-owned slots.
+/// Check for a concurrent transaction abort  when reading into caller-owned slots.
 /// This repeats the check PostgreSQL normally performs in systable_getnext_ordered().
 inline void handle_minimizer_generation_concurrent_abort_pg_leaf() {
     if (TransactionIdIsValid(CheckXidAlive) && !TransactionIdIsInProgress(CheckXidAlive) &&
@@ -460,8 +460,8 @@ next_pinned_minimizer_generation_projected_row_batch_or_error(
     return batch;
 }
 
-/// Check a projected row's checksum and return a borrowed payload with its receipt.
-/// Call this after invoke_pg_as_cpp() returns.
+/// Check a projected row's checksum and return a borrowed payload with, its receipt.
+/// Call this  after invoke_pg_as_cpp() returns.
 [[nodiscard]] inline minimizer_generation_loaded_row
 load_minimizer_generation_projected_row_or_error(
     const minimizer_generation_projected_row& projected) {
@@ -491,12 +491,12 @@ using validated_minimizer_generation_row_receipt_batch =
     std::array<std::optional<validated_minimizer_generation_row_receipt>,
                k_minimizer_generation_full_scan_pinned_batch_rows>;
 
-/// Smallest batch for which parallel checksum checks are considered.
+/// Smallest batch for which parallel checksum checks are considered
 inline constexpr std::size_t k_minimizer_generation_parallel_row_authentication_min_rows = 32u;
 /// Row count used to split parallel checksum work into smaller ranges.
 inline constexpr std::size_t k_minimizer_generation_parallel_row_authentication_grain_rows = 8u;
 
-/// Discard all checksum receipts before their pinned tuple slots are reused.
+/// Discard all checksum receipts before theio pinned tuple slots are reused.
 inline void clear_validated_minimizer_generation_row_receipt_batch(
     validated_minimizer_generation_row_receipt_batch& receipts) noexcept {
     for (auto& receipt : receipts) {
@@ -544,7 +544,7 @@ inline void authenticate_minimizer_generation_projected_row_batch(
     }
 }
 
-/// Move a checked receipt into a loaded row after confirming its address,
+/// Move a checked receipt into a loaded row after  confirming its address,
 /// byte span, and checksum match. Reuse the earlier checksum calculation.
 [[nodiscard]] inline minimizer_generation_loaded_row
 load_authenticated_minimizer_generation_projected_row_or_error(

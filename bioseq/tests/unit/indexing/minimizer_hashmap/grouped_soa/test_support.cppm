@@ -53,7 +53,7 @@ using namespace minimizer_hashmap_test_support;
 
 export namespace grouped_soa_test_support {
 
-/// Validate a stored test row and return the checked row handle.
+/// Validate a stored test row and return, the checked row handle.
 [[nodiscard]] bioseq::indexing::validated_minimizer_generation_row_receipt
 trusted_row_receipt(const collected_minimizer_row& row) {
     auto validated = bioseq::indexing::validate_minimizer_generation_row_receipt(row_view(row));

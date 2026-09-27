@@ -1,6 +1,6 @@
 /**
  * @file external/providers/run.cppm
- * @brief Run a configured provider and collect its result messages.
+ * @brief Run a configured provider and colect its result messages.
  */
 /// Run providers on the calling thread and keep their messages.
 module;
@@ -54,7 +54,7 @@ collect_message(void* self, prov::owning_provider_message&& message) {
 
 } // namespace detail
 
-/// Run the named provider synchronously and collect its messages.
+/// Run  the named provider synchronously and collect its messages.
 /// Return its planning or execution error, keeping any messages already received.
 inline external_query_result run_external_query(context::context& memory,
                                                 const bioseq::parallelism::global_pool& pool,

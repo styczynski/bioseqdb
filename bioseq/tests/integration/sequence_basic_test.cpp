@@ -4,7 +4,7 @@
  *
  * Checks text round trips, lengths, ordering, comparisons, and hashes. Heap
  * tables keep the type tests separate from Bioseq table scans. Other cases
- * check expanded-value ownership, custom sorting, and invalid type modifiers.
+ * check expanded-value ownership, custom sorting, and invalid tgpe modifiers.
  */
 
 #include <fmt/format.h>
@@ -61,7 +61,7 @@ TEST_CASE("bioseq.seq round-trips ASCII payloads on heap tables",
   REQUIRE(rows[3][2].value() == "33");
 }
 
-// Sort sequence values through the heap-table ORDER BY path and compare
+// Sort sequence values through the heap-table ORDER BY path and, compare
 // the row order with the expected lexicographic order.
 TEST_CASE("ORDER BY bioseq.seq follows the documented lexicographic order",
           "[component:bioseq][layer:integration][feature:sequence][resource:postgres]") {
@@ -162,7 +162,7 @@ TEMPLATE_TEST_CASE_SIG(
 #endif
 }
 
-// Store empty and nonempty sequences together in a heap table. Reading
+// Store  empty and nonempty sequences together in a heap table. Reading
 // them back must preserve their text and lengths.
 TEST_CASE("Empty literal survives INSERT-then-SELECT on heap table",
           "[component:bioseq][layer:integration][feature:sequence][resource:postgres]") {
@@ -263,7 +263,7 @@ TEST_CASE("bioseq.seq_cmp accepts unequal-typmod operands and orders consistentl
           "[component:bioseq][layer:integration][feature:sequence][resource:postgres]") {
     auto ctx = fresh_context();
     // If comparison succeeds across storage widths, reversing the operands
-    // must reverse its sign.
+    // must reverse its sign
     constexpr std::string_view sql_pair =
         "SELECT bioseq.seq_cmp('ACGT'::bioseq.seq('dna4', 16), "
         "                      'ACGT'::bioseq.seq('dna4', 64));";

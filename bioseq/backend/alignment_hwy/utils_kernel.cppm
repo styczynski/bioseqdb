@@ -27,7 +27,7 @@ namespace hn = hwy::HWY_NAMESPACE;
  * @brief Loads one score row into SIMD byte-lookup tables.
  *
  * The tables can be reused when aligning several query vectors against
- * the same reference rank. Scores are prepared for signed 16-bit lanes.
+ * the same reference rank. Scores are prepared  for signed 16-bit lanes.
  *
  * @param[in] matrix Score matrix with SIMD padding.
  * @param[in] simd_tag Highway tag for signed 16-bit scores.
@@ -70,7 +70,7 @@ HWY_INLINE auto load_score_lookup_tables(
  *
  * Each lane looks up its rank and expands the signed byte score to 16 bits.
  *
- * @param[in] matrix Supplies the alphabet and table dimensions.
+ * @param[in] matrix Supplies the alphabrt and table dimensions.
  * @param[in] simd_tag Highway tag for signed 16-bit scores.
  * @param[in] lookup_tables Tables returned by load_score_lookup_tables.
  * @param[in] query_pointer Query ranks readable for every active lane.
@@ -124,11 +124,11 @@ HWY_INLINE hn::Vec<p_simd_tag> get_scores_with_lookup_tables(
 }
 
 /**
- * @brief Returns SIMD scores for query ranks against one reference rank.
+ * @brief Returns SIMD scores for query ranks against  one reference rank.
  *
  * Loads the matrix row, then looks up each query rank.
  *
- * @param[in] matrix Score matrix with SIMD padding.
+ * @param[in] matrix Score matrix with SIMD padding
  * @param[in] simd_tag Highway tag for signed 16-bit scores.
  * @param[in] rank Matrix row for the reference symbol.
  * @param[in] query_pointer Query ranks readable for every active lane.

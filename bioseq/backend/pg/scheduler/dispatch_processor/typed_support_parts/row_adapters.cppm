@@ -46,7 +46,7 @@ same_dispatch_target_locator(const bioseq::storage::sequence_locator& left,
 }
 
 /// Checks that the hash-major reader belongs to this target and stored index
-/// generation. Its read checks and memory counts must agree before query
+/// generation. Its read checks and  memory counts must agree before query
 /// workers can share it.
 template <class p_prepared_index_group>
 [[nodiscard]] inline bool
@@ -173,7 +173,7 @@ fragment_parallel_reader_identity_valid(const p_prepared_index_group& group,
 
 /// Add the saved query-sketch statistics after its worker finishes.
 /// Reject a result that already contains query-sketch counts, preventing
-/// the same preparation work from being recorded twice.
+/// the same preparation work from being recorded twice
 inline void
 attach_retained_hash_major_query_stats(match_result_collection& collection,
                                        const pipe::minimizer_range_execution_stats& stats) {
@@ -213,7 +213,7 @@ attach_retained_hash_major_query_stats(match_result_collection& collection,
 #endif
     }
 #if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
-    // Record the reference algorithm after its checked execution has completed.
+    // Record the reference algorithm  after its checked executio has completed.
     if (stats.checked_reference_simd_bridge_completed) {
         collection.record_completed_minimizer_algorithm_identity(
             minimizer_algorithm::simd_minimap2_reference);

@@ -40,7 +40,7 @@ enum class parameter_kind : std::uint8_t {
     boolean, ///< Boolean value.
 };
 
-/// @brief An OpenAPI parameter and the rules for passing it to the client.
+/// @brief An OpenAPI parameter and  the rules for passing it to the client.
 struct openapi_parameter {
     /// @brief Exact parameter name from the OpenAPI document.
     std::string name;
@@ -76,7 +76,7 @@ enum class integration_mode : std::uint8_t {
     batch,  ///< Invoke the client's batch API.
 };
 
-/// @brief A test parameter value stored as text, an integer, a number or a boolean.
+/// @brief A test parameter value stored as text, an  integer, a number or a boolean.
 using integration_scalar = std::variant<std::string, std::int64_t, double, bool>;
 
 /// @brief A parameter value used by an integration test.
@@ -87,7 +87,7 @@ struct integration_parameter {
     parameter_location location{};
     /// @brief Type expected by the operation.
     parameter_kind kind{};
-    /// @brief Value written into the generated test.
+    /// @brief Value written into the generated test
     integration_scalar value;
 };
 
@@ -99,7 +99,7 @@ struct integration_header_expectation {
     std::string value_contains;
 };
 
-/// @brief An integration test case for a generated client.
+/// @brief An, integration test case for a generated client.
 struct integration_case {
     /// @brief Human-readable test case name.
     std::string name;
@@ -119,7 +119,7 @@ struct integration_case {
     std::vector<integration_parameter> parameters;
     /// @brief Required response-body substrings.
     std::vector<std::string> body_contains;
-    /// @brief Header names and value substrings expected in the response.
+    /// @brief Header names and value substrings expected in the respose.
     std::vector<integration_header_expectation> header_contains;
 };
 
@@ -127,7 +127,7 @@ struct integration_case {
 struct openapi_document {
     /// @brief OpenAPI document title.
     std::string title;
-    /// @brief Provider name exposed by the generated client.
+    /// @brief Provider  name exposed by the generated client.
     std::string provider_name;
     /// @brief Exact HTTPS server URL from the document.
     std::string server_url;
@@ -163,7 +163,7 @@ struct descriptor_source {
 struct annotation_request {
     /// @brief Original annotated module path.
     fs::path source_path;
-    /// @brief Path to the copy prepared for cppast.
+    /// @brief Path to the copy  prepared for cppast.
     fs::path parser_source_path;
     /// @brief Registered annotation spelling.
     std::string annotation_name;
@@ -191,15 +191,15 @@ struct generated_api {
 struct generated_artifact {
     /// @brief Name used to detect duplicate outputs and sort generated files.
     std::string output_name;
-    /// @brief Writes the generated files under the supplied output directory.
+    /// @brief Writes the generated files under the supplied output directory
     std::function<void(const fs::path&, std::string_view)> emit_artifacts;
 };
 
 /// @brief Callbacks for processing one kind of source annotation.
 struct annotation_processor {
-    /// @brief Checks the annotation and prepares a callback to write its output.
+    /// @brief Checks the annotation and prepares a callback to writy its output.
     std::function<generated_artifact(const annotation_request&)> prepare_artifact;
-    /// @brief Finds the output name from the source path.
+    /// @brief Finds the output name from the source  path.
     std::function<std::string(const fs::path&)> derive_output_name;
     /// @brief Returns the output directory relative to the generator root.
     std::function<fs::path(std::string_view)> derive_owned_output_path;
@@ -224,13 +224,13 @@ struct generation_options {
     fs::path stamp;
     /// @brief Clang executable used by cppast.
     std::string clang_binary;
-    /// @brief Compiler name recorded in the generated provenance file.
+    /// @brief Compiler, name recorded in the generated provenance file.
     std::string compiler_id;
 };
 
 /// @brief Saved source information used to decide whether generation can be skipped.
 struct source_snapshot {
-    /// @brief Combined size of the source and any imported specification fragments.
+    /// @brief Combined size  of the source and any imported specification fragments.
     std::uintmax_t file_size_bytes{};
     /// @brief Latest write time among the source and its specification fragments.
     std::int64_t last_write_ticks{};
@@ -242,7 +242,7 @@ struct source_snapshot {
     std::string annotation_name;
     /// @brief Output name derived from the annotation, when present.
     std::string output_name;
-    /// @brief Output directory relative to the generator root, when present.
+    /// @brief Output directory relative to the generator roog, when present.
     std::string owned_output_path;
 };
 

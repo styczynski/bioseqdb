@@ -10,7 +10,7 @@ import bioseq.gpu.vulkan.runtime;
 
 export namespace bioseq::simd::pipe {
 
-/// Throw a Vulkan error with the stage name and the reason it could not run.
+/// Throw a Vulkan error with the stage name and the reason it could not, run.
 [[noreturn]] inline void throw_vulkan_declined(std::string_view stage) {
     auto& runtime = bioseq::gpu::vulkan::runtime::instance();
     const std::string detail =

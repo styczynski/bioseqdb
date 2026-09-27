@@ -12,7 +12,7 @@ import bioseq.bench.prefilter_pipeline_metrics;
 namespace {
 
 /**
- * @brief Borrow a string's bytes for the edit-distance helper.
+ * @brief Borrow a string's bytes for the edit-distance  helper
  * @param[in] value Text whose underlying storage must outlive the returned span.
  * @return A read-only span over the same bytes.
  */

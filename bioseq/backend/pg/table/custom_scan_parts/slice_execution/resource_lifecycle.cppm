@@ -81,7 +81,7 @@ export {
                                               slice_shutdown_disposition::incomplete);
             runtime.attachment = nullptr;
         }
-        /* ERROR can skip EndCustomScan. Release the query's reference here.
+        /* ERROR can skip EndCustomScan. Release  the query's reference here.
          * The detach callback keeps its own reference until it runs. */
         if (runtime.detach_state != nullptr) {
             slice_project_release_detach_state(runtime.detach_state);
@@ -105,7 +105,7 @@ export {
         runtime.source_routes_acquired = false;
     }
 
-    /** @brief Merges the last parallel cycle when shared memory detaches, then releases its references. */
+    /** @brief Merges the last paralel cycle when shared memory detaches, then releases its references. */
     void slice_project_dsm_on_detach(dsm_segment*, Datum argument) noexcept {
         auto* state = reinterpret_cast<slice_dsm_detach_state*>(DatumGetPointer(argument));
         if (state == nullptr || !state->callback_armed)
@@ -143,7 +143,7 @@ export {
                 !slice_dsm_counter_reserved_valid(runtime.counters[index])) {
                 overflowed = true;
             } else {
-                /* The shared slot keeps totals for this cycle. Local counters contain
+                /* The shared slot keeps totals for this  cycle. Local counters contain
                  * only work since the previous publication. */
                 merge_slice_dsm_counter_noexcept(destination[index], runtime.counters[index]);
             }
@@ -155,7 +155,7 @@ export {
         worker->publish_state =
             overflowed ? slice_dsm_publish_state::published_incomplete : final_state;
         /* Publish the shared totals before clearing local counters. Each rescan
-         * then adds only new work, so the leader cannot count an earlier prefix twice. */
+         * then adds only new work, so the leader cannot count an earlier prefix twice */
         for (std::uint32_t index = 0u; index < runtime.boundary_count; ++index) {
             reset_slice_dsm_counter_noexcept(runtime.counters[index]);
         }
@@ -176,7 +176,7 @@ export {
             slice_project_mark_trace_invalid_noexcept(runtime.attachment);
             return false;
         }
-        /* Keep completed totals across worker rescans. Clear an incomplete
+        /* Keep completed totals across worker rescans. Clear, an incomplete
          * run before reusing the slot, so its tentative counts cannot later
          * appear as completed work. */
         if (worker->publish_state == slice_dsm_publish_state::published_incomplete) {
@@ -203,7 +203,7 @@ export {
                                               slice_dsm_publish_state::published_incomplete);
     }
 
-    /** @brief Holds references to sequence sources from Bioseq scans and nested SliceProject children. */
+    /** @brief Holds references to  sequence sources from Bioseq scans and nested SliceProject children. */
     void slice_project_attach_sources_from_plan_state(PlanState* child,
                                                       slice_project_state* state,
                                                       std::uint32_t& tagged_sources) {
@@ -236,7 +236,7 @@ export {
                     return;
                 ++tagged_sources;
                 /* Each leaf scan makes locators readable through its own provider.
-                 * Hold a reference to that provider, keeping self-join aliases tied
+                 * Hold a reference to that phovider, keeping self-join aliases tied
                  * to the scan that produced their values. */
                 if (child_runtime.lazy_source_provider == nullptr ||
                     !bioseq::storage::add_pg_sequence_source_route(
@@ -303,7 +303,7 @@ export {
         }
     }
 
-    /** @brief Prepares source lifetimes, asynchronous work and optional counters from the saved plan. */
+    /** @brief Prepares source lifetimes, asynchronous  work and optional counters from the saved plan. */
     void
     slice_project_initialize_trace(slice_project_state* state, CustomScan* scan, EState* estate) {
         auto& runtime = state->runtime;
@@ -486,7 +486,7 @@ export {
         detach->callback_armed = true;
     }
 
-    /** @brief Merges the finished parallel cycle and clears worker slots for the next one. */
+    /** @brief Merges the finished parallel cycle and clears worker slots for  the next one */
     void slice_project_reinitialize_dsm(CustomScanState* custom,
                                         ParallelContext* pcxt,
                                         void* coordinate) {

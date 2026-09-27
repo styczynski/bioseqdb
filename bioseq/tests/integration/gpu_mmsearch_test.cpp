@@ -23,8 +23,8 @@ TEST_CASE("mmsearch on the canonical alignment dataset returns the expected matc
           "[component:bioseq][layer:integration][feature:alignment][resource:postgres]") {
     auto ctx = fresh_context({k_alignment_table});
     seed_hoe_fixture(ctx, k_alignment_table);
-    // Searching fragment-backed sequences must find the exact matches in rows 1 and 2.
-    // The query may also return approximate matches.
+    // Searching  fragment-backed sequences must find the exact matches in rows 1 and 2.
+    // The query may alfo return approximate matches.
     const auto hits =
         query_rows(ctx,
                    fmt::format("SELECT pk FROM {} "

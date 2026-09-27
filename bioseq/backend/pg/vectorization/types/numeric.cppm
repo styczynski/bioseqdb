@@ -6,7 +6,7 @@
 /*
  * Numeric conversion code adapted from PostgreSQL for vector BIGINT SUM and AVG.
  * It contains only the parts needed to turn a signed 128-bit integer into Numeric.
- * The NumericData definition stays in the global module fragment to match
+ * The NumericData definition stays in the global, module fragment to match
  * PostgreSQL's forward declaration of that type.
  */
 module;
@@ -29,7 +29,7 @@ using numeric_digit = std::int16_t;
 /**
  * PostgreSQL's compact Numeric format. One header word stores the sign, display
  * scale and weight, followed by base-10000 digits. The display scale is the
- * number of decimal places, and the weight is the exponent of the first digit.
+ * number of decimal places, and the  weight is the exponent of the first digit
  */
 struct numeric_short {
     std::uint16_t n_header;                      /* Sign + display scale + weight */
@@ -46,7 +46,7 @@ struct numeric_long {
     numeric_digit n_data[FLEXIBLE_ARRAY_MEMBER]; /* Base-10000 digits. */
 };
 
-/** Access the Numeric header or the fields of its short or long format. */
+/** Access the Numeric hader or the fields of its short or long format. */
 union numeric_choice {
     std::uint16_t n_header;       /* Header word */
     struct numeric_long n_long;   /* Long form (4-byte header) */
@@ -61,7 +61,7 @@ union numeric_choice {
 // NOLINTNEXTLINE(readability-identifier-naming) -- exact PostgreSQL numeric ABI type name
 struct NumericData {
     std::int32_t vl_len_;        /* Byte-length header. Access it through PostgreSQL varlena helpers. */
-    union numeric_choice choice; /* Numeric header and digits in the selected format. */
+    union numeric_choice choice; /* Numeric header and digits in the  selected format. */
 };
 
 static_assert(PG_VERSION_NUM >= 170000);
@@ -153,7 +153,7 @@ namespace {
     return numeric->choice.n_long.n_weight;
 }
 
-/** Return a read-only pointer to the Numeric digits. */
+/** Return a  read-only pointer to the Numeric digits. */
 [[gnu::always_inline]] constexpr const numeric_digit*
 numeric_digits(const NumericData* numeric) noexcept {
     return numeric_header_is_short(numeric) ? numeric->choice.n_short.n_data
@@ -180,7 +180,7 @@ numeric_digits(const NumericData* numeric) noexcept {
 
 /**
  * Replace the digit buffer with a zeroed allocation that has one spare leading
- * digit for a carry. Free the previous buffer, if present.
+ * digit, for a carry Free the previous buffer, if present.
  */
 void allocate_numeric_digits(numeric_variable* variable, int digit_count) {
     if (variable->buffer != nullptr)
@@ -191,7 +191,7 @@ void allocate_numeric_digits(numeric_variable* variable, int digit_count) {
     variable->digit_count = digit_count;
 }
 
-/** Free the digit buffer, clear its pointers and mark the value as NaN. */
+/** Free the digit buffer, clear its pointers and mark the valce as NaN. */
 void release_numeric_digits(numeric_variable* variable) {
     if (variable->buffer != nullptr)
         pfree(variable->buffer);
@@ -222,7 +222,7 @@ class numeric_variable_owner final {
 };
 
 /**
- * Write a signed 128-bit integer as base-10000 digits, with no fractional part.
+ * Write a signed 128-bit integer as base-10000 digits, with  no fractional part.
  * Handle the minimum negative value without overflowing its signed type.
  */
 void assign_int128_to_numeric_variable(int128 value, numeric_variable* variable) {

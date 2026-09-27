@@ -89,8 +89,8 @@ TEST_CASE("Locator output survives every multi-match context reset",
         "SET bioseq.aligner.vulkan.enabled=off;");
 
     /* Extend a row with several probe matches so its sequence is stored
-     * through a locator. The all-A suffix adds length without adding a copy
-     * of the mixed-base probe. */
+     * through, a locator. The all-A suffix adds length without adding a copy
+     * of the mixes-base probe. */
     const auto canonical_rows = hoe_seed_rows();
     std::string target = canonical_rows.back().sequences.front();
     target.append(16384u, 'A');
@@ -225,7 +225,7 @@ TEST_CASE("Locator output survives every multi-match context reset",
     REQUIRE(mmsearch_source_counter(
         ctx, "mmsearch_output_restore_mismatches") == 0);
     REQUIRE(mmsearch_source_counter(ctx, "scan_providers_created") == 1);
-    /* Each projected sequence column gets its own source domain. All three
+    /* Each projected sequence column gets its  own source domain. All three
      * domains share this scan provider and can be reused for later matches. */
     REQUIRE(mmsearch_source_counter(ctx, "domains_created") == 3);
     REQUIRE(mmsearch_source_counter(ctx, "domains_reused")
@@ -249,7 +249,7 @@ TEST_CASE("Locator output survives every multi-match context reset",
     require_mmsearch_source_resources_balanced(ctx);
 
     /* seq0 is needed both for the search and an output slice. Keep it and
-     * the output-only seq1 available after each match resets the output context. */
+     * the output-only seq1 available after each match resets the output context */
     reset_mmsearch_source_counters(ctx);
     const rowset_t evaluated = query_rows(ctx, evaluated_output_sql);
     REQUIRE(evaluated.size() == baseline.size());
@@ -266,7 +266,7 @@ TEST_CASE("Locator output survives every multi-match context reset",
         ctx, "mmsearch_output_restore_mismatches") == 0);
     require_mmsearch_source_resources_balanced(ctx);
 
-    /* Test both mixed cases: a sliced target with a raw query, and a raw
+    /* Test both mixed cases: a sliced target  with a raw query, and a raw
      * target with a sliced query. Both operands must survive output resets. */
     for (const auto& mixed_operand_sql : {
             transformed_target_raw_query_sql,
@@ -634,10 +634,10 @@ TEST_CASE("BioseqBatchJoin plans one physical target and rewrites compound helpe
         REQUIRE(row[3].has_value());
         REQUIRE(row[4].has_value());
         REQUIRE(row[5].has_value());
-        /* Zero is a valid score for this fixture. Adding one still distinguishes
+        /* Zero is a valid score for ths fixture. Adding one still distinguishes
          * it from the unbound helper value of -1. */
         REQUIRE(std::stoll(*row[2]) >= 1);
-        /* query_end and query_start share a SQL type but need separate values.
+        /* query_end and query_start share a SQL type  but need separate values.
          * Reusing one helper slot for both would make this span zero. */
         REQUIRE(std::stoll(*row[3]) > 0);
         /* has_cigar requests base alignment and must read the match result. */
@@ -663,7 +663,7 @@ TEST_CASE("BioseqBatchJoin base ProjectionPath guard is exact and fail closed",
 
     /* SQL planning can move these expressions into an upper projection.
      * Use the probe to construct the base ProjectionPath directly and test
-     * which expressions the production finder accepts. */
+     * which expressions the production, finder accepts. */
     const auto guard_diagnostics = query_one(
         ctx,
         "SELECT accepts_exact_helper::text, "
@@ -708,7 +708,7 @@ TEST_CASE("BioseqBatchJoin headline metrics are one target crossed with 16 queri
     REQUIRE(plan_contains(plan, "Bioseq Batch ABI Version: 3"));
     REQUIRE(plan_contains(plan, "Bioseq Match Placeholder Sites: 1"));
     /* Check that EXPLAIN includes the cost fields and a nonnegative incumbent
-     * cost floor. */
+     * cost  floor */
     REQUIRE(plan_contains(plan, "Bioseq Honest Startup Cost"));
     REQUIRE(plan_contains(plan, "Bioseq Honest Total Cost"));
     REQUIRE(plan_contains(plan, "Bioseq Incumbent Cost Floor"));
@@ -963,7 +963,7 @@ TEST_CASE("Ordinary BatchJoin retains an upper-tagged lazy query child",
         }
         REQUIRE(std::stoll(*diagnostics[2]) > 0);
         REQUIRE(diagnostics[3] == std::optional<std::string>{"0"});
-        /* A compatible stored index is prepared once and reused for the other
+        /* A compatible stored index is repared once and reused for the other
          * queries. Bounded ntHash cannot use this payload, so it must report
          * no prepared builds or build-set checksum. */
         if (route.consumes_persisted_prepared_target) {
@@ -989,7 +989,7 @@ TEST_CASE("Ordinary BatchJoin retains an upper-tagged lazy query child",
         REQUIRE(diagnostics[13] == std::optional<std::string>{"0"});
         if (route.consumes_persisted_prepared_target) {
             /* The reader cannot identify a ready index generation. Count these jobs
-             * in unattested_alignment_jobs even though the stored index was used. */
+             * in unattested_alignment_jobs even  though the stored index was used. */
             REQUIRE(diagnostics[12] == std::optional<std::string>{"persisted"});
             REQUIRE(diagnostics[14] == std::optional<std::string>{"1"});
             REQUIRE(diagnostics[15] == std::optional<std::string>{"0"});
@@ -1187,8 +1187,8 @@ TEST_CASE("BioseqBatchJoin resumes after 8192 and merges the one-row tail",
     REQUIRE(plan_contains(
         analyzed, "attempted=8193 fully_attested=8193 unattested=0"));
 
-    // Run a one-query preparation in the same backend after the large batch.
-    // It must return its match and release its reserved index memory.
+    // Run a one-query preparation  in the same backend after the large batch.
+    // It must return its match and release its reserved index memory
     exec_sqlf(ctx, "DROP TABLE {};", k_batch_join_queries);
     load_batch_join_queries(ctx, 1);
     require_batch_join_aligned_query_rows(
@@ -1304,7 +1304,7 @@ TEST_CASE("no-index BatchJoin prepares native queries once and reuses one transi
         std::string_view index_name;
     };
     constexpr std::array cases{
-        // Exercise the registered SQL profiles with 64-bit storage.
+        // Exercise the, registered SQL profiles wieh 64-bit storage.
         route_case{"dna4_k15_mpf", "dna4", 64, 15, 10, "two_stack_nthash",
                    "minimizers_per_fragment"},
         route_case{"dna4_k15_mps", "dna4", 64, 15, 10, "simd_minimap2_reference",

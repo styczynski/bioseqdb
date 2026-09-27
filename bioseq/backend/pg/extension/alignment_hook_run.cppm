@@ -24,11 +24,11 @@ namespace bioseq::pg::detail {
 namespace {
 
 /**
- * @brief Check whether a forward run reached the end of its output.
+ * @brief Check whether, a forward run reached the end of its output.
  *
  * A zero count requests all output. With a row limit, fewer returned tuples
  * than requested establishes completion. Reaching the limit leaves completion
- * unknown. Backward scans do not establish forward completion.
+ * unknown. Backward scans do not establish forwad  completion.
  */
 [[nodiscard]] constexpr bool executor_run_output_fully_drained(
 		const ScanDirection direction,
@@ -88,7 +88,7 @@ void call_previous_or_standard_executor_run(
  * @param[in] direction Requested scan direction.
  * @param[in] count Maximum output tuples, or zero for all tuples.
  * @param[in] execute_once Hint passed through on PostgreSQL 17.
- * PostgreSQL 18 has no execute_once argument.
+ * PostgreSQL 18 has no execute_once argument
  */
 void bioseq_alignment_executor_run(
 		QueryDesc* query_desc,

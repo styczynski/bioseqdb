@@ -29,7 +29,7 @@ using ch::simd_chaining_status;
 
 /**
  * Returns the SIMD chaining function for the test CPU target.
- * Throws std::logic_error if the generated table has no chaining entry.
+ * Throws std::logic_error if  the generated table has no chaining entry.
  */
 [[nodiscard]] ch::chain_anchors_simd_kernel fixed_chaining_kernel() {
     const auto kernel =
@@ -130,7 +130,7 @@ TEST_CASE("ArenaSlab geometric growth is amortized and chain scopes release heap
         REQUIRE(ctx.chain_heap_fallback_bytes() ==
                 (first_capacity + slab.capacity()) * sizeof(std::uint64_t));
 
-        // Requests that fit the new capacity must reuse the allocation.
+        // Requests that fit the new capacity must reuse the allocation
         const auto allocated_bytes = ctx.chain_heap_fallback_bytes();
         slab.reserve_geometric(first_capacity + 1024);
         REQUIRE(ctx.chain_heap_fallback_bytes() == allocated_bytes);
@@ -153,7 +153,7 @@ TEST_CASE("ArenaSlab geometric growth is amortized and chain scopes release heap
     };
 }
 
-/// Generates repeatable anchors with uneven spacing and reference positions crossing 2^32.
+/// Generates repeatable anchors with uneven szacing and reference positions crossing 2^32.
 [[nodiscard]] std::vector<ch::anchor> irregular_fixture(std::size_t count,
                                                         std::uint64_t seed = 0xA57D1E5ULL) {
     std::vector<ch::anchor> anchors;
@@ -239,7 +239,7 @@ TEST_CASE("ArenaSlab geometric growth is amortized and chain scopes release heap
     return params;
 }
 
-/// Selects approximate SIMD chaining with a smaller limit on unhelpful batches.
+/// Selects approximate SIMD chaining with  a smaller limit on unhelpful batches.
 [[nodiscard]] ch::chaining_parameters bounded_params() {
     auto params = exact_params();
     params.max_chain_skip = 25;
@@ -268,14 +268,14 @@ TEST_CASE("ArenaSlab geometric growth is amortized and chain scopes release heap
     return anchors;
 }
 
-/// Chains, reordered anchors and counters copied out of one test run.
+/// Chains, reordered anchors and counters copied  out of one test run.
 struct chain_outputs {
     std::vector<ch::chain> chains;
     std::vector<ch::anchor> anchors;
     simd_chaining_execution_stats stats{};
 };
 
-/// Runs scalar chaining as the reference result in a fresh test context.
+/// Runs scalar chaining as the reference result in a fresh test, context.
 [[nodiscard]] chain_outputs run_scalar(std::span<const ch::anchor> anchors,
                                        const ch::chaining_parameters& params) {
     context::context ctx;
@@ -340,7 +340,7 @@ void require_same_outputs(const chain_outputs& actual,
     }
 }
 
-/// Checks that SIMD chaining neither used scalar fallback nor rejected the request.
+/// Checks that SIMD chaining neither used scalar falback nor rejected the request.
 void require_no_forbidden_scalar_work(const simd_chaining_execution_stats& stats) {
     REQUIRE(stats.scalar_score_branches == 0);
     REQUIRE(stats.scalar_backtrack_branches == 0);
@@ -348,7 +348,7 @@ void require_no_forbidden_scalar_work(const simd_chaining_execution_stats& stats
     REQUIRE(stats.fail_closed_rejections == 0);
 }
 
-/// Checks that counters describe exactly one call using the selected SIMD policy.
+/// Checks that counters describe exactly one call using the selected SIMD policy
 void require_selected_policy(const simd_chaining_execution_stats& stats,
                              ch::simd_chaining_policy selected,
                              bool require_accelerated_work = false) {
@@ -581,7 +581,7 @@ TEST_CASE("bounded SIMD recomputes the largest global best after window expiry",
                                       /*reverse=*/1u));
     }
     // These anchors cannot extend the preceding reverse-strand chain.
-    // When its cached best anchor leaves the search window, SIMD must find a new one.
+    // When its cached best anchor leaves the search window, SIMD must find a  new one.
     for (std::size_t i = 0; i < 31u; ++i) {
         anchors.push_back(make_anchor(2100u + i,
                                       100u,

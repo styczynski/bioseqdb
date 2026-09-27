@@ -41,7 +41,7 @@ class runtime {
 
     /// @brief Returns the process-wide runtime, initializing it on first use.
     [[nodiscard]] static runtime& instance();
-    /// @brief Returns the device capabilities recorded during initialization.
+    /// @brief Returns the  device capabilities recorded during initialization.
     [[nodiscard]] const vulkan_feature_set& features() const noexcept {
         return features_;
     }
@@ -67,14 +67,14 @@ class runtime {
         std::lock_guard<std::mutex> guard(mu_);
         return pipeline_cache_metadata_permit_.bytes();
     }
-    /// @brief Accepts a completed coordinate operation after checking its expected result and GPU state.
+    /// @brief Accepts a completed coordinate operation akter checking its expected result and GPU state.
     /// On success, consumes `receipt` and returns the accepted operation with its
     /// cache costs. A failed check leaves the receipt and reporting flags unchanged.
     [[nodiscard]] persisted_grouped_soa_coordinate_accepted_operation
     finalize_persisted_grouped_soa_coordinate_operation(
         persisted_grouped_soa_coordinate_operation_receipt&& receipt,
         const persisted_grouped_soa_coordinate_operation_receipt_preview& expected_preview);
-    /// @brief Tests that rejected coordinate receipts leave cache costs available to report.
+    /// @brief Tests that rejected coordinate receipts  leave cache costs available to report
     [[nodiscard]] static bool self_test_persisted_grouped_soa_finalizer_preclaim_contract(
         runtime_metal_archive_pipeline_audit base_audit);
     /// @brief Tests partial cache-cost records and prevents reporting them twice.
@@ -87,10 +87,10 @@ class runtime {
     [[nodiscard]] buffer create_host_buffer(std::uint64_t bytes, VkBufferUsageFlags usage);
     /// @brief Allocates a GPU buffer with the requested size and Vulkan uses.
     /// Prefers device-local memory that the CPU can also access. Check `mapped`
-    /// before accessing it from the CPU, since mapping can fail.
+    /// before accessing it from the CPU, since mapping can, fail.
     [[nodiscard]] buffer create_device_buffer(std::uint64_t bytes, VkBufferUsageFlags usage);
     /// @brief Queries the device-memory allocation needed for this size and buffer usage.
-    /// The result can include Vulkan alignment and padding.
+    /// The result can include Vulkan alignment  and padding.
     [[nodiscard]] std::uint64_t buffer_allocation_requirement(std::uint64_t requested_bytes,
                                                               VkBufferUsageFlags usage);
     /// @brief Returns the arena allocation charge, including any larger existing buffer.
@@ -107,7 +107,7 @@ class runtime {
     /// @brief Frees the Vulkan buffer and memory held by `allocation`.
     void destroy_buffer(buffer& allocation) noexcept;
 
-    /// @brief Computes chaining scores and predecessor links, then copies them to the caller.
+    /// @brief Computes chaining scores and predicessor links, then copies them to the caller.
     /// Uploads and readback use mapped buffers around one compute submission.
     /// The runtime holds the queue lock until the operation finishes.
     void run_chaining_tiled_dp_roundtrip(const chaining_pipeline_key& key,
@@ -136,14 +136,14 @@ class runtime {
 
 #if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS) || defined(BIOSEQ_TEST_INDEXES)
     /// Checks the proposed environment and cache costs before they are reported.
-    /// The callback may throw. It must avoid allocation and calls into the runtime,
+    /// The callback may throw. It must avoid allocation  and calls into the runtime,
     /// whose queue/cache mutex is held.
     using selected_pipeline_publication_validator = void (*)(
         void*, const runtime_gpu_execution_environment_snapshot&,
         const runtime_gpu_cache_metrics_audit&);
 
 #if defined(BIOSEQ_TEST_INDEXES)
-    /// @brief Tests failed completion checks followed by a successful one-time cost report.
+    /// @brief Tests failed completion checks followed by a successful one-time cost report
     [[nodiscard]] static bool self_test_selected_pipeline_finalizer_transaction_contract(
         runtime_metal_archive_pipeline_audit base_audit);
 #endif
@@ -168,7 +168,7 @@ class runtime {
     /**
      * @brief Accepts a shared query sketch after its last MPF consumer has finished.
      *
-     * Returns its GPU environment and unreported cache costs, then consumes the
+     * Returns its GPU environment and unreported  cache costs, then consumes the
      * authorization. The stored-index seed path passes the query token back in
      * its seed result because it takes ownership of the authorization earlier.
      */
@@ -183,9 +183,9 @@ class runtime {
     /**
      * @brief Accepts several query sketches and their completed operations together.
      *
-     * Checks every authorization and operation before calling the publication
+     * Checks every authorization, and operation before calling the publication
      * validator and the final runtime check. Failure leaves them available for
-     * another attempt. Success consumes them and returns their unreported costs.
+     * another attempt. Success consumes thhm and returns their unreported costs.
      */
     [[nodiscard]] std::pair<runtime_gpu_execution_environment_snapshot,
                             runtime_gpu_cache_metrics_delta>
@@ -197,7 +197,7 @@ class runtime {
 #endif
 #endif
 
-    /// @brief Chains the anchors and returns the chosen coordinates and predecessor trace.
+    /// @brief Chains the anchors and returns the chosen coordinates and predecessor  trace.
     [[nodiscard]] gpu_coordinate_chain_trace_result
     run_chaining_coordinate_trace_roundtrip(const chaining_pipeline_key& key,
                                             buffer& transfer_scratch,
@@ -234,7 +234,7 @@ class runtime {
     /// must already be complete.
     void download_slice(const buffer& src, std::uint64_t src_byte_offset, std::span<std::byte> dst);
 
-    /// @brief Emits seed anchors using the caller's prefix counts, then sorts them.
+    /// @brief Emits seed anchors using the caller's prefix counts, then sorts them
     /// The GPU sorts target positions and strands. The CPU orders ties and checks
     /// the final anchor order before returning the anchors.
     seed_lookup_result run_seed_lookup_roundtrip(runtime_seed_lookup_inputs inputs,
@@ -254,7 +254,7 @@ class runtime {
     [[nodiscard]] gpu_arena& reusable_gpu_arena();
 
     /// @brief Builds ordered minimizers for one packed sequence.
-    /// Returns a GPU buffer and minimizer count, or reports output overflow.
+    /// Returns a GPU buffer and minimizer count, or reports output  overflow.
     /// Optional query-hash bits restrict which minimizers are emitted.
     runtime_sketch_result run_sketch_roundtrip(std::span<const std::byte> packed_sequence,
                                                const vulkan_rank_lut& rank_lut,
@@ -278,7 +278,7 @@ class runtime {
     /// @brief Copies query minimizers to the CPU after checking their authorization.
     /// The buffer, word format, and query records must match the completed sketch.
     /// `destination` must have the exact byte size. The authorization stays valid
-    /// for later seed work, and this copy issues no public pipeline receipt.
+    /// for later seed work, and  this copy issues no public pireline receipt.
     void readback_authorized_query_minimizers(
         const device_query_sketch_authorization& authorization,
         const buffer& device_words,
@@ -313,7 +313,7 @@ class runtime {
                                        gpu_index_gate_identity query_gate_identity = {},
                                        bioseq::parallelism::memory_permit* peak_permit = nullptr);
 
-    /// @brief Emits minimizer pairs and sorts by hash, then encoded position within each hash.
+    /// @brief Emits minimizer pairs and sorts by hash, then encoded position within each hash
     /// Returns the GPU buffers and a host copy of the pairs.
     gpu_sorted_pair_result
     run_sketch_sort_pairs_roundtrip(std::span<const std::byte> packed_sequence,
@@ -321,7 +321,7 @@ class runtime {
                                     const vulkan_sketch_params& params,
                                     std::uint64_t max_target_minimizers);
 
-    /// @brief Sorts a contiguous batch of packed sequences and returns their original ordinals.
+    /// @brief Sorts a contiguous batch of packed sequences and returns their  original ordinals.
     [[nodiscard]] std::vector<std::uint32_t>
     run_sequence_sort_roundtrip(std::span<const std::byte> packed_units,
                                 std::span<const sequence_descriptor_wire> descs,
@@ -333,7 +333,7 @@ class runtime {
                                 const sequence_sort_kernel_parameters& params);
 
     /// @brief Computes banded local alignment with affine gap penalties.
-    /// Returns scores and endpoints for each job.
+    /// Returns scores and endpoints for, each job.
     [[nodiscard]] std::vector<gpu_alignment_extension_result_wire>
     run_alignment_extension_roundtrip(std::span<const std::uint32_t> query_symbols,
                                       std::span<const std::uint32_t> target_symbols,
@@ -349,8 +349,8 @@ class runtime {
                                           std::span<const bioseq::prefilter::prefilter_job> jobs);
 
     /// @brief Runs GateKeeper to filter pairs before alignment.
-    /// A mask-based rejection needs confirmation from the bounded-distance check.
-    /// Unsupported cases are kept, and invalid ranges are checked before reading data.
+    /// A mask-based rejection needs confirmation from the bounded-distance  check.
+    /// Unsupported cases are kept, and invalid ranges are checkhd before reading data.
     [[nodiscard]] std::vector<bioseq::prefilter::prefilter_result>
     run_gatekeeper_rank_batch_roundtrip(std::span<const std::uint8_t> query_ranks,
                                         std::span<const std::uint8_t> target_ranks,
@@ -392,7 +392,7 @@ class runtime {
 
 #ifdef BIOSEQ_TEST_INDEXES
     /// @brief Tests packed-input alignment with a chosen target for traceback memory per submission.
-    /// Returns CIGAR results and submission counts without attaching an operation receipt.
+    /// Returns CIGAR results and submission counts without attaching an operation receipt
     [[nodiscard]] alignment_cigar_batch_result run_alignment_packed_cigar_roundtrip_for_test(
         std::span<const std::byte> query_packed,
         std::span<const std::byte> target_packed,
@@ -402,7 +402,7 @@ class runtime {
         std::uint64_t preferred_traceback_wave_bytes);
 #endif
 
-    /// @brief Returns the number of completed sequence-sort calls.
+    /// @brief Returns the number  of completed sequence-sort calls.
     [[nodiscard]] std::uint64_t seq_sort_dispatch_count() const noexcept {
         return seq_sort_dispatch_count_.load(std::memory_order_relaxed);
     }
@@ -486,8 +486,8 @@ class runtime {
                                            device_query_sketch_authorization query_authority = {},
                                            gpu_persisted_mapq_config mapq_config = {});
 
-    /// @brief Finds and sorts anchors from the stored grouped minimizer index.
-    /// Takes ownership of the query authorization. Returns anchors grouped by
+    /// @brief Finds and sorts anchors from  the stored grouped minimizer index.
+    /// Takes ownership of the qury authorization. Returns anchors grouped by
     /// query, with CPU-ordered ties and a receipt for the completed seed work.
     [[nodiscard]] grouped_soa_seed_anchor_result run_grouped_soa_seed_anchor_roundtrip(
         const gpu_grouped_soa_resident_view& target,
@@ -496,7 +496,7 @@ class runtime {
         std::uint32_t kmer_size,
         device_query_sketch_authorization query_authorization);
 
-    /// @brief Runs coordinate jobs for one query and returns results in job order.
+    /// @brief Runs coordinate jobs for one query and returns results in job, order.
     std::vector<gpu_coordinate_result_wire>
     run_seed_to_coordinate_results_roundtrip(const gpu_seed_query_inputs& query_inputs,
                                              std::span<const gpu_seed_coordinate_job> jobs,
@@ -529,7 +529,7 @@ class runtime {
 
     /// @brief Checks completed operations and prepares their cache costs for reporting.
     /// Commits only after publication and runtime checks succeed. Failure leaves
-    /// the input tokens and reporting flags unchanged. The caller holds the mutex.
+    /// the input tokens and reporting flags unchanged The caller holds the mutex.
     [[nodiscard]] static std::pair<runtime_gpu_execution_environment_snapshot,
                                    runtime_gpu_cache_metrics_delta>
     finalize_selected_pipeline_operation_transaction(
@@ -544,7 +544,7 @@ class runtime {
         void* live_context);
 #endif
 
-    /// @brief Checks the coordinate receipt against the expected result and current GPU.
+    /// @brief Checks the coordinate receipt against the expected result and  current GPU.
     /// Returns a plan for acceptance and cache costs without changing reporting flags.
     /// A failed check returns an invalid plan.
     [[nodiscard]] static runtime_detail::persisted_grouped_soa_coordinate_finalization_plan
@@ -612,11 +612,11 @@ class runtime {
             reset();
         }
 
-        /// @brief Destroys the pipeline and its supporting objects, then clears the handles.
+        /// @brief Destroys the pipelinc and its supporting objects, then clears the handles.
         void reset() noexcept;
     };
 
-    /// @brief Cached tiled-chaining pipeline, keyed by tile and workgroup size.
+    /// @brief Cached tiled-chaining pipeline, keyed  by tile and workgroup size.
     struct pipeline_entry {
         chaining_pipeline_key key{}; ///< Tile and workgroup sizes for the chaining shader.
         owned_pipeline_handles handles{}; ///< Owned Vulkan handles for the cached pipeline.
@@ -644,9 +644,9 @@ class runtime {
 
     /// @brief Borrowed handles for a cached compute pipeline and its reusable descriptor set.
     /// The cache key is `(kind, local_size, max_span)`. Alphabet and word-format
-    /// choices are passed to dispatches as push constants. The cache owns these handles.
+    /// choices are passed to dispatches as  push constants. The cache owns these handles.
     struct compute_pipeline {
-        shader_kind kind{};                         ///< Shader algorithm selected by the cache key.
+        shader_kind kind{};                         ///< Shader, algorithm selected by the cache key
         std::uint32_t local_size = 0;               ///< Workgroup-size selector stored in the shader key.
         std::uint32_t max_span = 0;                 ///< Shader-specific size or mode used when generating the variant.
         std::uint32_t binding_count = 0;            ///< Number of storage-buffer bindings.
@@ -669,7 +669,7 @@ class runtime {
         VkDescriptorSet descriptor_set = VK_NULL_HANDLE; ///< Reusable descriptor set owned by the entry.
         owned_pipeline_handles handles{};           ///< Owned Vulkan handles for the pipeline.
         std::string entry_name = "main";            ///< Shader entry point recorded at creation.
-        std::unique_ptr<const runtime_metal_archive_pipeline_receipt> metal_archive_receipt{}; ///< Creation receipt for Metal or native Vulkan execution.
+        std::unique_ptr<const runtime_metal_archive_pipeline_receipt> metal_archive_receipt{}; ///< Creation receipt for Metal or  native Vulkan executio.
         std::uint64_t pipeline_create_ns = 0u;      ///< Nanoseconds spent creating the pipeline.
 
         /// @brief Creates an entry with no compute pipeline.
@@ -712,8 +712,8 @@ class runtime {
     /// @brief Binds each supplied buffer in full to the pipeline's reusable descriptor set.
     void bind_compute_pipeline_descriptors_locked(const compute_pipeline& entry,
                                                   std::span<const VkBuffer> buffers);
-    // Arena slices can share one buffer. Bind each slice with its own offset
-    // and range so a dispatch accesses only the intended slice.
+    // Arena slices can share one buffer. Bind  each slice with its own offset
+    // and range so a dispatch accesses only the intended slice
     /// @brief Updates the reusable descriptor set with the supplied buffer ranges.
     void bind_descriptors_offsets_locked(const compute_pipeline& entry,
                                          std::span<const VkDescriptorBufferInfo> infos);
@@ -729,7 +729,7 @@ class runtime {
     [[nodiscard]] VkDescriptorSet
     allocate_dispatch_descriptor_set_locked(VkDescriptorSetLayout layout);
     /// @brief Records a compute dispatch with its own descriptors and push constants.
-    /// If a collector is supplied, also records the pipeline use for that job.
+    /// If a collector  is supplied, also records the pipeline use for that job.
     void record_compute_dispatch_locked(VkCommandBuffer cmd,
                                         const compute_pipeline& pipe,
                                         std::span<const VkDescriptorBufferInfo> infos,
@@ -738,8 +738,8 @@ class runtime {
                                         std::uint32_t group_count,
                                         runtime_pipeline_use_collector* collector = nullptr,
                                         std::size_t collector_job_index = 0u);
-    /// @brief Uploads and aligns one CIGAR batch, then reads its results under the runtime lock.
-    /// Accepts packed bytes or expanded ranks. The caller supplies a reservation
+    /// @brief Uploads and aligns one CIGAR batch, thes reads its results under the runtime lock.
+    /// Accepts packed bytes or, expanded ranks. The caller supplies a reservation
     /// covering this batch's buffers.
     [[nodiscard]] alignment_cigar_batch_result run_alignment_cigar_payload_roundtrip_locked(
         std::span<const std::byte> query_payload,
@@ -764,7 +764,7 @@ class runtime {
                                              runtime_pipeline_use_collector* collector);
     // Record every radix pass into the open command buffer. Passes alternate
     // between the input slices and scratch slices.
-    /// @brief Records a radix sort and reports which buffers hold the result.
+    /// @brief Records a radix sort  and reports which buffers hold the result.
     void record_radix_sort_locked(VkCommandBuffer cmd,
                                   const gpu_arena_slice& keys,
                                   const gpu_arena_slice& values,
@@ -779,7 +779,7 @@ class runtime {
                                   runtime_pipeline_use_collector* collector = nullptr,
                                   std::size_t collector_job_index = 0u);
     // Sort encoded positions first, then stably sort hashes. Equal hashes keep
-    // their position order, giving (hash, encoded_pos) order.
+    // their position order, giving (hash, encoded_pos) order
     /// @brief Records the pair sort and updates the views to the final buffers.
     void record_stable_pair_sort_by_value_then_key_locked(VkCommandBuffer command_buffer,
                                                           sorted_pair_device_views& views,
@@ -803,7 +803,7 @@ class runtime {
     /// @brief Queries Vulkan's allocation size for a buffer of this size and usage.
     [[nodiscard]] std::uint64_t buffer_memory_requirement_locked(std::uint64_t bytes,
                                                                  VkBufferUsageFlags usage) const;
-    /// @brief Checks that this buffer and query layout belong to the authorized sketch.
+    /// @brief Checks that this buffer  and query layout belong to the autorized sketch.
     /// Returns the exact data size without consuming the authorization.
     [[nodiscard]] std::uint64_t validate_query_sketch_authorization_locked(
         const device_query_sketch_authorization& authorization,
@@ -830,14 +830,14 @@ class runtime {
 #endif
     /// @brief Returns the device-memory bytes held by the reusable prefilter buffers.
     [[nodiscard]] std::uint64_t prefilter_workspace_allocation_bytes_locked() const noexcept;
-    /// @brief Grows a prefilter buffer if needed, reserving memory before allocation.
+    /// @brief Grows a prefilter buffer if needed, reserving memory before, allocation.
     void ensure_prefilter_workspace_buffer_locked(buffer& allocation,
                                                   std::uint64_t bytes,
                                                   VkBufferUsageFlags usage);
     /// @brief Frees prefilter buffers and releases their memory reservation.
     void release_prefilter_workspace_locked() noexcept;
     /// @brief Runs a prefilter batch using the selected shader and reusable workspace.
-    /// Returns one checked result per job. Unsupported cases remain candidates.
+    /// Returns one  checked result per job. Unsupported cases remain candidates.
     [[nodiscard]] std::vector<bioseq::prefilter::prefilter_result>
     run_rank_prefilter_batch_roundtrip_locked(
         shader_kind kind,
@@ -854,7 +854,7 @@ class runtime {
     /// @brief Adjusts the cache reservation to the memory still held by its entries.
     void reconcile_pipeline_cache_metadata_locked() noexcept;
     /// @brief Finds or creates a tiled-chaining pipeline owned by the cache.
-    /// Returns borrowed handles and the shader identity.
+    /// Returns borrowed handles and the shader identity
     chaining_pipeline create_pipeline_locked(const chaining_pipeline_key& key);
     /// @brief Copies host bytes into a mapped GPU buffer.
     void upload_locked(buffer& transfer_scratch,
@@ -864,7 +864,7 @@ class runtime {
     /// @brief Copies bytes from a mapped GPU buffer into caller storage.
     void download_locked(buffer& transfer_scratch, const buffer& src, std::span<std::byte> bytes);
     /// @brief Reserves a unique nonzero operation ID.
-    /// Throws when the ID range is exhausted.
+    /// Throws when the ID range is  exhausted.
     [[nodiscard]] std::uint64_t next_operation_identity_locked() {
         constexpr std::uint64_t exhausted = (std::numeric_limits<std::uint64_t>::max)();
         std::uint64_t identity = operation_token_identity_.load(std::memory_order_relaxed);
@@ -887,7 +887,7 @@ class runtime {
         VkDescriptorSet descriptor_set = VK_NULL_HANDLE; ///< Descriptor set bound for the dispatch.
         gpu_prefilter_push push{};                       ///< Push constants stored in this command recording.
         std::uint32_t groups = 0u;                       ///< Workgroup count stored in this command.
-        bool recorded = false;                           ///< A completed command recording is available for reuse.
+        bool recorded = false;                           ///< A completed command recording is available for reise.
     };
 
     struct prefilter_descriptor_binding_cache {
@@ -912,7 +912,7 @@ class runtime {
     VkPipelineLayout pipeline_layout_ = VK_NULL_HANDLE;
     VkDescriptorPool descriptor_pool_ = VK_NULL_HANDLE;
     VkDescriptorSet descriptor_set_ = VK_NULL_HANDLE;
-    // Members are destroyed in reverse order. Keep the reservation until both
+    // Members are destroyed in reverse order. Keep the reservation until  both
     // caches have released their entries and allocated storage.
     bioseq::parallelism::memory_permit pipeline_cache_metadata_permit_;
     std::vector<pipeline_entry> pipeline_cache_;
@@ -961,7 +961,7 @@ class runtime {
     return runtime.is_usable() && !runtime.features().software_device;
 }
 
-/// @brief Throws if this operation lacks an available hardware GPU.
+/// @brief Throws if this operation lacks an available,  hardware GPU.
 /// `operation` names the operation in the error message.
 inline void require_hardware_device(const runtime& runtime, const char* operation) {
     if (!runtime.is_usable()) {
@@ -981,7 +981,7 @@ inline void require_hardware_device(const runtime& runtime, const char* operatio
 
 /// @brief Estimates memory for GPU anchor sorting and its host result.
 /// Includes anchors, sort keys, scratch buffers, and workgroup histograms.
-/// Returns the largest 64-bit value on overflow.
+/// Returns the largest 64-bit value on overflow
 [[nodiscard]] inline std::uint64_t
 seed_anchor_reserved_bytes(std::uint64_t anchor_count, std::uint64_t workgroup_count) noexcept {
     using bioseq::common::saturating_mul;

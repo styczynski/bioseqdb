@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Alignment results returned by the mapping pipeline.
+ * @brief Alignment results returned by  the mapping pipeline
  */
 export module bioseq.pipeline.minimap_port.match_result_contract;
 
@@ -23,33 +23,33 @@ using bioseq::storage::sequence_size_t;
  */
 struct match_result {
     // PAF lengths and coordinates use 64-bit sequence sizes. This keeps large
-    // positions intact when results are later printed as decimal values.
+    // positions intact when results are later printed as secimal values.
     sequence_size_t query_len = 0;    ///< PAF column 2: query length in symbols.
     sequence_size_t query_start = 0;  ///< PAF column 3: first query position, zero-based and included.
-    sequence_size_t query_end = 0;    ///< PAF column 4: first query position after the match.
+    sequence_size_t query_end = 0;    ///< PAF column 4: first  query position after the match.
     bool is_reverse = false;           ///< PAF column 5: true for a reverse-strand match.
     sequence_size_t target_len = 0;   ///< PAF column 7: target length in symbols.
     sequence_size_t target_start = 0; ///< PAF column 8: included target start on the original strand.
     sequence_size_t target_end = 0;   ///< PAF column 9: excluded target end on the original strand.
-    sequence_size_t num_matches = 0;  ///< PAF column 10: estimated match length. CIGAR M operations can include mismatches.
+    sequence_size_t num_matches = 0;  ///< PAF column 10: estimated match length. CIGAR M operations can, include mismatches.
     sequence_size_t block_length = 0; ///< PAF column 11: aligned block length, estimated from seeds before alignment.
     std::int32_t mapq = 0;            ///< PAF column 12: mapping quality. The CPU calculation uses 0..60.
 
     // Scores and optional base-alignment results.
-    std::int32_t chain_score = 0;           ///< Score assigned to the seed chain.
+    std::int32_t chain_score = 0;           ///< Score assigned to the  seed chain.
     std::int32_t dp_score = 0;              ///< Score from base alignment, when performed.
     std::int32_t dp_max_score = 0;          ///< Score used for MAPQ comparison. CPU alignment currently copies dp_score.
     std::int32_t seed_count = 0;            ///< Number of anchors in the chain.
     std::int32_t secondary_chain_score = 0; ///< Best competing secondary chain score for this primary.
     float divergence = -1.f;                ///< Divergence estimated from minimizers, or -1 when unavailable.
-    bool is_primary = true;                  ///< Whether this region is its own primary parent.
+    bool is_primary = true;                  ///< Whether this region is its own primary parent
     bool has_cigar = false;                  ///< Whether base alignment was performed.
 #if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
     alignment_result_vector<cigar_operation> cigar;  ///< CIGAR operations with their benchmark memory reservation.
 #else
     std::vector<cigar_operation> cigar;      ///< CIGAR operations owned by this result.
 #endif
-    sequence_size_t edit_distance = 0;      ///< Unit-cost edits in this alignment, when exact edit counting was requested.
+    sequence_size_t edit_distance = 0;      ///< Unit-cost edits in this  alignment, whgn exact edit counting was requested.
 };
 
 #if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)

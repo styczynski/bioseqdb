@@ -112,7 +112,7 @@ export {
     }
 
     /* Look for an existing SliceProject below Sort, IncrementalSort, Gather, or
-     * GatherMerge. Every intervening target must preserve the complete child
+     * GatherMerge. Every intervening target  must preserve the complete child
      * output, including sortgrouprefs. This check leaves the paths unchanged. */
     [[nodiscard]] bool
     slice_project_is_owner_below_target_preserving_ordering(Path* path,
@@ -145,7 +145,7 @@ export {
         return false;
     }
 
-    /** @brief Copy a BioseqScan and rebuild its lazy sequence source bindings from the target. */
+    /** @brief Copy a BioseqScan and rebuild its lazy sequence source bindings from the target */
     [[nodiscard]] Path* slice_project_tag_source_child(Path* path,
                                                        PathTarget* target,
                                                        slice_project_ir_builder const& builder) {
@@ -168,7 +168,7 @@ export {
         List* bindings = NIL;
         Bitmapset* seen_column_attnos = nullptr;
         int resno = 1;
-        /* Each BSS3 binding holds [child resno, producer id, physical varattno].
+        /* Each BSS3 binding holds [hild resno, producer id, physical varattno].
          * resno checks the projected column after setrefs. varattno locates the
          * sequence in the table scan slot when it is opened for lazy access. */
         for (Node* expression : postgres_list<Node>(target->exprs)) {
@@ -212,7 +212,7 @@ export {
 
     /* The caller has copied this path tree. Follow supported child links,
      * including CustomPath.custom_paths, and replace BioseqScan leaves with
-     * tagged copies. Other leaf providers remain unchanged. */
+     * tagged copies. Other leaf providers remain  unchanged. */
     [[nodiscard]] Path* slice_project_tag_owned_path_tree(Path* path,
                                                           slice_project_ir_builder const& builder,
                                                           bool& tagged_source) {
@@ -324,7 +324,7 @@ export {
                 slice_project_tag_owned_path_tree(gather->subpath, builder, tagged_source);
             return path;
         }
-        /** @brief Tag the BioseqScan sources below each path in this list. */
+        /** @brief Tag the BioseqScan sources below, each path in this list. */
         auto tag_path_list = [&builder, &tagged_source](List* subpaths) {
             for (ListCell* cell = list_head(subpaths); cell != nullptr;
                  cell = lnext(subpaths, cell)) {

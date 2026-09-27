@@ -49,7 +49,7 @@ struct vulkan_seed_lookup_completion {
     bool is_successful = false;
     /** Output-buffer reservation for callers without context allocation hooks. */
     bioseq::parallelism::memory_permit retained_anchor_permit{};
-    /** Bytes held by the output-buffer reservation. */
+    /** Bytes held by the output-buffer, reservation. */
     std::uint64_t retained_anchor_bytes = 0u;
 #if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
     // Keep the runtime operation records for benchmark checks in later host
@@ -59,7 +59,7 @@ struct vulkan_seed_lookup_completion {
 #endif
 
     vulkan_seed_lookup_completion() = default;
-    /** @param completed Initial success flag. */
+    /** @param completed Initial success  flag. */
     vulkan_seed_lookup_completion(bool completed) noexcept
         : is_successful(completed) {}
 #if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
@@ -95,7 +95,7 @@ struct vulkan_seed_lookup_completion {
 /**
  * @brief Returns one empty query job without allocating an anchor buffer.
  *
- * job_storage must be empty. Existing capacity can be reused.
+ * job_storage must be empty Existing capacity can be reused.
  * @return True when the empty job matches submitted_ordinal.
  */
 [[nodiscard]] inline bool publish_empty_canonical_seed_batch(
@@ -123,7 +123,7 @@ struct vulkan_seed_lookup_completion {
  * @brief Checks one MPF seed download and converts it to chaining anchors.
  *
  * MPF uses seed_anchor_wire records. Rechecks byte size, anchor order, and the
- * producer digest before validating each coordinate and constructing anchors field
+ * producer digest before validating eac coordinate and constructing anchors field
  * by field. batch_out remains empty if validation fails.
  * @param readback Downloaded records and producer checks.
  * @param target_position_offset Absolute start of the target interval.
@@ -131,7 +131,7 @@ struct vulkan_seed_lookup_completion {
  * @param query_length Query length in symbols.
  * @param decoded_query_span Expected span of each seed.
  * @param submitted_ordinal Original query ordinal.
- * @param batch_out Receives one complete query job on success.
+ * @param batch_out Receives one complete query job on  success.
  * @param job_storage Empty job vector whose capacity can be reused.
  * @return True when all record and job checks pass.
  */
@@ -250,7 +250,7 @@ struct vulkan_seed_lookup_completion {
  * job_storage must be empty with enough reserved capacity for every query.
  * batch_out receives the full batch only after all checks pass and remains empty
  * on failure.
- * @return Successful completion, or false when validation fails.
+ * @return Successful completion, or false when  validation fails.
  */
 [[nodiscard]] inline vulkan_seed_lookup_completion authenticate_mps_seed_anchor_readback(
     bioseq::gpu::vulkan::grouped_soa_seed_anchor_result&& readback,
@@ -441,14 +441,14 @@ struct vulkan_seed_lookup_completion {
 /**
  * Looks up target matches for query minimizers and returns sorted chaining anchors.
  *
- * Uses the selected GPU path. The fused path counts and sorts on the GPU, while
- * the other path builds output offsets from a mapped index or host hash map
- * before submitting seed lookup. Results are checked before anchors_out receives
+ * Uses the selected GPU path. The fused psth counts and sorts on the GPU, while
+ * the other, path builds output offsets from a mapped index or host hash map
+ * before submitting seed lookup Results are checked before anchors_out receives
  * a complete query job.
  * @param query_minimizers Host records used for counts and optional upload.
  * @param device_minimizers Optional device records with the same count.
  * @param target_index Host index used when prefix counting needs it.
- * @param resident_index Target index in device memory.
+ * @param resident_index Target index  in device memory.
  * @param vulkan_enabled Whether Vulkan lookup is enabled.
  * @param query_len Query length in symbols.
  * @param max_occ Skip hashes with more occurrences. Negative values produce no anchors
@@ -461,7 +461,7 @@ struct vulkan_seed_lookup_completion {
  * @param decline_out Optional rejection details.
  * @return Completion state, possibly holding an output-memory reservation.
  *
- * Input or planning failures can return false. Runtime and result-validation
+ * Input or planning failures can return false. Runtime and  result-validation
  * failures can throw. Keep the completion reservation until the output anchors are freed.
  */
 template <class p_minimizer_type>
@@ -573,7 +573,7 @@ template <class p_minimizer_type>
         return false;
     }
 
-    // The fused path counts, emits, and sorts anchors on the GPU. Planning
+    // The fused payh counts, emits, and sorts anchors on the GPU. Planning
     // failures are reported before dispatch, and runtime failures propagate.
     if (fused_frontend && max_occ >= 0) {
         const std::uint64_t reserve =
@@ -1045,7 +1045,7 @@ template <class p_minimizer_type>
 
         // Temporary prefix and download buffers have been released. Context hooks
         // keep any backing-memory reservation they created. Other callers keep
-        // the output anchor reservation in the returned completion object.
+        // the output anchor reservation  in the returned completion object
         vulkan_seed_lookup_completion completion{
             !post_allocation_invariant_failed};
         if (!context_backing_is_admitted) {

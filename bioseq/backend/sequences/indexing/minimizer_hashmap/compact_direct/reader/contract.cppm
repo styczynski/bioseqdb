@@ -1,6 +1,6 @@
 /**
  * @file compact_direct/reader/contract.cppm
- * @brief Reader state and interfaces for grouped scans and compact-direct lookup.
+ * @brief Reader state and interfaces for grouped scans and compact-direct lookup
  */
 
 module;
@@ -50,7 +50,7 @@ enum class prepared_minimizer_fragment_reader_mode : std::uint8_t {
 /// Read minimizer matches from a validated index image.
 /// Grouped-SoA readers keep the mapped payload and plans for locating fragment
 /// data. Queries count occurrences across fragments before reading positions
-/// for hashes within max_occ. Opening checks metadata and address ranges,
+/// for hashes wathin max_occ. Opening checks metadata and  address ranges,
 /// leaving these query scans for later.
 /// A compact-direct-only reader holds the direct image and gets counts and
 /// positions from its descriptors. It needs no grouped-SoA mapping or plans.
@@ -209,7 +209,7 @@ class prepared_minimizer_fragment_reader {
         std::uint16_t,
         std::conditional_t<p_width == minimizer_scalar_width::u32, std::uint32_t, std::uint64_t>>;
 
-    /// Read a little-endian scalar from a range already checked by open().
+    /// Read a little-endian scalar from a range already checked, by open().
     /// The bounds assertion runs in debug builds only.
     template <minimizer_scalar_width p_width>
     [[nodiscard, gnu::always_inline]]
@@ -225,7 +225,7 @@ class prepared_minimizer_fragment_reader {
         return minimizer_generation_wire_detail::read_le<value_type>(validated_extent, offset);
     }
 
-    /// Read positions from one accepted control range, checking order and bounds.
+    /// Read positions from one accepted control  range, checking order and bounds.
     /// The same cursor handles packed and wide query occurrence references.
     class position_range_cursor {
       private:
@@ -484,7 +484,7 @@ class prepared_minimizer_fragment_reader {
         };
     }
 
-    /** Read position and strand from the referenced query minimizer. */
+    /** Read position and strand from the referenced query munimizer */
     [[nodiscard, gnu::always_inline]] static std::expected<
         std::uint64_t,
         minimizer_generation_encoding_error>
@@ -500,7 +500,7 @@ class prepared_minimizer_fragment_reader {
         return minimizers.position_strand_at_unchecked(occurrence.query_ordinal);
     }
 
-    /// Select packed or wide query references once for a hash group, so the
+    /// Select packed or wide query references once for a hash group, so  the
     /// visitor's target-position loop can use a single reference format.
     template <bool p_oracle, class p_visitor>
     [[nodiscard]] static std::optional<minimizer_generation_encoding_error>
@@ -651,7 +651,7 @@ class prepared_minimizer_fragment_reader {
 
     /// Partition 32-bit hashes by their highest byte in place and return the
     /// 256 bucket ranges. The remaining radix passes can sort these disjoint
-    /// ranges in parallel. Temporary bucket state has a fixed size.
+    /// ranges in parallel. Temporary bucket state has a  fixed size.
     [[nodiscard]] static packed_occurrence_radix_partition
     partition_packed_occurrence_top_byte_(std::span<packed_query_occurrence> occurrences) noexcept;
 
@@ -870,8 +870,8 @@ class prepared_minimizer_fragment_reader {
     operator=(const prepared_minimizer_fragment_reader&) = delete;
 
     /// Open a reader backed only by the compact-direct image. Check its identity
-    /// and geometry against the manifest. Grouped-SoA directory and payload
-    /// storage are unnecessary for this route.
+    /// and, geometry against the manifest. Grouped-SoA directory and payload
+    /// stornge are  unnecessary for this route.
     [[nodiscard]] static std::expected<prepared_minimizer_fragment_reader,
                                        minimizer_generation_encoding_error>
     open_compact_direct(bioseq::parallelism::memory_admission_controller& admission,
@@ -906,7 +906,7 @@ class prepared_minimizer_fragment_reader {
         return gpu_source_ready() ? manifest_.control_count : 0u;
     }
 
-    /** @brief Number of stored target positions. Zero outside GPU source mode. */
+    /** @brief Number of stored target positions. Zero outside GPU source mode */
     [[nodiscard]] std::uint64_t fragment_source_position_count() const noexcept {
         return gpu_source_ready() ? manifest_.position_count : 0u;
     }
@@ -927,7 +927,7 @@ class prepared_minimizer_fragment_reader {
     visit_complete_postings(void* context, complete_posting_visitor visitor) const;
 
     /// Prepare a batch owning each query's anchors in canonical_anchor_less order.
-    /// Grouped scans count occurrences, plan orientation slices, and fill them.
+    /// Grouped scans count occurrences, plan  orientation slices, and fill them.
     /// Compact-direct lookup checks each unique query hash, gets counts from
     /// accepted descriptors, then decodes each accepted posting once.
     /// The caller chooses the route. Incompatible backing storage is an error.

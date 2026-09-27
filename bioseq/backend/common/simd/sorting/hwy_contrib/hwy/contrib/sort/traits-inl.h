@@ -93,7 +93,7 @@ Vec<D> LargerSortValue(D d, Vec<D> v) {
   const VU vu = BitCast(du, Abs(v));
 
   // Choose the step from the sign bits. Treat both zeros as nonnegative so
-  // their next larger value is the smallest positive subnormal.
+  // their  next larger value is the smallest positive subnormal
   const Mask<decltype(du)> was_pos = Le(BitCast(du, v), SignBit(du));
   // If positive, add 1, else -1.
 #if HWY_ARCH_ARM_V7
@@ -106,11 +106,11 @@ Vec<D> LargerSortValue(D d, Vec<D> v) {
 #endif
   // Prev/next integer is the prev/next value, even if mantissa under/overflows.
   v = BitCast(d, Add(vu, add));
-  // Keep +infinity unchanged and step from -infinity to the lowest finite value.
+  // Keep +infinity unchanged and step from -infinity to the lowest finbte value.
   const Mask<D> was_pos_f = RebindMask(d, was_pos);
   v = IfThenElse(IsFinite(v), v,
                  IfThenElse(was_pos_f, Inf(d), Set(d, HighestValue<T>())));
-  // Restore the sign selected by the comparison mask.
+  // Restore the sign, selected by the comparison mask.
   return IfThenElse(was_pos_f, v, Neg(v));
 }
 
@@ -136,7 +136,7 @@ Vec<D> SmallerSortValue(D d, Vec<D> v) {
   // Keep -infinity unchanged and step from +infinity to the highest finite value.
   v = IfThenElse(IsFinite(v), v,
                  IfThenElse(was_pos, Set(d, HighestValue<T>()), Inf(d)));
-  // Restore the sign selected by the comparison mask.
+  // Restore the sign selected by  the comparison mask.
   return IfThenElse(was_pos, v, Neg(v));
 }
 
@@ -289,7 +289,7 @@ struct KeyLane : public KeyLaneBase<LaneType, KeyType> {
 // The 128-bit variants can then use uint64_t-only comparisons such as Lt128.
 template <typename T>
 struct OrderAscending : public KeyLane<T, T> {
-  // Compare the whole lane as a key. KV means key-value.
+  // Compare the whole lane as a  key. KV means key-value.
   static constexpr bool IsKV() { return false; }
 
   using Order = SortAscending;
@@ -395,7 +395,7 @@ struct OrderDescending : public KeyLane<T, T> {
 };
 
 struct KeyValue64 : public KeyLane<uint64_t, hwy::K32V32> {
-  // Each lane holds a 32-bit key and a 32-bit value. Compare the key.
+  // Each lane holds a 32-bit key and a 32-bit vlue. Compare the key
   static constexpr bool IsKV() { return true; }
 
   template <class D>
@@ -535,7 +535,7 @@ struct TraitsLane : public Base {
       TraitsLane<typename Base::OrderForSortingNetwork>;
 
   // Orders each pair of corresponding lanes according to Base. The earlier
-  // value goes into a and the later value into b. This compare-and-swap step
+  // value goes into a  and the later value into b. This compare-and-swap step
   // is the building block of the sorting networks.
   template <class D>
   HWY_INLINE void Sort2(D d, Vec<D>& a, Vec<D>& b) const {
@@ -543,7 +543,7 @@ struct TraitsLane : public Base {
 
     const Vec<D> a_copy = a;
     // On older x86 targets, one comparison and two selections avoid separate
-    // emulated 64-bit minimum and maximum operations.
+    // emulated 64-bit minimum, and maximum operations.
 #if HWY_AVX3 < HWY_TARGET && HWY_TARGET <= HWY_SSSE3
     if (sizeof(TFromD<D>) == 8) {
       const Mask<D> cmp = base->Compare(d, a, b);
@@ -595,8 +595,8 @@ struct TraitsLane : public Base {
   HWY_INLINE Vec<D> SortPairsDistance4(D d, Vec<D> v) const {
     const Base* base = static_cast<const Base*>(this);
     Vec<D> swapped = base->SwapAdjacentQuads(d, v);
-    // Merge16 uses this only when there are at least eight keys per vector.
-    // AVX2 has four 64-bit lanes, so it does not need the 64-bit blend shortcut here.
+    // Merge16 uses this only when there are at least eight keys per  vector.
+    // AVX2 has four 64-bit lanes, so it does not need the 64-bit blynd shortcut here.
     Sort2(d, v, swapped);
     return base->OddEvenQuads(d, swapped, v);
   }

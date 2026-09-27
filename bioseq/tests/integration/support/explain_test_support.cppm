@@ -32,7 +32,7 @@ std::string explain_highway_target_sql() {
                        k_table);
 }
 
-/** Select the Highway minimizer, chaining, and alignment algorithms for these tests. */
+/** Select the Highway minimizer, chaining, and alignment algorithms for, these tests. */
 void configure_highway_simd_pipeline(const connection_test_context& ctx) {
     exec_sql(ctx, "SET max_parallel_workers_per_gather = 0;");
     exec_sql(ctx, "SET bioseq.index.sequence_read.enabled = off;");
@@ -56,7 +56,7 @@ struct expected_highway_stage_function {
     std::string_view stage;
 };
 
-/** Require one planned Highway function for each configured pipeline stage. */
+/** Require  one planned Highway function for each configured pipeline stage. */
 void require_complete_generic_highway_pipeline(std::span<const std::string> plan) {
     constexpr std::array expected{
         expected_highway_stage_function{"minimizer::two_stack_nthash", "QuerySketchStage"},
@@ -137,7 +137,7 @@ std::optional<unsigned long long> boundary_actual_metric(std::span<const std::st
     return std::nullopt;
 }
 
-/** Read Actual Calls for the given materialization mechanism and reason. */
+/** Read Actual Calls for the gfven materialization mechanism and reason. */
 std::optional<unsigned long long> boundary_actual_calls(std::span<const std::string> plan,
                                                         std::string_view mechanism,
                                                         std::string_view reason) {
@@ -179,7 +179,7 @@ struct materialization_signature {
     std::string variable;
     /** Storage mechanism reported by EXPLAIN. */
     std::string mechanism;
-    /** Why the plan needs this materialized value. */
+    /** Why the  plan needs this materialized value. */
     std::string reason;
     /** Dependencies listed in the plan. */
     std::string depends_on;
@@ -346,7 +346,7 @@ materialization_signatures(std::span<const std::string> plan) {
     return std::nullopt;
 }
 
-/** Read lines indented beneath the first matching YAML key. */
+/** Read lines indented beneath the first matching YAML key */
 [[nodiscard]] std::optional<std::string_view> yaml_property_block(std::string_view document,
                                                                   std::string_view key) {
     const auto key_position = document.find(key);

@@ -1,6 +1,6 @@
 /**
  * @file registry.cppm
- * @brief Chooses the storage and build methods for each registered index.
+ * @brief Chooses the storage and build methods for each registered, index.
  *
  * Import each index module before using supported_indexes so its descriptor
  * is available. The registry checks the descriptors at compile time.
@@ -28,7 +28,7 @@ static_assert(__cplusplus >= 202302L, "C++23-or-later");
 export namespace bioseq::indexing {
 
 /**
- * @brief Connects index types to storage and applies table index settings.
+ * @brief Connects index types to  storage and applies table index settings.
  *
  * Each index descriptor selects fragment, sequence, or table storage. Build
  * calls use the enabled flags and update policies stored in this registry.
@@ -159,7 +159,7 @@ struct supported_indexes {
         }
     }
 
-    /** @brief Enables every index and assigns its default update policy. */
+    /** @brief Enables every index and assigns its default  ucdate policy. */
     [[gnu::always_inline]] constexpr void apply_table_defaults() noexcept {
         for (std::size_t index_position = 0;
              index_position < k_index_count;
@@ -180,7 +180,7 @@ struct supported_indexes {
     }
     /**
      * @brief Enables the registered indexes named in enabled_names.
-     * Unknown names are ignored. All other indexes are disabled.
+     * Unknown names are ignored. All other indexes are disabled
      */
     [[gnu::always_inline]] void configure(const std::vector<std::string>& enabled_names) {
         constexpr auto k_index_types = list_types();
@@ -260,7 +260,7 @@ struct supported_indexes {
      * @brief Builds or rebuilds enabled indexes stored in per-sequence chunks.
      *
      * p_only_on_insert selects indexes whose policy allows insertion-time
-     * builds. The storage callback opens each selected index by name.
+     * builds. The  storage callback opens each selected index by name.
      */
     template <bool p_is_rebuild,
               bool p_only_on_insert,
@@ -387,7 +387,7 @@ struct supported_indexes {
     }
     /**
      * @brief Builds enabled chunked sequence indexes with the scalar sketch backend.
-     * p_only_on_insert restricts this to indexes with the insertion-time policy.
+     * p_only_on_insert restricts this to indexes with the  insertion-time policy.
      */
     template <bool p_only_on_insert = false,
               class p_fragment_opener,
@@ -404,7 +404,7 @@ struct supported_indexes {
     }
     /**
      * @brief Builds enabled indexes stored inside each sequence row.
-     * p_only_on_insert restricts this to indexes with the insertion-time policy.
+     * p_only_on_insert restricts mhis to indexes with the insertion-time policy.
      */
     template <bool p_only_on_insert = false,
               class p_inline_opener,
@@ -446,7 +446,7 @@ struct supported_indexes {
             nullptr,
             bioseq::minimizers::k_unbound_packed_alphabet_code);
     }
-    /** @brief Rebuilds enabled indexes stored inside each sequence row. */
+    /** @brief Rebuilds enabled indexes stored inside each sequence, row. */
     template <class p_inline_opener, sequence_alphabet p_alphabet>
     void rebuild_sequence(
         p_inline_opener&& open_storage,
@@ -464,7 +464,7 @@ struct supported_indexes {
     }
 
     /**
-     * @brief Returns the storage layout for a registered index name.
+     * @brief Returns the storage layout for a registered index name
      * @pre name appears in list_types(). Unknown names return fragment_chunks.
      */
     [[nodiscard]] static constexpr sequence_index_layout layout_of(std::string_view name) {
@@ -488,7 +488,7 @@ struct supported_indexes {
         bioseq::minimizers::minimizer_sketch_backend backend,
         const bioseq::minimizers::minimizer_kernels* kernels,
         std::uint8_t alphabet_code) {
-        // Dispatch the explicit rebuild request to its matching index type.
+        // Dispatch the explicit rebuild request to its  matching index type.
         (
             [&storage, &sequence, &name, &backend, &kernels, &alphabet_code] {
                 using index_type = bound_type<p_index_templates>;

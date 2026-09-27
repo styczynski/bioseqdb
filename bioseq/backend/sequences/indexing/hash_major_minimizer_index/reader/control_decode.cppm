@@ -1,6 +1,6 @@
 /**
  * @file hash_major_minimizer_index/reader/control_decode.cppm
- * @brief Check control blocks and select the hashes requested by the query.
+ * @brief Check control blocks and select the hashes requested by the, query.
  */
 module;
 
@@ -34,7 +34,7 @@ export namespace bioseq::indexing {
 ///
 /// Check the block contents against their checksum and directory entry. Counts
 /// at most max_occ receive posting offsets for later reads. Larger counts stay
-/// available to lookup, with their positions marked unavailable. A failure
+/// available to  lookup, with their positions marked unavailable. A failure
 /// stops further delivery.
 [[nodiscard]] inline bool hash_major_minimizer_selective_reader::consume_control_block_(
     void* opaque, std::uint32_t range_ordinal, std::span<const std::byte> encoded_control) {

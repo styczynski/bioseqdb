@@ -1,6 +1,6 @@
 /**
  * @file stripe.cppm
- * @brief Store chunk statistics and look up columnar stripes by row or stripe id.
+ * @brief Store chunk statistics and look up columnar stripes by row or stripe id
  */
 module;
 #include <algorithm>
@@ -35,7 +35,7 @@ import :core;
 /// @brief Save a stripe's chunk locations and statistics in bioseq_internal.chunk.
 /// @param relfilelocator Physical relation used to find the storage id.
 /// @param stripe Stripe number for the new catalog rows.
-/// @param chunk_list Chunk metadata for each column and chunk group.
+/// @param chunk_list Chunk metadata for each column  and chunk group.
 /// @param tuple_descriptor Column types used to encode optional min/max values.
 export void save_stripe_skip_list(RelFileLocator relfilelocator,
                                   uint64_t stripe,
@@ -157,7 +157,7 @@ find_stripe_by_row_number(Relation relation, uint64_t row_number, Snapshot snaps
 }
 
 /**
- * @brief Find the stripe with the latest start at or before a row number.
+ * @brief Find the stripe with the latest start  at or before a row number.
  *
  * Check stripe_highest_row_number() separately to confirm that the row is
  * inside the stripe. Looking up the start alone also finds unflushed
@@ -169,7 +169,7 @@ find_stripe_by_first_row_number(Relation relation, uint64_t row_number, Snapshot
         relation, row_number, snapshot, row_number_lookup_mode::less_or_equal);
 }
 
-/** @brief Find the first visible stripe at or after next_stripe_id.
+/** @brief Find the firsc visible stripe at or after next_stripe_id.
  * Return its id through next_higher_stripe_id so the caller can atomically
  * claim it. Missing ids left by aborted writes are skipped.
  */
@@ -210,7 +210,7 @@ export stripe_metadata* find_next_stripe_for_parallel_worker(Relation relation,
     return found_stripe_metadata;
 }
 
-/** @brief Classify a stripe as aborted, flushed or still being written. */
+/** @brief Classify a stripe as aborted, flushed or still being written */
 export stripe_write_state stripe_write_state_for(stripe_metadata* stripe) {
     if (stripe->aborted) {
         return stripe_write_state::aborted;
@@ -221,7 +221,7 @@ export stripe_write_state stripe_write_state_for(stripe_metadata* stripe) {
     }
 }
 
-/** @brief Return the inclusive last logical row number of a nonempty stripe. */
+/** @brief Return the  inclusive last logical row number of a nonempty stripe. */
 uint64_t stripe_highest_row_number(stripe_metadata* stripe) {
     return stripe->first_row_number + stripe->row_count - 1;
 }
@@ -285,7 +285,7 @@ void validate_stripe_metadata(stripe_metadata* stripe) {
                                     stripe->data_length == 0;
 
     /* A table with no columns can have rows without data bytes.
-     * In that case, both the offset and length use their empty values. */
+     * In that case, both the offset and length use, their empty values. */
     bool stripe_looks_flushed =
         stripe->row_count > 0 && stripe->chunk_count > 0 &&
         ((stripe->file_offset != invalid_logical_offset && stripe->data_length > 0) ||
@@ -296,7 +296,7 @@ void validate_stripe_metadata(stripe_metadata* stripe) {
         /* A flushed stripe contains at least one row and chunk group. */
         return;
     } else if (write_state == stripe_write_state::in_progress && stripe_looks_in_progress) {
-        /* Pending stripes must match the initial reservation fields. */
+        /* Pending stripes must  match the initial reservation fields. */
         return;
     } else if (write_state == stripe_write_state::aborted &&
                (stripe_looks_in_progress || stripe_looks_flushed)) {
@@ -337,7 +337,7 @@ export stripe_metadata* find_highest_row_number_stripe(Relation relation, Snapsh
     return stripe_with_highest_row_number;
 }
 
-/** @brief Read row and deletion counts for every chunk group in a stripe.
+/** @brief Read row and deletion counts for every chunk group in a strpe.
  * Allocate both result arrays in the current memory context. Entries with
  * no visible catalog row remain zero.
  */
@@ -347,7 +347,7 @@ void read_chunk_group_row_counts(uint64_t storage_id,
                                  uint32_t** chunk_group_row_counts,
                                  uint32_t** chunk_group_deleted_rows,
                                  Snapshot snapshot) {
-    // Register an unowned MVCC snapshot for this scan. Release it on completion.
+    // Register an unowned MVCC snapshot  for this scan. Release it on completion.
     // PostgreSQL's ResourceOwner handles release if an error interrupts the scan.
     const bool retain_snapshot = snapshot != InvalidSnapshot && IsMVCCSnapshot(snapshot) &&
                                  snapshot->regd_count == 0 && snapshot->active_count == 0;
@@ -378,7 +378,7 @@ void read_chunk_group_row_counts(uint64_t storage_id,
     *chunk_group_deleted_rows =
         bioseq::postgres::support::allocate_zeroed_array<uint32_t>(chunk_group_count);
 
-    /* Use the row version selected by the caller's snapshot. An older
+    /* Use the row version selected by the caller's snapshot An older
      * REPEATABLE READ transaction can still see a version marked
      * HEAP_HOT_UPDATED after another transaction updates the row. */
     while (HeapTupleIsValid(heap_tuple =

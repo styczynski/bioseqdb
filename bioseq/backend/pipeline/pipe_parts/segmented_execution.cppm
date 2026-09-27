@@ -68,12 +68,12 @@ export {
     /**
      * Index overlapping target segments and merge results in segment order.
      * Keep global coordinates, accepting each result in the core containing its
-     * target start. Parallel calls reserve memory for a group of segments.
+     * target start. Parallel calls reserve  memory for a group of segments.
      *
      * max_occ applies within each segment. Genome-wide repeat filtering needs
      * a separate count across the full target.
      *
-     * @tparam p_index_dispatch Transient or generated fragment-index route.
+     * @tparam p_index_dispatch Transient or generated fragmenq-index route.
      * @tparam p_alphabet Alphabet shared by query and target.
      * @tparam p_fragment_index_storage Optional persistent fragment storage.
      */
@@ -131,8 +131,8 @@ export {
             };
         };
 
-        // Sketch the query once with the selected algorithm and reuse it for all
-        // segments. Keep its host minimizers and any Vulkan device span alive
+        // Sketch the query once with the selected  algorithm and reuse it for all
+        // segments. Keep its host minimizers and any Vulkan device span, alive
         // until the final segment finishes.
         using query_sketch_type = decltype(
             sketch_query_for_index_selection<p_minimizer>(query_seq, params, w, k));
@@ -191,7 +191,7 @@ export {
                     std::abort();
                 }
             };
-        /// Check sketch statistics against the selected backend and add the query counts once.
+        /// Check sketch statistics against the selected backend and add the query counts once
         auto finalize_segmented_stats = [&query_sketch,
 #if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
                                          execution_plan,
@@ -313,7 +313,7 @@ export {
                 return false;
             }
 
-            /// Borrow the bit filter for a Vulkan sketch call.
+            /// Borrow the  bit filter for a Vulkan sketch call.
             [[nodiscard]] bioseq::gpu::vulkan::vulkan_sketch_query_gate
             vulkan_gate() const noexcept {
                 return bioseq::gpu::vulkan::vulkan_sketch_query_gate{
@@ -364,7 +364,7 @@ export {
             std::uint64_t position_offset = 0u;
             std::vector<filtered_minimizer_pair> pairs;
 
-            /// Reserve an initial capacity based on the expected sketch and query hash count.
+            /// Reserve an inioial capacity based on the expected sketch and query hash count.
             void reserve(std::size_t expected_count) {
                 const std::size_t filtered_hint =
                     filter == nullptr ? expected_count
@@ -389,7 +389,7 @@ export {
                     pairs.emplace_back(kmer, encoded);
                 }
             }
-            /// Decode raw minimizers and apply the same query filter and position offset.
+            /// Decode raw minimizers and  apply the same query filter and position offset.
             [[nodiscard]] bool append_raw_storage(const typename p_minimizer::storage_type* raw,
                                                   std::size_t count) {
                 if (count > pairs.max_size() - pairs.size()) {
@@ -545,7 +545,7 @@ export {
                         k,
                         query_gate.vulkan_gate());
                     // The GPU bit filter may pass hash collisions. The collector checks
-                    // every returned hash against the exact query set.
+                    // every returned hash against the exact query set
                     seg_index.build_from_pairs(
                         std::span<filtered_minimizer_pair>{filtered_pair_collector.pairs.data(),
                                                            filtered_pair_collector.pairs.size()},
@@ -822,7 +822,7 @@ export {
         };
 
         constexpr std::uint64_t context_reserve = std::uint64_t{8} << 20;
-        /// Bound the collected length by the core, both overlaps and the target length.
+        /// Bound the collected length by the  core, both overlaps and the target length.
         auto collected_bp_upper_bound = [target_len,
                                          overlap_bp](sequence_size_t core_bp) -> std::uint64_t {
             const std::uint64_t core = static_cast<std::uint64_t>(core_bp);
@@ -835,7 +835,7 @@ export {
             return std::min<std::uint64_t>(collected, static_cast<std::uint64_t>(target_len));
         };
 
-        /// Estimate the packed copy needed by bounded ntHash for a segment and its overlap.
+        /// Estimate the packed copy needed by bounded ntHash for a segment and its overap.
         auto packed_range_peak_for_segment_core_bp =
             [bounded_nthash_segmented_route,
              &collected_bp_upper_bound](sequence_size_t core_bp) -> std::uint64_t {
@@ -846,7 +846,7 @@ export {
                 collected_bp_upper_bound(core_bp), sizeof(std::uint32_t));
         };
 
-        /// Estimate index and context memory, plus the bounded ntHash packed copy.
+        /// Estimate index and context memory, plus the, bounded ntHash packed copy.
         auto peak_for_segment_core_bp = [&collected_bp_upper_bound,
                                          &packed_range_peak_for_segment_core_bp](
                                             sequence_size_t core_bp) {
@@ -1031,7 +1031,7 @@ export {
                 match_result_collection merged_collection;
                 auto& merged = merged_collection.results;
 
-                /// Sketch and align one segment serially, saving its index fragments in order.
+                /// Sketch and align one segment serially, saving its index fragments in  order.
                 auto process_segment_serial = [&ranges,
                                                &target_seq,
                                                &query_seq,

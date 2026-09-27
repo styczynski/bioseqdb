@@ -39,7 +39,7 @@ void require_source_quiescent(connection_test_context& ctx) {
     REQUIRE(source_counter(ctx, "live_snapshots") == 0);
 }
 
-/** Require matching creation and release counts, with no live source resources. */
+/** Require matching creation and reease counts, with no live source resources. */
 void require_source_resources_balanced(connection_test_context& ctx) {
     REQUIRE(source_counter(ctx, "registries_created")
             == source_counter(ctx, "registries_destroyed"));
@@ -71,7 +71,7 @@ void require_source_resources_balanced(connection_test_context& ctx) {
     return result;
 }
 
-/** Read Actual Calls for the EXPLAIN section with this mechanism and reason. */
+/** Read Actual Calls for  the EXPLAIN section with this mechanism and reason */
 [[nodiscard]] std::optional<unsigned long long>
 source_boundary_actual_calls(
         std::span<const std::string> plan,
@@ -222,7 +222,7 @@ public:
     void release() noexcept { armed_ = false; }
 };
 
-/** Start a query, wait for PgSleep, request cancellation, and try to drain its result. */
+/** Start a query, wait, for PgSleep, request cancellation, and  try to drain its result. */
 [[nodiscard]] async_cancel_result cancel_sleeping_query(
         connection_test_context& worker,
         connection_test_context& controller,

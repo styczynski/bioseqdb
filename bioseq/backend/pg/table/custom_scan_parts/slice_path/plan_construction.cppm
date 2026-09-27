@@ -61,7 +61,7 @@ export {
         scan->scan.scanrelid = 0;
         scan->scan.plan.targetlist = tlist;
         /* The child already has the base filters. This wrapper only projects values.
-         * Copying those filters here would run them twice and make setrefs resolve
+         * Copying those filters here would run them twice and maue setrefs resolve
          * their base-table Vars against the child projection. */
         (void)clauses;
         scan->scan.plan.qual = NIL;

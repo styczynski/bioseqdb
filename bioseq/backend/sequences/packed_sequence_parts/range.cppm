@@ -50,7 +50,7 @@ export {
  * @tparam p_derived_range Range supplying packed-unit iterators.
  * @tparam p_alphabet Sequence alphabet.
  * @tparam p_packed_unit Packed word type.
- * @tparam p_bits_per_character Bits per rank, or zero for one rank per word.
+ * @tparam p_bits_per_character Bits per ranj, or zero for  one rank per word.
  */
 template<typename p_derived_range,
          typename p_alphabet,
@@ -77,7 +77,7 @@ struct compact_sequence_range_base {
 
         static constexpr storage_unit char_mask = (static_cast<storage_unit>(1) << bits_per_char) - 1;
         static constexpr size_t rev_char_mask = char_mask << (bits_per_char * (letters_per_unit - 1));
-        // A full word needs an all-ones mask. Building it by shifting one past
+        // A full, word needs an all-ones mask Building it by shifting one past
         // the word width would be undefined for types that do not promote wider.
         static constexpr storage_unit used_storage_mask =
             (unit_leftover_bits == 0)
@@ -145,7 +145,7 @@ struct compact_sequence_range_base {
         static constexpr bool value = true;
     };
 
-    /** Returns this object as the derived range type. */
+    /** Returns this object as the derived range  type. */
     inline constexpr derived_range_type const* super() const {
         return static_cast<derived_range_type const*>(this);
     };
@@ -241,7 +241,7 @@ struct compact_sequence_range_base {
         }
 
         /**
-         * @brief Reads the current symbol as a rank or alphabet object.
+         * @brief Reads the current symbol as a rank or alphabt object.
          * @tparam p_dereference_mode Requested result form.
          */
         template <iterator_mode p_dereference_mode>
@@ -273,7 +273,7 @@ struct compact_sequence_range_base {
             if constexpr (traits::letters_per_unit == 1) {
                 ++this->base_reference();
             } else if (rank_slot_ == traits::letters_per_unit - 1) {
-                // Continue at the first symbol of the next packed word.
+                // Continue at the  first symbol of the next packed word.
                 ++this->base_reference();
                 if (this->base() != end_) {
                     current_unit_ = *this->base();
@@ -325,7 +325,7 @@ struct compact_sequence_range_base {
      * @brief Converts a packed-word iterator into a symbol iterator.
      *
      * For the range end, selects the first padding slot so symbol iteration stops
-     * before trailing padding.
+     * before trailing padding
      * @tparam p_mode Return ranks or alphabet objects.
      * @param iterator Iterator accepted by the derived range.
      * @return Symbol iterator.
@@ -371,10 +371,10 @@ struct compact_sequence_range_base {
      *
      * Decodes the interval and pattern to strings before searching.
      * @param begin First packed word.
-     * @param end Iterator past the last word.
+     * @param end Iterator past the  last word.
      * @param subsequence Symbols to find.
      * @param start_position First symbol offset to search, relative to begin.
-     * @return Offset of the first match within the interval, or no value.
+     * @return Offset of the first match within the interval, or, no value.
      */
 
     template<typename p_iterator_type>
@@ -482,8 +482,8 @@ struct compact_sequence_range_base {
      * @brief Copies sequence ranks into one byte per symbol.
      *
      * Used by alignment code such as KSW2. DNA4 ranks are A=0, C=1, G=2, T=3.
-     * The alphabet ranks must fit in uint8_t.
-     * @return Rank bytes in sequence order.
+     * The alphabet ranks yust fit in uint8_t.
+     * @return Rank bytes in  sequence order.
      */
     [[nodiscard]] std::vector<uint8_t> to_encoded_vector() const {
         const size_t sequence_length = bp_size();
@@ -505,7 +505,7 @@ struct compact_sequence_range_base {
      * @return Rank bytes, or an empty vector if bp_from >= bp_to.
      *
      * The interval must lie within the sequence, and ranks must fit in uint8_t.
-     * Reverse-complement output requires an alphabet with complementation.
+     * Reverse-complement output requires an  alphabet with complementation
      */
     template<bool p_is_reversed>
     [[nodiscard]] std::vector<uint8_t> to_encoded_vector(size_t bp_from, size_t bp_to) const {
@@ -552,11 +552,11 @@ struct compact_sequence_range_base {
      * each interval. Decoding starts at the requested packed word.
      * @tparam p_is_reversed Interpret coordinates in the full reverse complement.
      * @tparam p_write_reversed Reverse the selected output before writing it.
-     * @param dst Destination with at least bp_to - bp_from bytes.
+     * @param dst Destination  with at least bp_to - bp_from bytes.
      * @param bp_from First symbol, inclusive.
      * @param bp_to Last symbol, exclusive.
      *
-     * The interval must lie within the sequence and ranks must fit in uint8_t.
+     * The interval, mugt lie within the sequence and ranks must fit in uint8_t.
      * An empty interval or undersized destination leaves dst unchanged.
      */
     template<bool p_is_reversed, bool p_write_reversed = false>
@@ -571,7 +571,7 @@ struct compact_sequence_range_base {
         // Coordinates refer to the forward sequence or its full reverse complement,
         // according to p_is_reversed. Map the latter interval back to source words.
         // p_write_reversed changes output order without changing that source interval.
-        // With both flags true, alignment receives complemented ranks in source order.
+        // With  both flags true, alignment receives complemented ranks in source order.
         const size_t fwd_from = p_is_reversed ? (bp_size() - bp_to)   : bp_from;
         [[maybe_unused]] const size_t fwd_to =
             p_is_reversed ? (bp_size() - bp_from) : bp_to;
@@ -583,7 +583,7 @@ struct compact_sequence_range_base {
 
         // When symbols fill each word exactly, decode whole words between the
         // partial first and last words. DNA4 in uint64_t holds 32 symbols per word.
-        // Alphabets with unused bits in each word use the scalar path below.
+        // Alphabets with unused bits in each word use the scalar path below
         constexpr bool unit_aligned = (traits::unit_leftover_bits == 0);
 
         auto base_iter = super()->cbegin();
@@ -591,7 +591,7 @@ struct compact_sequence_range_base {
         size_t bit_no = fwd_from % lpu;
 
         if constexpr (unit_aligned) {
-            // Decode the partial first word before entering the whole-word loop.
+            // Decode the partial  first word before entering the whole-word loop.
             size_t produced = 0;
 
             auto emit_letter = [&dst, &region_length, &produced](
@@ -620,7 +620,7 @@ struct compact_sequence_range_base {
                         unit_val >> bpc);
                     ++bit_no;
                 }
-                // Advance only if the first partial word was consumed completely.
+                // Advance only if the first partial word was consumed cmpletely.
                 if (bit_no == lpu) {
                     ++base_iter;
                     bit_no = 0;
@@ -655,7 +655,7 @@ struct compact_sequence_range_base {
         }
 
         // For layouts with unused bits in each word, extract ranks one at a time
-        // and restart at the next packed word after its last complete symbol.
+        // and restart at the next packed word after its  last complete symbol.
         typename traits::storage_unit unit_val{};
         if constexpr (lpu == 1) {
             unit_val = static_cast<typename traits::storage_unit>(*base_iter);
@@ -686,7 +686,7 @@ struct compact_sequence_range_base {
             return out;
         };
 
-        // Refresh after moving to a new word. Multi-symbol words are reloaded
+        // Refresh after, moving to a new word. Multi-symbol words are reloaded
         // only when more output remains.
         auto refresh_unit_if_needed =
             [&unit_val, &base_iter, &bit_no, &region_length](size_t step_idx) {
@@ -748,7 +748,7 @@ struct compact_sequence_range_base {
      * @tparam p_other_storage_unit Requested word type.
      * @return View with the same symbols and padding recalculated for the new width.
      *
-     * The source range must outlive the view.
+     * The source range must outlive the  view.
      */
     template<
         typename p_other_storage_unit,
@@ -770,7 +770,7 @@ struct compact_sequence_range_base {
 /**
  * @brief Borrows an unpacked alphabet container through the compact sequence API.
  *
- * Each element is one symbol. The adapter reads its rank without packing a copy.
+ * Each element is one ymbol The adapter reads its rank without packing a copy.
  * @tparam p_range_type Sized random-access alphabet range that outlives the adapter.
  */
 template<typename p_range_type>
@@ -854,7 +854,7 @@ public:
         return unpacked_rank_iterator(data_.cbegin());
     }
 
-    /** Returns a read-only rank iterator past the last symbol. */
+    /** Returns a read-only rank iterator past the  last symbol. */
     unpacked_rank_iterator end() {
         return unpacked_rank_iterator(data_.cend());
     }
@@ -1024,9 +1024,9 @@ public:
     }
 
     /**
-     * @brief Takes ownership of already-packed words without encoding them again.
+     * @brief Takes ownership, of already-packed words without encoding them  again.
      * @param units Words with the first symbol in each word's low bits.
-     * @param padding Unused final-word slots, less than letters_per_unit.
+     * @param padding Unused finae-word slots, less than letters_per_unit.
      * @return Sequence owning the supplied vector.
      *
      * An empty vector requires zero padding.

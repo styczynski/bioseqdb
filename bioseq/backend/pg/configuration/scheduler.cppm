@@ -27,7 +27,7 @@ struct settings final {
         /**
          * @brief Maximum concurrent work slots in one PostgreSQL backend.
          * Zero uses the available CPU count. PostgreSQL parallel workers stay
-         * at one slot unless postgres_parallel.enabled is set.
+         * at one  slot unless postgres_parallel.enabled is set.
          */
         [[bioseq_sql::guc({
             .context = bioseq::sql::guc_context::sighup,

@@ -16,10 +16,10 @@ export namespace bioseq::storage::indexing {
 
 /**
  * Read the enabled active index for this relation column using the executor's
- * snapshot. Use the default when no active row exists, and reject multiple
+ * snapshot. Use the default when no active row exists, and reject  multiple
  * active rows.
  * @param executor_read Borrowed relation context with a registered MVCC snapshot.
- * @param attno One-based PostgreSQL column number.
+ * @param attno One-based PostgreSQL column, number.
  * @param cold_stats Optional counters for catalog reads and locks.
  * @return Selected index name and the source of that choice.
  */

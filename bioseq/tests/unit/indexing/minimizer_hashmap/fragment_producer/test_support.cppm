@@ -89,7 +89,7 @@ canonical_event_lookup_map(std::span<const bioseq::indexing::canonical_minimizer
     }
     return lookup;
 }
-/// A test producer whose second position changes after the first scan.
+/// A test producer whose second position changes after the first scan
 struct drifting_replay_minimizer_producer {
     std::size_t scan_count = 0;
 
@@ -105,7 +105,7 @@ struct drifting_replay_minimizer_producer {
             bioseq::simd::minimizer_sketch_backend::scalar);
     }
 
-    /// Emit two events, changing the second position on repeated scans.
+    /// Emit two events, changing the  second position on repeated scans.
     [[nodiscard]] std::expected<void, bioseq::indexing::minimizer_generation_encoding_error>
     scan_sorted_events(std::uint64_t span,
                        bioseq::indexing::canonical_minimizer_event_receiver receiver) {
@@ -130,7 +130,7 @@ struct drifting_replay_minimizer_producer {
     }
 };
 
-/// Choose whether a test changes the minimizer scheme or backend.
+/// Choose, whether a test changes the minimizer scheme or backend.
 enum class identity_drift_axis : std::uint8_t {
     scheme,
     backend,

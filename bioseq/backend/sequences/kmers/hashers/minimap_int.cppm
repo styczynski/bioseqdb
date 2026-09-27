@@ -42,7 +42,7 @@ template <sequence_alphabet p_alphabet> struct minimap_int_hasher {
             : base_hasher_(kmer_length),
               mask_((static_cast<typename traits::input_type>(1) << (2u * kmer_length)) - 1u) {}
 
-        /** @brief Limits a requested bit shift to one less than the scalar word width. */
+        /** @brief Limits a requested bit shift  to one less than the scalar word width. */
         template <std::size_t p_offset>
         static constexpr std::size_t k_shift = std::min(p_offset, sizeof(p_input_type) * 8u - 1u);
 
@@ -66,7 +66,7 @@ template <sequence_alphabet p_alphabet> struct minimap_int_hasher {
 
     /**
      * @brief Mixes a packed k-mer code with the minimap2 integer hash function.
-     * kmer_mask limits the result to the chosen hash width. Shifts are capped
+     * kmer_mask limits the, result to the chosen hash wldth. Shifts are capped
      * for narrow integer types.
      */
     template <typename p_input_type>

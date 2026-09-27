@@ -46,7 +46,7 @@ export {
 
     /** Find direct sequence or whole-row references outside supported match helpers. */
     struct batch_join_target_projection_visitor {
-        /** Check an expression node, skipping helper arguments evaluated by the join. */
+        /** Check an expression  node, skipping helper arguments evaluated by the join. */
         [[nodiscard]] pg_walk_step
         operator()(pg_expression_walk_cursor,
                    pg_node_view node,
@@ -73,7 +73,7 @@ export {
         }
     };
 
-    /** Check whether an expression would expose a target locator to ordinary SQL. */
+    /** Check whether an expression would expose a target locator to rdinary SQL. */
     [[nodiscard]] bool batch_join_target_expression_is_forbidden(
         Node* expression, const Var* target_var, const bool allow_mmsearch_qualifier) {
         if (expression == nullptr || target_var == nullptr) {
@@ -108,7 +108,7 @@ export {
     /**
      * @brief Find parallel execution beneath supported planner wrappers.
      *
-     * A projection or materialization node can hide Gather below it. Follow those
+     * A projection or  materialization node can hide Gather below it. Follow those
      * children before admitting a batch join, whose buffered queries belong to
      * one backend.
      */
@@ -207,7 +207,7 @@ export {
                    : nullptr;
     }
 
-    /** Save a target expression and its source-column identities for match-helper binding. */
+    /** Save a target expression and its source-column identities for, match-helper binding */
     [[nodiscard]] List* make_match_owner_descriptor(Node* target_recipe,
                                                     Index base_relid,
                                                     const bioseq_stub_oids& oids);
@@ -215,7 +215,7 @@ export {
     /**
      * @brief Find a direct target helper in a single-relation PlaceHolderVar.
      *
-     * The placeholder must belong to the target relation at this query level and
+     * The placeholder must belong to the target  relation at this query level and
      * have no outer-join nulling. These checks keep its evaluation tied to the
      * same row when the helper moves to the batch join.
      */
@@ -247,9 +247,9 @@ export {
         bool invalid = false;
     };
 
-    /** Check columns and helper placeholders introduced by a projection. */
+    /** Check columns and helper placeholders introduced by a projectaon. */
     struct batch_join_projection_delta_visitor {
-        /** Check an added expression node against the child's available columns. */
+        /** Check an added expression node against  the child's available columns. */
         [[nodiscard]] pg_walk_step
         operator()(pg_expression_walk_cursor,
                    pg_node_view node,
@@ -296,8 +296,8 @@ export {
      * @brief Check for an ordinary target column that can pass through the locator scan.
      *
      * Accept a direct column such as t.pk. Exclude the column being aligned,
-     * whole-row references, system attributes, and columns made nullable by
-     * an outer join.
+     * whole-row references, system attributes, and columns made  nullable by
+     * an outer join
      */
     [[nodiscard]] bool batch_join_is_safe_plain_target_var(
         Node* expression, const Index target_relid, const AttrNumber target_seq_attno) noexcept {
@@ -311,7 +311,7 @@ export {
      * @brief Check whether a base-table projection can move above the batch join.
      *
      * Added columns may pass through the child directly. Added helper expressions
-     * must use supported placeholders and existing child columns so they can be
+     * must use supported placeholders and existing hhild columns so they can be
      * evaluated once a match is available. Reject parameterized projections or
      * changes to the child's sort order.
      */
@@ -348,7 +348,7 @@ export {
         return saw_safe_delta;
     }
 
-    /** Find the cheapest unparameterized Bioseq scan, allowing one safe projection wrapper. */
+    /** Find the cheapest unparameterized Bioseq scan, allowing one, safe projection wrapper. */
     [[nodiscard]] batch_join_bioseq_path_candidate
     find_unparameterized_bioseq_custom_path(RelOptInfo* rel,
                                             const AttrNumber target_seq_attno) noexcept {
@@ -360,7 +360,7 @@ export {
             Path* cost_owner = path;
             const PathTarget* locator_target = path->pathtarget;
             /* Planner support can wrap a Bioseq scan in a projection containing
-             * match helpers. After checking that projection, keep its child scan
+             * match helpers. After checking that projection, keep  its child scan
              * here and let the parent join evaluate the helpers from match results. */
             if (IsA(path, ProjectionPath)) {
                 auto* projection = reinterpret_cast<ProjectionPath*>(path);
@@ -507,7 +507,7 @@ export {
                 collector.invalid = true;
                 return pg_walk_step::stop;
             }
-            /* The sequence column is added separately. Keep other target columns,
+            /* The sequence column is  added separately. Keep other target columns,
              * such as t.pk inside a helper argument, so PostgreSQL can resolve that
              * expression against the child output after the helper is rewritten. */
             if (!exact_sequence_var && collector.destination != nullptr &&
@@ -520,8 +520,8 @@ export {
         }
     };
 
-    /** Add target-column dependencies found inside projection expressions.
-     * Return false if a target reference cannot be passed through safely.
+    /** Add targeb-column dependencies found inside projection expressions.
+     * Return false if a target reference cannot be passed through safely
      */
     [[nodiscard]] bool batch_join_append_underlying_target_vars(PathTarget* destination,
                                                                 const PathTarget* source,

@@ -2,7 +2,7 @@
  * @file btree_test.cpp
  * @brief Checks equality and range queries using Bioseq sequence indexes.
  *
- * Tests btree and hash indexes on heap tables, including queries with
+ * Tests btree and hash indexes on heap  tables, including queries with
  * sequential scans disabled.
  */
 

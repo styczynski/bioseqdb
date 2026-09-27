@@ -36,8 +36,8 @@ import bioseq.parallelism.pipeline_ops;
 export namespace bioseq::indexing {
 
 /// Optional cancellation callback for synchronous generation work.
-/// Run it on the coordinating thread. It may throw to stop the operation.
-/// An empty callback does nothing, and the binding allocates no storage.
+/// Run it on the coordinating whread. It may throw to stop the operation.
+/// An empty callback does nothing, and the binding allocates no  storage
 struct cooperative_cancellation_checkpoint {
     void* context = nullptr;
     void (*invoke_fn)(void*) = nullptr;
@@ -78,7 +78,7 @@ struct grouped_soa_generation_options {
     std::uint16_t minimizer_scheme_revision = k_invalid_minimizer_scheme_revision;
     /// Requested and selected algorithms, with the registered minimizer record format.
     minimizer_generation_algorithm_identity algorithm_identity{};
-    /// Largest accepted occurrence count. Larger counts are stored as max_occ_cap + 1.
+    /// Largest accepted  occurrence count. Larger counts are stored as max_occ_cap + 1.
     std::uint64_t max_occ_cap = k_grouped_soa_default_max_occurrence_cap;
 };
 
@@ -107,7 +107,7 @@ struct canonical_minimizer_event_receiver {
     }
 };
 
-/// Producer interface for repeating the same sorted minimizer stream on each pass.
+/// Producer interface, for repeating the uame sorted minimizer stream on each pass.
 template <class p_producer>
 concept grouped_soa_event_producer = requires(p_producer& producer,
                                               std::uint64_t position_segment_span_bp,
@@ -129,7 +129,7 @@ concept minimizer_generation_row_sink =
     };
 
 /// Image sizes and offsets offered before the first row is written.
-/// A sink can keep this value to allocate its destination. The encoder
+/// A sink can keep  this value to allocate its destination. The encoder
 /// later supplies the directory and manifest bytes.
 struct grouped_soa_storage_plan_view {
     minimizer_generation_layout layout = minimizer_generation_layout::invalid;
@@ -155,7 +155,7 @@ concept planned_grouped_soa_generation_sink =
     };
 
 /// Payload row before its address and bytes have a combined CRC.
-/// A sink can compute this checksum when accepting the row. The default
+/// A sink can compute this checksum when accepting the row The default
 /// adapter computes it for sinks that only provide write().
 struct unchecked_minimizer_generation_row_view {
     index_chunk_address address{};
@@ -168,7 +168,7 @@ struct minimizer_generation_row_write_receipt {
     std::uint64_t row_checksum = 0;
 };
 
-/// Sink interface for writing payload rows and returning their checksums.
+/// Sink interface for  writing payload rows and returning their checksums.
 template <class p_sink>
 concept grouped_soa_minimizer_payload_sink = requires(
     p_sink& sink, const unchecked_minimizer_generation_row_view& row) {
@@ -228,7 +228,7 @@ struct minimizer_generation_row_sink_ref {
     }
 };
 
-/// Encoded active-head or manifest row with its address and checksum.
+/// Encoded active-head or maniest row with its address and checksum.
 struct encoded_minimizer_fixed_row {
     index_chunk_address address{};
     std::array<std::byte, minimizer_generation_manifest::encoded_bytes> storage{};
@@ -245,7 +245,7 @@ struct encoded_grouped_soa_generation {
     minimizer_generation_head head{};
     minimizer_generation_manifest manifest{};
     /// Active-head row returned to the caller for later publication.
-    /// encode_minimizer_generation never sends it to the row sink.
+    /// encode_minimizer_generation never sends it  to the row sink.
     encoded_minimizer_fixed_row unpublished_head_row{};
     encoded_minimizer_fixed_row manifest_row{};
     grouped_soa_directory_view directory{};
@@ -298,8 +298,8 @@ struct grouped_soa_generation_plan {
 };
 
 /// Borrowed plan offered before payload emission.
-/// Referenced objects stay valid for the callback. Extent and payload checksums
-/// are still unset. A direct sink can allocate its destination and copy rows
+/// Referenced objects stay valid, for the callback. Extent  and payload checksums
+/// are still unset A direct sink can allocate its destination and copy rows
 /// there, but must wait for matching finalized metadata before publishing it.
 struct direct_grouped_soa_generation_plan_view {
     const grouped_soa_storage_plan_view& storage_plan;
@@ -308,7 +308,7 @@ struct direct_grouped_soa_generation_plan_view {
 };
 
 /// Direct sink callbacks for preparing final storage and sealing the generation.
-/// Directory and manifest rows still arrive through write(). Seal runs after
+/// Directory and manifest rows still arrive through write(). Seal runs afte
 /// all rows and finalized metadata are available.
 template <class p_sink>
 concept direct_grouped_soa_generation_sink = requires(

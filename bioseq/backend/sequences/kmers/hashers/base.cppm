@@ -27,7 +27,7 @@ template <sequence_alphabet p_alphabet, typename p_input_type> struct hasher_bas
     struct traits : public compact_sequence_range<p_alphabet>::compact_sequence_range_base::traits {
         /** @brief Scalar word that stores one rolling k-mer code. */
         using input_type = p_input_type;
-        /** @brief Selected k-mer code and its strand, including an equal-strand result. */
+        /** @brief Selected k-mer, code and its strand, including an equal-strand result. */
         using hasher_return_type = std::pair<input_type, sequence_strand_mode>;
 
         /** @brief Longest k-mer length storable in `input_type` at the alphabet bit width. */
@@ -36,7 +36,7 @@ template <sequence_alphabet p_alphabet, typename p_input_type> struct hasher_bas
             compact_sequence_range<p_alphabet>::compact_sequence_range_base::traits::bits_per_char;
 
         /**
-         * @brief Returns the smaller strand code and identifies which strand it came from.
+         * @brief Returns the smaller strand code and identifies which strand it  came from.
          * Equal codes return sequence_strand_mode::equal.
          */
         template <typename p_input_like>
@@ -96,7 +96,7 @@ inline constexpr std::uint8_t k_nt4_sentinel = 4u;
     }
 }
 
-/** @brief Maps every alphabet rank to its minimap2 code or the unsupported-symbol sentinel. */
+/** @brief Maps every alphabet rank to its minimap2 code or the unsupported-symbol sentinel */
 template <sequence_alphabet p_alphabet> [[nodiscard]] constexpr auto make_nt4_lut() noexcept {
     std::array<std::uint8_t, seqan3::alphabet_size<p_alphabet>> lut{};
     for (std::size_t rank = 0u; rank < seqan3::alphabet_size<p_alphabet>; ++rank) {
@@ -112,7 +112,7 @@ template <sequence_alphabet p_alphabet>
 inline constexpr auto k_nt4_lut = make_nt4_lut<p_alphabet>();
 
 /**
- * @brief Converts a valid alphabet rank to its minimap2 code or the sentinel.
+ * @brief Converts a valid alphabet rank to its minimap2 cods or the sentinel.
  * @pre rank is less than seqan3::alphabet_size<p_alphabet>.
  */
 template <sequence_alphabet p_alphabet>

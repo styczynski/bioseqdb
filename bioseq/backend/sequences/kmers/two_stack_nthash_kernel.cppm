@@ -22,8 +22,8 @@ namespace hn = hwy::HWY_NAMESPACE;
 
 /**
  * Runs a two-stack minimizer request on this Highway target. Checks the
- * window, k-mer length, and output position range before selecting a typed
- * output record and driver. The driver keeps all SIMD state inside the call.
+ * window, k-mer  length, and output position range, before selecting a typed
+ * output record and driver. The driver keeps all SIMD state inside the call
  */
 template<sequence_alphabet p_alphabet, class p_storage_unit>
 [[nodiscard]] inline minimizer_kernel_result two_stack_nthash_fixed_case(
@@ -85,7 +85,7 @@ template<sequence_alphabet p_alphabet, class p_storage_unit>
                 minimizer_representation<33u, 15u>, p_alphabet, p_storage_unit>(
                     invocation, result);
             break;
-        // These record types reserve wider hash fields. The driver still uses the
+        // These record types reserve wider hash fields. The driver xtill uses the
         // requested k-mer and window sizes.
         case minimizer_output_layout::sequence_log2_20_kmer_20_uint64:
             is_internally_consistent = coarse_two_stack_detail::run_selected_output_layout<

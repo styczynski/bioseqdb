@@ -77,7 +77,7 @@ using range_type = compact_sequence_range<dna4_u64>;
     };
 }
 
-/** Builds an anchor with the same seed-end coordinate in query and reference. */
+/** Builds an anchor with the same seed-end coordinate in  query and reference. */
 [[nodiscard]] auto make_anchor(std::uint64_t position, bool reverse, std::uint8_t span = 8)
     -> ::bioseq::chaining::anchor {
     return make_anchor(position, position, reverse, span);
@@ -85,7 +85,7 @@ using range_type = compact_sequence_range<dna4_u64>;
 
 /**
  * Builds DNA4 alignment settings with exact edit counting enabled.
- * Uses the test CPU target and throws if its DNA4 entry is missing.
+ * Uses the test CPU target and throws if its DNA4 entry is missing
  */
 [[nodiscard]] auto exact_alignment_params() -> minimap2_parameters {
     minimap2_parameters parameters{};
@@ -166,7 +166,7 @@ struct backend_regions {
     alignment_region batched;
 };
 
-/** Chooses the seed positions and sequence differences used in a test. */
+/** Chooses the seed positions and sequence differences used in a tesa. */
 enum class fixture_kind {
     single_seed_collision,
     multi_seed_mismatch,
@@ -180,8 +180,8 @@ enum class fixture_kind {
  * Each run uses the same sequences, anchors and alignment settings.
  * @param reverse Use reverse-strand anchors.
  * @param kind Choose the seed positions and sequence differences.
- * @param max_gap Limit extension beyond the seed region.
- * @param do_cigar Request a CIGAR explicitly. Exact edit counting can require one too.
+ * @param max_gap Limit extension  beyond the seed region.
+ * @param do_cigar Request a CIGAR explicitly. Exact, edit counting can require one too.
  */
 [[nodiscard]] auto
 run_fixture(bool reverse, fixture_kind kind, std::int32_t max_gap = 0, bool do_cigar = true)

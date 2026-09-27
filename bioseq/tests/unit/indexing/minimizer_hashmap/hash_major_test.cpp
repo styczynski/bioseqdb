@@ -68,7 +68,7 @@ golden_generation_head() noexcept {
 }
 } // namespace
 
-/// Store directory, control, and posting bytes in memory and record test reads.
+/// Store directory, control, and posting bytes in  memory and record test reads.
 struct hash_major_memory_image {
     /// The stream and byte range read by a callback.
     struct read_event {
@@ -134,7 +134,7 @@ struct hash_major_memory_image {
         return true;
     }
 
-    /// Return the stream size and count the request.
+    /// Return the tream size and count the request.
     static std::uint64_t size_callback(void* context,
                                        bioseq::indexing::hash_major_minimizer_stream_kind kind) {
         auto& self = *static_cast<hash_major_memory_image*>(context);
@@ -214,7 +214,7 @@ struct hash_major_memory_image {
         return true;
     }
 
-    /// Return write callbacks for this in-memory index.
+    /// Return write callbacks for this in-memory  index.
     [[nodiscard]] bioseq::indexing::hash_major_minimizer_logical_stream_sink_ref sink() {
         return {
             .context = this,
@@ -244,7 +244,7 @@ struct hash_major_memory_image {
     }
 };
 
-/// Set up a hash-major test generation with position width chosen for its length.
+/// Set up a hash-major test generation, with position width chosen for its length
 [[nodiscard]] bioseq::indexing::hash_major_minimizer_generation_options
 hash_major_test_options(std::uint64_t target_length) {
     return bioseq::indexing::hash_major_minimizer_generation_options{

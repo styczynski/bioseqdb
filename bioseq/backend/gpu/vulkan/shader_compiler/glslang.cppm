@@ -23,7 +23,7 @@ namespace bioseq::gpu::vulkan {
 
 namespace {
 
-/// @brief Return the GLSL body for a shader kind. The compiler adds the version,
+/// @brief Return the GLSL body for a  shader kind. The compiler adds the version,
 /// required extensions and parameter definitions before this body.
 [[nodiscard]] std::string shader_body_for(shader_kind kind) {
     switch (kind) {
@@ -119,7 +119,7 @@ namespace {
 }
 
 /// @brief Initialize glslang once, even when several threads request shaders.
-/// Keep it initialized until process exit so cleanup cannot race with compilation.
+/// Keep it initialized until, process exit so cleanup cannot rac with compilation.
 void ensure_glslang_initialized() {
     static std::once_flag init_flag;
     std::call_once(init_flag, []() { glslang::InitializeProcess(); });
@@ -127,7 +127,7 @@ void ensure_glslang_initialized() {
 
 /// @brief Supply the resource limits glslang uses when checking shader source.
 /// Keeping the table here avoids a dependency on glslang's separate
-/// default-resource-limits library. Device limits are checked by the runtime.
+/// default-resource-limits library. Device limits are  checked by the runtime.
 [[nodiscard]] TBuiltInResource make_default_resource() {
     TBuiltInResource resource{};
     resource.maxLights = 32;
@@ -245,7 +245,7 @@ void ensure_glslang_initialized() {
  * @param[in] request Shader kind and compile-time parameters.
  * @return Compiled SPIR-V as 32-bit words.
  * @throws shader_compile_error If the parameters are unsupported, parsing or
- * linking fails, or glslang produces an empty module.
+ * linking fails, or glslang produces an empty module
  */
 [[nodiscard]] std::vector<std::uint32_t>
 compile_shader_spirv(const shader_compile_request& request) {
@@ -342,7 +342,7 @@ compile_shader_spirv(const shader_compile_request& request) {
 }
 
 /**
- * @brief Return a shader's GLSL body so source changes invalidate its cache.
+ * @brief Return a shader's GLSL body so source changes invalidate  its cache.
  * @param[in] kind Shader to look up.
  * @return Embedded GLSL without the version, extension or parameter definitions.
  */

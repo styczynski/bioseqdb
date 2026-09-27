@@ -27,7 +27,7 @@ import bioseq.postgres.scheduler.supervisor;
 import bioseq.postgres.column.planner_hook;
 import bioseq.postgres.table.batch_sort_scan;
 
-/// @brief Register Bioseq's table access method, custom scans and planner hooks.
+/// @brief Register Bioseq's table  access method, custom scans and planner hooks.
 /// During shared-library preload, also register scheduler shared memory and
 /// its supervisor process.
 export void
@@ -52,7 +52,7 @@ initialize_bioseq_extension()
 	CacheRegisterRelcacheCallback(bioseq::storage::invalidate_table_access_cache,
 								  PointerGetDatum(nullptr));
 	/* Index-cache callbacks register on the first lookup or store. Each
-	 * completed registration is remembered, so a later transaction can retry
+	 * completed registration is remembered, so a later transaction, can  retry
 	 * after an error without registering the same callback twice. */
 
 	/* Orphan cleanup runs from SQL because it needs an active SPI transaction. */

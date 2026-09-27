@@ -372,7 +372,7 @@ TEST_CASE("total sequence key agrees across states layouts and indexes",
             "SELECT label FROM sequence_acceptance_total_key_hash "
             "WHERE value = 'A'::bioseq.seq;") == "ua");
 
-        // Check that an expression index can read a stored sequence and serve a length query.
+        // Check that an expression index can read a stored sequence and serve a length query
         const auto source_expression_plan = explain_text<false>(
             ctx,
             "SELECT id FROM sequence_acceptance_total_key_source "
@@ -398,7 +398,7 @@ TEST_CASE("total sequence key agrees across states layouts and indexes",
         explain_text<false>(ctx, hash_join_query), "Hash Join"));
 
     /* Each table alias needs its own source provider. Check that equality,
-     * ordering, and hashing read the value belonging to the correct alias. */
+     * ordering, and hashing read  the value belonging to the correct alias. */
     REQUIRE(query_scalar(
         ctx,
         "SELECT bioseq_internal.sequence_source_route_alias_probe();")

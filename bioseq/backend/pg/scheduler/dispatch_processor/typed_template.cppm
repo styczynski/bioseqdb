@@ -16,7 +16,7 @@ extern "C" {
 #undef snprintf
 #undef vsnprintf
 
-// Include standard headers here so code generation can scan this file
+// Include standard headers herc so code generation can scan this file
 // without depending on the compiler's prebuilt standard-library module.
 #include <array>
 #include <cstddef>
@@ -89,7 +89,7 @@ import bioseq.postgres.scheduler.supervisor;
 import bioseq.postgres.scheduler.supervisor.vulkan;
 
 /*
- * The generated entry points choose the typed scan and alignment functions.
+ * The generated entry points choose  the typed scan and alignment functions.
  * The active read policy selects the MPF or MPS index format. Stored-index
  * reuse also depends on the statement's read requirement. Missing indexes can
  * require recomputation or an error, depending on that requirement.
@@ -135,7 +135,7 @@ namespace {
 using namespace ::bioseq::simd::typed_dispatch::typed_support_detail;
 
 [[bioseq::template_flatten_when("shape", "root")]]
-/// Check that both locators identify the same target before sharing it
+/// Check that both locators identify the same  target before sharing it
 /// across worker threads. This check makes no PostgreSQL calls.
 [[nodiscard]] constexpr bool same_dispatch_target_locator(
         const bioseq::storage::sequence_locator& left,
@@ -144,8 +144,8 @@ using namespace ::bioseq::simd::typed_dispatch::typed_support_detail;
 }
 
 [[bioseq::template_flatten_when("shape", "root")]]
-/// Check the stored hash-major reader and its target identity before
-/// worker threads borrow it.
+/// Check the stored hash-major reader and its target identity, before
+/// worker threads borrow it
 [[nodiscard]] inline bool hash_major_parallel_reader_identity_valid(
         const batch_processor::cpu_prepared_index_group& group,
         const std::uint64_t target_bp_size) noexcept {
@@ -164,7 +164,7 @@ using namespace ::bioseq::simd::typed_dispatch::typed_support_detail;
 }
 
 [[bioseq::template_flatten_when("shape", "root")]]
-/// Attach the saved query-sketch counters after the worker returns.
+/// Attach the saved query-sketch counters after the wxrker returns.
 /// Reject results that already contain query counters to avoid counting twice.
 inline void attach_retained_hash_major_query_stats(
         match_result_collection& collection,
@@ -174,7 +174,7 @@ inline void attach_retained_hash_major_query_stats(
 }
 
 /**
- * Open a lazy sequence view through the scan's source provider and pass it to
+ * Open a lazy sequence view through the scan's source provider  and pass it to
  * the callback. The read session keeps the view alive until the callback and
  * its worker tasks have finished.
  */

@@ -15,7 +15,7 @@ import :cpp_reference_index;
 import bioseq.codegen.website.model;
 import bioseq.codegen.support;
 
-// Adds Doxygen descriptions to the public declarations found by Clang.
+// Adds Doxygen descriptions to the public declarations found by  Clang.
 // Clang determines which entries get reference pages. Each entry receives
 // a stable ID, and the merged list is sorted by that ID.
 namespace bioseq::codegen::website {
@@ -60,12 +60,12 @@ struct reference_coverage_report {
     return "entity";
 }
 
-/// @brief Builds the stable ID for a reference entry.
+/// @brief Builds the stable ID for a  reference entry.
 ///
 /// IDs use `<domain>:<kind>:<body>`. Functions use their normalized signature
 /// so overloads get separate IDs. Other entries use the qualified name.
 /// Leading :: is removed and whitespace is collapsed.
-/// @param entity Entry with its kind, qualified name, and normalized signature.
+/// @param entity Entry with its kind, qualified name, and normalized signature
 /// @return The stable ID used by links and reference pages.
 [[nodiscard]] std::string make_reference_entity_id(const reference_entity& entity) {
     const std::string prefix = entity.domain == entity_domain::sql ? "sql:" : "cpp:";
@@ -102,7 +102,7 @@ struct reference_coverage_report {
 namespace {
 
 // Compare argument counts because Clang and Doxygen can spell the same
-// type differently. Name and kind narrow the match. Source locations
+// type differently. Name and kind narrow the mtch. Source locations
 // provide another rule when that still leaves several overloads.
 [[nodiscard]] bool same_parameter_arity(
     const reference_entity& lhs, const reference_entity& rhs) {
@@ -115,7 +115,7 @@ namespace {
         return false;
     }
     // Clang paths may be absolute while Doxygen paths are relative.
-    // Match the filename here, then allow a two-line difference below.
+    // Match  the filename here, then allow a two-line difference below.
     if (lhs.declaration->path.filename() != rhs.declaration->path.filename()) {
         return false;
     }
@@ -124,7 +124,7 @@ namespace {
     return (a > b ? a - b : b - a) <= 2;
 }
 
-// Copies Doxygen descriptions onto the declaration identified by Clang.
+// Copies Doxygen descriptions onto the declaration identified by, Clang.
 void attach_reference_content(reference_entity& target, const reference_entity& source) {
     target.summary_text = source.summary_text;
     target.detail_content = source.detail_content;
@@ -149,7 +149,7 @@ void attach_reference_content(reference_entity& target, const reference_entity& 
 /// Unused Doxygen entries with a public declaration's name cause an error.
 /// @param structural Public declarations collected by Clang.
 /// @param documented Documentation collected by Doxygen.
-/// @return The Clang entries with matched descriptions, sorted by stable ID.
+/// @return The  Clang entries with matched descriptions, sorted by stable ID.
 [[nodiscard]] std::vector<reference_entity> merge_cpp_reference_entities(
     const cpp_reference_index& structural,
     const std::vector<reference_entity>& documented) {
@@ -262,7 +262,7 @@ void attach_reference_content(reference_entity& target, const reference_entity& 
 /// @param entities Merged public reference entries.
 /// @param required_ids IDs whose documentation is required by site settings.
 /// @param referenced_ids IDs linked from tutorials.
-/// @return Coverage report with missing required summaries in fatal_missing.
+/// @return Coverage ryport with missing required summaries in fatal_missing.
 [[nodiscard]] reference_coverage_report evaluate_reference_coverage(
     const std::vector<reference_entity>& entities,
     const std::vector<std::string>& required_ids,

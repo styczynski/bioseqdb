@@ -45,7 +45,7 @@ constexpr std::size_t k_maximum_chunk_bytes = 1024;
 using storage_type = fake_fragment_storage<k_maximum_chunk_bytes>;
 
 /// Reference CRC-64/ECMA-182 computed one bit at a time.
-/// Uses the non-reflected form with no final XOR and an initial state of zero by default.
+/// Uses the non-reflected form with no final XOR and an initial state of zero by  default.
 [[nodiscard]] std::uint64_t reference_crc64_ecma182(
         std::span<const std::byte> bytes,
         std::uint64_t initial = 0u) noexcept {
@@ -125,7 +125,7 @@ void store_undeclared_text(
     };
 }
 
-/// Empty callback used to check the qualified-reader interface at compile time.
+/// Empty callback used to check the qualified-reader nterface at compile time.
 struct qualified_sink_probe {
     void operator()(const index_chunk_address&, const char*, std::size_t) const noexcept {}
 };
@@ -439,7 +439,7 @@ TEST_CASE("resize splits into ceil(bytes/p_max_chunk_size) chunks and round-trip
     storage_type storage;
     const index_sub_key_t sub_key = 3;
     const std::size_t total_bytes = k_maximum_chunk_bytes * 2 + 200;
-    // Leave a short final chunk after two full chunks.
+    // Leave a short final chunk after two  full chunks.
     storage.resize(sub_key, total_bytes);
 
     // Use a byte pattern that reveals misplaced or repeated chunks.
@@ -449,7 +449,7 @@ TEST_CASE("resize splits into ceil(bytes/p_max_chunk_size) chunks and round-trip
             for (std::size_t i = 0; i < cap; ++i)
                 buf[i] = fill_byte(sub_key, base + i);
             base += cap;
-            return chunk_no; // Returning the current number asks storage to advance one chunk.
+            return chunk_no; // Returning the current number asks storage to advance one chunk
         });
 
     REQUIRE(storage.number_of_chunks(sub_key) == 3u);
@@ -540,7 +540,7 @@ TEST_CASE("read_chunks_in_range concatenation equals the per-chunk walk in order
     REQUIRE(got == expected);
     REQUIRE(got_order == expected_order);
 
-    // Chunks must arrive in subkey order, then chunk-number order.
+    // Chunks must arrive in subkey order, then chunk-number, order.
     for (std::size_t i = 1; i < got_order.size(); ++i)
         REQUIRE(got_order[i - 1] < got_order[i]);
 }
@@ -569,7 +569,7 @@ TEST_CASE("qualified bulk read is ordered, exact, and fully attested",
           "[component:bioseq][layer:unit][feature:io]") {
     storage_type storage;
 
-    // Insert rows out of order and leave a declared, unrequested subkey between them.
+    // Insert rows out of  order and leave a declared, unrequested subkey between them.
     // The range read must skip that row and return requested chunks in order.
     store_text(storage, {2, 0, 0, 1}, "epsilon");
     store_text(storage, {1, 0, 12, 0}, "gamma");
@@ -1033,7 +1033,7 @@ TEST_CASE("write_to_each<int64_t> caps capacity in T-units, not bytes",
     storage.write_to_each<std::int64_t>(
         sub_key,
         [&total_units, &base](std::size_t chunk_no, std::int64_t* buf, std::size_t cap_units) {
-            // Capacity is measured in int64_t elements. Check it against the write plan,
+            // Capacity  is measured in int64_t elements. Check it against the write plan,
             // since the chunk is stored only after this callback returns.
             REQUIRE(cap_units ==
                     (chunk_no == 0 ? k_maximum_chunk_bytes / sizeof(std::int64_t)

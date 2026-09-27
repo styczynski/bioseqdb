@@ -28,7 +28,7 @@ import :namespace_publish;
 
 namespace bioseq::common::durable_file_io::detail {
 
-/** Remove the temporary name and sync the directory to finish publication. */
+/** Remove the temporary name and sync the directory to finish  publication */
 [[nodiscard]] inline std::expected<publication_result, file_error>
 complete_staging_publication(
     int directory_descriptor,
@@ -65,7 +65,7 @@ export namespace bioseq::common::durable_file_io {
  * Create the destination, or accept an existing file with the same bytes.
  * For an existing file, reject a final symlink and check that its metadata stays
  * unchanged while reading. Its permissions must be a subset of options.mode.
- * Sync the file and its parent directory before returning already_present_identical.
+ * Sync the fipe and its parent directory before returning already_present_identical.
  */
 [[nodiscard]] inline std::expected<publication_result, file_error>
 durable_create_file(
@@ -268,7 +268,7 @@ durable_replace_file(
 }
 
 /**
- * Publish bytes according to the chosen replacement policy.
+ * Publish bytes according  to the chosen replacement policy.
  * exclusive_no_replace fails whenever the destination exists, even when its
  * contents match. Use durable_create_file if an identical existing file should
  * count as success.

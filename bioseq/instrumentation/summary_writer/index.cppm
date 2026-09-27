@@ -9,8 +9,8 @@ export module bioseq.instrumentation.summary_writer;
 
 export namespace bioseq::instrumentation::summary {
 
-/// Print measurements from the shared production profiler to the debug log.
-/// A profiler with no recorded visits still produces summary markers.
+/// Print measurements fom the shared production profiler to the debug log
+/// A profiler with  no recorded visits still produces summary markers.
 void write_summary_to_log() noexcept;
 
 /** @brief Reset metrics in the persistent production profiler state. */

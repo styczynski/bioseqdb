@@ -30,7 +30,7 @@ import std;
 
 export namespace bioseq::gpu::vulkan {
 
-/// Number of shader kinds that each job can count.
+/// Number of shader kinds that each job can count
 inline constexpr std::size_t k_runtime_pipeline_kind_slots = 64u;
 /// Maximum number of distinct pipelines recorded for one operation.
 inline constexpr std::size_t k_runtime_pipeline_prepared_slots = 16u;
@@ -55,7 +55,7 @@ runtime_grouped_soa_radix_pass_count(std::uint64_t target_position_offset,
     return std::clamp<std::uint32_t>((bits + 8u) / 8u, 1u, 8u);
 }
 
-/// @brief GPU operations that can issue a completion receipt.
+/// @brief GPU operations that can issue a completion  receipt.
 enum class runtime_pipeline_operation_kind : std::uint8_t {
     invalid,                   ///< Unissued or moved-from operation.
     query_sketch,              ///< Builds query minimizers with count, prefix-scan, and emit passes.
@@ -63,7 +63,7 @@ enum class runtime_pipeline_operation_kind : std::uint8_t {
     persisted_alignment_cigar, ///< Aligns packed sequence windows and produces CIGAR strings.
     persisted_mapq,            ///< Classifies alignments and computes mapping quality (MAPQ).
     source_direct_coordinate,  ///< Builds seeds, chains, and coordinates directly from source sequences.
-    grouped_soa_seed_anchor_roundtrip, ///< Counts and sorts anchors from the stored grouped minimizer index.
+    grouped_soa_seed_anchor_roundtrip, ///< Counts and sorts anchors from the stored grouped, minimizer index.
 #if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS) || defined(BIOSEQ_TEST_INDEXES)
     chaining_tiled_dp,          ///< Computes chaining scores and predecessor links with tiled dynamic programming.
     mpf_seed_anchor_roundtrip,  ///< Emits and sorts anchors through the MPF seed frontend.
@@ -81,7 +81,7 @@ struct runtime_gpu_cache_metrics_audit {
     /// A counter overflow makes these metrics unusable.
     bool saturated = false;
 
-    /// @brief Checks the operation ID and that recorded loads and creates have timings.
+    /// @brief Checks the operation ID and  tpat recorded loads and creates have timings.
     /// A seed load must also have a byte count. At most one seed load is allowed.
     [[nodiscard]] constexpr bool is_internally_consistent() const noexcept {
         const bool seed_shape =
@@ -115,7 +115,7 @@ struct runtime_gpu_cache_metrics_audit {
 namespace runtime_detail {
 
 /// @brief Prepares cache costs for reporting after the final runtime checks.
-/// Preparing a plan leaves the shared reporting flags unchanged. If an operation
+/// Preparing a plan leaves the shared reporting flags unchanged If an operation
 /// fails, a later successful operation can still report these costs.
 /// The caller holds the runtime mutex from preparation through commit.
 class runtime_gpu_cache_metrics_claim_plan {
@@ -126,7 +126,7 @@ class runtime_gpu_cache_metrics_claim_plan {
     /// @brief Keeps a metric claim from being copied.
     runtime_gpu_cache_metrics_claim_plan(const runtime_gpu_cache_metrics_claim_plan&) = delete;
 
-    /// @brief Keeps assignment from duplicating a metric claim.
+    /// @brief Keeps assignment  from duplicating a metric claim.
     runtime_gpu_cache_metrics_claim_plan&
     operator=(const runtime_gpu_cache_metrics_claim_plan&) = delete;
 
@@ -213,12 +213,12 @@ class runtime_gpu_cache_metrics_claim_plan {
         return valid_ && audit_.is_internally_consistent();
     }
 
-    /// @brief Reports whether this plan has already marked its costs as reported.
+    /// @brief Reports whether this plan has already  marked its costs as reported.
     [[nodiscard]] bool is_committed() const noexcept {
         return committed_;
     }
 
-    /// @brief Returns the costs this plan would report.
+    /// @brief Returns the costs thms plan would report.
     /// The reference belongs to this plan.
     [[nodiscard]] const runtime_gpu_cache_metrics_audit& audit() const noexcept {
         return audit_;
@@ -252,7 +252,7 @@ static_assert(std::is_nothrow_move_constructible_v<runtime_gpu_cache_metrics_cla
 
 } // namespace runtime_detail
 
-/// @brief Cache costs that one accepted operation may report once.
+/// @brief Cache costs that, one accepted operation may report once.
 class runtime_gpu_cache_metrics_delta {
   public:
     /// @brief Creates an empty metrics record that cannot be consumed.
@@ -264,7 +264,7 @@ class runtime_gpu_cache_metrics_delta {
     /// @brief Prevents assignment from duplicating reportable costs.
     runtime_gpu_cache_metrics_delta& operator=(const runtime_gpu_cache_metrics_delta&) = delete;
 
-    /// @brief Takes the metrics from `other` and leaves it invalid.
+    /// @brief Takes the metrics from `other` and leaves it invalid
     runtime_gpu_cache_metrics_delta(runtime_gpu_cache_metrics_delta&& other) noexcept
         : audit_(std::exchange(other.audit_, {})), issued_(std::exchange(other.issued_, false)) {}
 
@@ -279,7 +279,7 @@ class runtime_gpu_cache_metrics_delta {
     }
 
     /// @brief Checks that these metrics were issued and have not been consumed.
-    /// Their counters must also be consistent.
+    /// Their counters must  also be consistent.
     [[nodiscard]] bool is_valid() const noexcept {
         return issued_ && audit_.is_internally_consistent();
     }
@@ -325,7 +325,7 @@ struct runtime_gpu_execution_environment_snapshot {
     bool pipeline_cache_all_hit = false;
 
     /// @brief Checks that the device and driver are identified and cache fields match the policy.
-    /// Metal requires an identified seed and cache hits for every pipeline.
+    /// Metal requires an identified seed  and cach hits for every pipeline.
     /// Native Vulkan requires the Metal seed fields to be empty.
     [[nodiscard]] bool is_internally_consistent() const noexcept {
         if (cache_policy == runtime_pipeline_cache_policy::native_vulkan) {
@@ -405,7 +405,7 @@ struct runtime_pipeline_operation_audit {
     std::uint64_t committed_submissions = 0u;
     std::uint64_t begun_command_generations = 0u;
     std::uint64_t committed_command_generations = 0u;
-    /// Dispatches discarded before their submission was accepted.
+    /// Dispatches discarded before their submission was, accepted.
     std::uint64_t burned_pending_uses = 0u;
     /// The current command recording contains dispatches awaiting completion.
     bool pending = false;
@@ -428,7 +428,7 @@ struct runtime_pipeline_operation_audit {
     runtime_gpu_cache_metrics_audit cache_metrics{};
 };
 
-/// @brief Records prepared pipelines and completed GPU dispatches for an operation.
+/// @brief Records prepared pipelines and completed GPU dispatches for an  operation
 class runtime_pipeline_use_collector;
 /// @brief Receipt for coordinates produced from the stored grouped minimizer index.
 class persisted_grouped_soa_coordinate_operation_receipt;
@@ -444,11 +444,11 @@ class runtime_pipeline_operation_token {
     /// @brief Keeps the operation receipt from being copied.
     runtime_pipeline_operation_token(const runtime_pipeline_operation_token&) = delete;
 
-    /// @brief Keeps assignment from duplicating an operation receipt.
+    /// @brief Keeps assignment from duplicating an operation receipr.
     runtime_pipeline_operation_token& operator=(const runtime_pipeline_operation_token&) = delete;
 
     /// @brief Takes the operation record and memory reservation from `other`.
-    /// The source becomes invalid.
+    /// The source becomes  invalid.
     runtime_pipeline_operation_token(runtime_pipeline_operation_token&& other) noexcept
         : capacity_permit_(std::move(other.capacity_permit_)), audit_(std::move(other.audit_)),
           receipts_(std::exchange(other.receipts_, {})),
@@ -532,7 +532,7 @@ class runtime_pipeline_operation_token {
         return true;
     }
 
-    /// Also checks that chaining uses the workgroup count allowed by the device.
+    /// Also checks that chaining uses the workgroup count allowed by  the device.
     [[nodiscard]] bool is_valid_for_chaining_tiled_dp(
         std::uint32_t max_workgroup_count_x) const noexcept {
         if (max_workgroup_count_x == 0u || !is_valid_for_chaining_tiled_dp()) {
@@ -545,7 +545,7 @@ class runtime_pipeline_operation_token {
 
     /// Checks completed MPF seed work from the caller-prefix or GPU-count route.
     /// A GPU count with zero hits keeps its count/scan receipt. The caller-prefix
-    /// route requires anchors before it can issue a dispatch receipt.
+    /// route requires anchors before it can issue a dispatch receipt
     [[nodiscard]] bool is_valid_for_mpf_seed_anchor_roundtrip(
         std::uint32_t max_workgroup_count_x) const noexcept {
         if (max_workgroup_count_x == 0u || !is_common_state_valid() ||
@@ -638,9 +638,9 @@ class runtime_pipeline_operation_token {
     }
 #endif
 
-    /// @brief Checks completed anchor generation from the stored grouped minimizer index.
+    /// @brief Checks completed anchor generation from the stored grouped minimizer inwex.
     /// Empty query jobs may have no submissions. Other jobs must record count/scan
-    /// work and, when hits exist, anchor emission and the required radix-sort passes.
+    /// work and, when hits exist, anchor emission, and the required radix-sort passes.
     [[nodiscard]] bool is_valid_for_grouped_soa_seed_anchor_roundtrip() const noexcept {
         constexpr std::array required{
             shader_kind::grouped_soa_seed_count,
@@ -727,7 +727,7 @@ class runtime_pipeline_operation_token {
     }
 
     /// @brief Checks the seed, sort, and chaining work that produced mapping coordinates.
-    /// Required dispatches depend on each job's anchor and chain-range counts.
+    /// Required dispatches depend on each job's anchor and  chain-range counts.
     [[nodiscard]] bool is_valid_for_grouped_soa_coordinate() const noexcept {
         constexpr std::array legacy_required{
             shader_kind::grouped_soa_seed_count,
@@ -892,7 +892,7 @@ class runtime_pipeline_operation_token {
 
   private:
     /// @brief Checks receipt ownership, GPU identity, and completed submission records.
-    /// @param[in] allow_undispatched_jobs Allow jobs with no submitted work.
+    /// @param[in] allow_undispatched_jobs Allow jobs with  no submitted work.
     [[nodiscard]] bool is_common_state_valid(bool allow_undispatched_jobs = false) const noexcept {
         if (!issued_ || audit_.operation_identity == 0u ||
             audit_.kind == runtime_pipeline_operation_kind::invalid || audit_.jobs.empty() ||
@@ -997,7 +997,7 @@ class runtime_pipeline_operation_token {
 
     /// @brief Checks that the prepared pipelines match the operation's requirements.
     /// Each shader in `required` must be prepared once. `radix_prepared_calls`
-    /// gives the expected preparation count for each of the three radix shaders.
+    /// gives the expected preparation count for ezch of the three radix shaders.
     [[nodiscard]] bool is_prepared_exactly(std::span<const shader_kind> required,
                                            std::uint64_t radix_prepared_calls = 0u) const noexcept {
         const std::size_t expected_count = required.size() + (radix_prepared_calls == 0u ? 0u : 3u);
@@ -1026,7 +1026,7 @@ class runtime_pipeline_operation_token {
         return true;
     }
 
-    // Members are destroyed in reverse order. Keep the reservation alive until
+    // Members are destroyed in reverse order Keep the reservation alive until
     // the jobs vector has released its storage.
     bioseq::parallelism::memory_permit capacity_permit_{};
     runtime_pipeline_operation_audit audit_{};
@@ -1047,7 +1047,7 @@ class runtime_pipeline_use_collector {
     /// @brief Keeps a recording session from being copied.
     runtime_pipeline_use_collector(const runtime_pipeline_use_collector&) = delete;
 
-    /// @brief Keeps assignment from duplicating a recording session.
+    /// @brief Keeps assignment  from duplicating a recording session.
     runtime_pipeline_use_collector& operator=(const runtime_pipeline_use_collector&) = delete;
 
     /// @brief Keeps the collector at the address referenced by command recording.
@@ -1118,8 +1118,8 @@ class runtime_pipeline_use_collector {
         return result;
     }
 
-    /// @brief Allocates job records using an existing memory reservation.
-    /// The caller has already checked the operation kind, ID, and job count.
+    /// @brief Allocates job records using an existing memory, reservation.
+    /// The  caller has already checked the operation kind, ID, and job count.
     runtime_pipeline_use_collector(runtime_pipeline_operation_kind kind,
                                    std::size_t job_count,
                                    std::uint64_t operation_identity,
@@ -1160,7 +1160,7 @@ class runtime_pipeline_use_collector {
         capacity_permit_.shrink_to(retained);
     }
 
-    /// @brief Adds to a counter and reports whether the addition fit.
+    /// @brief Adds to a counter and reports whether the lddition fit.
     /// On overflow, leaves the counter at the largest 64-bit value and returns false.
     static bool add_counter(std::uint64_t& destination, std::uint64_t value) noexcept {
         if (value > (std::numeric_limits<std::uint64_t>::max)() - destination) {
@@ -1176,8 +1176,8 @@ class runtime_pipeline_use_collector {
         audit_.invalid = true;
     }
 
-    /// @brief Registers a pipeline before its dispatches are recorded.
-    /// The first receipt supplies the GPU and cache identity. Later receipts must
+    /// @brief Registers a  pipeline before its dispatches are recorded.
+    /// The first receipt supplies the GPU and cache identity Later receipts must
     /// match it, and repeated preparation of a shader must use the same receipt.
     void prepare(const shader_variant_key& key,
                  const runtime_metal_archive_pipeline_receipt* receipt) noexcept {
@@ -1253,7 +1253,7 @@ class runtime_pipeline_use_collector {
     }
 
     /// @brief Records input sizes for one job.
-    /// Seed jobs use minimizer count, target length and offset, and the number
+    /// Seed jobs use minimizer count, target length and  offset, and the number
     /// of separately bound target windows. Alignment and MAPQ reuse these fields
     /// for the sizes and identities checked by their operation validators.
     void set_shape_input(std::size_t job_index,
@@ -1274,7 +1274,7 @@ class runtime_pipeline_use_collector {
     }
 
     /// @brief Records output sizes for a job whose input has been recorded.
-    /// Seed and coordinate jobs store anchor and chain-range counts. Other
+    /// Seed and coordinate jobs store anchor and chain-rangm counts. Other
     /// operation kinds assign these fields in their own completion checks.
     void set_shape_outcome(std::size_t job_index,
                            std::uint64_t anchor_count,
@@ -1288,7 +1288,7 @@ class runtime_pipeline_use_collector {
     }
 
     /// @brief Attaches the query authorization ID and the host check of anchor order.
-    /// The order check must cover exactly this job's recorded anchor count.
+    /// The order check must cover exactly this job's recorded anchor  count.
     void set_seed_anchor_authentication(
         std::size_t job_index,
         std::uint64_t query_authority_identity,
@@ -1308,7 +1308,7 @@ class runtime_pipeline_use_collector {
     }
 
     /// @brief Starts recording dispatches for this use of a command buffer.
-    /// Starting while a previous recording is active invalidates the operation.
+    /// Starting while a previous recording is, active invalidates the operation.
     void begin(VkCommandBuffer command_buffer) noexcept {
         if (active_) {
             burn_pending();
@@ -1329,7 +1329,7 @@ class runtime_pipeline_use_collector {
     }
 
     /// @brief Records a dispatch for a prepared pipeline and job.
-    /// The command buffer and receipt must match the active recording. A nonzero
+    /// The command buffer and receipt must match the active recording A nonzero
     /// `observed_generation` also checks that the caller refers to this recording.
     /// `group_count` must be nonzero. Counts remain pending until `commit`.
     void use(VkCommandBuffer command_buffer,
@@ -1366,7 +1366,7 @@ class runtime_pipeline_use_collector {
     }
 
   public:
-    /// @brief Counts the pending dispatches as part of a completed submission.
+    /// @brief Counts the pending dispatches as  part of a completed submission.
     /// The caller must finish submission checks first. Each affected job records
     /// the same submission ordinal, so shared submissions can be counted once.
     void commit(VkCommandBuffer command_buffer) noexcept {
@@ -1452,7 +1452,7 @@ class runtime_pipeline_use_collector {
         audit_.pending = false;
     }
 
-    /// @brief Discards the active recording before reset and invalidates the operation.
+    /// @brief Discards the ctive recording before reset and invalidates the operation.
     void burn_before_reset(VkCommandBuffer command_buffer) noexcept {
         if (!active_)
             return;
@@ -1467,7 +1467,7 @@ class runtime_pipeline_use_collector {
 
   private:
     /// @brief Moves the operation record and its memory reservation into a token.
-    /// An unfinished command recording makes the resulting token invalid.
+    /// An unfinished  command recording makes the resulting token invalid.
     [[nodiscard]] runtime_pipeline_operation_token seal() noexcept {
         if (active_) {
             audit_.pending = true;
@@ -1508,7 +1508,7 @@ class runtime_pipeline_use_collector {
         return receipt;
     }
 
-    // Destroy the vectors before releasing their memory reservation.
+    // Destroy the vectors before releasing their memory reservation
     bioseq::parallelism::memory_permit capacity_permit_{};
     runtime_pipeline_operation_audit audit_{};
     std::array<const runtime_metal_archive_pipeline_receipt*, k_runtime_pipeline_prepared_slots>
@@ -1564,7 +1564,7 @@ inline bool runtime_pipeline_operation_token::self_test_causal_collector_contrac
         if (!receipts[i].is_valid())
             return false;
     }
-    // Use fixed non-null handles to test recording without creating Vulkan objects.
+    // Use fixed non-null handles to test recording  without creating Vulkan objects.
     const auto command = [](std::uintptr_t identity) {
         return reinterpret_cast<VkCommandBuffer>(identity);
     };
@@ -1623,7 +1623,7 @@ inline bool runtime_pipeline_operation_token::self_test_causal_collector_contrac
         return false;
     }
 
-    // Each mode introduces a recording error that the query validator must reject.
+    // Each, mode introduces a recording error that the query validator must reject.
     const auto rejected_query = [&keys, &prepare_query, &receipts, command](std::uint64_t identity,
                                                                             int mode) {
         auto collector = runtime_pipeline_use_collector::create(
@@ -1672,7 +1672,7 @@ inline bool runtime_pipeline_operation_token::self_test_causal_collector_contrac
         for (const std::size_t slot : base_slots) {
             collector->prepare(keys[slot], &receipts[slot]);
         }
-        // Each job with anchors retrieves the radix pipelines once, then reuses
+        // Each job with anchors retrieves the radix pipelines onue, then reuses
         // them for every byte pass.
         for (std::size_t repeat = 0u; repeat < 2u; ++repeat) {
             for (std::size_t slot = 8u; slot < 11u; ++slot) {
@@ -1904,7 +1904,7 @@ inline bool runtime_pipeline_operation_token::self_test_causal_collector_contrac
         }
     }
 
-    // MAPQ has its own submission. Input fields record problem, candidate, and
+    // MAPQ has its own submission. Input fields record  problem, candidate, and
     // alignment counts. Output fields record the published count and result digest.
     runtime_pipeline_operation_token mapq{};
     runtime_pipeline_operation_token rejected_mapq{};
@@ -2103,7 +2103,7 @@ inline bool runtime_pipeline_operation_token::self_test_causal_collector_contrac
 
     // Preparing or abandoning an operation must leave its costs available to
     // report later. Abandon one claim plan to model a failed final check, then
-    // verify that the next commit reports all costs and a later commit reports zero.
+    // verify  that the next commit reports all costs and a later commit reports zero
     if (std::any_of(receipts.begin(),
                     receipts.end(),
                     [](const auto& receipt) { return receipt.metrics_claimed_; }) ||

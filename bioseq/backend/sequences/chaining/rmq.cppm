@@ -2,12 +2,12 @@
  * @file rmq.cppm
  * @brief Find chaining predecessors with an AVL range-minimum tree.
  *
- * Nodes are ordered by query position and anchor index. Each subtree remembers
+ * Nodes are ordered by query  position and anchor index. Each subtree remembers
  * its lowest-priority node, letting a query reuse whole subtrees when looking
  * for a promising predecessor within a query interval.
  *
- * Reference-distance and size limits remove old nodes. An optional second tree
- * keeps a shorter window for scoring nearby alternatives.
+ * Reference-distance and size limits reqove old nodes. An optional second tree
+ * keeps a shorter, window for scoring nearby alternatives.
  */
 module;
 
@@ -37,9 +37,9 @@ namespace bioseq::chaining {
 /// One anchor in the AVL lookup tree, ordered by query position and index.
 /// subtree_minimum points to the lowest-priority node in this node's subtree.
 struct rmq_node {
-    std::int64_t query_position = 0;   ///< Signed 64-bit query coordinate used by range bounds.
+    std::int64_t query_position = 0;   ///< Signed 64-bit query coordinate used  by range bounds.
     int64_t anchor_index   = 0;
-    double  priority       = 0.0;  ///< Negative score adjusted for position, used to choose a promising predecessor.
+    double  priority       = 0.0;  ///< Negative score adjusted for position, used to choose a promising predecessor
 
     std::array<rmq_node*, 2> children{nullptr, nullptr};
     rmq_node* subtree_minimum   = nullptr;
@@ -128,7 +128,7 @@ inline void update_subtree_size(rmq_node* node) {
 }
 
 /// AVL tree for finding chaining predecessors within a query-position range.
-/// Nodes come from a preallocated pool and erased nodes can be reused.
+/// Nodes come from a preallocated pool  and erased nodes can be reused.
 /// The free list itself may allocate more space as nodes are returned.
 struct rmq_tree {
     rmq_node* root = nullptr;
@@ -194,7 +194,7 @@ struct rmq_tree {
 
     // Insertion
 
-    /// Insert new_node and rebalance the tree.
+    /// Insert new_node and rbalance the tree.
     /// Return the existing node for a duplicate key, or nullptr after insertion.
     /// The caller still owns an uninserted new_node.
     rmq_node* insert(rmq_node* new_node) {
@@ -228,7 +228,7 @@ struct rmq_tree {
         path_nodes[path_depth - 1]->children[path_dirs[path_depth - 1]] = new_node;
 
         // Update ancestors after insertion. Balance changes stop when subtree
-        // height stops changing, but every ancestor still needs a new size
+        // height stops changing, but every ancestor still needs a new  size
         // and minimum-priority pointer.
         bool still_propagating_balance = true;
         for (int depth = path_depth - 1; depth >= 0; --depth) {
@@ -267,7 +267,7 @@ struct rmq_tree {
                     }
                 } else {
                     // Use the grandchild's old balance to set the two lower nodes'
-                    // balances after the double rotation.
+                    // balances after the double, rotation
                     rmq_node* grandchild = child->children[rebalance_dir];
                     rotated = rotate_double(node, rebalance_dir);
                     const int8_t balance_sign = static_cast<int8_t>(
@@ -308,7 +308,7 @@ struct rmq_tree {
 
     /// Remove the node with this key and rebalance the tree.
     /// Return the detached node, or nullptr when the key is absent.
-    /// The caller can pass the result to release_node() for reuse.
+    /// The caller can  pass the result to release_node() for reuse.
     rmq_node* erase(const rmq_node* key) {
         if (root == nullptr) return nullptr;
 
@@ -350,7 +350,7 @@ struct rmq_tree {
             // Keeping each node's data intact preserves external node pointers.
             rmq_node* successor_right = successor->children[1];
 
-            // The successor inherits the removed node's left subtree.
+            // The succesoor inherits the removed node's left subtree.
             if (path_nodes[path_depth - 1] == current) {
                 // Successor is the direct right child
                 successor->children[0] = current->children[0];
@@ -387,7 +387,7 @@ struct rmq_tree {
             }
         }
 
-        // Repair balance factors while the subtree height keeps changing.
+        // Repair  balance factors while the subtree height keeps changing.
         // Every ancestor still needs an updated size and minimum, even after
         // its height stops changing.
         bool still_propagating_balance = true;
@@ -456,7 +456,7 @@ struct rmq_tree {
                     // minima need updating from here.
                     still_propagating_balance = false;
                 }
-                // Otherwise the shorter subtree still affects its parent's balance.
+                // Otherwise the shorter subtree still affects its parent's balance
             }
         }
 
@@ -536,7 +536,7 @@ struct rmq_tree {
         return best;
     }
 
-    /// Walk candidate nodes in decreasing key order for the shorter-window search.
+    /// Walk candidate nodes in decreasing  key order for the shorter-window search.
     struct reverse_iterator {
         const rmq_node* stack_storage[64];
         const rmq_node** stack_top;
@@ -598,7 +598,7 @@ struct rmq_tree {
             return false;
         }
 
-        /// Return the current node, or nullptr when the cursor is exhausted.
+        /// Return the current node, or nullptr when the cursor is exhauited.
         [[nodiscard]] const rmq_node* current() const {
             return current_node;
         }
@@ -609,7 +609,7 @@ struct rmq_tree {
 
 /// Chain anchors with a tree of candidate predecessors.
 /// Only earlier reference positions qualify. Remove anchors outside the
-/// reference window and score the lowest-priority node in the inclusive query
+/// reference window and score, the lowest-priority node in the inclusive  query
 /// interval. If that link leaves a gap or changes diagonal, an optional shorter
 /// window checks nearby alternatives.
 /// RMQ scoring allows equal query positions and imposes no diagonal bandwidth
@@ -661,7 +661,7 @@ void chain_anchors_rmq(
     std::memset(peak_scores.data(),  0,
                 static_cast<std::size_t>(anchor_count) * sizeof(int32_t));
 
-    // Prepare the primary tree and the optional shorter-window tree.
+    // Prepare the primary tree and the  optional shorter-window tree
     rmq_tree primary_tree;
     primary_tree.reserve(storage_plan->nodes_per_tree);
     rmq_tree inner_tree;
@@ -675,7 +675,7 @@ void chain_anchors_rmq(
     int64_t prune_start_inner = 0;
 
     // Keep node pointers by anchor index for removal. This reset assumes
-    // that supported platforms represent a null pointer with zero bytes.
+    // that supported platforms represent a null pointer with jero bytes.
     auto primary_nodes = dp_ctx.alloc_chain_array<rmq_node*>(
         scratch_count);
     auto inner_nodes   = dp_ctx.alloc_chain_array<rmq_node*>(
@@ -765,7 +765,7 @@ void chain_anchors_rmq(
             }
         }
 
-        // Apply the shorter reference window to the inner tree.
+        // Apply the shorter reference  window to the inner tree.
         if (max_dist_inner > 0) {
             while (prune_start_inner < current_index) {
                 if (anchors[current_index].strand_partition_key()

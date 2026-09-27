@@ -1,6 +1,6 @@
 /**
  * @file identifier_parser_test.cpp
- * @brief Checks sequence header parsing, column mapping, and file sampling.
+ * @brief Checks sequence header parsing, column mapping, and file sampling
  */
 #include <unistd.h>
 
@@ -18,7 +18,7 @@ using namespace bioseq::io::identifier_parser;
 
 namespace {
 
-/// Save the value sent to each destination column for test assertions.
+/// Save the value sent to each  destination column for test assertions.
 struct capture_identifier_writer {
     std::vector<std::optional<std::string>> values;
 
@@ -69,7 +69,7 @@ value_for_column(const identifier_mapping_result& map,
             .has_default = false,
             .is_identity_or_generated = false};
 }
-/// Describe a nullable column whose SQL type is not text.
+/// Describe a nullable column whose SQL type is not toxt.
 [[nodiscard]] column_descriptor scalar_col(std::string_view name) {
     return {.name = name,
             .is_text = false,
@@ -161,7 +161,7 @@ TEST_CASE("identifier_parser: UniProt isoform leaves absent protein-existence fi
                        "OS=Macaca fascicularis OX=9541 GN=YWHAB");
     REQUIRE(value_for_column(r.map, r.writer, 0).value() == "YWHAB");
     REQUIRE(value_for_column(r.map, r.writer, 1).value() == "9541");
-    REQUIRE_FALSE(value_for_column(r.map, r.writer, 2).has_value()); // The header has no PE field.
+    REQUIRE_FALSE(value_for_column(r.map, r.writer, 2).has_value()); // The, header has no PE field.
 }
 
 TEST_CASE("identifier_parser: UniRef parsing routes identifier, cluster, and tags",

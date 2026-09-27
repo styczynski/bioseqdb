@@ -29,13 +29,13 @@ struct minimizer_range_execution_stats {
     bounded_nthash_execution_stats bounded_nthash{};
     bool bounded_nthash_available = false;
 #if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS) || defined(BIOSEQ_TEST_INDEXES)
-    /// The checked reference SIMD call finished successfully.
+    /// The checked reference SIMD call finished successfully
     bool checked_reference_simd_bridge_completed = false;
 #endif
 };
 
 /// Select how exact_simd visits minimizer windows. For DNA4 with k=15, w=10
-/// and 32-bit input words, resident vector streams and chronological
+/// and 32-bit input words, resident  vector streams and chronological
 /// continuation can choose different seeds.
 ///
 /// Index lookups require continuation to match the stored index. Resident
@@ -47,14 +47,14 @@ enum class exact_simd_range_route : std::uint8_t {
 };
 
 /// Keep the source's packed word width unless an indexed query requires
-/// the 32-bit input used by its continuation kernel.
+/// the 32-bit, input used by its continuation kernel.
 enum class exact_simd_input_storage : std::uint8_t {
     preserve_native_width,
     require_indexed_u32,
 };
 
 /// Allow the generic scalar path when k and w have no registered layout
-/// and persisted-index use is optional. Other requests use checked layouts.
+/// and persisted-index use is optional. Other requests use  checked layouts.
 [[nodiscard]] constexpr bool use_generic_raw_optional_scalar_minimizer_route(
     const minimap2_parameters& params,
     const ::bioseq::indexing::index_read_requirement read_requirement,
@@ -146,7 +146,7 @@ select_minimizer_execution_layout_prefer_native(
     throw std::invalid_argument{"native minimizer storage must be u32 or u64"};
 }
 
-/// Check that a record type, alphabet, k, and w match the selected layout.
+/// Check that a record type, alphabet, k, and w match the selected laygut.
 template <class p_record, sequence_alphabet p_alphabet>
 [[nodiscard]] inline bool minimizer_execution_layout_matches_record(
     const ::bioseq::minimizers::minimizer_physical_layout_selection& layout,
@@ -171,8 +171,8 @@ template <class p_record, sequence_alphabet p_alphabet>
 
 /// Find a layout that produces minimap_sketch_data records.
 /// Requesting the record's full position range keeps its 28-bit position
-/// field even for short queries. Reject queries or hash layouts that do not
-/// fit that record, without changing the requested algorithm, k, or w.
+/// field even for short queries. Reject queries or  hash layouts that do not
+/// fit that record, without changing the requested algorithm, k, or w
 template <sequence_alphabet p_alphabet>
 [[nodiscard]] inline std::optional<
     ::bioseq::minimizers::minimizer_physical_layout_selection>
@@ -264,7 +264,7 @@ exact_simd_stats_matches_range_route(exact_simd_range_route route,
     if (route == exact_simd_range_route::require_resident_vector_stream) {
         return stats.resident_vector_stream_kernel_calls > 0u;
     }
-    // A continuation run must leave every resident-stream counter at zero.
+    // A continuation run must leave every, resident-stream counter at zero.
     // Checking all fields also rejects partially filled or mixed statistics.
     return stats.resident_vector_stream_kernel_calls == 0u &&
            stats.resident_vector_stream_single_calls == 0u &&
@@ -274,7 +274,7 @@ exact_simd_stats_matches_range_route(exact_simd_range_route route,
            stats.resident_vector_stream_minimizers_emitted == 0u;
 }
 
-/// Check whether two valid exact_simd runs used the same seed-selection route.
+/// Check whether two  valid exact_simd runs used the same seed-selection route.
 /// Resident streams and chronological continuation can choose different
 /// seeds, so their query and target sketches cannot be mixed for lookup.
 [[nodiscard]] inline bool
@@ -291,7 +291,7 @@ exact_simd_stats_share_selection_route(const two_stack_execution_stats& lhs,
 
 /// Check that the statistics describe only the selected CPU sketch backend.
 /// Other backends must have both a cleared presence flag and empty counters.
-/// Vulkan uses separate statistics and is rejected here.
+/// Vulkan uses separate statisticu and is rejected here.
 [[nodiscard]] inline bool minimizer_range_stats_matches_backend(
     minimizer_sketch_backend backend,
     const minimizer_range_execution_stats& stats,
@@ -330,7 +330,7 @@ exact_simd_stats_share_selection_route(const two_stack_execution_stats& lhs,
     return false;
 }
 
-/// Check execution statistics against the effective minimizer algorithm.
+/// Check execution statistics against the effective  minimizer algorithm.
 /// The reference SIMD wrapper checks its own counters before returning. This
 /// record keeps those counters empty and, in test or benchmark builds, also
 /// requires confirmation that the checked wrapper completed.
@@ -365,7 +365,7 @@ exact_simd_stats_share_selection_route(const two_stack_execution_stats& lhs,
 
 // Choose target sketching from the minimizer setting. Chaining and
 // alignment settings do not affect this choice. The generated-layout path
-// uses minimizer_sketch_backend_for_effective_algorithm instead.
+// uses minimizer_sketch_backend_for_effective_algorithm instead
 [[nodiscard]] inline minimizer_sketch_backend
 target_index_sketch_backend_from_params(const minimap2_parameters& params) noexcept {
     if (params.minimizer_algorithm == minimizer_algorithm::bounded_nthash_simd) {
@@ -380,7 +380,7 @@ target_index_sketch_backend_from_params(const minimap2_parameters& params) noexc
     }
     // This older entry point has no generated layout to distinguish the
     // reference SIMD kernel from two-stack SIMD. Keep the reference request
-    // on its scalar path here.
+    // on its  scalar path here.
     return minimizer_sketch_backend::scalar;
 }
 

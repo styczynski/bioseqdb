@@ -106,9 +106,9 @@ arm_pg_sequence_source_failure(sequence_source_failure point) noexcept {
 
 namespace sequence_source_detail {
 
-/// Raise and clear the test error if this is its selected location.
+/// Raise  and clear the test errnr if this is its selected location
 /// @throws PostgreSQL ERROR when `point` is armed.
-/// @param point Failure location being entered.
+/// @param point Failure location, being entered.
 inline void inject_pg_sequence_source_failure(sequence_source_failure point) {
     if (g_pg_sequence_source_failure != point) {
         return;
@@ -152,7 +152,7 @@ inline void note_mmsearch_output_locator_promotion_for_test(
 }
 
 /// Count error recovery in test builds and record whether prior state was restored.
-/// @param state_restored Whether the output owner returned to its prior state.
+/// @param state_restored Whether the output  owner returned to its prior state.
 inline void note_mmsearch_output_pg_error_restore_for_test(
         const bool state_restored) noexcept {
 #ifdef BIOSEQ_TEST_INDEXES

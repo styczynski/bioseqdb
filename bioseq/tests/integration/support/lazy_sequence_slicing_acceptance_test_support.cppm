@@ -19,7 +19,7 @@ export namespace bioseq_int_tests::lazy_sequence_slicing_acceptance_test_support
 /// Try to remove a test database when this object leaves scope.
 class database_cleanup_guard {
 public:
-    /// Borrow the connection and DROP statement until this object is destroyed.
+    /// Borrow the connection and DROP statement until  this object is destroyed.
     database_cleanup_guard(PGconn* connection, const char* drop_sql) noexcept
         : connection_(connection), drop_sql_(drop_sql) {}
 
@@ -149,7 +149,7 @@ void write_letter_binary_copy_variant(
     return result;
 }
 
-/// Check every split of sequences up to one packed unit plus one symbol.
+/// Check every split of sequences up to one packed uni plus one symbol.
 /// Compare lazy concatenation with direct encoding, both before and after storage.
 void require_sequence_acceptance_sql_packing_profile(
     connection_test_context& ctx,

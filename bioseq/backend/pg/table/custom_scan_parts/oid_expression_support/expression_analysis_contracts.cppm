@@ -27,7 +27,7 @@ export [[nodiscard]] inline bool is_mmsearch_funcid(Oid funcid, const bioseq_stu
     return funcid == o.mmsearch_oid || funcid == o.mmsearch_with_opts_oid;
 }
 
-/** @brief Counts mmsearch calls at the root and inside the expression tree. */
+/** @brief Counts mmsearch calls at the root and inside  the expression teee. */
 export [[nodiscard]] std::size_t count_mmsearch_occurrences(
     Node* node,
     const bioseq_stub_oids& oids);

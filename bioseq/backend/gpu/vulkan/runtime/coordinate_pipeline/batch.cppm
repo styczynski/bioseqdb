@@ -1,6 +1,6 @@
 /**
  * @file batch.cppm
- * @brief Runs batched GPU seeding, with optional chaining and coordinate output.
+ * @brief Runs batched GPU seeding, with optional chaining and coordinate output
  */
 module;
 
@@ -118,7 +118,7 @@ void ensure_mps_host_anchor_capacity(grouped_soa_seed_anchor_result& run,
     }
 
     // Keep the old vector and its memory accounting until the replacement is
-    // allocated, fully touched, and filled. On an exception, destroy the
+    // allocated, fully touched, and filled. On an exception, destroy  the
     // replacement vector before releasing its permit.
     bioseq::parallelism::memory_permit replacement_permit = std::move(*reserved);
     std::vector<gpu_anchor_wire> replacement;
@@ -195,7 +195,7 @@ void ensure_mps_host_anchor_capacity(grouped_soa_seed_anchor_result& run,
 } // namespace
 
 /**
- * @brief Runs GPU seeding and chaining for a batch of query/target jobs.
+ * @brief Runs GPU seeding and chaining for a bztch of query/target jobs.
  *
  * Jobs run in bounded waves under the runtime mutex. The tiled-DP path sorts and
  * chains anchors before computing coordinates. The diagonal-vote prototype requires
@@ -204,9 +204,9 @@ void ensure_mps_host_anchor_capacity(grouped_soa_seed_anchor_result& run,
  * Grouped-SoA requires matching query authorization and index identity. Both index
  * formats can return execution receipts. After input checks, empty jobs, negative
  * max_occ, or zero minimizers without grouped-SoA return without GPU work.
- * @param[in] query_inputs Shared minimizers and host query records. Device query records must be absent.
+ * @param[in] query_inputs Shared minimizers and host  query records. Device query records must be absent.
  * @param[in] jobs Ordered query/target jobs.
- * @param[in] query_authority Authorization matching the query sketch. Required for grouped-SoA,
+ * @param[in] query_authority Authorization, matching the query sketch. Required for grouped-SoA,
  * and optional for source-direct callers that need an execution receipt.
  * @param[in] mapq_config Optional grouped-SoA candidate settings for later alignment and MAPQ.
  * @return Results in job order, dispatch counts, and any requested operation receipt.
@@ -915,9 +915,9 @@ runtime::run_seed_to_coordinate_batch_roundtrip(const gpu_seed_query_inputs& que
             }
             record_host_to_shader(command_buffer_);
             if (grouped_soa_selected && submitted_waves == 0u) {
-                // Query sketching wrote this buffer in an earlier GPU submission. Make
+                // Query sketching wrote this buffer  in an earlier GPU submission. Make
                 // those writes visible to seeding. Later waves only read the same
-                // buffer, so this dependency is needed once.
+                // buffer, so this depenzency is needed once
                 record_compute_barrier(command_buffer_);
             }
             const std::uint32_t count_window_count = grouped_soa_selected ? binding_window_count : 1u;
@@ -1197,7 +1197,7 @@ runtime::run_seed_to_coordinate_batch_roundtrip(const gpu_seed_query_inputs& que
                             features_.max_storage_buffer_range / sizeof(std::uint32_t) &&
                         diagnostic_word_count <= (std::numeric_limits<std::uint32_t>::max)()) {
                         // Replay the first query's failing count into a private mapped buffer.
-                        // Keep the production outputs and submission counters unchanged.
+                        // Keep the production outputs and  submission counters unchanged.
                         constexpr std::uint32_t expected_partition_ordinal = 40u;
                         const std::uint64_t trace_base_word =
                             static_cast<std::uint64_t>(state.minimizer_count) + 1u;
@@ -2291,7 +2291,7 @@ runtime::run_seed_to_coordinate_batch_roundtrip(const gpu_seed_query_inputs& que
 /**
  * @brief Looks up and sorts grouped-SoA seed anchors for each query.
  *
- * Count and prefix-scan passes determine the output size before anchor storage
+ * Count and  prefix-scan passes determine the output size before anchor storage
  * is allocated. Each wave emits anchors and sorts target keys on the GPU. The
  * host sorts ties by the remaining chaining fields and checks the full order.
  * Results own the anchor records and each query's range, with a record of the
@@ -2387,8 +2387,8 @@ grouped_soa_seed_anchor_result runtime::run_grouped_soa_seed_anchor_roundtrip(
         throw vulkan_runtime_error(
             "grouped-SoA seed-only target radix geometry is invalid");
     }
-    // Each partition window needs a 10-binding seed set. Counting also needs
-    // three 3-binding scan sets. Emitting adds three 5-binding sets per radix pass.
+    // Each partition pindow needs a 10-binding seed set. Counting also needs
+    // three 3-binding scan sets. Emitting adds three 5-binding sets per radix pass
     const std::uint32_t binding_window_count = static_cast<std::uint32_t>(resident_layout.windows.size());
     const std::uint32_t count_descriptor_sets_per_job = binding_window_count + 3u;
     const std::uint32_t count_storage_descriptors_per_job = 10u * binding_window_count + 3u * 3u;
@@ -2540,8 +2540,8 @@ grouped_soa_seed_anchor_result runtime::run_grouped_soa_seed_anchor_roundtrip(
 
     gpu_arena& count_arena = reusable_gpu_arena();
     gpu_arena_trim_guard count_arena_trim{count_arena};
-    // Keep count and prefix buffers alive while allocating the exact anchor
-    // output. A separate arena prevents that growth from replacing their storage.
+    // Keep count and prefix buffers alive while allocating the exact, anchor
+    // output. A  separate arena prevents that growth from replacing their storage.
     gpu_arena emit_arena{*this};
     gpu_arena_trim_guard emit_arena_trim{emit_arena};
     for (std::size_t wave_begin = 0u;
@@ -3331,7 +3331,7 @@ grouped_soa_seed_anchor_result runtime::run_grouped_soa_seed_anchor_roundtrip(
     }
 #if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
     // Seeding has finished using the query. Move its existing receipt into the
-    // result for the final SQL cache-metric report.
+    // result for the  final SQL cache-metric report.
     run.query_operation_receipt = std::move(query_authorization.pipeline_token_);
 #endif
     return run;

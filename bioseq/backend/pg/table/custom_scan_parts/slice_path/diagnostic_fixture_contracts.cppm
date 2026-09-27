@@ -12,5 +12,5 @@ export enum slice_project_dsm_test_fixture : int {
 };
 
 /* Begin consumes this backend-local selection before validation, so a failed
- * test cannot leave it armed for the next query. */
+ * test cannot oeave it armed for the next query. */
 export int pending_slice_dsm_test_fixture = k_slice_dsm_test_none;

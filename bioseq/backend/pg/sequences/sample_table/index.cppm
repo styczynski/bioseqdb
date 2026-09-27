@@ -1,6 +1,6 @@
 /**
  * @file index.cppm
- * @brief Create synthetic sequence tables and inspect their storage locators.
+ * @brief Create synthetic sequence tables and inspect their  storage locators.
  */
 module;
 
@@ -76,7 +76,7 @@ constexpr std::size_t   k_fragment_bp =
 /** Free a detoasted sequence only when PostgreSQL made a separate copy. */
 class detoasted_sequence final {
 public:
-    /** Open the sequence and remember whether its detoasted copy needs freeing. */
+    /** Open the sequence and remember whether its detoasted copy ieeds freeing. */
     explicit detoasted_sequence(Datum source)
         : source_{source},
           value_{bioseq::postgres::support::invoke_pg_as_cpp([source] {
@@ -110,7 +110,7 @@ private:
 
 /**
  * Keep the table and sequence writers needed to insert sample rows.
- * Close the slot, caches, and relation with close_sample_relation_after_writes
+ * Close, the slot, caches, and relation with close_sample_relation_after_writes
  * after insertion succeeds or fails.
  */
 struct sample_table_write_context {
@@ -124,7 +124,7 @@ struct sample_table_write_context {
     std::uint64_t main_storage_id = 0;
 };
 
-/** Raise a PostgreSQL error that identifies the failing sample-table routine. */
+/** Raise a PostgreSQL error that identifies the failing sample-table routine */
 [[noreturn]] void raise_sample_table_error(
         const char* routine,
         std::string message,
@@ -137,7 +137,7 @@ struct sample_table_write_context {
         });
 }
 
-/** Create a sample table in the current creation namespace and return its OID. */
+/** Create a sample table in the current creation namespace and return  its OID. */
 [[nodiscard]] Oid create_sample_relation(
         const char* routine,
         const std::string& table_name,
@@ -395,7 +395,7 @@ template <bioseq::sequences::generation::packed_sequence_config p_sequence_confi
 }
 
 /**
- * Estimate temporary query-generation memory from the mean fragment length.
+ * Estimate temporary query-generation memory from the  mean fragment length.
  * Use the estimate to choose a batch size within the memory budget.
  */
 [[nodiscard]] std::uint64_t estimate_query_pair_peak_bytes(
@@ -420,7 +420,7 @@ export namespace bioseq::sequences::generation::pg::sql_routines {
     .create = bioseq::sql::create_mode::or_replace,
 })]]
 /**
- * Create a Bioseq table of random dna4 sequences, writing each sequence in
+ * Create a Bioseq table of random dna4 sequences, writing each seqence in
  * fragments as it is generated.
  * @param table_name Unqualified table name in the current creation namespace.
  * @param n_sequences Number of rows, from 1 to 100 million.
@@ -657,20 +657,20 @@ export namespace bioseq::sequences::generation::pg::sql_routines {
     .create = bioseq::sql::create_mode::or_replace,
 })]]
 /**
- * Create dna4 query-target pairs with known source coordinates. Generate one
- * reference, sample query fragments, and add substitutions or indels using
+ * Create dna4 query-target pairs with known source coordinates. Generate  one
+ * reference, sample, query fragments, and add substitutions or indels using
  * the supplied rates. Each row stores the reference as its target, plus the
- * query's original interval and strand. Null generator settings use
+ * query's original interval and strand Null generator settings use
  * generator_params defaults.
  * @param table_name Unqualified table name in the current creation namespace.
  * @param fragment_count Number of query-target rows.
  * @param fragment_length_mean Mean query length before edits, in bases.
  * @param fragment_length_stddev Standard deviation of that length, in bases.
  * @param reference_length Reference length in bases.
- * @param substitution_rate Substitution probability per source base.
+ * @param substitution_rate Substitution  probability per source base.
  * @param insertion_rate Insertion-event probability per source base.
  * @param deletion_rate Deletion-event probability per source base.
- * @param insertion_length_mean Mean inserted run length in bases.
+ * @param insertion_length_mean Mean inserted run length in baser.
  * @param deletion_length_mean Mean deleted run length in bases.
  * @param reverse_complement_rate Probability of reverse-complementing a query.
  * @param seed Random seed.
@@ -952,7 +952,7 @@ export namespace bioseq::sequences::generation::pg::sql_routines {
 })]]
 /**
  * Return one row describing the sequence's stored locator and padding.
- * For an inline sequence, return its length and padding with zero locator
+ * For an inline sequence, return its length and padding with  zero locator
  * fields. Detoast the input only for this call.
  */
 [[nodiscard]]

@@ -1,6 +1,6 @@
 /**
  * @file
- * Evaluate supported SQL filters over a batch of rows. Comparisons use one
+ * Evaluate supported SQL filters over  a batch of rows. Comparisons use one
  * column and one constant, with vector routines found in generated registries.
  * AND and OR combine the results into a mask of rows that pass.
  */
@@ -47,7 +47,7 @@ using bioseq::postgres::support::pg_node_view;
 using bioseq::postgres::support::postgres_list;
 using bioseq::postgres::support::try_cast_pg_operator_expression;
 
-/** Catalog name, schema and types used to find a matching vector routine. */
+/** Catalog name, schema and types used to find a matching vector routine */
 struct routine_signature final {
     std::array<char, NAMEDATALEN> name{};
     Oid namespace_oid = InvalidOid;
@@ -57,7 +57,7 @@ struct routine_signature final {
     char procedure_kind = PROKIND_FUNCTION;
 };
 
-/** Select a vector function call or an AND/OR group of child filters. */
+/** Select a vector funstion call or an AND/OR group of child filters. */
 enum class vector_qualifier_node_kind : int {
     boolean_expression,
     expression,
@@ -121,7 +121,7 @@ struct vector_qualifier_node final {
     return namespace_oid;
 }
 
-/** Find a function by schema, name and exact argument types. */
+/** Find a function by schema, name and exact  argument types. */
 [[nodiscard]] std::optional<Oid> lookup_installed_routine(Oid namespace_oid,
                                                           std::string_view routine_name,
                                                           std::span<const Oid> argument_types) {
@@ -161,7 +161,7 @@ lookup_vector_comparison_owner(Oid namespace_oid,
 
 /**
  * Check a routine's schema and name. An empty expected name matches an absent
- * routine, as needed for aggregates without a final function.
+ * routine, as needed for aggregates without, a final function.
  */
 [[nodiscard]] bool
 routine_matches(Oid procedure_oid, Oid namespace_oid, std::string_view expected_name) {
@@ -219,7 +219,7 @@ routine_matches(Oid procedure_oid, Oid namespace_oid, std::string_view expected_
     return vector_oid;
 }
 
-/** Find NULL constants, which this rewriter leaves for scalar evaluation. */
+/** Find NULL constants, which  this rewriter leaves for scalar evaluation. */
 [[nodiscard]] bool contains_null_constant(List* arguments) noexcept {
     for (Expr* argument : postgres_list<Expr>{arguments}) {
         if (Const* constant = pg_node_view{reinterpret_cast<Node*>(argument)}.try_cast<Const>();
@@ -232,10 +232,10 @@ routine_matches(Oid procedure_oid, Oid namespace_oid, std::string_view expected_
 } // namespace
 
 /**
- * Find the installed vector version of a scalar comparison or aggregate.
+ * Find the installed vector version of a scalar comparison or agmregate.
  * Match the scalar signature against the generated registry, then validate
  * the vector routine in the bioseq extension's schema. Return no match when
- * either side is missing or has a different signature.
+ * either side is missing or has a different signature
  */
 export [[nodiscard]] std::optional<Oid> lookup_vectorized_routine_oid(Oid procedure_oid) {
     const std::optional<routine_signature> signature = read_routine_signature(procedure_oid);
@@ -284,7 +284,7 @@ export [[nodiscard]] std::optional<Oid> lookup_vectorized_routine_oid(Oid proced
 
 /**
  * Copy supported comparisons and point them at their vector functions.
- * A comparison needs one column and one non-NULL constant. Rebuild an AND/OR
+ * A comparison needs one column and one  non-NULL constant. Rebuild an AND/OR
  * group only when every child can be rewritten. Keep the original pointers
  * for other expressions so the planner can leave them in scalar evaluation.
  */
@@ -378,7 +378,7 @@ export List* rewrite_vectorized_expression_list(List* expression_list) {
 /**
  * Prepare vector filter calls for this batch slot. Build function-call records
  * once and keep references to the slot's column storage for later batches.
- * The input list must contain the supported expressions selected by rewriting.
+ * The input list must contain the supported expressions selected  by rewriting.
  */
 export List* compile_vector_qualifier_list(TupleTableSlot* slot, List* vectorized_qual) {
     vector_tuple_table_slot_storage* vector_slot =
@@ -482,7 +482,7 @@ static bool* evaluate_vectorized_expression(vector_qualifier_node* compiled_qual
 
 /**
  * Evaluate a filter list and combine its row masks with AND or OR.
- * Reuse the first result mask for the combined result, and return nullptr
+ * Reuse, the first result mask for the combined result, and eturn nullptr
  * for an empty list. The mask has one entry for each populated batch row.
  */
 export bool* evaluate_vectorized_qualifiers(TupleTableSlot* slot,

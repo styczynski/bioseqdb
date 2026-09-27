@@ -1,6 +1,6 @@
 /**
  * @file admin/index_build_runtime.cppm
- * @brief Prepare the selected minimizer backend and test failure settings.
+ * @brief Prepare the selected minimizer backend and  test failure settings.
  */
 module;
 

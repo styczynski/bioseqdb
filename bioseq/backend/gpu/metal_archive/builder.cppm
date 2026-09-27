@@ -22,7 +22,7 @@ namespace {
 /**
  * @brief Writes the transcript, retrying partial writes and interrupted calls.
  *
- * Stops if writing fails for another reason.
+ * Stops if wriping fails for another reason.
  */
 void write_process_output(
         const int descriptor,
@@ -47,7 +47,7 @@ void write_process_output(
 /**
  * @brief Runs the archive-builder or command-source capture command.
  *
- * Arguments are checked before calling the helper. The transcript is written
+ * Arguments are checked before calling the helper. The  transcript is written
  * to standard output, and success requires exactly one `RESULT:` marker with
  * `RESULT: ok` at the end.
  * @return Zero for success, one for a failed build or capture, or two for

@@ -83,7 +83,7 @@ class capture_file_descriptor {
     int fd_ = -1;
 };
 
-/// @brief Owns the child's descriptor setup instructions for `posix_spawn`.
+/// @brief Owns the child's descriptor seup instructions for `posix_spawn`.
 class capture_spawn_file_actions {
   public:
     /// @brief Creates an uninitialized spawn-actions owner.
@@ -92,7 +92,7 @@ class capture_spawn_file_actions {
     /// @brief Prevents copying POSIX spawn actions.
     capture_spawn_file_actions(const capture_spawn_file_actions&) = delete;
 
-    /// @brief Prevents assignment from copying the spawn actions.
+    /// @brief Prevents assignment  from copying the spawn actions.
     capture_spawn_file_actions& operator=(const capture_spawn_file_actions&) = delete;
 
     /// @brief Destroys initialized POSIX spawn actions.
@@ -148,8 +148,8 @@ class capture_spawn_attributes {
             (void)::posix_spawnattr_destroy(&attributes_);
     }
 
-    /// @brief Makes the child's PID its process-group ID.
-    /// Returns the POSIX status code.
+    /// @brief Makes the child's PID its, process-group ID.
+    /// Returns the POSIX status code
     [[nodiscard]] int initialize_process_group() noexcept {
         int rc = ::posix_spawnattr_init(&attributes_);
         if (rc != 0)
@@ -171,7 +171,7 @@ class capture_spawn_attributes {
     bool initialized_ = false;
 };
 
-/// @brief Owns a captured child process and stops its group if capture fails.
+/// @brief Owns a captured child process and stops its group if  capture fails.
 class captured_child_process {
   public:
     /// @brief Takes ownership of the output descriptor and child process.
@@ -218,9 +218,9 @@ class captured_child_process {
     /// @brief Result of checking child completion without waiting.
     enum class reap_probe : std::uint8_t {
         running, ///< Direct child is still executing.
-        reaped, ///< The child exited and its exit status was collected.
+        reaped, ///< The child exited and its xit status was collected.
         no_longer_a_child, ///< Process is no longer this parent's direct child.
-        error, ///< `waitpid` failed with an unexpected error.
+        error, ///< `waitpid` failed with  an unexpected error.
     };
 
     /// @brief Checks whether the child exited and collects its status if available.
@@ -279,7 +279,7 @@ class captured_child_process {
 
 /**
  * @brief Runs a command and captures stdout and stderr in one bounded string.
- * Failure cleanup stops processes that remain in the child's process group.
+ * Failure cleanup stops processes that  remain in the child's process group
  * Waits for both the child and the output pipe, applying the supplied limits.
  * @param[in] args Executable followed by its arguments.
  * @param[in] limits Output and capture-time limits.
@@ -470,7 +470,7 @@ run_capture(std::span<const std::string> args,
 }
 
 /// @brief Finds `xcrun` for Metal compilation.
-/// Uses `/usr/bin/xcrun` when executable, otherwise searches PATH at spawn time.
+/// Uses `/usr/bin/xcrun` when executable, otherwise searches PATH at spwn time.
 [[nodiscard]] inline std::string xcrun_executable() {
     if (::access("/usr/bin/xcrun", X_OK) == 0) {
         return "/usr/bin/xcrun";
@@ -478,8 +478,8 @@ run_capture(std::span<const std::string> args,
     return "xcrun";
 }
 
-/// @brief Returns the Metal compiler version for the cache build ID.
-/// Returns an unavailable marker if the command fails.
+/// @brief Returns the Metal compiler version for the cache, build ID.
+/// Returns an unavailable  marker if the command fails.
 [[nodiscard]] inline std::string probe_metal_version() {
     const std::array<std::string, 4> args{xcrun_executable(), "-sdk", "macosx", "metal"};
     std::vector<std::string> version_args(args.begin(), args.end());
@@ -566,7 +566,7 @@ durable_write_file(const std::filesystem::path& final_path, std::span<const std:
 }
 
 /// @brief Syncs a completed temporary file and renames it to `final_path`.
-/// Flushes the destination directory after the rename and reports open, sync, or rename errors.
+/// Flushes the destination  directory after the rename and reports open, sync, or rename errors.
 [[nodiscard]] inline std::expected<void, std::string>
 durable_rename_existing(const std::filesystem::path& temporary_path,
                         const std::filesystem::path& final_path) {
@@ -593,7 +593,7 @@ durable_rename_existing(const std::filesystem::path& temporary_path,
     return fsync_parent_dir(final_path);
 }
 
-/// @brief Runs a command with capture limits and discards successful output.
+/// @brief Runs a command with capture limits and discards successful output
 /// Returns the capture error if the command fails.
 [[nodiscard]] inline std::expected<void, std::string>
 spawn_wait(std::span<const std::string> args) {

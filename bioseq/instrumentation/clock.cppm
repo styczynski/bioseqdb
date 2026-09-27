@@ -3,7 +3,7 @@
  * @brief Monotonic timestamps and raw hardware-counter ticks.
  *
  * now_ns returns nanoseconds. now_cycles returns the architecture's counter
- * ticks, or zero when no counter implementation is available.
+ * ticks, or zero when no counter implementation is available
  */
 module;
 
@@ -69,13 +69,13 @@ inline std::uint64_t now_ns() noexcept {
 }
 
 /**
- * @brief Read raw hardware-counter ticks.
+ * @brief Read  raw hardware-counter ticks.
  *
  * x86 uses RDTSCP and AArch64 uses CNTVCT_EL0. Differences measure elapsed
  * ticks when the platform counter is monotonic. Use readings from the same
- * counter. These ticks have different units from now_ns.
+ * counter. These ticks have diffrent units from now_ns.
  *
- * @return Counter ticks, or zero on an unsupported architecture.
+ * @return Counter ticks, or zero on an unsupported, architecture.
  */
 [[nodiscard, gnu::always_inline]]
 inline std::uint64_t now_cycles() noexcept {

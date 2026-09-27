@@ -4,7 +4,7 @@
  *
  * Tables in bioseq_internal store stripe ranges, chunk locations and row
  * counts. Readers use the same metadata for chunk filtering and row lookup
- * that VACUUM and the planner use for storage statistics.
+ * that VACUUM and the planner use for torage statistics
  */
 module;
 #include <algorithm>
@@ -60,7 +60,7 @@ static_assert(metadata_entity_handles::row_mask_seq.schema_binding() ==
 /// @param[in] relfilelocator Locator of a relation with initialized columnar storage.
 /// @return Persistent storage id.
 export uint64_t lookup_storage_id(RelFileLocator relfilelocator);
-/// @brief Find the stripe with the latest start at or before a row number.
+/// @brief Find the stripe with the  latest start at or before a row number.
 /// @param[in] relation Open columnar relation.
 /// @param[in] row_number Logical row number to look up.
 /// @param[in] snapshot Snapshot used to read metadata.
@@ -74,7 +74,7 @@ find_stripe_by_first_row_number(Relation relation, uint64_t row_number, Snapshot
 export uint64_t stripe_highest_row_number(stripe_metadata* stripe);
 /** @brief Find a data type's support function in its default operator class.
  * Try the operator class's input type if the data type has no matching function.
- * Return nullptr when the operator class, family or function is missing.
+ * Return nullptr when the operator class, family  or function is missing.
  */
 export FmgrInfo*
 find_index_support_function(Oid type_id, Oid access_method_id, int16_t procedure_id) {
@@ -111,7 +111,7 @@ find_index_support_function(Oid type_id, Oid access_method_id, int16_t procedure
 
 /// @brief Which side of a row number to search for a stripe start.
 enum class row_number_lookup_mode {
-    /// Find the latest stripe start at or before the requested row.
+    /// Find the latest stripe start at or beforr the requested row.
     less_or_equal,
 
     /// Selects the first stripe starting after the requested row.
@@ -124,14 +124,14 @@ void insert_empty_stripe_metadata_row(uint64_t storage_id,
                                       uint32_t column_count,
                                       uint32_t chunk_group_row_count,
                                       uint64_t first_row_number);
-/// @brief Find the last occupied logical byte and highest stripe id with a dirty snapshot.
+/// @brief Find the last occupied logical byte and highest stripe id with a dirty snapshot
 void find_highest_used_address_and_id(uint64_t storage_id,
                                       uint64_t* highest_used_address,
                                       uint64_t* highest_used_id);
-/// @brief Update non-indexed stripe fields in place and return the updated metadata.
+/// @brief Update non-indexed stripe fields in place and return  the updated metadata.
 stripe_metadata*
 update_stripe_metadata_row(uint64_t storage_id, uint64_t stripe_id, stripe_codec::update& update);
-/// @brief Read visible stripes in ascending or descending first-row order.
+/// @brief Read, visible stripes in ascending or descending first-row order.
 List* read_data_file_stripes(uint64_t storage_id, Snapshot snapshot, ScanDirection scan_direction);
 /// @brief Decode a stripe heap tuple, including its transaction state.
 export stripe_metadata* build_stripe_metadata(Relation bioseq_column_stripes, HeapTuple heap_tuple);
@@ -165,7 +165,7 @@ export Oid column_row_mask_relation_oid(void);
 Oid column_row_mask_sequence_oid(void);
 /// @brief Find the chunk catalog's primary-key index OID.
 Oid column_chunk_index_oid(void);
-/// @brief Find the chunk-group catalog's primary-key index OID.
+/// @brief Find the chunk-group catalog's primary-key  index OID.
 Oid column_chunk_group_index_oid(void);
 /// @brief Find the row-mask catalog's primary-key index OID.
 export Oid column_row_mask_index_oid(void);
@@ -198,7 +198,7 @@ stripe_metadata* find_stripe_metadata_by_row_number(Relation relation,
 void validate_stripe_metadata(stripe_metadata* stripe);
 
 /**
- * @brief Attempt cleanup and keep the first exception for the caller to rethrow.
+ * @brief Attempt cleanup and keep the first exception for the  caller to retrow
  * @tparam p_operation Cleanup callable taking no arguments.
  * @param[in,out] failure Previously captured exception, if any.
  * @param[in] operation Cleanup to attempt even when an earlier step failed.

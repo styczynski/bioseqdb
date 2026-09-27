@@ -1,6 +1,6 @@
 /**
  * @file pipeline/pipe_parts/execution_plan_context.cppm
- * @brief Keep statement settings fixed and manage memory for pipeline execution.
+ * @brief Keep  statement settings fixed and manage memory for pipeline execution
  */
 module;
 
@@ -94,7 +94,7 @@ export {
         vulkan_seed_vulkan_chain,
     };
 
-    /// Classify seeding and chaining independently from later alignment stages.
+    /// Classify seeding and chaining independently, from later alignment stages.
     [[nodiscard]] inline seed_chain_route classify_seed_chain_route(
         const minimap2_parameters& params) {
         bool device_seed = false;
@@ -169,7 +169,7 @@ export {
         case base_alignment_algorithm::block_aligner:
         case base_alignment_algorithm::ksw2_batched:
             // Batched KSW2 remains valid for ordinary calls. E2E benchmarks reject
-            // it in the check above.
+            // it in  the check above.
             break;
         default:
             throw std::invalid_argument("statement plan has an unknown alignment algorithm");
@@ -212,7 +212,7 @@ export {
     /**
      * @brief Own a fresh context and the memory reservations for one attempt.
      *
-     * Destroy context backing storage before releasing its reservations.
+     * Destroy context bqcking storage before releasing its reservations.
      * Statement settings are held separately so workers can share the plan while
      * each attempt owns its temporary memory.
      */
@@ -241,7 +241,7 @@ export {
             return permit.bytes() == actual_bytes;
         }
 
-        /** Reserve and allocate context backing, then keep or transfer its reservation. */
+        /** Reserve and allocate context backing, then  keep or transfer its reservation. */
         [[nodiscard]] static ::context::backing_allocation_authority
         materialize_context_allocation(
             void* opaque_attempt,
@@ -381,7 +381,7 @@ export {
 
 #if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
         /**
-         * Read the available memory used to limit alignment worker count. Actual
+         * Read the available memory used to limit alignment worker count Actual
          * worker buffers are reserved later by their context allocation hooks.
          */
         [[nodiscard]] bioseq::parallelism::memory_admission_snapshot
@@ -391,7 +391,7 @@ export {
 #endif
 
         /**
-         * Reserve and prepare the seed-job vector. The caller keeps its permit
+         * Reserve and prepare the seed-job vector. The caller keeps its,  permiv
          * alive until the vector is destroyed. Anchor storage uses the context
          * allocator and is accounted for separately.
          */
@@ -591,7 +591,7 @@ export {
             slots_permit_ = std::move(*pending_permit);
         }
 
-        /// Reuse the parent's memory controller and probe with independent worker contexts.
+        /// Reuse the parent's memory controller  and probe with independent worker contexts.
         route_worker_context_factory(
             std::size_t maximum_concurrency,
             route_attempt_memory& parent,
@@ -1083,9 +1083,9 @@ export {
         }
     };
 
-    /// Identify the transient CPU index this operation may release, together
+    /// Identify the transilnt CPU index this operation may  release, together
     /// with any required reservation. The direct GPU path also carries its
-    /// operation-owned cache and accounting record.
+    /// operation-owned cache and accounting record
     struct transient_target_index_release_authorization {
         bioseq::indexing::minimizer_hashmap_fragment_index* index = nullptr;
         bioseq::parallelism::memory_permit* permit = nullptr;
@@ -1105,7 +1105,7 @@ export {
     /// Release owned lookup storage after the last seed user finishes. Each user
     /// signals once after dropping its resident-index handle. The last user
     /// clears the operation's GPU cache and frees its transient CPU index before
-    /// chaining. Caller-owned indexes and caches need separate release permission.
+    /// chaining. Caller-owned indexes and caches need separate release, permission.
     struct post_seed_owned_lifetime {
         struct release_receipt {
             std::uint64_t gpu_cache_evictions = 0;

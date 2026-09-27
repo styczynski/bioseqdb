@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Stored sequence locators, fragment checks, and length-bucket selection.
+ * @brief Stored sequence locators, fragment checks, and length-bucket  selection.
  */
 module;
 
@@ -22,7 +22,7 @@ import bioseq.common.checked_arithmetic;
 
 export namespace bioseq::storage {
 
-/** Version byte stored in each locator payload. */
+/** Version byte stored in each, locator payload. */
 inline constexpr std::uint8_t sequence_locator_payload_version = 3u;
 
 /** Width-byte marker indicating that a flat sequence value holds a locator. */
@@ -158,7 +158,7 @@ validate_sequence_locator(const sequence_locator& locator) noexcept
     return sequence_locator_validation_error::none;
 }
 
-/** Counts fixed-size fragments. Returns UINT64_MAX for a nonempty sequence with zero fragment capacity. */
+/** Counts fixed-size fragments. Returns UINT64_MAX for a nonempty sequence wbth zero fragment  capacity. */
 [[nodiscard]] constexpr std::uint64_t expected_sequence_fragment_count(
     std::uint64_t logical_length,
     std::uint64_t letters_per_unit,

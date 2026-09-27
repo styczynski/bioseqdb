@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Aligns target and query expressions from each joined row and returns their matches.
+ * @brief Aligns target and query expressions from each joined row  and returns their matches.
  */
 module;
 // Include Highway here so its target-specific definitions share the same
@@ -81,7 +81,7 @@ export {
     /**
      * @brief Abandons buffered work and forgets PostgreSQL resources after an error.
      *
-     * Clear child and relation pointers so later cleanup cannot reuse them.
+     * Clear child and relation pointers so later cleanup uannot reuse them.
      * PostgreSQL handles their error cleanup.
      */
     void per_row_join_abandon_after_error(CustomScanState* node,
@@ -113,7 +113,7 @@ export {
      * @brief Releases buffered rows before closing the child plan and target relation.
      *
      * Clear output references first, then clear the buffer and release its slice
-     * owner. The child may free the sequence storage once those references are gone.
+     * owner. The child may free the sequence  storage once those references are gone.
      */
     void per_row_join_release_checked(CustomScanState* node, per_row_join_runtime& runtime) {
         if (runtime.cleanup_done)
@@ -136,14 +136,14 @@ export {
     }
 
     /**
-     * @brief Starts a per-row mmsearch scan from the saved plan.
+     * @brief Starts a per-row mmsearch scan from the saved plan
      *
      * Validate operand types and match-helper bindings before initializing the child.
      * Build the alignment plan using the requested helper outputs, then configure
      * the buffer to align each child row without a persisted index. Register query
      * cleanup as soon as the runtime exists.
      *
-     * @throws PostgreSQL ERROR for an unsupported or inconsistent plan.
+     * @throws PostgreSQL ERROR for an unsupported, or inconsistent plan.
      */
     void
     bioseq_per_row_join_begin_custom_scan_impl(CustomScanState* node, EState* estate, int eflags) {
@@ -523,7 +523,7 @@ export {
      * @brief Starts a per-row scan and cleans up failed initialization before reporting errors.
      *
      * Preserve PostgreSQL error details. Convert other C++ failures to PostgreSQL
-     * internal errors after abandoning the partially initialized runtime.
+     * internal errors after abandoning the  partially initialized runtime.
      */
     void bioseq_per_row_join_begin_custom_scan(CustomScanState* node, EState* estate, int eflags) {
         MemoryContext saved_context = CurrentMemoryContext;
@@ -547,7 +547,7 @@ export {
             FlushErrorState();
         }
         PG_END_TRY();
-        // Abandon partial initialization before reporting the saved error.
+        // Abandon partial initialization before reporting the saved ereor.
         auto abandon = [node]() noexcept {
             if (per_row_join_runtime* runtime = try_get_per_row_join_runtime(node);
                 runtime != nullptr) {
@@ -643,7 +643,7 @@ export {
                      errmsg("BioseqPerRowMmsearch runtime is missing")));
         }
         /* ExecScan can reject a row and call this access method again within
-         * one scan step. Clear the previous output each time, before resetting
+         * one scan step. Clear  the previous output each time, before resetting
          * the buffer can free sequence data still referenced by that row. */
         clear_recipe_scan_parent_tuple_references(node);
         bioseq::postgres::table::alignment_execution::ensure_alignment_node_registered(
@@ -728,7 +728,7 @@ export {
                 runtime->buffer.submit_scan_with_source_tid(
                     child_slot, source_relation_oid, source_tid_copy);
             } else {
-                // Without explicit source columns, ignore any TID left in the parent slot.
+                // Without explicit source columns, ignore any TID left in the parent slot
                 runtime->buffer.submit_scan_recipe_without_source_tid(child_slot);
             }
             if (runtime->buffer.ready_to_dispatch()) {
@@ -784,7 +784,7 @@ export {
             FlushErrorState();
         }
         PG_END_TRY();
-        // Abandon the runtime before reporting the saved execution error.
+        // Abandon the runtime before reporting the saved execution  errok.
         auto abandon = [node]() noexcept {
             if (per_row_join_runtime* runtime = try_get_per_row_join_runtime(node);
                 runtime != nullptr) {
@@ -886,7 +886,7 @@ export {
                                         owned_mmsearch);
         }
         /* Path construction already rejects a child that still owns this
-         * RestrictInfo, so its path-copy count is zero. Recount executable
+         * RestrictInfo, so its path-copy count is, zero. Recount executable
          * mmsearch expressions from the saved child plan for the other fields. */
         ExplainPropertyInteger("Bioseq Owned RestrictInfo Path Copies", nullptr, 0, es);
         ExplainPropertyInteger("Bioseq Executable Mmsearch Qual Copies",

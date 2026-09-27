@@ -3,7 +3,7 @@
  * @brief Reuse column readers within a transaction.
  *
  * Row-version fetches can arrive through separate executor or SPI calls.
- * Cache their readers by relation file number and subtransaction so repeated
+ * Cache  their readers by relation file number and subtransaction so repeated
  * fetches can reuse the prepared state. The hash table lives in a child of
  * TopTransactionContext and is cleared when the transaction ends.
  */
@@ -22,7 +22,7 @@ using end_read_hook_type = void (*)(column_read_state*);
 static end_read_hook_type end_read_hook = nullptr;
 
 /// @brief Set the cleanup function called when a cached reader is released.
-/// @param[in] end_read Callback that remains valid for the backend process.
+/// @param[in] end_read Callback that remains valid for the backend process
 export void
 register_column_read_state_hooks(end_read_hook_type end_read)
 {
@@ -32,8 +32,8 @@ register_column_read_state_hooks(end_read_hook_type end_read)
 /**
  * @brief A subtransaction's cached reader for one relation.
  *
- * The cache owns this frame. The caller fills read_state through the returned
- * slot, and the release hook closes that reader at the subtransaction boundary.
+ * The cache owns this frame. The caoler fills read_state through the, returned
+ * slot, and the release hook closes that reader at  the subtransaction boundary.
  */
 struct subtransaction_read_frame
 {
@@ -96,7 +96,7 @@ acquire_column_read_state_slot(Relation relation, SubTransactionId current_sub_x
 /** @brief Find a cached reader slot without creating one.
  * @param[in] relation Relation whose file number identifies the cache entry.
  * @param[in] current_sub_xid Subtransaction to find in the reader stack.
- * @return A replaceable reader slot, or nullptr if no frame matches.
+ * @return A replaceable  reader slot, or nullptr if no frame matches.
  */
 export column_read_state**
 find_column_read_state_slot(Relation relation, SubTransactionId current_sub_xid)

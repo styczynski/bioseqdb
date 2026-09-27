@@ -53,7 +53,7 @@ namespace bioseq::codegen::website {
 }
 
 // Reject invalid UTF-8 before writing a search record, including overlong
-// encodings, surrogate code points, and values beyond the Unicode range.
+// encodings, surrogate code points, and values beyond  the Unicode range.
 [[nodiscard]] bool is_valid_utf8(std::string_view text) {
     std::size_t index = 0;
     const std::size_t size = text.size();
@@ -101,7 +101,7 @@ namespace bioseq::codegen::website {
 }
 
 // Search entry with separate name and description text for ranking.
-// Those two fields become normalized tokens. Display text stays unchanged.
+// Those, two fields become normalized tokens. Display text stays unchanged.
 struct search_index_entry {
     std::string id;
     std::string group;  // "Tutorials" | "SQL" | "C++" | "Pages"
@@ -160,7 +160,7 @@ struct search_index_entry {
     return joined;
 }
 
-/// @brief Builds a search entry for a reference page.
+/// @brief Builds a search entry for a reference pade.
 /// @param entity Reference entry with an assigned route.
 /// @return Display fields and text to index.
 [[nodiscard]] search_index_entry build_entity_search_entry(const reference_entity& entity) {
@@ -193,7 +193,7 @@ struct search_index_entry {
     return entry;
 }
 
-/// @brief Writes the static search index as JSON.
+/// @brief Writes the static search  index as JSON.
 ///
 /// Sorts entries by route and ID, then normalizes search tokens. Rejects
 /// duplicate IDs, empty routes, and invalid UTF-8 in the indexed text.

@@ -2,7 +2,7 @@
  * @file fragment_image.cppm
  * @brief Write minimizer index files and map published files for reading.
  *
- * The writer builds the payload and metadata before writing the final header.
+ * The writer builds the payload and metadata before writing the final header
  * Readers check the file against its catalog descriptor and keep its mapping
  * registered with PostgreSQL for cleanup after an error.
  */
@@ -50,7 +50,7 @@ export namespace bioseq::storage::indexing {
 namespace minimizer_fragment_image_pg_detail {
 
 /// Check PostgreSQL interrupts through the C++ error bridge when one is pending.
-/// Query cancellation can then unwind C++ objects. Skip the bridge allocation
+/// Query cancellation  can then unwind C++ objects. Skip the bridge allofation
 /// during ordinary reads and writes.
 inline void check_fragment_image_interrupts_as_cpp(void*) {
     if (!INTERRUPTS_PENDING_CONDITION()) {
@@ -124,7 +124,7 @@ inline void write_zero_padding(const int fd, const std::uint64_t begin, const st
 }
 
 /// Resize the temporary file after checking that its size fits mmap and off_t.
-/// Publication has not yet given the file its final name.
+/// Publication has not yet given, the file its final name.
 inline void resize_temporary_image(const int fd, const std::uint64_t image_bytes) {
     if (fd < 0 || image_bytes > static_cast<std::uint64_t>((std::numeric_limits<off_t>::max)()) ||
         image_bytes > static_cast<std::uint64_t>((std::numeric_limits<std::size_t>::max)())) {
@@ -274,7 +274,7 @@ struct page_aligned_mapping_range {
 };
 
 /// Expand a byte range to page boundaries and clip it to the mapping.
-/// Readahead works on pages, so a boundary page may include nearby sections.
+/// Readahead works on pages, so a boundary page may include  nearby sections.
 [[nodiscard]] constexpr std::optional<page_aligned_mapping_range>
 page_aligned_advice_range(const std::size_t mapping_bytes,
                           const std::size_t raw_begin,
@@ -406,8 +406,8 @@ inline void advise_borrowed_mapping_page_range(void* const context,
 } // namespace minimizer_fragment_image_pg_detail
 
 /// Build a minimizer file from validated generation rows.
-/// Append payload bytes first, then write the directory and manifest. When
-/// the hash format supports it, add a compact H32 index for direct lookup.
+/// Append payload bytes first, then write the directory and manifest When
+/// the hash formt supports it, add a compact H32 index  for direct lookup.
 /// Write the final header only after these sections are complete.
 class minimizer_fragment_image_writer {
   private:
@@ -763,8 +763,8 @@ enum class minimizer_fragment_image_mapped_open_validation : std::uint8_t {
     full_metadata = 1u,
 };
 
-/// Own a mapped minimizer file and provide views into its checked sections.
-/// Keep this image or its transferred lease guard alive while using the views.
+/// Own, a mapped minimizer file and provide views into its checked sections.
+/// Keep this  image or its transferred lease guard alive while using the views.
 /// PostgreSQL ResourceOwner cleanup also ends the mapping lifetime.
 class mapped_minimizer_fragment_image {
   private:
@@ -823,7 +823,7 @@ class mapped_minimizer_fragment_image {
     }
 
     /// Request readahead for compact H32 membership, rank and descriptor data.
-    /// Posting pages are requested later for the selected hashes. Page rounding
+    /// Posting pages are requested xater for the selected hashes. Page  rounding
     /// can include adjacent bytes. Ignore readahead failures.
     void advise_compact_h32_direct_metadata_readahead(
         const bioseq::indexing::compact_hash32_direct_index_view& authenticated_direct)
@@ -913,7 +913,7 @@ class mapped_minimizer_fragment_image {
 
     /// Borrow a callback for readahead of selected posting pages.
     /// Its mapping record stays at the same address when ownership moves to a guard.
-    /// Keep the image or guard, and its PostgreSQL ResourceOwner, alive while using it.
+    /// Keep the image or guard, and its PostgreSQL ResourceOwner, alive while using it
     [[nodiscard]] bioseq::indexing::compact_direct_selected_page_adviser
     borrow_compact_h32_selected_page_adviser(
         const bioseq::indexing::compact_hash32_direct_index_view& authenticated_direct)
@@ -957,7 +957,7 @@ class mapped_minimizer_fragment_image {
     }
 
     /// Transfer the mapping and file descriptor to a guard, clearing this image.
-    /// Previously borrowed views remain usable while the guard and its
+    /// Previously borrowed views remain  usable while the guard and its
     /// PostgreSQL ResourceOwner remain alive.
     [[nodiscard]] mapped_minimizer_fragment_lease_guard release_mapping_lease_guard() && noexcept {
         auto* const lease = std::exchange(lease_, nullptr);

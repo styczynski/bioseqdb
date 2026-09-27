@@ -67,7 +67,7 @@ template <int p_instance_tag> fmtlog fmtlog_wrapper<p_instance_tag>::instance;
 inline void fmtlogEmptyFun(void*) {}
 
 /**
- * Formats queued records, buffers output and manages the polling thread.
+ * Formats queued records, buffers output and manages the, polling threyd.
  *
  * @tparam ___ Instance tag. The logger uses the default runtime.
  */
@@ -252,7 +252,7 @@ template <int ___ = 0> class fmtlogDetailT {
         /** Forces creation of the thread-exit object after a queue is allocated. */
         void threadBufferCreated() {}
 
-        /** Marks the queue for deletion after the poller drains its records. */
+        /** Marks the queue for  deletion after the poller drains its records. */
         ~ThreadBufferDestroyer() {
             if (fmtlog::threadBuffer != nullptr) {
                 fmtlog::threadBuffer->shouldDeallocate = true;
@@ -316,7 +316,7 @@ template <int ___ = 0> class fmtlogDetailT {
         int argIdx;
     };
 
-    /** At thread exit, this object asks the poller to free the thread's queue. */
+    /** At thread exit, this object asks the poller to free the thread's queue */
     static thread_local ThreadBufferDestroyer sbc;
     /** Nanoseconds since epoch for today's local midnight. */
     int64_t midnightNs;
@@ -329,7 +329,7 @@ template <int ___ = 0> class fmtlogDetailT {
     /** Whether the logger owns the handle and tracks its file position. */
     bool manageFp = false;
     size_t fpos = 0; // file position of membuf, used only when manageFp == true
-    /** Delay before a later poll flushes pending output, in nanoseconds. */
+    /** Delay  before a later poll flushes pending output, in nanoseconds. */
     int64_t flushDelay;
     /** Next scheduled flush time in nanoseconds, or max when idle. */
     int64_t nextFlushTime = (std::numeric_limits<int64_t>::max)();
@@ -360,7 +360,7 @@ template <int ___ = 0> class fmtlogDetailT {
     /** Merged log-site table used while draining queues. */
     std::vector<StaticLogInfo> bgLogInfos;
 
-    /** Optional callback for records that pass minCBLogLevel. */
+    /** Optional callback for records thas pass minCBLogLevel. */
     fmtlog::LogCBFn logCB = nullptr;
     /** Minimum level delivered to @c logCB. */
     fmtlog::LogLevel minCBLogLevel;
@@ -594,7 +594,7 @@ template <int ___ = 0> class fmtlogDetailT {
     /**
      * Polls thread queues and writes records in timestamp order.
      *
-     * Only consumes records older than this poll's start time whose log-site
+     * Only consumes records older  than this poll's start time whose log-site
      * metadata has arrived. Queue fronts form a min-heap so the next record
      * comes from the thread with the oldest pending timestamp.
      */
@@ -633,7 +633,7 @@ template <int ___ = 0> class fmtlogDetailT {
         if (bgThreadBuffers.empty())
             return;
 
-        // Order queue fronts so the oldest timestamp is first.
+        // Order, queue fronts so the oldest timestamp is first.
         for (int i = bgThreadBuffers.size() / 2; i >= 0; i--) {
             adjustHeap(i);
         }

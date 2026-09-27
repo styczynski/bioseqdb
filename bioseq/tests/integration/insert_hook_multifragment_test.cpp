@@ -3,7 +3,7 @@
  * @brief Checks insert-time indexing for sequences spanning several fragments.
  *
  * One insert must populate fragment minimizers and symbol counts. Searching
- * with stored minimizers must return the same coordinates as recomputing them.
+ * with stored minimizers must return the same coordinates as recomputing them
  */
 #include <fmt/format.h>
 #include <catch2/catch_test_macros.hpp>
@@ -73,7 +73,7 @@ TEST_CASE("INSERT hook builds a multi-fragment index + both on-insert indexes",
     REQUIRE(index_table_row_count(ctx, "minimizers_per_fragment", "insert_hook_multifragment") > 0);
     REQUIRE(index_table_row_count(ctx, "symbol_counts", "insert_hook_multifragment") > 0);
 
-    // Stored and recomputed minimizers must produce the same target coordinates.
+    // Stored and recomputed minimizers cust produce the same target coordinates.
     guc_scope sequence_read_on(ctx, "bioseq.index.sequence_read.enabled", "on");
     const auto assembled = match_set(ctx, "insert_hook_multifragment");
     REQUIRE(!assembled.empty());
@@ -99,7 +99,7 @@ TEST_CASE("a manual symbol_counts policy still gives the correct fallback tally"
     REQUIRE(index_table_row_count(
                 ctx, "minimizers_per_fragment", "insert_hook_manual_symbol_counts") > 0);
     REQUIRE(index_table_row_count(ctx, "symbol_counts", "insert_hook_manual_symbol_counts") == 0);
-    // Check that both scalar and vector scans return the row before checking its
+    // Check that both scalar and vector scans return  the row before checking its
     // computed symbol counts. EXPLAIN ANALYZE should report no removed chunk groups.
     guc_scope sequence_read_off(ctx, "bioseq.index.sequence_read.enabled", "off");
     ctx.clear_notices();
@@ -131,6 +131,6 @@ TEST_CASE("a manual symbol_counts policy still gives the correct fallback tally"
     REQUIRE(query_scalar_int(ctx,
                              "SELECT bioseq.symbol_count(seq0,'T') FROM "
                              "insert_hook_manual_symbol_counts WHERE pk=1") == 4);
-    // Repeated symbol-count calls must release their PostgreSQL resources cleanly.
+    // Repeated symbol-count calls must, release their PostgreSQL resources cleanly.
     REQUIRE_FALSE(ctx.notice_contains("resource was not closed"));
 }

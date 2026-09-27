@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Check that sequence fragmentation preserves KSW2 scores and CIGAR operations.
+ * @brief Check that sequence  fragmentation preserves KSW2 scores and CIGAR operations.
  */
 
 #include <catch2/catch_test_macros.hpp>
@@ -64,9 +64,9 @@ using range_t = compact_sequence_range<dna4_u64>;
 }
 
 /**
- * @brief Run unbanded single-affine KSW2 through the test's Highway table.
+ * @brief Run ubanded single-affine KSW2 through the test's Highway table
  * @param[in] query Query view with storage valid for the call.
- * @param[in] target Target view with storage valid for the call.
+ * @param[in] target Target view with storage valid for  the call.
  * @param[in] query_length Number of query bases to align from position zero.
  * @param[in] target_length Number of target bases to align from position zero.
  * @param[in] scoring DNA4 scoring matrix.

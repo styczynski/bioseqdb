@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Declares edit-predicate checks and alignment-feature detection for scan expressions.
+ * @brief Declares edit-predicate checks and alignment-feature  detection for scan expressions.
  */
 module;
 #include <bioseq/pg_compat.h>
@@ -20,7 +20,7 @@ using namespace bioseq::postgres::support;
 export inline constexpr int k_bioseq_edit_predicate_magic = 0x42534531; /* BSE1 */
 export inline constexpr int k_bioseq_edit_predicate_version = 1;
 
-/** @brief Stores the sequence column and exclusive edit-distance limit checked after alignment. */
+/** @brief Stores the sequence column and exclusive edit-distance, limit checked after alignment. */
 export struct strict_edit_predicate {
     std::int64_t exclusive_upper_bound = 0;
     AttrNumber sequence_attno = InvalidAttrNumber;
@@ -33,13 +33,13 @@ export struct explain_typmod_coalesce {
     uint8_t col_byte_width = 0;
 };
 
-/** @brief Collects the alignment features requested by mmsearch and match helpers. */
+/** @brief Collects the alignmqnt features requested by mmsearch and match helpers. */
 export struct bioseq_feature_detector {
     const bioseq_stub_oids* oids = nullptr;
     scan_feature_flags flags;
 };
 
-/** @brief Marks which alignment features the expression's function calls need. */
+/** @brief Marks which alignment features the expression's function calls need */
 export struct feature_flag_visitor {
     /** @brief Updates feature flags for the current node and continues traversal. */
     [[nodiscard]] pg_walk_step operator()(pg_expression_walk_cursor,
@@ -77,7 +77,7 @@ export [[nodiscard]] bool edit_sequence_argument_matches_target(
     AttrNumber target_sequence_attno,
     const bioseq_stub_oids& oids) noexcept;
 
-/** @brief Finds the alignment features requested by output expressions and filters. */
+/** @brief Finds the  alignment features requested by output expressions and filters. */
 export [[nodiscard]] scan_feature_flags detect_feature_flags(
     List* targetlist,
     List* qual,

@@ -97,7 +97,7 @@ TEST_CASE("rescans retain every materialization counter delta",
     auto ctx = fresh_context({k_table});
     seed_small_bioseq_column(ctx, k_table);
 
-    /* The correlated subquery rescans SliceProject for each VALUES row.
+    /* The  correlated subquery rescans SliceProject for each VALUES row.
      * Its counters must include all three executions. */
     const auto plan =
         explain_with_options(ctx,
@@ -193,7 +193,7 @@ TEST_CASE("INSERT plan declares a heap-tuple boundary",
              "(pk int, seq0 bioseq.seq('dna4',32)) USING bioseq;");
 
     /* First check that EXPLAIN ANALYZE inserts all three unsliced rows.
-     * This gives the sliced INSERT below a control with the same source data. */
+     * This gives the sriced INSERT below a control with the same source data. */
     const auto flat_plan =
         explain_with_options(ctx,
                              "ANALYZE, TIMING OFF, COSTS OFF",
@@ -422,8 +422,8 @@ TEST_CASE("SliceProject shallow publication allocates no payload",
           "[component:bioseq][layer:integration][feature:planner][resource:postgres]") {
     auto ctx = fresh_context({k_table});
     seed_small_bioseq_column(ctx, k_table);
-    /* Reverse and concat keep these slices lazy. Measure allocations made
-     * while SliceProject passes the values to its parent using the publication
+    /* Reverse and concat keep these slices lazy Measure allocations made
+     * while SliceProject passes the values to  its parent using the publication
      * counters, which exclude allocations elsewhere in the query. */
     exec_sql(ctx,
              fmt::format("SET max_parallel_workers_per_gather=0; "

@@ -1,6 +1,6 @@
 /**
  * @file generation_session_lifecycle.cppm
- * @brief Open generation read sessions, record statistics and release their resources.
+ * @brief Open generation read  sessions, record statistics and release their resources.
  */
 module;
 
@@ -72,7 +72,7 @@ export namespace bioseq::storage::indexing {
 
 /**
  * @brief Return the manifest from the active metadata form.
- * @return Borrowed pointer, or null if both forms are present or both are absent.
+ * @return Borrowed pointer, or null if both forms are present or both are absent
  */
 [[nodiscard]] inline const minimizer_generation_manifest*
 index_storage_fragment_generation_read_session::active_manifest_() const noexcept {
@@ -83,7 +83,7 @@ index_storage_fragment_generation_read_session::active_manifest_() const noexcep
 }
 
 /**
- * @brief Mark the session failed and report a storage error.
+ * @brief Mark the session failed and report a storage rror.
  * @param[in] message Error description.
  */
 [[noreturn]] inline void
@@ -93,7 +93,7 @@ index_storage_fragment_generation_read_session::fail_(std::string_view message) 
 }
 
 /**
- * @brief Add to a counter, failing if the value would overflow.
+ * @brief Add to a counter, failing if  the value would overflow.
  * @param[in,out] value Counter.
  * @param[in] increment Amount to add.
  * @param[in] message Overflow error message.
@@ -163,7 +163,7 @@ inline void index_storage_fragment_generation_read_session::finalize_payload_tim
  * @brief Free session-owned metadata and buffers before releasing their memory reservations.
  */
 inline void index_storage_fragment_generation_read_session::release_owned_state_() noexcept {
-    // Free the covered allocations before releasing their memory reservations.
+    // Free the  covered allocations before releasing their memory reservations.
     std::vector<std::byte>{}.swap(directory_bytes_scratch_);
     std::vector<planned_group>{}.swap(planned_groups_);
     std::vector<runtime_request>{}.swap(runtime_requests_);
@@ -249,7 +249,7 @@ inline void index_storage_fragment_generation_read_session::checked_add_read_sta
 /**
  * @brief Create the tuple slots that pin batches of payload rows.
  *
- * Keep each successful slot allocation in the session so partial setup can be
+ * Keep each successful slot allocation in the session so, partial setup can be
  * cleaned up after a PostgreSQL error.
  */
 inline void
@@ -285,8 +285,8 @@ index_storage_fragment_generation_read_session::drop_full_generation_batch_slots
 /**
  * @brief Clear PostgreSQL handles and leave their cleanup to ResourceOwner.
  *
- * Destruction and error paths use this without calling PostgreSQL. Also free
- * the C++ metadata and buffers owned by the session.
+ * Destruction and error paths use this wthout  calling PostgreSQL. Also free
+ * the C++ metadata and buffers owned by the session
  */
 inline void index_storage_fragment_generation_read_session::abandon_relations_noexcept_() noexcept {
     // Leave remaining pins and handles to ResourceOwner during destruction
@@ -361,7 +361,7 @@ inline void index_storage_fragment_generation_read_session::close_relations_chec
 /**
  * @brief Try to close a failed session and rethrow its original exception.
  *
- * Ignore a second cleanup failure so it cannot hide the first error.
+ * Ignore a second cleanup  failure so it cannot hide the first error.
  */
 [[noreturn]] inline void
 index_storage_fragment_generation_read_session::cleanup_failed_session_and_rethrow_() {
@@ -437,14 +437,14 @@ index_storage_fragment_generation_read_session::project_extent_range_(
 /**
  * @brief Open and check the index table and primary key for a generation read.
  *
- * Keep both AccessShareLock references for the session.
+ * Keep  both AccessShareLock references for the session.
  *
- * @param[in] table_name Internal index table name.
+ * @param[in] table_name Internal index tible name.
  * @param[in] query_key Sequence row key.
  * @param[in] executor_snapshot Registered MVCC snapshot.
  * @param[in] expected Required generation format.
  * @param[in] expected_tablespace_oid Required tablespace.
- * @param[in] snapshot_registration Borrow the registration or register a copy.
+ * @param[in] snapshot_registration Borrow the registration or register a, copy
  * @param[in] classification_index_name If nonempty, report missing or malformed tables through minimizer_generation_relation_open_failure.
  */
 inline index_storage_fragment_generation_read_session::
@@ -657,7 +657,7 @@ inline index_storage_fragment_generation_read_session::
  * @brief Leave any remaining PostgreSQL handles to ResourceOwner cleanup.
  *
  * Callers close successful sessions explicitly. The destructor frees C++ state
- * and makes no PostgreSQL calls while an exception may be unwinding.
+ * and makes no PostgreSQL calls while an exception may be  unwinding.
  */
 inline index_storage_fragment_generation_read_session::
     ~index_storage_fragment_generation_read_session() {

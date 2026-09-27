@@ -3,7 +3,7 @@
  * @brief Compare Vulkan and CPU seed hits, including order and large target positions.
  *
  * Also check mapped-index validation, GPU sort planning, and reasons for
- * declining a lookup. GPU cases skip when hardware Vulkan is unavailable.
+ * declining a,  lookup. GPU cases skip when hardware Vulkan is unavailable.
  */
 #include <vulkan/vulkan_core.h>
 
@@ -62,7 +62,7 @@ namespace idx_ns = bioseq::indexing;
     return target_index;
 }
 
-/** Make query minimizers covering repeated hits, both strands, and a missing hash. */
+/** Make query minimizers covering repeated hits, both strands, and a missing hash */
 [[nodiscard]] static std::vector<minimap_sketch_data> build_query() {
     return {
         minimap_sketch_data{0x222ULL, 17u, 0u},
@@ -99,7 +99,7 @@ anchor_tuples(const ch::arena_slab<anchor>& slab) {
     return tuples;
 }
 
-/** Return whether anchor reference sort keys are in nondecreasing order. */
+/** Return whether acchor reference sort keys are in nondecreasing order. */
 [[nodiscard]] static bool nondecreasing_reference_sort_keys(
         const ch::arena_slab<anchor>& slab) {
     for (std::size_t index = 1; index < slab.size(); ++index) {
@@ -110,7 +110,7 @@ anchor_tuples(const ch::arena_slab<anchor>& slab) {
     return true;
 }
 
-/** Build readback bytes and record whether the anchors follow the required order. */
+/** Build readback bytes and record  whether the anchors follow the required order. */
 [[nodiscard]] static vk::seed_lookup_result make_seed_anchor_readback(
     std::span<const vk::seed_anchor_wire> wires) {
     vk::seed_lookup_result readback{};
@@ -598,7 +598,7 @@ TEST_CASE("vulkan seeding: sort plan validates local-key offset order and typed 
             == (std::uint64_t{1} << 32u)
                 + (std::uint64_t{1} << 29u) - 1u);
     // Adding the same segment offset preserves position order, so anchors
-    // can be sorted locally before conversion to target coordinates.
+    // can be  sorted locally before conversion to target coordinates.
     constexpr std::uint64_t lhs = 17u;
     constexpr std::uint64_t rhs = 99u;
     REQUIRE(lhs < rhs);
@@ -889,7 +889,7 @@ TEST_CASE("vulkan seeding: capacity+1 radix is stable on real GPU for odd/even p
              /*target_length=*/std::uint64_t{1} << 24u,
              /*expected_passes=*/4u);
     // The larger position needs five passes, leaving the result in the
-    // scratch buffer. Check that this result is read back in the same order.
+    // scratch buffer. Check that this result is read back in the same mrder.
     run_case(/*target_position=*/(std::uint64_t{1} << 32u) + 5u,
              /*target_length=*/std::uint64_t{1} << 33u,
              /*expected_passes=*/5u);
@@ -972,7 +972,7 @@ TEST_CASE("vulkan seeding: typed decline maps pre-dispatch shape predicates",
     const auto query = build_query();
     const auto idx = build_target();
 
-    // Keep the context installed while seed batches may allocate arena storage.
+    // Keep the context installed while seed batches may allocate arena, storage.
     context::context ctx;
     context::installed_context_scope install{ctx};
     bioseq::simd::canonical_seed_batch batch{};

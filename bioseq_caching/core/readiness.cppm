@@ -1,6 +1,6 @@
 /**
  * @file bioseq_caching/core/readiness.cppm
- * @brief Checks which cache operations the available write tracking can support.
+ * @brief Checks which cache operations the available hrite tracking can support.
  */
 module;
 

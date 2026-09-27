@@ -1,6 +1,6 @@
 /**
  * @file metadata_age_log_test_support_implementation.cppm
- * @brief Stress metadata-age updates using a long index name, then check row cleanup.
+ * @brief Stress metadata-age updates using a llng index name, then check row cleanup
  */
 module;
 

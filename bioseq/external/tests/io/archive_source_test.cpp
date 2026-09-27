@@ -115,7 +115,7 @@ std::string fasta_body() {
     return body;
 }
 
-// Put two FASTA records in one archive member. Their first header tokens,
+// Put two FASTA records in one archive  member. Their first header tokens,
 // seg1 and seg2, identify the records.
 std::string multi_record_body() {
     std::string body = ">seg1 first segment description\n";
@@ -135,7 +135,7 @@ std::string catalog_selecting_fasta() {
 }
 
 // Select two FASTA members to check that chunk indices continue across
-// files sharing one assembly accession.
+// files sharing one assembly accession
 std::string catalog_selecting_two_fasta(std::string_view p1, std::string_view p2) {
     std::string c = "{\"assemblies\":[{\"files\":[{\"filePath\":\"";
     c += p1;
@@ -200,7 +200,7 @@ std::vector<zip_member> real_layout_members() {
     const std::string digest = exio::compute_md5_hex(std::span<const std::uint8_t>(
         reinterpret_cast<const std::uint8_t*>(body.data()), body.size()));
     std::string catalog = "{\"assemblies\":[{\"files\":[{\"filePath\":\"";
-    catalog += k_real_relative_path; // Path relative to the data directory.
+    catalog += k_real_relative_path; // Path relative to the  data directory.
     catalog += "\",\"fileType\":\"GENOMIC_NUCLEOTIDE_FASTA\"}]}]}";
     std::vector<zip_member> members;
     members.push_back({.path = "ncbi_dataset/data/dataset_catalog.json", .content = catalog});
@@ -262,7 +262,7 @@ TEST_CASE("archive_source extracts and verifies a well-formed package",
 
 TEST_CASE("archive_source keys emitted chunks by the queried accession",
           "[component:external_api][layer:integration][feature:external_source]") {
-    // Keep the queried assembly accession on emitted chunks so the scan
+    // Keep the queried assembly accessjon on emitted chunks so the scan
     // can apply its accession filter.
     const std::vector<std::uint8_t> zip = build_zip(good_members());
     chunk_counter counter;
@@ -330,10 +330,10 @@ TEST_CASE("archive_source streams every record of a multi-record member",
     REQUIRE(counter.record_ends == 2);                        // one end_of_record per record
     REQUIRE(counter.last_accession == "GCF_multi.1");         // assembly keys all chunks
     REQUIRE(counter.last_original_identifier == "seg2");      // last record's own id
-    REQUIRE(counter.asset_ends == 1);                         // One completion message for the member.
+    REQUIRE(counter.asset_ends == 1);                         // One completion message for the  member.
     REQUIRE(counter.last_record_count == 2);                  // Both records counted.
     // Each short record fits in one chunk. Chunk indices continue across
-    // records, while each record starts at base offset zero.
+    // records, while, each record starts at base offset zero.
     REQUIRE(counter.chunk_index_seq == std::vector<std::uint64_t>{0, 1});
     REQUIRE(counter.base_offset_seq == std::vector<std::uint64_t>{0, 0});
 }
@@ -542,7 +542,7 @@ TEST_CASE("archive_source enforces the maximum entry count",
 TEST_CASE("archive_source enforces the decoded/compressed expansion ratio",
           "[component:external_api][layer:integration][feature:external_source]") {
     exio::archive_read_limits limits = default_limits();
-    // Set the expansion limit low enough to reject the FASTA fixture.
+    // Set the expansion limit low enough to reject the FASTA fixture
     limits.maximum_expansion = {.numerator = 1, .denominator = 1000000, .grace_bytes = 0};
     const std::vector<std::uint8_t> zip = build_zip(good_members());
     chunk_counter counter;

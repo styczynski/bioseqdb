@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Declares checks for the scans that supply each match-helper result.
+ * @brief Declares checks for the scans that supply each match-helper reslt.
  */
 module;
 #include <bioseq/pg_compat.h>
@@ -33,7 +33,7 @@ export [[nodiscard]] std::size_t finalized_base_owner_matching_site_count(
     const bioseq_stub_oids& oids);
 
 /**
- * @brief Counts matching helper owners in a plan subtree, stopping at subqueries.
+ * @brief Counts matching helper owners in a plan subtree, stopping  at subqueries.
  *
  * Counts stop at 2 because callers only need to test uniqueness.
  */
@@ -48,7 +48,7 @@ export [[nodiscard]] finalized_match_owner_site_counts finalized_child_match_own
     Node* identity,
     const bioseq_stub_oids& oids);
 
-/** @brief Adds owner counts, returning 2 once ownership is ambiguous. */
+/** @brief Adds owner counts, returning 2 once ownership is ambiguous */
 export [[nodiscard]] constexpr std::size_t
 saturated_match_owner_site_count_add(std::size_t left, std::size_t right) noexcept {
     return left > 1u || right > 1u || left + right > 1u ? std::size_t{2u} : left + right;

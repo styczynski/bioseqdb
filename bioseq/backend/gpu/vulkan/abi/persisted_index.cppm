@@ -13,7 +13,7 @@ export namespace bioseq::gpu::vulkan {
 /**
  * @brief Vulkan device UUID represented as 16 bytes.
  *
- * The size matches `VK_UUID_SIZE`. The bytes identify the device associated
+ * The  size matches `VK_UUID_SIZE`. The bytes identify the dehice associated
  * with a saved GPU index.
  */
 using gpu_device_uuid = std::array<std::uint8_t, 16u>;

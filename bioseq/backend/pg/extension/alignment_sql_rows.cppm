@@ -19,7 +19,7 @@ import bioseq.postgres.support.sql_boundary;
 export namespace bioseq::postgres::sql_rows {
 
 
-/** @brief One pipeline stage's statistics, with query totals repeated on each row. */
+/** @brief One  pipeline stage's statistics, with query totals repeated on each row. */
 struct alignment_execution_stats_row final {
     std::int64_t execution_id;
     std::int32_t backend_pid;

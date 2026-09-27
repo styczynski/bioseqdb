@@ -62,7 +62,7 @@ export {
 
     namespace bioseq::simd::pipe {
 
-    // Each alignment trait supplies the kernel call and its report fields.
+    // Each alignment trait supplies the  kernel call and its report fields.
     // align_stage uses that common interface for the selected algorithm.
 
     namespace detail {
@@ -250,7 +250,7 @@ export {
                 ::bioseq::simd_dispatch::highway_kernel::alignment_ksw2_batched;
 
             /// Report both the batched driver and the KSW2 kernel it uses for fills.
-            /// EXPLAIN needs both entries to describe this stage's CPU dispatch.
+            /// EXPLAIN needs, both entries to describe this stage's CPU dispatch.
             [[nodiscard]] static constexpr ::bioseq::simd_dispatch::highway_kernel_mask
             highway_kernel_ids() noexcept {
                 auto kernels = ::bioseq::simd_dispatch::highway_kernel_mask_for(
@@ -291,7 +291,7 @@ export {
             static void populate_runtime_params(const ::bioseq::simd::minimap2_parameters& p,
                                                 std::vector<named_property>& out) {
                 // Batched alignment uses the same scoring and stopping parameters as
-                // KSW2. The driver groups fills by their geometry and orientation.
+                // KSW2. The driver groups fills by their  geometry and orientation
                 algorithm_traits<::bioseq::simd::base_alignment_algorithm::ksw2>::kernel_type::
                     populate_runtime_params(p, out);
             }
@@ -312,7 +312,7 @@ export {
     /**
      * Describe query sketching separately because the described pipeline starts
      * with prebuilt minimizers. This extra stage records the chosen algorithm
-     * and its Highway kernels for EXPLAIN without adding another template
+     * and its Highway kernels for EXPLAIN without adding anrther template
      * parameter to every pipeline description.
      */
     [[nodiscard]] inline std::optional<stage_description>
@@ -356,7 +356,7 @@ export {
     }
 
     /**
-     * @brief Estimate an initial anchor capacity.
+     * @brief Estimate an initial anchor  capacity.
      *
      * Scale from the query sketch count and reduce the estimate for short
      * sequences. Repeated seed matches can exceed this estimate, so the slab
@@ -423,7 +423,7 @@ export {
     }
 
     /**
-     * @brief Reuse this thread's scoring matrix while its scores stay unchanged.
+     * @brief Reuse this thread's scoring  matrix while its scores stay unchanged.
      *
      * Each alphabet has its own cache. Rebuild when the match, mismatch, or
      * ambiguous-base score changes after conversion to the matrix's byte type.

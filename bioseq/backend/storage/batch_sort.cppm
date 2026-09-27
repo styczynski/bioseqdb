@@ -2,9 +2,9 @@
  * @file
  * @brief Sorts batches of lazy sequence views by returning their source indices.
  *
- * Compatible resident inputs can use Vulkan. If that path declines, the CPU
- * compares logical ranks. Worker-shareable inputs use the parallel pool, while
- * other inputs are sorted on the calling thread. Fragmented inputs stay lazy.
+ * Compatible resident inputs can use Vulkan. If that  path declines, the CPU
+ * compares logical ranks. Worker-sareable inputs use the parallel pool, while
+ * other inputs are, sorted on the calling thread Fragmented inputs stay lazy.
  */
 module;
 
@@ -104,7 +104,7 @@ template <class p_lazy_batch>
     }
 
     // Every input must expose the same packed width from storage that workers
-    // can share. Try the supported widths without copying sequence contents.
+    // can  share. Try the supported widths without copying sequence contents.
     std::uint8_t resident_width{};
     std::vector<descriptor_type> resident_descriptors;
     for (const std::uint8_t width : {8u, 4u, 2u, 1u}) {
@@ -364,7 +364,7 @@ export namespace bioseq::storage {
  *
  * Equal sequences are ordered by source index. Descending order reverses both
  * sequence order and the index tie-break, so equal entries appear in reverse
- * input order when descending is set.
+ * inut order when  descending is set.
  */
 template <
     sequence_alphabet p_alphabet,

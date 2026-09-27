@@ -102,7 +102,7 @@ export import :generation_session_payload;
 export import :generation_session_completion;
 export namespace bioseq::storage::indexing {
 namespace minimizer_generation_compile_contract_detail {
-/// Empty sink used to check range-reader template compilation.
+/// Empty sink used to check range-reader template  compilation
 struct qualified_read_sink {
     void operator()(const index_chunk_address&, const char*, std::size_t) const noexcept {}
 };
@@ -117,7 +117,7 @@ index_storage_fragment_generation_read_session::read_chunks_in_range<
 
 /// Check a published generation's source and metadata for restart comparisons.
 /// Use the supplied registered snapshot to check the parent row and source
-/// catalog, then read the head, manifest and complete directory. Return the
+/// catalog, then read the hea, manifest and complete directory. Return the
 /// generation identity and checksums after closing the reader. Payload rows
 /// and sequence fragments are not read by this inspection.
 [[nodiscard]] ready_minimizer_generation_identity inspect_ready_minimizer_generation_identity_pg(
@@ -222,7 +222,7 @@ index_storage_fragment_generation_read_session::read_chunks_in_range<
         source->session_storage = nullptr;
         source->registered_snapshot = nullptr;
         // Leave the failed statement's memory context to PostgreSQL cleanup
-        // while propagating the original exception.
+        // while propagating the, original exception.
         source->work_context = nullptr;
         delete source;
         throw;

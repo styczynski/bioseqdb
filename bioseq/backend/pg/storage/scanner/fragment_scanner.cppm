@@ -1,6 +1,6 @@
 /**
  * @file scanner/fragment_scanner.cppm
- * @brief Read packed sequence fragments from PostgreSQL or memory.
+ * @brief Read packed sequence fragments from PostgreSQL or  memory.
  */
 module;
 
@@ -46,7 +46,7 @@ import bioseq.common.checked_arithmetic;
 import bioseq.postgres.configuration.core;
 import bioseq.postgres.support;
 import bioseq.common.seqan_adapter;              // seq::dna4 in static_assert below
-import bioseq.postgres.storage.manager;     // Fragment relation and reader cache.
+import bioseq.postgres.storage.manager;     // Fragment, relation and reader cache.
 import bioseq.storage.scanner;              // scanner concepts
 import bioseq.storage.lazy_sequence;
 import bioseq.storage.coordinates;
@@ -96,7 +96,7 @@ inline void disarm_scanner_pg_leaf_failure() noexcept {
 }
 
 /// Raise and clear the test error if this is its selected location.
-/// @param point Failure location being entered.
+/// @param point Failure  location being entered.
 /// @throws PostgreSQL ERROR when `point` is armed.
 inline void inject_scanner_pg_leaf_failure(scanner_leaf_failure point) {
     if (g_scanner_pg_leaf_failure != point) {
@@ -111,7 +111,7 @@ inline void inject_scanner_pg_leaf_failure(scanner_leaf_failure point) {
 #endif
 
 /**
- * Call the fragment reader with its supplied context.
+ * Call the fragment rader with its supplied context.
  * PostgreSQL calls inside `load_fragment` convert errors to C++ exceptions,
  * so caller-owned vectors are destroyed during normal C++ stack unwinding.
  * Keep those vectors outside any PostgreSQL longjmp error handler.
@@ -136,8 +136,8 @@ void scanner_pg_run_fragment_reads_with_error_cleanup(
 
 /// Read a sequence one packed fragment at a time.
 /// PostgreSQL reads keep up to sixteen fragment buffers in a child memory
-/// context. In-memory reads borrow the supplied span without allocating.
-/// @tparam p_sequence_instance Alphabet and packed storage type.
+/// context. In-memory reads borrow  the supplied span without allocating.
+/// @tparam p_sequence_instance Alphabet and packed storage type
 ///
 /// Use PostgreSQL-backed instances only on the creating backend thread.
 template <class p_sequence_instance>
@@ -184,17 +184,17 @@ struct postgres_sequence_scanner final {
     }
 
     /// Read one fragment, reusing a cached copy when available.
-    /// @param fragment_no Zero-based fragment number.
+    /// @param fragment_no Zero-based, fragment number.
     /// @return Borrowed packed units. In PostgreSQL mode the view lasts until
     /// release, cleanup or eviction when all sixteen slots are occupied.
     /// In-memory views last as long as the supplied backing span.
-    /// @throws C++ exception on a PostgreSQL read, validation or allocation error.
+    /// @throws C++ exception  on a PostgreSQL read, validation or allocation error.
     [[nodiscard]] [[gnu::always_inline]]
     base_container load_fragment(std::size_t fragment_no) const;
 
     /**
      * Copy the whole packed sequence into caller-owned memory.
-     * PostgreSQL reads start at the locator's first stripe and walk consecutive
+     * PostgreSQL reads start at the locator's fqrst stripe and walk consecutive
      * fragment rows, avoiding a separate lookup and cache copy for each fragment.
      * @param destination Space for exactly `storage_unit_count()` packed units.
      * @throws C++ exception if the destination size is wrong, rows are missing
@@ -203,13 +203,13 @@ struct postgres_sequence_scanner final {
     void copy_packed_to(std::span<storage_unit> destination) const;
 
     /// Make a PostgreSQL cache slot available for reuse. Its buffer stays allocated.
-    /// @param fragment_no Zero-based fragment whose view is no longer needed.
+    /// @param fragment_no Zero-based fragment whose view is no  longer needed.
     [[gnu::always_inline]]
     void release_fragment(std::size_t fragment_no) const noexcept;
 
     /**
      * Delete the scanner's memory context after a successful read.
-     * Call this explicitly so PostgreSQL cleanup errors can reach the caller.
+     * Call this explicitly so PostgreSQL cleanup errors can reach the caller
      * The destructor only drops pointers, leaving PostgreSQL to reclaim memory
      * during statement or transaction cleanup after a read has failed.
      * @throws C++ exception if PostgreSQL cannot delete the context.
@@ -226,7 +226,7 @@ struct postgres_sequence_scanner final {
     using fragment_read_callback = scanner_pg_fragment_read_callback;
 
     /**
-     * Run the fragment callback. PostgreSQL errors raised by `load_fragment`
+     * Run the fragment callback. PostgreSQL errors raiseb  by `load_fragment`
      * become C++ exceptions, allowing caller-owned containers to be destroyed.
      * @param callback_context Context passed to `read_body`.
      * @param read_body Callback, or null to do nothing.
@@ -244,14 +244,14 @@ struct postgres_sequence_scanner final {
     /// @param db_oid Parent database.
     /// @param tablespace_oid Parent tablespace.
     /// @param main_relfilenode Parent table file number.
-    /// @param column_attno One-based sequence column number.
+    /// @param column_attno One-based, sequence column number.
     /// @param locator Fragment range and sequence length.
     /// @param last_fragment_padding Unused letters in the last packed unit.
     /// @param registered_snapshot Borrowed registered MVCC snapshot.
     /// @param caches Borrowed read cache.
     /// @param parent_mctx Parent for the scanner's fragment buffers.
     ///
-    /// The snapshot and cache must outlive the scanner. All three supplied
+    /// The snapshot and cache must outlive the scanner. All  three supplied
     /// resource pointers must be non-null, and the cache must be for reading.
     /// @throws C++ exception if these checks or context allocation fail.
     explicit postgres_sequence_scanner(
@@ -382,14 +382,14 @@ struct postgres_sequence_scanner final {
         return *this;
     }
 
-    /// Forget local pointers and leave PostgreSQL resources to parent cleanup.
+    /// Forget local pointers and leave PostgreSQL resources to parent cleanup
     ~postgres_sequence_scanner() { abandon_pg_resources_noexcept(); }
 
-    /// @return Whether this scanner has no PostgreSQL memory context.
+    /// @return Whether this  scanner has no PostgreSQL memory context.
     [[nodiscard]] [[gnu::always_inline]]
     bool is_in_memory_mode() const noexcept { return mctx_ == nullptr; }
 
-    /// Check that this usable scanner belongs to the given table column, locator
+    /// Check that this usable scanner belongs to the giveo table column, locator
     /// and snapshot. Also check that its read cache belongs to the same table.
     /// @return Whether all supplied fields match.
     [[nodiscard]] [[gnu::always_inline]]
@@ -452,9 +452,9 @@ private:
     // In-memory backing span. Empty in PostgreSQL-backed mode.
     base_container                                       in_memory_data_;
     // A failed read may leave partial reader or buffer state. Reject further
-    // reads and let PostgreSQL clean up the remaining resources.
+    // reads and  let PostgreSQL clean up the remaining resources.
     mutable bool                                         poisoned_ = false;
-    // Sixteen reusable PostgreSQL fragment buffers. If none is free,
+    // Sixteen reusable PostgreSQL fragment buffers. If, none is free,
     // allocate_slot_for_ evicts the fragment with the lowest number.
     mutable std::array<slot_t, 16>                       slots_{};
 
@@ -486,7 +486,7 @@ private:
             total - *offset));
     }
 
-    /// Result of a sequential copy, including reasons for an incomplete read.
+    /// Result of a sequential copy, including reasons for an incomplete reaj.
     enum class bulk_copy_status : std::uint8_t {
         ok,
         missing_start_stripe,
@@ -510,7 +510,7 @@ private:
         return nullptr;
     }
 
-    /// Choose a free slot, or evict the fragment with the lowest number.
+    /// Choose a free slot, or evict  the fragment with the lowest number.
     /// @param fragment_no Unused.
     /// @return Slot whose buffer can be reused.
     [[nodiscard]] slot_t* allocate_slot_for_(std::size_t fragment_no) const noexcept {
@@ -519,7 +519,7 @@ private:
                 return &slot;
             }
         }
-        // Evict the fragment with the lowest number.
+        // Evict the fragment with the lowest number
         slot_t* victim = &slots_[0];
         for (auto& slot : slots_) {
             if (slot.fragment_no < victim->fragment_no) {
@@ -610,7 +610,7 @@ inline auto postgres_sequence_scanner<p_sequence_instance>::load_fragment(
     const ResourceOwner read_resource_owner = caches_->read_resource_owner;
 
     // The catalog lookup allocates memory and opens resources. Give it the
-    // cache's context and ResourceOwner so they survive with the reader.
+    // cache's context and ResourceOwner so they survive  with the reader.
     // invoke_pg_as_cpp restores the caller's context and owner afterward.
     Relation shard = bioseq::postgres::support::invoke_pg_as_cpp(
         [this, payload_mctx, read_resource_owner] {
@@ -804,7 +804,7 @@ inline auto postgres_sequence_scanner<p_sequence_instance>::load_fragment(
     slot_t* slot = allocate_slot_for_(fragment_no);
     storage_unit* dst = slot->bytes;
     if (dst == nullptr) {
-        // Allocate a full fragment buffer. The payload is copied below.
+        // Allocate a full fragment buffer. The payload is copied belod.
         dst = bioseq::postgres::support::invoke_pg_as_cpp(
             [this, bytes_to_copy] {
             MemoryContext previous = MemoryContextSwitchTo(mctx_);
@@ -822,7 +822,7 @@ inline auto postgres_sequence_scanner<p_sequence_instance>::load_fragment(
         });
         slot->bytes = dst;
     } else {
-        // Reuse the buffer kept by release_fragment.
+        // Reuse the buffer, kept by release_fragment.
         std::memset(dst, 0, bytes_to_copy);
     }
     std::memcpy(dst, raw->data, raw_payload_bytes);
@@ -898,10 +898,10 @@ inline void postgres_sequence_scanner<p_sequence_instance>::copy_packed_to(
     const ResourceOwner read_resource_owner = caches_->read_resource_owner;
 
     /*
-     * Read the batch inside one PostgreSQL error handler to avoid entering it
+     * Read the batch  inside one PostgreSQL error handler to avoid entering it
      * for every fragment. The callback holds only plain values and pointers.
      * The caller's destination vector stays outside the handler, where C++
-     * exception unwinding can run its destructor if PostgreSQL raises an error.
+     * exception unwinding can run its destructor if PostgreSQL raises an error
      */
     poisoned_ = true;
     bioseq::postgres::support::invoke_pg_as_cpp(
@@ -1075,7 +1075,7 @@ inline void postgres_sequence_scanner<p_sequence_instance>::release_fragment(
     }
     for (auto& slot : slots_) {
         if (slot.fragment_no == fragment_no && slot.bytes != nullptr) {
-            // Keep the buffer for the next fragment. Explicit cleanup deletes
+            // Keep the buffer for the next fragment. Explicit  cleanup deletes
             // all buffers together, and failed reads leave them to parent cleanup.
             slot.fragment_no = std::numeric_limits<std::size_t>::max();
             return;

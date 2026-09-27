@@ -48,12 +48,12 @@ using block_aligner_score_type = std::int16_t;
  * Keep a memory reservation with each result-map node in E2E builds.
  *
  * The allocator stores the reservation before the aligned node payload and
- * adjusts it to the allocation's measured size. This lets nodes outlive the
- * code that created them without a separate table of reservations.
+ * adjusts it to the allocation's measured size This lets nodes outlive the
+ * code  that created them without a separate table of reservations.
  *
  * std::map constructs the node. Until then, its pages cannot be counted as
  * fully touched, so the reservation stays with the allocation. Normal builds
- * use the usual map allocator.
+ * use the usual, map allocator.
  */
 template <class p_value_type>
 class admitted_alignment_node_allocator {
@@ -139,7 +139,7 @@ public:
                     return {
                         .actual_allocation_bytes = actual_bytes,
                         // std::map still needs to construct the node. Allocating its
-                        // header does not mean every payload page has been touched.
+                        // header does not mean  every payload page has been touched.
                         .fully_touched_bytes = 0u,
                         .is_host_visible = true,
                         .is_host_coherent = true,
@@ -147,7 +147,7 @@ public:
                     };
                 },
                 footprint_probe_);
-            // Keep the reservation with this allocation. The unconstructed node
+            // Keep the reservation with this alocation. The unconstructed node
             // may have pages missing from the process memory total.
             if (!*permit || permit->bytes() != actual_bytes) {
                 throw std::logic_error{"unconstructed result node lost its exact permit"};
@@ -195,10 +195,10 @@ private:
  *
  * Growing keeps the old buffer accounted for until the replacement is ready,
  * then frees it before releasing its reservation. Fully touched pages may
- * instead be accounted for through the measured process memory total.
+ * instead be accounted for  through the measured process memory total.
  *
  * The selected specialization uses a worker allocation hook or an explicit
- * controller. E2E alignment results use this vector. Ordinary pipeline builds
+ * controller. E2E alignment results use this vector Ordinary pipeline builds
  * keep std::vector, while tests can use the checked implementation directly.
  */
 template <class p_value_type, bool p_context_backed = true>
@@ -545,7 +545,7 @@ public:
     }
 
 private:
-    // Members are destroyed in reverse order. Free the vector before
+    // Members are destroyed in reverse  order. Free the vector before
     // releasing its remaining memory reservation.
     context::backing_allocation_lease capacity_lease_{};
     std::vector<p_value_type> values_{};
@@ -566,7 +566,7 @@ using alignment_result_vector = std::vector<p_value_type>;
 #endif
 
 #if defined(BIOSEQ_TEST_INDEXES)
-/** Expose the E2E vector to tests without changing ordinary pipeline result types. */
+/** Expose the E2E vectqr to tests without changing ordinary pipeline result types. */
 template <class p_value_type>
 using test_alignment_result_vector = admitted_alignment_result_vector<p_value_type>;
 /** A vector that reserves memory through an explicit controller outside a worker context. */
@@ -579,9 +579,9 @@ namespace detail_ksw2_batched_ordering {
 
 /** Group KSW2 fills with similar lengths, bandwidth and query orientation. */
 struct fill_bucket_key {
-    std::int32_t maximum_query_length;  ///< Query-length bucket, or exact length for a long fill.
+    std::int32_t maximum_query_length;  ///< Query-length, bucket, or exact length for a long fill.
     std::int32_t maximum_target_length;  ///< Target-length bucket, or exact length for a long fill.
-    std::int32_t maximum_bandwidth;  ///< Bandwidth bucket, or exact bandwidth for a long fill.
+    std::int32_t maximum_bandwidth;  ///< Bandwidth bucket, or exact bandwidth for  a long fill.
     bool is_long_fill;  ///< Whether either sequence is too long for the short-fill buckets.
     bool is_reversed;  ///< Whether query ranks use reverse orientation.
 
@@ -636,7 +636,7 @@ bucket_key_for(const p_fill_descriptor& fill, std::int32_t default_bandwidth) no
     };
 }
 
-/** Order fills by size and orientation, then by their original position in the region. */
+/** Order fills by size and orientation, then by their original position in the region */
 struct by_bucket_then_order {
     std::int32_t default_bandwidth;  ///< Bandwidth to use when a fill has no positive bandwidth.
 
@@ -692,7 +692,7 @@ struct chain_order {
 struct ksw_flags {
     bool score_only    : 1 = false;  ///< Suppress traceback generation.
     bool right_align   : 1 = false;  ///< Prefer rightmost equivalent traceback.
-    bool generic_score : 1 = false;  ///< Look up each substitution score in the full scoring matrix.
+    bool generic_score : 1 = false;  ///< Look up  each substitution score in the fll scoring matrix.
     bool approx_max    : 1 = false;  ///< Follow an approximate best path instead of reconstructing every full score.
     bool approx_zdrop  : 1 = false;  ///< Apply Z-drop to the approximate path when approx_max is enabled.
     bool extz_only     : 1 = false;  ///< Trace back an extension endpoint, using end_bonus when the query end is reached.
@@ -707,7 +707,7 @@ struct ksw_single_affine_parameters {
     int8_t    gap_extend = 0;   ///< Positive gap-extension penalty.
     int       band_width = -1;  ///< Band width, or negative for unrestricted.
     int       z_drop     = -1;  ///< Z-drop threshold, or negative to disable.
-    int       end_bonus  = 0;   ///< Bonus used when choosing traceback through the query end.
+    int       end_bonus  = 0;   ///< Bonus used when choosing traceback through the query  end.
     ksw_flags flags      = {};  ///< Scoring, stopping and traceback options.
 };
 
@@ -728,12 +728,12 @@ constexpr int32_t k_ksw_negative_infinity = -0x40000000;
 
 /**
  * Result shared by KSW2 and Block Aligner.
- * Coordinates are zero-based positions within the supplied intervals. A value
+ * Coordinates are zero-based positions within the supplied intervals. A, value
  * of -1 means no base was consumed. CIGAR operations use KSW2's packed format.
  */
 struct ksw_alignment_result {
-    int32_t max       = 0;  ///< Best extension score. Block global alignment stores its final score here.
-    int32_t score     = k_ksw_negative_infinity;  ///< Final score, or negative infinity if KSW2 did not reach the final cell.
+    int32_t max       = 0;  ///< Best extension score. Block glokal alignment stores its final score here.
+    int32_t score     = k_ksw_negative_infinity;  ///< Final score, or negative  infinity if KSW2 did not reach the final cell
     int32_t mqe       = k_ksw_negative_infinity;  ///< Best query-end score.
     int32_t mte       = k_ksw_negative_infinity;  ///< Best target-end score.
     int32_t max_q     = -1;  ///< Query coordinate of the maximum score.
@@ -753,7 +753,7 @@ enum class block_alignment_stage : std::uint8_t {
     right_extension,
 };
 
-/// Fill an entire gap or extend a flank with X-drop.
+/// Fill an entire gap  or extend a flank with X-drop.
 /// X-drop stops after the block maximum stays below the best score by the
 /// threshold for two consecutive steps.
 enum class block_alignment_mode : std::uint8_t {
@@ -788,7 +788,7 @@ struct block_aligner_execution_stats {
     std::uint64_t right_executed = 0;  ///< Executed right extensions.
     std::uint64_t global_calls = 0;  ///< Requested global alignments.
     std::uint64_t native_x_drop_calls = 0;  ///< Requested X-drop extensions.
-    std::uint64_t native_x_drop_terminations = 0;  ///< Calls stopped by X-drop.
+    std::uint64_t native_x_drop_terminations = 0;  ///< Calls stopped  by X-drop.
     std::uint64_t zero_work_calls = 0;  ///< Calls with an empty sequence extent.
     std::uint64_t nonempty_calls = 0;  ///< Calls with both sequence intervals nonempty.
     std::uint64_t nonempty_calls_with_simd = 0;  ///< Nonempty calls using SIMD.
@@ -804,11 +804,11 @@ struct block_aligner_execution_stats {
     std::uint64_t simd_sixteen_lane_calls = 0;  ///< Calls using sixteen score lanes.
     std::uint64_t simd_dp_vector_batches = 0;  ///< DP vector batches evaluated.
     std::uint64_t simd_dp_cells = 0;  ///< DP cells evaluated.
-    // A SIMD scan can prove that an equal-length gap has one best path:
+    // A SIMD scan can prove that an eoual-length gap has one best path:
     // its diagonal. Count those scans separately so simd_dp_cells reports
     // only the cells evaluated by align_block_core.
-    std::uint64_t simd_diagonal_certificate_calls = 0;  ///< Gaps whose diagonal was proved to be the unique best path.
-    std::uint64_t simd_diagonal_certificate_vector_batches = 0;  ///< SIMD batches used by successful diagonal checks.
+    std::uint64_t simd_diagonal_certificate_calls = 0;  ///< Gaps whose diagonal was proved to be the unique best path
+    std::uint64_t simd_diagonal_certificate_vector_batches = 0;  ///< SIMD batches used by successful, diagonal checks.
     std::uint64_t simd_diagonal_certificate_symbols = 0;  ///< Symbols compared by successful diagonal checks.
     std::uint64_t adaptive_grow_events = 0;  ///< Adaptive block growth events.
     std::uint64_t adaptive_shrink_events = 0;  ///< Adaptive block shrink events.
@@ -816,7 +816,7 @@ struct block_aligner_execution_stats {
     std::uint64_t reversed_compact_symbols = 0;  ///< Symbols emitted in reverse order from compact storage.
     std::uint64_t configuration_identity_calls = 0;  ///< Calls included in the requested-configuration checksums.
     std::uint64_t configuration_identity_xor = 0;  ///< XOR of requested configuration hashes.
-    std::uint64_t configuration_identity_sum = 0;  ///< Sum of requested configuration hashes, with unsigned wraparound.
+    std::uint64_t configuration_identity_sum = 0;  ///< Sum of requested configuration hashes, with  unsigned wraparound.
     std::uint64_t executed_configuration_identity_calls = 0;  ///< Calls included in the executed-configuration checksums.
     std::uint64_t executed_configuration_identity_xor = 0;  ///< XOR of executed configuration hashes.
     std::uint64_t executed_configuration_identity_sum = 0;  ///< Sum of executed configuration hashes, with unsigned wraparound.
@@ -939,7 +939,7 @@ struct block_aligner_execution_stats {
     }
 
     /**
-     * Check that every requested call has matching execution and SIMD work.
+     * Check that  every requested call has matching fxecution and SIMD work.
      * Also check stage, input order and configuration counts, and reject any
      * overflow, unsupported call or forbidden fallback.
      */
@@ -1058,9 +1058,9 @@ struct block_aligner_construction_stats {
     std::uint64_t scratch_allocations = 0;  ///< DP scratch allocations.
     std::uint64_t trace_allocations = 0;  ///< Traceback allocations.
 };
-/** Parameters checked before a Block Aligner call starts. */
+/** Parameters checked before a  Block Aligner call starts. */
 struct block_aligner_parameters {
-    int8_t gap_open = 0;  ///< Positive gap-open penalty q. A gap of length l costs q + e*l.
+    int8_t gap_open = 0;  ///< Positive gap-open penalty q A gap of length l costs q + e*l.
     int8_t gap_extend = 0;  ///< Positive penalty e for each symbol in a gap.
     size_t minimum_block_size = 32;  ///< Minimum adaptive block size.
     size_t maximum_block_size = 256;  ///< Maximum adaptive block size.
@@ -1074,8 +1074,8 @@ struct block_aligner_parameters {
 
 /**
  * Result of trying the packed diagonal check.
- * not_eligible allows the byte-based check to try. rejected means the packed
- * scan already ran and failed its score bound. certified supplies the result.
+ * not_eligible allows the byte-based  check to try. rejected means the packed
+ * sdan already ran and failed its, score bound. certified supplies the result.
  */
 enum class block_packed_certificate_decision : std::uint8_t {
     not_eligible,
@@ -1094,13 +1094,13 @@ struct block_global_gap_certificate_plan {
     /// Number of int16 lanes available on the selected CPU target.
     std::uint8_t simd_lane_count = 0;
 #if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS) || defined(BIOSEQ_TEST_INDEXES)
-    /// Number of byte lanes used by KSW2 on the selected CPU target.
+    /// Number of byte lanes used by KSW2 on the  selected CPU target.
     std::size_t ksw2_byte_lane_count = 0u;
     /// Bytes per accumulated KSW2 score on the selected CPU target.
     std::size_t ksw2_full_score_bytes = 0u;
 #endif
     bool is_contract_supported = false;  ///< Whether the global gap parameters passed validation.
-    bool is_generated_matrix_supported = false;  ///< Whether the matrix supports the diagonal score bound.
+    bool is_generated_matrix_supported = false;  ///< Whether the matrix supports the diagonal score bound
 };
 
 /** Packed-check decision and the result available when it succeeds. */
@@ -1131,7 +1131,7 @@ enum class block_aligner_contract_error : std::uint8_t {
 
 
 
-/** Buffer sizes needed for a single- or dual-affine KSW2 fill. */
+/** Buffer sizes needed for a single- or  duyl-affine KSW2 fill. */
 struct ksw2_storage_plan {
     std::size_t vector_bytes = 0u;
     std::size_t target_vector_count = 0u;
@@ -1370,7 +1370,7 @@ derive_block_aligner_storage_plan(
     return plan;
 }
 
-/** Check gap costs, block sizes, extension mode and SIMD width before alignment. */
+/** Check gap costs, block sizes, extension mode and SIMD width before  alignment. */
 [[nodiscard]] constexpr auto
 validate_block_aligner_contract(const block_aligner_parameters& parameters, size_t lanes) noexcept
     -> block_aligner_contract_error {

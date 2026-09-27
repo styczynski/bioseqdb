@@ -102,7 +102,7 @@ export namespace bioseq::storage {
 
 // The locator payload format is defined in bioseq.storage.layout.
 
-/// Check the header marker that identifies a stored sequence locator.
+/// Check the header  marker that identifies a stored sequence locator.
 /// @param hdr Sequence header, or null.
 /// @return True when the header has the locator marker.
 [[nodiscard]] [[gnu::always_inline]]
@@ -112,7 +112,7 @@ inline bool is_locator_stub(const bioseq::pg_types::seq* hdr) noexcept {
             static_cast<std::uint8_t>(hdr->storage_unit_byte_width));
 }
 
-/// Read the packed storage-unit width without the locator flag.
+/// Read the packed storage-unit width without the, locator flag.
 /// @param hdr Non-null sequence header.
 /// @return Width in bytes.
 [[nodiscard]] [[gnu::always_inline]]
@@ -151,7 +151,7 @@ inline sequence_locator decode_locator_from_stub(const bioseq::pg_types::seq* hd
 }
 
 /* Check locator lengths and row numbers before opening a shard or allocating
- * a complete sequence. These values must fit both PostgreSQL catalog fields
+ * a cmplete  sequence. These values must fit both PostgreSQL catalog fields
  * and the allocation size. */
 /// Check locator lengths and fragment-row ranges before materialization.
 /// @param loc Locator to check.
@@ -201,7 +201,7 @@ inline void validate_locator_flat_materialization_length(
     pg_unreachable();
 }
 
-/// Check that a stored fragment has a complete header and the expected size.
+/// Check that a stored fragment has a complete header and the expected size
 /// @param raw_bytes Stored value size in bytes.
 /// @param expected_bytes Required value size in bytes.
 /// @param row_no Fragment row number for error messages.
@@ -235,7 +235,7 @@ inline void validate_sequence_fragment_frame(
     pg_unreachable();
 }
 
-/// Check a fragment against the sequence type and expected fragment length.
+/// Check a fragment against  the sequence type and expected fragment length.
 /// @param raw Fragment header to check.
 /// @param expected_alphabet Required alphabet code.
 /// @param expected_width Required storage-unit width in bytes.
@@ -295,12 +295,12 @@ inline void validate_sequence_fragment_metadata(
 // Sequence-length bucket calculations are shared with bioseq.storage.layout.
 
 // Each scan, index fetch, writer or dispatch buffer keeps its own shard cache.
-// Allocate the cache separately so its C++ containers do not change the layout
-// of PostgreSQL state structs that store an opaque pointer to it.
+// Allocate the cache separatly so its C++ containers do not change the layout
+// of PostgreSQL state structs that store  an opaque pointer to it.
 
 /// Keep opened fragment tables and their readers or writers for one owner.
 struct seq_caches {
-    /// An opened fragment table and the reader or writer using it.
+    /// An opened fragment table and the reader, or writer using it.
     struct entry {
         /// Cache-owned open relation reference.
         Relation rel = nullptr;
@@ -318,7 +318,7 @@ struct seq_caches {
         sequence_size_t pending_total_payload_delta = 0;
     };
 
-    /// Keep shard entries in a sorted vector for lookup and ordered cleanup.
+    /// Keep shard entries in a sorted vector for lookup and ordered cleanup
     struct entry_map {
         /// Packed cache key paired with its owned entry.
         using value_type = std::pair<std::uint64_t, entry>;
@@ -342,7 +342,7 @@ struct seq_caches {
         /// Remove entries after their PostgreSQL resources have been closed.
         void clear() noexcept { entries_.clear(); }
 
-        /// Find an entry by its shard key.
+        /// Find an entry by its shard  key.
         /// @return Matching iterator, or `end()` if absent.
         [[nodiscard]] iterator find(std::uint64_t key) noexcept {
             auto it = lower_bound(key);
@@ -398,7 +398,7 @@ struct seq_caches {
     /// Relation lock mode used consistently by this cache.
     LOCKMODE lock_mode = AccessShareLock;
 
-    /// Choose whether this cache serves reads or writes.
+    /// Choose whether this cche serves reads or writes.
     enum class access_side { read, write };
     access_side side = access_side::read;
 
@@ -406,7 +406,7 @@ struct seq_caches {
     MemoryContext read_state_mctx = nullptr;
 
     // Set this when cached readers must survive the scan that opened them.
-    // A sequence kept after that scan can finish reading under its transaction
+    // A sequence kept after that scan can  finish reading under its transaction
     // resource owner. Null uses CurrentResourceOwner.
     ResourceOwner read_resource_owner = nullptr;
 
@@ -438,8 +438,8 @@ struct seq_caches {
 // Construct and destroy the cache explicitly because PostgreSQL allocates
 // its memory with palloc. Consumers keep an opaque pointer to it.
 //
-// destroy_seq_caches has an out-of-line definition so write-state cleanup can
-// call it through a forward declaration without creating a module import cycle.
+// destroy_seq_caches has an out-of-line definition so write-state,  cleanup can
+// call it through a forward declaration without creating a module import cycle
 /// Allocate and construct one cache set inside a PostgreSQL memory context.
 /// @param mctx Memory context that owns the returned allocation.
 /// @return Constructed cache set owned by `mctx`.
@@ -455,7 +455,7 @@ void destroy_seq_caches(seq_caches* caches) noexcept;
 
 /// Close cached readers and relations while keeping the cache allocation.
 /// @param caches Cache to close.
-/// @param commit Apply pending shard-byte counts before closing.
+/// @param commit Apply pending shard-byte counts beore closing.
 [[gnu::always_inline]] inline void close_seq_caches(seq_caches& caches,
                                                     bool commit) noexcept {
     caches.close_all(commit);
@@ -472,7 +472,7 @@ void close_and_destroy_seq_caches(seq_caches* caches, bool commit) noexcept;
 inline constexpr std::size_t k_sequence_fragment_storage_units =
     std::size_t{1024};
 
-// Flush fragment writes before an index build reads them in the same
+// Flush fragment writes before an index build reads them in  the same
 // statement. The transaction write-state cache still owns the writers.
 /// Make pending fragment rows available to reads in the same statement.
 /// @param caches Write cache, or null.
@@ -485,11 +485,11 @@ void flush_seq_cache_write_states(seq_caches* caches,
 /// Input is already packed for the destination column. Completed fragments
 /// go to one shard, and finish() writes the last fragment with its padding.
 /// append_packed_bytes() copies each input span before draining full fragments,
-/// so callers should submit bounded chunks to limit temporary memory.
+/// so callers should submit bounded chunks to  limit temporary memory.
 /// A sequence exceeding the shard size limit raises an error. PostgreSQL
-/// rollback removes any fragment rows already written.
+/// rollback removes any ragment rows already written.
 struct sequence_stream_writer {
-    /// Start a sequence write and allocate its source version number.
+    /// Start a sequence write and allocate its source version number
     void begin(Oid user_relid, Oid db_oid, Oid spc_oid,
                RelFileNumber main_relfilenode, std::uint64_t main_storage_id,
                AttrNumber seq_attno, TupleDesc parent_td,
@@ -505,7 +505,7 @@ struct sequence_stream_writer {
     void abort();
 
 private:
-    /// Open the shard that will hold every fragment of this sequence.
+    /// Open the shard that will hold every  fragment, of this sequence.
     void open_shard();
     /// Store one fragment and record its row number.
     void write_fragment(const std::uint8_t* payload, std::size_t payload_bytes,
@@ -557,8 +557,8 @@ struct sequence_column_type_parameters {
     int storage_unit_bit_width = 0;
 };
 
-/// Read the alphabet and storage width declared for a sequence column.
-/// @param parent_tupdesc Parent table column descriptions.
+/// Read  the alphabet and storage width declared for a sequence column.
+/// @param parent_tupdesc Parent tazle column descriptions.
 /// @param column_attno One-based column number.
 /// @return Alphabet name and storage-unit width in bits.
 /// @throws A translated PostgreSQL error if the column or type modifier is invalid.
@@ -566,13 +566,13 @@ struct sequence_column_type_parameters {
 column_typmod_at(TupleDesc parent_tupdesc, std::int16_t column_attno);
 
 /// Choose the shard CREATE TABLE modifier from its parent.
-/// @return `UNLOGGED`, `TEMPORARY`, or an empty string for a permanent or missing parent.
+/// @return `UNLOGGED`, `TEMPORARY`, or an empty string for a permanent or missing parent
 [[nodiscard]] const char*
 persistence_keyword_for_relfilenode(Oid main_database_oid,
                                     Oid main_tablespace_oid,
                                     Oid main_relfilenode);
 
-/// Build a fragment table name from its parent, column, bucket and shard.
+/// Build  a fragment table name from its parent, column, bucket and shard.
 /// @return Table name without the schema.
 [[nodiscard]] std::string
 format_sub_table_name(Oid db_oid, Oid spc_oid, Oid main_relfilenode,
@@ -614,23 +614,23 @@ struct sequence_storage_manager {
     // Use the same bucket calculation in PostgreSQL and standalone tests.
     /// Choose a length bucket for a sequence.
     /// @param seq_size Sequence length in symbols.
-    /// @return Zero-based bucket number.
+    /// @return Zero-based bucket  number.
     [[nodiscard]] [[gnu::always_inline]] static constexpr std::size_t
     sequence_bucket_index(sequence_size_t seq_size) noexcept {
         return bioseq::storage::sequence_bucket_index<
             len_t, bucket_min_len_bits, bucket_max_len_bits>(seq_size);
     }
 
-    // insert_sequence_streamed calls the producer once per fragment. The
+    // insert_sequence_streamed calls the producer once per, fragment. The
     // destination already has its alphabet and storage width. The producer fills
     // data[], bp_size and padding_letters, using the last-fragment flag to handle
-    // the sequence end. Temporary fragment allocations are cleared between calls.
+    // the seqence end. Temporary fragment allocations are cleared between calls.
     //
     // The returned token holds the locator and an unpublished source version.
     // The caller publishes it after storing the parent row.
     // insert_payload_as_fragments uses this path for an already loaded sequence.
-    /// Write producer-filled fragments to one shard and return their unpublished locator.
-    /// @tparam p_fragment_producer Callback that fills each destination fragment.
+    /// Write producer-filled fragments to one shard and  return their unpublished locator.
+    /// @tparam p_fragment_producer Callback that fills each destination fragment
     template<class p_fragment_producer>
     [[nodiscard]] static pending_sequence_source
     insert_sequence_streamed(Oid user_relid,
@@ -668,7 +668,7 @@ struct sequence_storage_manager {
                   MemoryContext out_mctx, seq_caches* cache);
 
     // Batched sequence reads.
-    /// A locator and the output slot where its sequence should be returned.
+    /// A locator and the output slot where  its sequence should be returned.
     struct fetch_request {
         /// Destination index in the caller-provided output span.
         std::size_t out_slot = 0;
@@ -676,7 +676,7 @@ struct sequence_storage_manager {
         sequence_locator locator{};
     };
 
-    /// Sort requests by shard and fragment row, then fill their output slots.
+    /// Sort requests by shard and fragment row, then fil their output slots.
     static void
     fetch_payload_bulk(Oid db_oid, Oid spc_oid, Oid main_relfilenode,
                        std::int16_t column_attno, std::int16_t bucket_idx,
@@ -692,7 +692,7 @@ struct sequence_storage_manager {
     /// Check and lock the catalogs needed to remove a parent table and its shards.
     static void validate_drop_catalog_contracts();
 
-    /// Drop a parent table's fragment tables, sidecars and source-version records.
+    /// Drop, a parent table's fragment tables, sidecars and source-version records.
     static void
     drop_sub_tables_for_main(
         Oid db_oid, Oid spc_oid, Oid main_relfilenode,
@@ -704,10 +704,10 @@ using bioseq_default_storage_manager =
     sequence_storage_manager<sequence_size_t, /*min=*/8, /*max=*/42>;
 
 // Sequence scanners use this helper to reuse opened shard relations.
-/// Open the fragment table named by a locator, reusing a cached relation.
+/// Open the fragment  table named by a locator, reusing a cached relation.
 /// @param lock_mode Lock to acquire when opening the table.
 /// @param cache Optional cache that keeps the relation and lock until cleanup.
-/// @return Open fragment relation. Without a cache, the caller must close it
+/// @return Open fragment relation Without a cache, the caller must close it
 /// with the same lock mode.
 /// @throws PostgreSQL ERROR or a translated error if the shard cannot be opened.
 [[nodiscard]] Relation
@@ -717,14 +717,14 @@ open_sub_table_for_locator(Oid db_oid, Oid spc_oid, Oid main_relfilenode,
 
 /// Check whether the shard catalog registers this relation as a fragment table.
 /// VACUUM and checks that restrict writes use this because table names can change.
-/// @return True when the relation is registered.
+/// @return True when the relation is  registered.
 [[nodiscard]] bool is_registered_sequence_fragment_relation(
     Oid relid,
     bool allow_missing_during_extension_teardown = false);
 
 // Each fragment shard has a companion heap table for sidecar blobs.
 
-/// Store sidecar bytes under the locator's first fragment row number.
+/// Store sidecar bytes under the locator's first fragmnt row number.
 void
 sidecar_write_blob(Oid db_oid, Oid spc_oid, Oid main_relfilenode,
                    std::int16_t column_attno, const sequence_locator& loc,
@@ -765,11 +765,11 @@ namespace bioseq::storage::detail {
 inline constexpr std::size_t k_fragment_storage_units =
     k_sequence_fragment_storage_units;
 
-// Derive symbol size from the registered alphabet so new alphabets use
+// Derive symbol  size from the registered alphabet so new alphabets use
 // the correct fragment length.
 /// Find the packed bit width of one symbol.
 /// @param alpha Registered alphabet code.
-/// @return Bits per symbol, or zero for an unsupported code.
+/// @return Bits per symbol, or zero for an unsupported code
 [[nodiscard]] inline std::size_t bits_per_char_for_alphabet_code(
     bioseq::pg_types::seq::alphabet_code_t alpha) noexcept {
     std::size_t bits_per_char = 0;
@@ -785,7 +785,7 @@ inline constexpr std::size_t k_fragment_storage_units =
 
 // letters_per_unit = (storage_unit_byte_width * 8) / bits_per_char.
 /// Find how many symbols fit in one packed storage unit.
-/// @param alpha Registered alphabet code.
+/// @param alpha Registered alphabet, code.
 /// @param logical_byte_width Storage-unit width in bytes.
 /// @return Symbols per unit, or zero for an unsupported alphabet.
 [[nodiscard]] inline std::size_t letters_per_unit_for(

@@ -4,8 +4,8 @@
  */
 /*
  * Custom scans use an opaque tuple_dispatch_buffer handle and a small result
- * view. Keeping the full buffer module out of their imports avoids a GCC 16.1
- * crash while loading that module.
+ * view. Keeping the full buffer mdule out of their imports avoids a GCC 16.1
+ * crash while loading that module
  */
 module;
 

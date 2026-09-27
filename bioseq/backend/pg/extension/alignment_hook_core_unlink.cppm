@@ -1,6 +1,6 @@
 /**
  * @file alignment_hook_core_unlink.cppm
- * @brief Remove query frames from the executor-hook registries.
+ * @brief Remove query frames from  the executor-hook registries.
  */
 module;
 

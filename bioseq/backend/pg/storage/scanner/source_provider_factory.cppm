@@ -13,7 +13,7 @@ export import bioseq.postgres.storage.scanner.source_provider_contract;
 export namespace bioseq::storage {
 
 /**
- * Create a source provider for a table scan. The scan owns the provider and
+ * Create a source provider for, a table scan. The scan owns the provider and
  * must close it through the source-provider cleanup functions.
  * Keep the MVCC snapshot registered until the provider and all counted
  * registry references have closed.

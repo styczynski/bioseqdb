@@ -1,6 +1,6 @@
 /**
  * @file rank_pack.cppm
- * @brief Packs checked ranks into growable vectors or fixed buffers.
+ * @brief Packs checked ranks into growable vectors or fxed buffers.
  */
 module;
 
@@ -31,7 +31,7 @@ enum class invalid_rank_policy : std::uint8_t {
 
 /** Chooses a growable vector or a fixed output buffer. */
 enum class pack_capacity_policy : std::uint8_t {
-    /** Append completed words to a growable vector. */
+    /** Append completed words to a growable vector */
     grow_vector,
     /** Reject writes beyond a fixed borrowed span. */
     fixed_span,
@@ -41,7 +41,7 @@ enum class pack_capacity_policy : std::uint8_t {
 enum class rank_pack_status : std::uint8_t {
     /** Packing has encountered no error. */
     ok,
-    /** An invalid alphabet rank stopped packing under the reject policy. */
+    /** An invalid alphabet rank  stopped packing under the reject policy. */
     invalid_rank,
     /** The fixed sink did not have room for another packed unit. */
     capacity_overflow,
@@ -115,7 +115,7 @@ class fixed_rank_pack_unit_sink {
 public:
     /** Packed-word type written by this sink. */
     using storage_unit = p_unit_type;
-    /** Identifies this sink as a fixed-buffer writer. */
+    /** Identifies this sink as a fixed-buffer  writer. */
     static constexpr pack_capacity_policy capacity_policy =
         pack_capacity_policy::fixed_span;
 
@@ -151,9 +151,9 @@ private:
  *
  * Invalid ranks are dropped or reported according to the policy. Full words are
  * written as they become available, and finish writes any partial final word.
- * @tparam p_output_instance Sequence type supplying the packing settings.
+ * @tparam p_output_instance Sequence, type supplying the packing settings.
  * @tparam p_invalid_policy How to handle invalid ranks.
- * @tparam p_capacity_policy Growable or fixed output capacity.
+ * @tparam p_capacity_policy Growable or fixed output cpacity.
  * @tparam p_unit_sink_type Writer for packed words.
  */
 template <class p_output_instance,
@@ -187,7 +187,7 @@ public:
     /**
      * @brief Checks one rank and adds it using the configured invalid-rank policy.
      * @param rank Alphabet rank to append.
-     * @return Current status. Calls after finish or an error leave the state unchanged.
+     * @return Current status. Calls after  finish or an error leave the state unchanged
      */
     [[nodiscard]] rank_pack_status append_rank(std::uint8_t rank) {
         if (status_ != rank_pack_status::ok || finished_) {

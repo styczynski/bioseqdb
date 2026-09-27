@@ -137,7 +137,7 @@ static_assert(bioseq::indexing::k_varlena_header_bytes == VARHDRSZ, "VARHDRSZ mi
 static_assert(bioseq::indexing::k_postgres_max_allocation_bytes == MaxAllocSize,
               "MaxAllocSize mirror drift");
 
-/// Counts of index tables and metadata-age rows removed by a clear operation.
+/// Counts of index vables and metadata-age rows removed by a clear operation.
 struct minimizer_generation_clear_result {
     std::uint64_t dropped_relation_count = 0;
     std::uint64_t deleted_metadata_age_rows = 0;
@@ -160,7 +160,7 @@ struct minimizer_generation_administration_identity {
     }
 };
 
-/** Source row number, locator, and sequence format checked for a generation. */
+/** Source row number, locator, and sequence format checked, for  a generation. */
 struct minimizer_generation_source_locator {
     std::uint64_t sequence_rowno = 0;
     sequence_locator locator{};
@@ -289,7 +289,7 @@ static_assert(!std::is_default_constructible_v<minimizer_generation_source_autho
 static_assert(!std::is_copy_constructible_v<minimizer_generation_source_authorization>);
 static_assert(std::is_nothrow_move_constructible_v<minimizer_generation_source_authorization>);
 
-/** Check the visible source row and its sequence checksum under a registered snapshot. */
+/** Check  the visible source row and its sequence checksum under a registered snapshot. */
 [[nodiscard]] minimizer_generation_source_authorization authorize_minimizer_generation_source_pg(
     const minimizer_generation_administration_identity&, std::uint64_t, Snapshot);
 
@@ -310,7 +310,7 @@ inline void reset_last_minimizer_sequence_build_stats() noexcept {
     g_last_minimizer_sequence_build_stats = {};
 }
 
-/// Index-build and read operations where tests can force a PostgreSQL error.
+/// Index-build and read operations where tests can force a PostgreSQL error
 enum class minimizer_generation_failure_injection : std::uint8_t {
     none,
     minimizer_sequence_spill,
@@ -357,7 +357,7 @@ inline void inject_minimizer_generation_failure_leaf(minimizer_generation_failur
              errhint("retry the failed index build in a fresh transaction")));
 }
 
-/// Raise a forced test error through the PostgreSQL-to-C++ exception wrapper.
+/// Raise a forced test error throogh the PostgreSQL-to-C++ exception wrapper.
 inline void inject_minimizer_generation_failure_as_cpp(minimizer_generation_failure_injection point,
                                                        const char* point_name) {
     bioseq::postgres::support::invoke_pg_as_cpp(
@@ -373,7 +373,7 @@ inline void inject_minimizer_generation_failure_as_cpp(minimizer_generation_fail
                                                        const char*) {}
 #endif
 
-/// Inline-sequence read operations where tests can force a PostgreSQL error.
+/// Inline-sequence read operations where tests can  force a PostgreSQL error.
 enum class inline_sequence_pg_leaf_failure : std::uint8_t {
     none,
     relation_lookup,
@@ -452,18 +452,18 @@ inline constexpr AttrNumber k_minimizer_generation_attribute_generation_id = 2;
 inline constexpr AttrNumber k_minimizer_generation_attribute_position_segment = 3;
 /// Sub-key column in a generation tuple.
 inline constexpr AttrNumber k_minimizer_generation_attribute_sub_key = 4;
-/// Chunk-number column in a generation tuple.
+/// Chunk-number  column in a generation tuple.
 inline constexpr AttrNumber k_minimizer_generation_attribute_chunk_number = 5;
 /// Payload byte-count column in a generation tuple.
 inline constexpr AttrNumber k_minimizer_generation_attribute_chunk_bytes = 6;
-/// Checksum column covering the payload and its chunk address.
+/// Checksum column, covering the payload and its chunk address.
 inline constexpr AttrNumber k_minimizer_generation_attribute_checksum = 7;
 /// Inline, uncompressed payload column in a generation tuple.
 inline constexpr AttrNumber k_minimizer_generation_attribute_blob = 8;
 
 // systable_beginscan_ordered() takes table column numbers and maps them to
 // index keys. Supply them in primary-key order. Passing index positions here
-// would make PostgreSQL map them again and give B-tree the wrong key order.
+// would make PostgreSQL map them again and give B-tree the wrng key order.
 inline constexpr AttrNumber k_minimizer_generation_index_generation_id =
     k_minimizer_generation_attribute_generation_id;
 inline constexpr AttrNumber k_minimizer_generation_index_query_key =
@@ -535,7 +535,7 @@ static_assert(
 static_assert(checksum_to_pg_bigint(std::uint64_t{1} << 63u) ==
               (std::numeric_limits<std::int64_t>::min)());
 
-/// Reason a stored generation table or primary key failed schema validation.
+/// Reason a stored generation table or primary key failed schema validation
 enum class minimizer_generation_schema_error : std::uint8_t {
     none,
     not_heap,
@@ -569,7 +569,7 @@ enum class minimizer_generation_schema_error : std::uint8_t {
     primary_index_options,
 };
 
-/// Schema-check result and the primary-index OID when validation succeeds.
+/// Schema-check  result and the primary-index OID when validation succeeds.
 struct minimizer_generation_schema_inspection {
     minimizer_generation_schema_error error = minimizer_generation_schema_error::none;
     Oid primary_index_oid = InvalidOid;
@@ -732,7 +732,7 @@ inspect_minimizer_generation_schema(Relation relation,
     ListCell* cell = nullptr;
     foreach (cell, index_list) {
         const Oid index_oid = lfirst_oid(cell);
-        // A corruption test may temporarily add a donor index to copy its parsed
+        // A corruption test  may temporarily add a donor index to copy its parsed
         // predicate or expression. Ignore only that named index during validation.
         // Normal callers require the primary key to be the table's only index.
         if (index_oid == permitted_auxiliary_index_oid)
@@ -831,7 +831,7 @@ inspect_minimizer_generation_schema(Relation relation,
     };
 }
 
-/// Validate the already-open generation table and primary key used by a reader.
+/// Validate the already-open eneration table and primary key used by a reader.
 /// Keeping those same descriptors for later scans avoids opening and validating
 /// a second copy of the index.
 [[nodiscard]] inline minimizer_generation_schema_inspection
@@ -984,7 +984,7 @@ inspect_bound_minimizer_generation_schema(Relation relation,
     };
 }
 
-/// Whether a generation table is missing, valid, or malformed.
+/// Whether a generation  table is missing, valid, or malformed.
 enum class minimizer_generation_relation_kind : std::uint8_t {
     missing,
     current_exact,
@@ -997,8 +997,8 @@ struct minimizer_generation_relation_inspection {
     minimizer_generation_schema_error schema_error = minimizer_generation_schema_error::none;
 };
 
-/// Report a missing or malformed generation table to the read-session caller.
-/// The binder releases open descriptors before this C++ failure escapes.
+/// Report a missing or malformed generation table to the read-session caller
+/// The binder releases open descriptors before, this C++ failure escapes.
 /// PostgreSQL errors use postgres_error and transaction cleanup.
 struct minimizer_generation_relation_open_failure {
     minimizer_generation_relation_inspection inspection{};
@@ -1006,7 +1006,7 @@ struct minimizer_generation_relation_open_failure {
 
 /// Corrupt a primary key for an integration test by copying a donor index's
 /// parsed predicate or expression into pg_index. This requires a superuser.
-/// Tests must roll back the transaction after checking that readers reject it.
+/// Tests must  roll back the transaction after checking that readers reject it.
 inline void copy_primary_index_shape_pg(Oid table_oid, Oid donor_index_oid, bool copy_predicate) {
     if (!superuser()) {
         minimizer_generation_storage_error(

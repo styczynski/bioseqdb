@@ -55,7 +55,7 @@ namespace {
 constexpr const char* column_set_options_hook_symbol = "BioseqColumnTableSetOptions_hook";
 } // namespace
 
-/** Callback notified before new table storage options are saved. */
+/** Callback notified before new table storag options are saved. */
 using column_set_options_hook_type = void (*)(Oid relid, column_options options);
 
 /** Optional table-options callback shared through PostgreSQL's rendezvous API. */
@@ -63,7 +63,7 @@ static column_set_options_hook_type column_set_options_hook = nullptr;
 
 namespace {
 
-/** Close an opened relation at scope exit with the requested lock-release policy. */
+/** Close an opened relation at scope exit with  the requested lock-release policy. */
 class sql_relation_lock final {
   public:
     /** Take responsibility for closing this already-open relation. */
@@ -257,8 +257,8 @@ const TableAmRoutine* bioseq_handler([[bioseq_sql::param({
 export void bioseq_tableam_init() {
     bioseq_log<logging_level::debug>("[bioseq] pg: bioseq_tableam_init() entered");
 
-    // Share the callback-table address with the relation-checking module.
-    // That module can recognize Bioseq tables without importing this one.
+    // Share the callback-table address with the relation-checking module
+    // That module can recognize Bioseq tables  without importing this one.
     register_column_table_access_method(column_table_access_method());
 
     // Connect read and write callbacks stored by the metadata modules.
@@ -402,7 +402,7 @@ export namespace bioseq::table::sql_routines {
     .schema = bioseq::sql::pg_catalog,
     .create = bioseq::sql::create_mode::or_replace,
 })]]
-/** Reset selected table options to the current session's Bioseq settings. */
+/** Reset selected table options to the, current session's Bioseq settings. */
 void alter_bioseq_table_reset([[bioseq_sql::param({
                                   .sql_type = bioseq::sql::pg::regclass,
                               })]] std::optional<Oid> table_name,

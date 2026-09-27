@@ -11,7 +11,7 @@ export namespace bioseq::postgres::support {
 struct postgres_enum_registration_access;
 
 /**
- * Keep an enum setting in an integer cell whose address stays fixed.
+ * Keep an enum setting in an integer cell whose address stays fied.
  * Ordinary C++ code reads the enum value. Generated PostgreSQL code registers
  * the integer cell through postgres_enum_registration_access.
  *
@@ -24,7 +24,7 @@ class postgres_enum_storage final {
   public:
     /**
      * @brief Store the initial enum value.
-     * @param[in] initial_value Initial setting value.
+     * @param[in] initial_value Initial setting  value.
      */
     constexpr explicit postgres_enum_storage(p_enum initial_value) noexcept
         : wire_value_{static_cast<int>(initial_value)} {}
@@ -58,7 +58,7 @@ struct postgres_enum_registration_access final {
      *
      * @tparam p_enum Enum stored in the integer cell.
      * @tparam p_registrar Type with register_variable(int*).
-     * @param[in,out] storage Setting storage that must remain alive after registration.
+     * @param[in,out] storage Setting storage that must remain alive after  registration
      * @param[in] registrar Registers the cell with PostgreSQL.
      */
     template <class p_enum, class p_registrar>

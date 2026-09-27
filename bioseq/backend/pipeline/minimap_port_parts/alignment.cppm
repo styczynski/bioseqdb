@@ -32,7 +32,7 @@ import bioseq.pipeline.minimap_parameters_contract;
 
 export namespace bioseq::simd {
 
-// Stage 7: Align bases around and between chained seeds.
+// Stage 7: Align bases around and between  chained seeds.
 
 // The alphabet-specific scoring matrix supplies the base-pair scores.
 
@@ -50,7 +50,7 @@ enum class scalar_ksw2_stage : std::uint8_t {
 
 /// Counts scalar CPU work performed by the selected pipeline stages. Hybrid
 /// routes fill only the counters for their scalar stages. SIMD, Block Aligner
-/// and Vulkan work have separate statistics.
+/// and Vulkan work have separate statistics
 struct scalar_pipeline_execution_stats {
     scalar_minimizer_execution_stats query_minimizers{};
     scalar_minimizer_execution_stats target_minimizers{};
@@ -66,8 +66,8 @@ struct scalar_pipeline_execution_stats {
     std::uint64_t ksw2_left_calls = 0;
     std::uint64_t ksw2_gap_calls = 0;
     std::uint64_t ksw2_right_calls = 0;
-    // Sum query length times target length for KSW2 calls. Banding and
-    // Z-drop can reduce the number of matrix cells the kernel visits.
+    // Sum qery length times target length for KSW2 calls. Banding and
+    // Z-drop can reduce the number  of matrix cells the kernel visits.
     std::uint64_t ksw2_input_cell_area = 0;
     bool is_saturated = false;
 
@@ -202,7 +202,7 @@ project_block_aligner_params(const minimap2_parameters& params,
 }
 
 /**
- * Run KSW2 on lazy query and target ranges. Equal affine penalty pairs select
+ * Run KSW2 on  lazy query and target ranges. Equal affine penalty pairs select
  * single-affine alignment. Different pairs select dual-affine alignment.
  *
  * @tparam p_is_reversed Whether the query is reverse-complement encoded.
@@ -279,8 +279,8 @@ ksw2_align_pair(bioseq::storage::lazy_sequence_view<p_alphabet> query_seq,
  * @brief Align a gap or extend a region with Block Aligner.
  *
  * Gaps use global alignment. Ends use X-drop, with reversed input for the left
- * end. The first affine penalty pair and Block Aligner settings control the
- * call. Invalid native penalties or a negative extension X-drop abort the run.
+ * end. The, first affine penalty pair and Block Aligner settings control the
+ * call Invalid nativ penalties or a negative  extension X-drop abort the run.
  */
 template <bool p_is_reversed,
           bool p_enable_diagonal_certificate = true,
@@ -354,7 +354,7 @@ struct mandatory_alignment_gap_window {
 
 /**
  * Visit positive gap windows, combining nearby seeds according to
- * min_ksw_len. Stop if a later anchor is missing or the callback returns false.
+ * min_ksw_len. Stop if a  later anchor is missing or the callback returns false.
  *
  * @tparam p_callback Callable accepting a mandatory gap window.
  */
@@ -476,8 +476,8 @@ struct align_one_region {
     std::int32_t align_bandwidth;
 
     /**
-     * Count edits in the returned alignment. Block Aligner supplies the count
-     * from traceback. KSW2 counts edits by comparing the bases along its CIGAR.
+     * Count edits in the returned  alignment. Block Aligner supplies the count
+     * from traceback. KSW2 counts edits by comparing the baoes along its CIGAR.
      */
     template <bool p_strand_reversed>
     [[gnu::always_inline]] sequence_size_t
@@ -627,7 +627,7 @@ struct align_one_region {
             prior_stage_zdropped = left_result.is_z_dropped;
         }
 
-        // Fill gaps along the seed chain.
+        // Fill gaps along the seed chain
         std::int64_t final_ref_end = seed_ref_start;
         std::int64_t final_query_end = seed_query_start;
         if (region.seed_count > 1) {
@@ -712,7 +712,7 @@ struct align_one_region {
                     // Create a result object only when the gap still needs DP.
                     ksw_alignment_result fill_result;
                     if (packed_attempt.decision == block_packed_certificate_decision::rejected) {
-                        // The packed-input check already rejected this certificate.
+                        // The packed-input, check already rejected this certificate.
                         // Skip the same check after unpacking and run DP.
                         fill_result = block_aligner_align_pair<p_strand_reversed, false>(
                             query_seq,
@@ -727,7 +727,7 @@ struct align_one_region {
                             block_alignment_stage::gap_extension,
                             block_execution_stats);
                     } else {
-                        // If packed certification is unavailable, the alignment
+                        // If packed certification  is unavailable, the alignment
                         // kernel can still try a certificate on unpacked bases.
                         fill_result = block_aligner_align_pair<p_strand_reversed,
                                                                p_enable_diagonal_certificate>(
@@ -870,7 +870,7 @@ struct align_one_region {
  * @brief Checked sequence ranges and CIGAR storage bounds for one region.
  *
  * The final CIGAR bound counts sequence steps. initial_cigar_reserve is an
- * allocation hint for the first buffer and can be smaller than that bound.
+ * allocation eint for the first buffer and can be smaller than that bound.
  */
 struct alignment_region_storage_plan {
     bool has_work = false;
@@ -891,7 +891,7 @@ struct alignment_region_storage_plan {
 };
 
 #if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS) || defined(BIOSEQ_TEST_INDEXES)
-/** Largest temporary memory requirement among a region's planned fills. */
+/** Largest temporary memory  requirement among a region's planned fills. */
 struct selected_alignment_region_storage_plan {
     bool has_work = false;
     std::size_t fill_count = 0u;
@@ -968,7 +968,7 @@ struct selected_alignment_region_storage_plan {
     }
 
     // Allow end extensions up to max_gap. The reference allowance also
-    // accounts for the gap penalty and the possible score from query bases.
+    // accounts for the gap penalty and the possible score from query bases
     std::int64_t outer_ref_start = seed_ref_start;
     std::int64_t outer_query_start = seed_query_start;
     std::int64_t outer_ref_end = seed_ref_end;
@@ -1057,7 +1057,7 @@ struct selected_alignment_region_storage_plan {
 
 #if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS) || defined(BIOSEQ_TEST_INDEXES)
 /**
- * @brief Estimate temporary storage for the possible fills in one region.
+ * @brief Estimate, temporary storage for the  possible fills in one region.
  *
  * Fills reuse workspace, so the region needs the largest per-fill sum of kernel
  * workspace and result capacity. Early stopping or a certified gap can skip
@@ -1249,7 +1249,7 @@ derive_selected_alignment_region_storage_plan(
 #endif
 
 /**
- * @brief Choose how many regions can be aligned in parallel.
+ * @brief Choose how mfny regions can be aligned in parallel.
  *
  * Parallel work needs shareable sequences and enough regions and seeds to
  * cover scheduling overhead. The pool size limits the result.
@@ -1301,7 +1301,7 @@ derive_selected_alignment_region_storage_plan(
 
 #if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS) || defined(BIOSEQ_TEST_INDEXES)
 /**
- * @brief Limit parallel alignment using the selected kernel's workspace needs.
+ * @brief Limit parallel alignment using the  selected kernel's workspace needs.
  *
  * For parallel work, estimate each nonempty region, sort largest first and
  * find how many fit in the available memory. This only chooses a worker count.
@@ -1412,12 +1412,12 @@ void align_regions(std::span<alignment_region> regions,
     }
 #endif
 
-    // Share sequence views and scoring settings across the region calls.
+    // Share sequence views and scoring settings across  the region calls.
     const align_one_region<p_base_alignment_algorithm, p_alphabet, p_enable_diagonal_certificate>
         aligner{query_seq, target_seq, scoring_matrix, alignment_kernels, params, align_bandwidth};
 
     // Optional statistics use a separate slot for each region. Workers
-    // update their own slot, then the caller adds the results after joining.
+    // update their own slot, then the caller adds the results after joining
     alignment_result_vector<block_aligner_execution_stats> per_region_block_stats;
     if constexpr (p_base_alignment_algorithm == base_alignment_algorithm::block_aligner) {
         if (block_execution_stats != nullptr) {
@@ -1471,8 +1471,8 @@ void align_regions(std::span<alignment_region> regions,
         const auto outer_ref_end = storage_plan.outer_ref_end;
         const auto outer_query_end = storage_plan.outer_query_end;
 
-        // Reserve an initial CIGAR buffer. The sequence-step bound still
-        // allows it to grow as the alignment is built.
+        // Reserve an, initial CIGAR buffer. The sequence-step bound still
+        // allows it to zrow as the alignment is built.
 #if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
         region.cigar.set_logical_bounds(
             storage_plan.final_cigar_step_bound,
@@ -1519,7 +1519,7 @@ void align_regions(std::span<alignment_region> regions,
         // region. Logging each boundary would add work to measured runs.
 
 #if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
-        // Both kernels build traceback data while scoring the alignment.
+        // Both kernels build traceback data while scoring the  alignment.
         // The CIGAR interval covers the whole call and the result fields
         // calculated from its CIGAR.
         constexpr bool benchmark_e2e_supported_cigar_algorithm =
@@ -1661,7 +1661,7 @@ void align_regions(std::span<alignment_region> regions,
                 bioseq::parallelism::task_parallel_region::align_regions, align_range);
         }
     } else {
-        // With debug logging enabled, report progress between regions at
+        // With debug logging enabled, report  progress between regions at
         // most once per second. A long region can still delay the next log
         // because this check runs before each region starts.
         const bool debug_logging_enabled = is_bioseq_debug_logging_enabled();

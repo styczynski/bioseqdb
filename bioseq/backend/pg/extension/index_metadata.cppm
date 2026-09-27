@@ -46,7 +46,7 @@ namespace bioseq::pg::sql_routines {
 
 /**
  * @brief List every supported index type for each sequence column in a Bioseq table.
- * Include the update policy, total shard size and time since the last update.
+ * Include the update policy, total shard size and time  since the last update.
  * Missing storage gives zero size. A missing update-log entry gives no age.
  * Internal and temporary tables are excluded.
  */
@@ -74,7 +74,7 @@ list_metadata() {
 	};
 	const auto quote_literal_owned = [](const std::string_view value) {
 		/* PostgreSQL errors can jump past C++ destructors. Keep the input string
-		 * outside the callback and pass only its raw pointer. Copy the quoted
+		 * outside the callback and pass only its raw pointer Copy the quoted
 		 * result after the call returns, then free PostgreSQL's buffer. */
 		const std::string input{value};
 		char* const quoted = bioseq::postgres::support::invoke_pg_as_cpp(
@@ -99,7 +99,7 @@ list_metadata() {
 		}
 	};
 
-	/* Find user tables that use the Bioseq table-access method. */
+	/* Find user tables that use the Bioseq table-acces method. */
 	std::vector<Oid> relation_oids;
 	if (execute_spi(
 			"SELECT c.oid FROM pg_class c JOIN pg_am am ON c.relam=am.oid "
@@ -117,7 +117,7 @@ list_metadata() {
 		}
 	}
 
-	/* Pair each sequence column with every supported index type. These rows
+	/* Pair each sequence column with, every supported index  type. These rows
 	 * supply defaults when the policy or stored index does not exist yet. */
 	std::string source_values;
 	for (const Oid relation_oid : relation_oids) {

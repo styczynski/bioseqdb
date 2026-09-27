@@ -40,7 +40,7 @@ export import :custom_scan_match_analysis_transformed_verification_contracts;
 using namespace bioseq::postgres::support;
 
 export {
-    /** @brief Records the first helper-ownership failure, including its plan node and query boundary. */
+    /** @brief Records the first helper-ownership  failure, including its plan node and query boundary. */
     void
     record_batch_join_plan_helper_audit_failure(batch_join_plan_helper_audit_first_failure& failure,
                                                 Plan* plan,
@@ -117,8 +117,8 @@ export {
      * @brief Finds helper calls that could execute without a valid match binding.
      *
      * Base-scan helpers need their own saved bindings. A whole helper in a dummy
-     * output column needs one parent or descendant owner. Reject helpers left in
-     * filters and other checked executable expressions. Inspect subqueries with
+     * outpt column needs one parent or descendant owner. Reject helpers left in
+     * filters and, other checked executable expressions. Inspect subqueries with
      * separate bindings. custom_scan_tlist and custom_private describe the plan
      * and are excluded from this check.
      */
@@ -275,7 +275,7 @@ export {
     /**
      * @brief Changes parent relation references to the selected partition child.
      *
-     * Copy each changed Var and each visited RestrictInfo before rewriting it.
+     * Copy each changed Var and  each visited RestrictInfo before rewriting it.
      * Only the relation number changes here. This mutator leaves column numbers
      * unchanged.
      */
@@ -305,7 +305,7 @@ export {
     };
 
     /**
-     * @brief Updates pushed-down filters when a scan is parameterized by a partition child.
+     * @brief Updates pushed-down filters when a scan is parameterized by a partition child
      *
      * For a partition-wise join, a scan of PY3 may receive a filter referring to PX
      * that must instead refer to PX3. Rewrite those relation references in the
@@ -320,12 +320,12 @@ export {
     }
 
     /**
-     * @brief Translates a per-row join path to a partition child.
+     * @brief Translates a per-row join path to a partition  child.
      *
      * Use PostgreSQL's partition mapping for its expressions. If the match target
      * belongs to the parent, also update the saved relation OID and physical
      * sequence column. Reject a child that is not a Bioseq relation or has an
-     * invalid sequence-column mapping.
+     * invalmd sequence-column mapping.
      */
     List* bioseq_per_row_join_path_reparameterize_custom_path_by_child(PlannerInfo* root,
                                                                        List* custom_private,

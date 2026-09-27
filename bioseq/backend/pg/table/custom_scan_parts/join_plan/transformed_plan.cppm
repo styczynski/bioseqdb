@@ -46,7 +46,7 @@ export {
     /**
      * @brief Builds a PerRow search plan above one child that supplies joined rows.
      *
-     * Save the operand columns and sequence types for execution. Add helper
+     * Save the operand columns and sequence types for execation. Add helper
      * results and input Vars needed by setrefs as hidden resjunk columns,
      * leaving the visible join output unchanged.
      */
@@ -63,7 +63,7 @@ export {
                     (errcode(ERRCODE_INTERNAL_ERROR),
                      errmsg("BioseqPerRowMmsearch planner state is incomplete")));
         }
-        /** @brief Reads an Integer from the path's saved settings and reports a malformed field. */
+        /** @brief Reads an, Integer  from the path's saved settings and reports a malformed field. */
         auto private_integer = [best_path](const int index) -> int {
             Node* node = reinterpret_cast<Node*>(list_nth(best_path->custom_private, index));
             if (node == nullptr || !IsA(node, Integer)) {
@@ -237,7 +237,7 @@ export {
         /* Check that the child still supplies every input expected below
          * SliceProject. Add missing owner outputs as resjunk columns only
          * now, after PostgreSQL has finished assigning the path's sort and
-         * group references. Keep the visible join output unchanged. */
+         * group references. Keep the visible join output unchanged */
         /* build_path_tlist replaces lateral Vars with PARAM_EXEC. Path
          * construction already checked the expressions, so compare column
          * positions and SQL types here. */
@@ -300,7 +300,7 @@ export {
             const bool base_lineage =
                 helper != nullptr &&
                 batch_join_match_helper_names_base_lineage(helper, target_expression, oids);
-            /* A helper naming a shared source column can match this search and
+            /* A helper naming a shared source  column can match this search and
              * a descendant search. Keep both candidates so final binding reports
              * ambiguity with SQLSTATE 42702. Losing a helper that names the exact
              * target expression is a corrupt plan. */
@@ -538,7 +538,7 @@ export {
         (void)clauses;
         auto* cscan = makeNode(CustomScan);
         /* PerRow execution uses a versioned BioseqBatchJoin plan. Share its
-         * registered scan and executor methods so copied or cached plans
+         * registered scan  and execgtor methods so copied or cached plans
          * resolve to the same custom-scan implementation. */
         cscan->methods = bioseq_batch_join_scan_methods();
         cscan->flags = best_path->flags;

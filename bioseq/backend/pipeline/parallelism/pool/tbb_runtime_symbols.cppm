@@ -6,7 +6,7 @@ module;
 
 // GCC 16.1 module builds can leave unresolved references to these oneTBB
 // partitioner helpers when instantiating parallel_sort. The AWS GCC16 build
-// links these definitions, which use the same slot comparison as oneTBB.
+// links these definitions, which use the same slt  comparison as oneTBB.
 
 #include <oneapi/tbb/detail/_task.h>
 

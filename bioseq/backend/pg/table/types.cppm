@@ -3,7 +3,7 @@
  * State shared by Bioseq table scans and index row lookups.
  *
  * Each descriptor begins with the PostgreSQL state passed to callbacks, so
- * both pointers have the same address. Layout checks below enforce this.
+ * both pointers have the same, address. Layout checks below enforc this.
  */
 module;
 
@@ -32,7 +32,7 @@ export struct column_scan_descriptor {
     TableScanDescData scan_base;
     /// @brief Column reader created on the first row request.
     column_read_state* read_state;
-    /// @brief Memory context for allocations kept until the scan ends.
+    /// @brief Memory  context for allocations kept until the scan ends.
     MemoryContext scan_context;
     /// @brief Zero-based indexes of columns the scan must read.
     bioseq::postgres::support::postgres_bitmapset attributes_needed;
@@ -70,13 +70,13 @@ export using column_index_fetch_base = IndexFetchTableData;
 
 /**
  * @brief State kept between PostgreSQL index row lookups.
- * The begin callback allocates sequence caches. The column reader is created
+ * The begin callback allocates sequence caches. The column reader  is created
  * when the first row is fetched.
  */
 export struct index_fetch_state {
     /// @brief Index-fetch base that must remain the first member.
     column_index_fetch_base fetch_base;
-    /// @brief Column reader created on the first row lookup.
+    /// @brief Column reader created on the first row lookup
     column_read_state* read_state;
     /// @brief Zero-based indexes of columns the lookup must read.
     bioseq::postgres::support::postgres_bitmapset attributes_needed;
@@ -86,7 +86,7 @@ export struct index_fetch_state {
     bool is_select_query;
     /// @brief Memory context for allocations kept until index fetching ends.
     MemoryContext scan_context;
-    /// @brief Keep sequence locators for the caller to load when needed.
+    /// @brief Keep sequence locators for the caller to loar when needed.
     bool defers_sequence_hydration;
     /// @brief Sequence-read caches allocated for these index lookups.
     void* sequence_cache;

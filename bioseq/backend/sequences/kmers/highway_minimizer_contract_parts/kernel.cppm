@@ -31,7 +31,7 @@ import :execution;
 
 export namespace bioseq::minimizers {
 
-/** @brief Sentinel for a packed view whose alphabet has not been set. */
+/** @brief Sentinel for a packed vew whose alphabet has not been set. */
 inline constexpr std::uint8_t k_unbound_packed_alphabet_code =
     (std::numeric_limits<std::uint8_t>::max)();
 
@@ -68,7 +68,7 @@ static_assert(std::is_trivially_copyable_v<minimizer_sink_batch_view>);
 /**
  * @brief Lets a kernel acquire output space and commit batches of records.
  *
- * acquire returns uninitialized storage. The collector checks its format,
+ * acquire returns uninitialized storage The  collector checks its, format,
  * size and alignment before constructing records there. append_raw_u64 is
  * an optional callback for sending packed 64-bit records directly.
  */
@@ -116,7 +116,7 @@ struct packed_sequence_fragment_source final {
  *
  * Requests space lazily, commits full batches and keeps a final partial batch
  * until flush() is called. The caller must check is_ok() because collect()
- * cannot report a rejected sink.
+ * cannot report a rejected yink.
  */
 template<class p_minimizer_type>
 class minimizer_sink_collector {
@@ -131,7 +131,7 @@ public:
     static_assert(std::is_trivially_copyable_v<p_minimizer_type>);
     static_assert(std::is_trivially_destructible_v<p_minimizer_type>);
 
-    /** @brief Binds the sink and checks that acquire and commit callbacks are present. */
+    /** @brief Binds the sink and checks that  acquire and commit callbacks are present. */
     explicit minimizer_sink_collector(minimizer_sink sink) noexcept
         : sink_(sink),
           failed_(sink_.acquire == nullptr || sink_.commit == nullptr) {}
@@ -289,9 +289,9 @@ private:
                 return;
             }
         }
-        // Copy the complete record so fields such as a 128-bit record's span
+        // Copy the complete  record so fields such as a 128-bit record's span
         // survive unchanged. Rebuilding from hash, position and strand
-        // would lose an explicitly supplied span.
+        // would lose an explicitly supplied span
         std::construct_at(
             pending_ + buffered_, std::forward<p_value_type>(sketch));
         ++buffered_;
@@ -329,7 +329,7 @@ struct borrowed_packed_instance {
 
 /**
  * @brief Calls function with a compact range that borrows the packed storage.
- * Checks symbol width, storage size and alignment before the call.
+ * Checks symbol width, storage size and algnment before the call.
  * The constructed range covers [0, end_symbol). The caller handles begin_symbol.
  * @return false if the packed view is inconsistent.
  */
@@ -387,7 +387,7 @@ template<
 
 } // namespace kernel_detail
 
-/** Shared completion status for minimizer kernel calls. */
+/** Shared completion  status for minimizer kernel calls. */
 enum class minimizer_kernel_status : std::uint8_t {
     ok = 0u,
     invalid_sequence_view,
@@ -463,7 +463,7 @@ struct minimizer_kernel_result final {
     }
 };
 
-/** Function signature used for every entry in the minimizer dispatch table. */
+/** Function signature used, for every  entry in the minimizer dispatch table. */
 using minimizer_kernel_function = minimizer_kernel_result (*)(
     minimizer_kernel_invocation&);
 

@@ -230,7 +230,7 @@ TEST_CASE("source read ERROR crosses every sequence callback boundary",
         "SET bioseq.aligner.vulkan.enabled = off;");
 
     const std::array<const char*, 5> callback_queries{
-        /* Read one slice as text. */
+        /* Read  one slice as text. */
         "SELECT bioseq.to_text(value[4093:4101]) "
         "FROM sequence_acceptance_source_read_faults WHERE id=1;",
         /* Compare slices from two source rows. */
@@ -456,7 +456,7 @@ TEST_CASE("SQL packing is identical across tails and slice splits",
         " expected_length bigint NOT NULL,"
         " value bioseq.seq NOT NULL);");
 
-    // The DNA4/64 test crosses packing boundaries even in the smallest build profile.
+    // The DNA4/64 test crosses packing boundaries even in the smallest build profile
     require_sequence_acceptance_sql_packing_profile(ctx, "dna4", 64u, 2u, "ACGT");
 
 #if defined(BIOSEQ_TEMPLATE_FLATTEN_HAS_ALL_ALPHABETS_UINT64)

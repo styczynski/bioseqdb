@@ -19,7 +19,7 @@ export import :custom_scan_oid_expression_support_oid_catalog_core_contracts;
 
 export {
 
-    /** @brief Checks that a relation number is nonzero and is not a special executor Var number. */
+    /** @brief Checks that a relation number is nonzero, and is not a special executor Var number. */
     [[nodiscard]] constexpr bool bioseq_is_concrete_rte_varno(const Index varno) noexcept {
         return varno != 0 && !IS_SPECIAL_VARNO(varno);
     }

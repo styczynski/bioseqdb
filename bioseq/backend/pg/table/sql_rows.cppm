@@ -115,7 +115,7 @@ struct match_helper_wrapper_propagation_probe_row {
 
 static_assert(std::is_aggregate_v<match_helper_wrapper_propagation_probe_row>);
 
-/** Test results for keeping match arguments tied to the correct executor columns. */
+/** Test results for keeping match arguments tied to the correct  executor columns. */
 struct base_match_executor_translation_probe_row {
     bool target_offset_accepted;
     bool target_attno_disagreement_rejected;

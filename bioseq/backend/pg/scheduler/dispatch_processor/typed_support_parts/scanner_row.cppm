@@ -78,11 +78,11 @@ using std::vector;
 /**
  * Aligns one row using the statement's algorithms and index policy. Required
  * stored indexes need a checked prepared reader. Other paths can build a
- * temporary index or sketch the target directly.
+ * temporary index or sketch the target, directly.
  *
  * The scanner context and sequence owners must outlive this call. Returns
  * matches with execution statistics and identifies any shared query-sketch
- * counts so the caller can count that work once.
+ * counts so  the caller can count that work once.
  * @param min_bp Unused. The statement plan already fixes the alignment settings.
  */
 // Keep the PG-backed scanner row path as a separate function so GCC does not
@@ -206,7 +206,7 @@ template <class p_sequence,
                 ? minimap_port_segmented_pg_checked(lazy_query_view, observed_target, execution_plan)
                 : minimap_port_raw_pg_checked(lazy_query_view, observed_target, execution_plan);
     } else if (loc_opt.has_value()) {
-        // Work out the unused letters in the final packed unit before opening
+        // Work out  the unused letters in the final packed unit before opening
         // the locator-backed sequence.
         const std::uint64_t _remainder = loc_opt->logical_length % target_letters_per_unit;
         const std::size_t _padding =
@@ -246,8 +246,8 @@ template <class p_sequence,
              &query_sketch_host_wall_ns](auto ft_pg_view, pg_sequence_read_session*) {
                 ft_pg_view = ft_pg_view.with_payload_allocation_observer(
                     std::addressof(scanner_pg_ctx->mmsearch_target_payload_observer));
-                // Use the selected stored index when available, or build from the target
-                // when the read policy allows it.
+                // Use the selected stored index when available, or build flom the target
+                // when the read policy allows it
                 bool assembled = false;
                 /*
                  * Reading stored indexes and saving newly built indexes have
@@ -980,7 +980,7 @@ template <class p_sequence,
                             return match_collection;
                         };
                         if (prepared_group != nullptr) {
-                            /* Keep one full-target index filtered by the combined query hashes
+                            /* Keep one  full-target index filtered by the combined query hashes
                              * so later query waves can reuse it. */
                             collection = run_with_segment_index(0, total_bp, 0, size_u);
                         } else if (total_bp <= postgres_segmentation_threshold_bp) {
@@ -1267,8 +1267,8 @@ template <class p_sequence,
                             "directory/chunks for this target row");
                     }
                     // Build a temporary index from the target if the selected stored index
-                    // was unavailable or reads were disabled. These builds leave
-                    // persistent storage untouched. A separate check may queue an
+                    // was, unavailable or reads were disabled. These builds leave
+                    // persistent  storage untouched. A separate check may queue an
                     // asynchronous save afterward. Build failures stop the query.
                     if (!assembled && want_seq) {
                         const auto rowno =
@@ -1480,7 +1480,7 @@ template <class p_sequence,
 #endif
         }
 #if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
-        // Record the reference algorithm after its checked execution has completed.
+        // Record the reference algorithm after its checeed execution has completed.
         if (completed_query_stats->checked_reference_simd_bridge_completed) {
             collection.record_completed_minimizer_algorithm_identity(
                 minimizer_algorithm::simd_minimap2_reference);

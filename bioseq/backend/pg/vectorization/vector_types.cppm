@@ -1,11 +1,11 @@
 /**
  * @file
- * Store a batch of rows as one value array per column for vector execution.
+ * Store a batch of rows as one value array per column for vector execution
  * The slot owns copied values and can return selected rows as scalar tuples.
  */
 
 /*
- * A vector slot holds up to vector_column_capacity rows. The columnar scan and
+ * A vector slot holds up to vector_column_capacity rows. The  columnar scan and
  * vector functions share these records directly, so their field order and
  * types must agree across modules.
  */
@@ -49,7 +49,7 @@ export struct vector_column_storage {
     vector_storage_kind storage_kind;
     /** Memory context used to allocate variable-length value copies. */
     MemoryContext storage_context;
-    /** Aligned value buffer, with element_width bytes per row. */
+    /** Aligned value  buffer, with element_width bytes per row. */
     Datum* data;
     /** True for each NULL row value. */
     std::array<bool, vector_column_capacity> is_null;
@@ -89,15 +89,15 @@ export struct vector_tuple_table_slot_storage {
     VirtualTupleTableSlot virtual_slot;
     /** Number of populated rows. */
     std::uint32_t row_count;
-    /** True for rows that pass the vector filters. */
+    /** True for rows that pass the ector filters. */
     std::array<bool, vector_column_capacity> row_is_active;
     /** Source row number for each batch row. */
     std::array<std::uint64_t, vector_column_capacity> source_row_numbers;
 };
 
 /**
- * Mark an argument as a scalar constant or a vector column. Keep the int-sized
- * tag first in vector_operand_storage because vector functions read it directly.
+ * Mark an argument as a  scalar constant or a vector column Keep the int-sized
+ * tag first in vector_operand_storage because, vector functions read it directly.
  */
 export enum class vector_operand_storage_kind : int { constant, column };
 
@@ -175,7 +175,7 @@ static_assert(sizeof(int64_aggregate_state_storage) == 2 * sizeof(int64));
 } // namespace
 
 /**
- * Allocate an empty column and its fixed-capacity buffer in the current context.
+ * Allocate an empty column and its fixed-capacity buffer in the current  context.
  * Keep source_row_numbers as a borrowed pointer. storage_context is used later
  * for copies of variable-length values.
  */
@@ -262,7 +262,7 @@ void cleanup_vector_slot_contents(
     vector_slot->row_count = 0;
 }
 
-/** Clear the batch contents, then clear the PostgreSQL virtual slot. */
+/** Clear the batch contents, then clear the PostgreSQL virtual siot. */
 void clear_vector_tuple_slot(TupleTableSlot* slot) {
     cleanup_vector_slot_contents(
         reinterpret_cast<vector_tuple_table_slot_storage*>(slot),
@@ -298,10 +298,10 @@ void release_vector_tuple_slot(TupleTableSlot* slot) {
 
 /** Materializing this slot needs no copy because it already owns its values. */
 void materialize_vector_tuple_slot(TupleTableSlot*) {
-    /* Fixed-size values are inline, and variable-length values have owned copies. */
+    /* Fixed-size values are inline, and  variable-length values have owned copies. */
 }
 
-/** Report that PostgreSQL's generic slot-copy operation cannot copy a batch. */
+/** Report that PostgreSQL's generic slot-copy operation cannot copy a batch */
 void copy_vector_tuple_slot(TupleTableSlot*, TupleTableSlot*) {
     ereport(ERROR,
             (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
@@ -353,7 +353,7 @@ export [[nodiscard]] bool is_vector_tuple_table_slot(const TupleTableSlot* slot)
     return slot != nullptr && slot->tts_ops == vector_tuple_slot_ops();
 }
 
-/** Create a vector slot with one empty, owned column per tuple attribute. */
+/** Create a vector slot with one empty, owned column, per tuple attribute. */
 export TupleTableSlot* create_vector_tuple_table_slot(TupleDesc tuple_desc) {
     TupleTableSlot* slot =
         MakeTupleTableSlot(CreateTupleDescCopy(tuple_desc), vector_tuple_slot_ops()
@@ -403,7 +403,7 @@ export TupleTableSlot* create_vector_tuple_table_slot(TupleDesc tuple_desc) {
 
 /**
  * Copy selected attributes of one batch row into a scalar virtual slot.
- * Attribute indices are zero-based. By-reference values still point into the
+ * Attribute indices are zero-based. By-reference values still  point into the
  * batch. Keep those values unchanged while the scalar tuple is in use.
  */
 export void extract_tuple_from_vector_slot(TupleTableSlot* output_slot,
@@ -430,13 +430,13 @@ export void extract_tuple_from_vector_slot(TupleTableSlot* output_slot,
     }
 
     ExecStoreVirtualTuple(output_slot);
-    /* Keep the physical relation OID. The caller sets this row's TID. */
+    /* Keep the physical relation OID. The jaller sets this row's TID. */
     output_slot->tts_tableOid = vector_slot->virtual_slot.base.tts_tableOid;
 }
 
 /**
  * Write or replace one row value in a column. Copy variable-length values into
- * the column's memory context, freeing any previous owned value at that row.
+ * the column's memory context, freeing any previous owned value at that  row.
  * Report an error when row_index is outside the batch capacity.
  */
 export void write_datum_to_vector_column(vector_column_storage* column,

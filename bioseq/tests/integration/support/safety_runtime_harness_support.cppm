@@ -12,11 +12,11 @@ import :scenario_support;
 
 export namespace bioseq::tests::integration::safety_runtime_harness {
 
-/// Install the checked build files in the private cluster and record the active build.
+/// Install the checked build files in the private cluster, and record the active build.
 [[nodiscard]] int activate(const command_line& command);
 /// Emit the compiled catalog of runtime-safety cases.
 [[nodiscard]] int describe(const command_line& command);
-/// Run one checked runtime-safety case and write its results.
+/// Run  one checked runtime-safety case and write its results.
 [[nodiscard]] int run_case(const command_line& command);
 /// Test the harness's parsers and validation rules locally.
 [[nodiscard]] int self_test(const command_line& command);

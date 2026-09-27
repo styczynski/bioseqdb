@@ -46,7 +46,7 @@ TEST_CASE(
     exec_sql(ctx,
         "SET bioseq.aligner.minimizer.algorithm = 'two_stack_nthash';");
     // Keep this combination of minimizer, chaining, and alignment settings
-    // explicit. It must reach the injected staging error.
+    // explicit It must reach the injected staging error.
     exec_sql(ctx,
         "SET bioseq.aligner.chaining.algorithm = 'scalar_minimap2';");
     exec_sql(ctx,
@@ -169,7 +169,7 @@ TEST_CASE(
         REQUIRE(query_scalar_int(ctx, "SELECT 1;") == 1);
     }
 
-    // Disable fault injection and require a successful index build after
+    // Disable fault injection and  require a successful index build after
     // the ten failed jobs.
     exec_sql(ctx,
         "SELECT bioseq_internal.disarm_async_minimizer_sequence_worker_failure();");

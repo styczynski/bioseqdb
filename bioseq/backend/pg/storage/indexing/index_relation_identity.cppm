@@ -28,8 +28,8 @@ struct relation_identity {
 /**
  * @brief Read a table's storage identity under AccessShareLock.
  *
- * The lock is released before return. If the table cannot be opened, the
- * tablespace and file number are invalid. A table with no file number uses
+ * The lock is released before  return. If the table cannot be opened, the
+ * tablespace and file number are invalid. A table with no, file number uses
  * its relation OID in that field.
  *
  * @param[in] user_relid Table OID to inspect.

@@ -10,7 +10,7 @@ module;
 
 export module bioseq.highway.sources.indexing;
 
-/** @brief Namespace marker used to generate the indexing source for each Highway target. */
+/** @brief Namespace marker used to generate the indexing source for each  Highway target. */
 export namespace bioseq::indexing {
 namespace [[bioseq::simd]] target {} // namespace target
 } // namespace bioseq::indexing

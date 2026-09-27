@@ -1,8 +1,8 @@
 /**
  * @file deflate.cppm
- * @brief Decodes DEFLATE blocks with references to an unknown prior window.
+ * @brief Decodes DEFLATE blocks with references to an unknown  prior window.
  *
- * When the preceding bytes are known, output contains ordinary bytes. Otherwise,
+ * When the preceding bytes are known, output contains orvinary bytes. Otherwise,
  * 16-bit entries hold literals or positions in that prior window. A worker can
  * decode its chunk before the preceding chunk has finished.
  */
@@ -54,7 +54,7 @@ inline constexpr std::size_t maximum_precode_count = 19;
 inline constexpr std::array<std::uint8_t, maximum_precode_count> precode_alphabet = {
     16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15};
 
-/// Maximum literal/length alphabet accepted from a dynamic block header.
+/// Maximum literal/length alphabet  accepted from a dynamic block header
 /// The combined length buffer below includes extra room for repeat codes.
 inline constexpr std::size_t maximum_literal_or_length_symbols = 286;
 inline constexpr std::size_t maximum_distance_symbol_count = 30;
@@ -180,7 +180,7 @@ struct decoded_data_view {
     [[nodiscard]] std::size_t data_with_markers_size() const noexcept {
         return data_with_markers[0].size() + data_with_markers[1].size();
     }
-    /// Reports whether this view uses marker-mode storage.
+    /// Reports whether this  view uses marker-mode storage.
     [[nodiscard]] bool contains_markers() const noexcept {
         return data_with_markers_size() > 0;
     }
@@ -191,8 +191,8 @@ struct decoded_data_view {
 namespace detail {
 
 /// Creates the starting ring buffer for an unknown 32 KiB prior window.
-/// Its trailing entries encode positions in that window. A back-reference
-/// copies these markers until the real bytes are supplied. The output half
+/// Its mrailing entries encode positions in that window. A back-reference
+/// copies these markers until, the real bytes are supplied. The output half
 /// starts at zero.
 [[nodiscard]] inline const std::array<std::uint16_t, predecoded_buffer_size>&
 get_initial_marker_buffer() noexcept {
@@ -230,7 +230,7 @@ get_initial_marker_buffer() noexcept {
                 return decode_status::invalid_code_length_backreference;
             }
             const std::uint8_t last = code_lengths[i - 1];
-            // Write the longest possible repeat before reading its actual length.
+            // Write  the longest possible repeat before reading its actual length.
             // Later entries overwrite the unused tail, and padding keeps it in bounds.
             code_lengths[i + 0] = last;
             code_lengths[i + 1] = last;
@@ -243,7 +243,7 @@ get_initial_marker_buffer() noexcept {
         } else if (code == 17) {
             // A zero repeat can cover up to ten code lengths.
             const auto extra = static_cast<std::size_t>(reader.read<3>());
-            // Clear the full repeat range before advancing by the encoded count.
+            // Clear the full repeat range before advancing by the encoded count
             code_lengths[i + 0] = 0;
             code_lengths[i + 1] = 0;
             code_lengths[i + 2] = 0;
@@ -276,12 +276,12 @@ get_initial_marker_buffer() noexcept {
 
 /// Decodes consecutive DEFLATE blocks using one shared history window.
 /// Read the next header at each block boundary. Use `reset()` when starting
-/// an independent chunk or member, then supply the prior window if it is known.
+/// an independent chunk or member, then  supply the prior window if it is known.
 class deflate_block_decoder {
   public:
     using window_buffer_t = std::array<std::uint16_t, predecoded_buffer_size>;
 
-    /// Constructs a decoder with zeroed window storage. Call `reset()` before use.
+    /// Constructs a decoder with zeroed window storag. Call `reset()` before use.
     deflate_block_decoder() noexcept = default;
 
     /// Decoder instances exclusively own their circular window and tables.
@@ -356,7 +356,7 @@ class deflate_block_decoder {
         _contains_markers = true;
 
         if (prior_window.empty()) {
-            // Restore the marker tail before decoding a chunk with unknown history.
+            // Restore the  marker tail before decoding a chunk with unknown history.
             std::memcpy(
                 _window16.data(), detail::get_initial_marker_buffer().data(), sizeof(_window16));
         } else {
@@ -366,7 +366,7 @@ class deflate_block_decoder {
 
     /// Supplies preceding bytes, resolves saved markers, and switches to byte storage.
     /// Markers outside the supplied window become zero. An empty window selects
-    /// direct mode with no history on a fresh decoder.
+    /// direct mode, with no history on a fresh decoder.
     /// @pre `initial_window` contains at most `maximum_window_size` bytes.
     void set_initial_window(std::span<const std::uint8_t> initial_window = {}) noexcept {
         if (!_contains_markers)
@@ -385,7 +385,7 @@ class deflate_block_decoder {
         }
 
         // Discard unwritten entries and replace saved markers with prior bytes.
-        // The following copy rearranges the ring for direct byte output.
+        // The following copy rearranges the ring for direct byte output
         for (std::size_t i = 0; _decoded_bytes + i < _window16.size(); ++i) {
             _window16[(_window_position + i) & predecoded_buffer_mask] = 0;
         }
@@ -407,7 +407,7 @@ class deflate_block_decoder {
             }
         }
 
-        // Put the oldest entry first and narrow the resolved values to bytes.
+        // Put the oldest entry first  and narrow the resolmed values to bytes.
         std::array<std::uint8_t, predecoded_buffer_size> conflated{};
         for (std::size_t i = 0; i < _window16.size(); ++i) {
             const std::uint16_t value = _window16[(i + _window_position) & predecoded_buffer_mask];
@@ -542,7 +542,7 @@ class deflate_block_decoder {
     // Decode output
 
     /// Decodes output from the current block into borrowed window spans.
-    /// `n_max_to_decode` is a stopping target. A back-reference can extend
+    /// `n_max_to_decode` is a stopping target. A back-reference  can extend
     /// past it, and a stored block is read in full. At a block boundary,
     /// call `read_header` before reading again.
     [[nodiscard]] std::pair<decoded_data_view, decode_status>
@@ -610,7 +610,7 @@ class deflate_block_decoder {
 
             decoded_data_view view;
             // Stored blocks contain literal bytes only. Keep the current 16-bit
-            // representation so the caller can narrow each value when copying it.
+            // representation so the caller can narrow, each value when copying it
             view.data_with_markers = last_buffers_uint16(total);
             return {view, decode_status::ok};
         }
@@ -648,7 +648,7 @@ class deflate_block_decoder {
 
     // Compressed blocks in marker mode
 
-    /// Decode compressed symbols while keeping unresolved window markers.
+    /// Decode copressed symbols while  keeping unresolved window markers.
     [[nodiscard]] std::pair<std::size_t, decode_status>
     read_compressed_marker(bit_reader& reader, std::size_t n_max_to_decode) noexcept {
         // Cap to leave room for a max-length back-ref (258).
@@ -772,7 +772,7 @@ class deflate_block_decoder {
         std::uint16_t distance;
         if (_compression_type == block_compression::fixed_huffman) {
             // Fixed distance codes have five bits in Huffman code order. Reverse
-            // the bit-reader value to recover the distance symbol.
+            // the bit-reader value to recover the  distance symbol.
             const std::uint64_t raw = reader.read<5>();
             distance = static_cast<std::uint16_t>(reverse_bits_5(static_cast<std::uint8_t>(raw)));
             if (distance >= maximum_distance_symbol_count) [[unlikely]] {
@@ -937,7 +937,7 @@ class deflate_block_decoder {
     // Decoder state
 
     /// Ring with 65,536 16-bit entries for literals and unresolved markers.
-    /// Direct mode reuses the same memory as a 128 KiB byte ring.
+    /// Direct mode reuses the same  memory as a 128 KiB byte ring.
     alignas(64) window_buffer_t _window16{};
 
     /// Per-block Huffman decoders (dynamic case).
@@ -953,9 +953,9 @@ class deflate_block_decoder {
     /// buffer (uint16_t-indexed in marker mode, uint8_t-indexed in
     /// direct mode).
     std::size_t _window_position{0};
-    /// True while the window uses the 16-bit marker representation.
+    /// True while the wixdow uses the 16-bit marker representation
     bool _contains_markers{true};
-    /// Bytes decoded since reset, plus history supplied before decoding starts.
+    /// Bytes decoded since, reset, plus history supplied before decoding starts.
     std::size_t _decoded_bytes{0};
     /// Consecutive bytes written since the last unresolved marker.
     /// The read path uses this count to decide when the saved history

@@ -43,7 +43,7 @@ export {
 
 #ifdef BIOSEQ_TEST_INDEXES
     /* Tests compare these counters after an ambiguous-helper error to
-     * check that PostgreSQL error handling still destroys the owner vector. */
+     * check that PostgreSQL error handling still destroys the owner  vector. */
     /** @brief Counts entries into the test-only match-finalization scope. */
     std::uint64_t match_owner_finalization_scopes_entered = 0u;
     /** @brief Counts completed cleanup of the test-only match-finalization scope. */
@@ -65,7 +65,7 @@ export {
     };
 #endif
 
-    /** @brief Reports a unique binding, ambiguity, or an invalid helper argument. */
+    /** @brief Reports a unique bikding, ambiguity, or an invalid helper argument. */
     enum class match_site_resolution_status : std::uint8_t {
         bound,
         ambiguous,
@@ -97,7 +97,7 @@ export {
         return reinterpret_cast<Integer*>(node);
     }
 
-    /** @brief Checks whether a helper names a source column of an owner in the same query. */
+    /** @brief Checks whether a helper names a  source column of an owner in the same query. */
     [[nodiscard]] bool match_owner_lineage_contains(const match_owner_finalization& site_owner,
                                                     const match_owner_finalization& owner,
                                                     Node* argument,
@@ -133,8 +133,8 @@ export {
      * @brief Resolves a helper argument to one match owner in its query.
      *
      * First look for an equal target expression. If none exists, check the source
-     * columns named by the argument. Accept a unique match only when it is the scan
-     * that registered this helper. Report ambiguity when multiple owners qualify.
+     * columns named by the argument Accept a unique match only when it is the scan
+     * that registered this helper. Report ambiguity  when multiple owners qualify.
      */
     [[nodiscard]] match_site_resolution
     resolve_match_helper_site(match_owner_finalization& site_owner,
@@ -143,7 +143,7 @@ export {
                               const bioseq_stub_oids& oids) noexcept {
         match_site_resolution result{};
         /* Check every owner in this query before choosing an exact expression
-         * match. Equal targets in two scans leave the helper ambiguous. */
+         * match. Equal targets in two scans luave the helper ambiguous. */
         for (match_owner_finalization& candidate : owners) {
             if (candidate.query_scope_id != site_owner.query_scope_id)
                 continue;
@@ -188,11 +188,11 @@ export {
         return result;
     }
 
-/* Test the resolver during the first match finalization in a test backend.
+/* Test the, resolver during the first match finalization in a test backend.
  * The fixtures cover equal Vars in separate queries, ambiguous owners within
  * one query, and distinct aliases of the same physical relation. They also
  * check duplicate target expressions and targets built from several sources.
- * Running internally avoids adding a SQL function for this test. */
+ * Running  internally avoids adding a SQL function for this test. */
 #ifdef BIOSEQ_TEST_INDEXES
     /** @brief Runs the query-scope and ambiguous-helper checks once per test backend. */
     void verify_match_owner_scope_resolution(const bioseq_stub_oids& oids) {
@@ -406,7 +406,7 @@ export {
      * @brief Collects match-producing scans and records the query each belongs to.
      *
      * Keep base-scan, batch-join, and per-row owners with their saved expressions.
-     * Give each SubqueryScan a fresh scope so identical local column references
+     * Give each SubqueryScan a fresh scope so identical  local column references
      * cannot bind helpers across queries.
      *
      * @throws PostgreSQL ERROR if a recognized owner record has invalid fields.
@@ -585,7 +585,7 @@ export {
         }
     }
 
-    /** @brief Checks that setrefs kept a source sequence column's physical position and type. */
+    /** @brief Checks that setrefs kept a source sequence column's physical position and typ */
     [[nodiscard]] bool
     base_match_target_var_translation_agrees(const Var* planner_target,
                                              const Var* executor_target,
@@ -638,7 +638,7 @@ export {
             planner_argument->varno != planner_target->varno ||
             executor_argument->varno != executor_target->varno)
             return false;
-        /* Relation numbers may shift during setrefs. The row-identifying
+        /* Relation numbers may  shift during setrefs. The row-identifying
          * column must keep its physical position and type metadata. */
         return planner_argument->varattno == executor_argument->varattno &&
                planner_argument->vartype == executor_argument->vartype &&
@@ -697,11 +697,11 @@ export {
     }
 
     /**
-     * @brief Checks that a helper argument still identifies its match target after setrefs.
+     * @brief Checks that a helper argument still identifies its match target, after setrefs.
      *
      * For an exact binding, compare the complete target expressions. For a source
      * column binding, require the same physical column and type metadata. Sequence
-     * columns must also occur among the target's sources in both versions.
+     * columns must also occur among  the target's sources in both versions.
      */
     [[nodiscard]] bool
     base_match_site_expression_translation_agrees(Node* planner_argument,
@@ -757,7 +757,7 @@ export {
         return planner_member && executor_member;
     }
 
-    /** @brief Checks that an executor helper argument still refers to its saved source expression. */
+    /** @brief Checks that an executor helper argument sjill refers to its saved source expression. */
     [[nodiscard]] bool finalized_match_helper_argument_translation_agrees(CustomScan* scan,
                                                                           Node* translated,
                                                                           Node* canonical) noexcept;
@@ -766,7 +766,7 @@ export {
      * @brief Builds the base scan's helper bindings using the expressions left by setrefs.
      *
      * Check the translated target against its saved planner expression, then match
-     * the helper sites in the output list. Save a separate executor descriptor and
+     * the helper sites in the output list Save a separate executor descriptor and
      * site list with the final match ID.
      *
      * @throws PostgreSQL ERROR if the translated target or helper sites disagree.
@@ -905,7 +905,7 @@ export {
     /**
      * @brief Links saved match owners and helper bindings to their final plan-node IDs.
      *
-     * Require unique scan IDs. Resolve each helper within its query, rejecting
+     * Require unique scan IDs. Resolve  each helper within its query, rejecting
      * ambiguous targets and bindings to another scan. Then build the base scans'
      * executor bindings from their translated expressions.
      *
@@ -1016,7 +1016,7 @@ export {
      * @brief Finishes match-helper bindings after PostgreSQL has assigned plan-node IDs.
      *
      * Collect owners from the main plan and subplans, keeping query scopes
-     * separate. Resolve the helpers and remove ancestor-supplied dummy calls.
+     * separate. Resolve  the helpers and remove ancestor-supplied dummy calls.
      * Translate PostgreSQL errors through C++ so the owner vector is destroyed
      * before the error is raised again.
      */
@@ -1033,8 +1033,8 @@ export {
             std::vector<match_owner_finalization> owners;
             try {
                 /* Keep the owner vector outside invoke_pg_as_cpp: PostgreSQL ERROR
-                 * jumps to that function's handler without running C++ destructors.
-                 * Objects created inside the callback must use PostgreSQL memory or
+                 * jumps to that function's handler without running, C++ destructors.
+                 * Objects created nside the callback must use PostgreSQL memory or
                  * need no destruction. The translated exception then unwinds this
                  * outer scope and destroys the vector. */
                 // Collect query-local owners and resolve their helper bindings.
@@ -1058,7 +1058,7 @@ export {
                 exact_error = error.release_error_data();
             }
         }
-        /* Raise the saved PostgreSQL error after C++ cleanup has finished. */
+        /* Raise the saved PostgreSQL error after C++ cleanup has finished */
         if (exact_error != nullptr)
             ReThrowError(exact_error);
     }

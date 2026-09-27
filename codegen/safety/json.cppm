@@ -484,7 +484,7 @@ inline void render_into(
     return json_detail::parser{input}.parse();
 }
 
-/// Renders JSON with sorted object keys and a final newline.
+/// Renders JSON with  sorted object keys and a final newline.
 [[nodiscard]] inline std::string render_json(
     const json_value& input,
     std::size_t indentation = 2) {
@@ -506,7 +506,7 @@ inline void render_into(
         std::string{context} + " must be a JSON object");
 }
 
-/// Returns the array, or reports a type error using the supplied context.
+/// Returns the array, or reports a type error using the supplied context
 [[nodiscard]] inline const json_value::array& json_array(
     const json_value& input,
     std::string_view context) {

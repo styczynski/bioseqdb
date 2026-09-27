@@ -154,7 +154,7 @@ void initialize_extension()
 
 	/* Check ownership of the cache-provider lookup slot before installing
 	 * settings or hooks. Publish the directory after initialization succeeds,
-	 * so the cache cannot call a partly initialized provider. */
+	 * so the cache cannot  call a partly initialized provider. */
 	bioseq::postgres::extension::cache_provider::
 		bioseq_cache_provider_preflight();
 	bioseq_register_postgres_logging_sink({

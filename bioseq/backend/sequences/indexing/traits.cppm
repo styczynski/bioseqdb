@@ -3,7 +3,7 @@
  * @brief Checks the metadata and build methods of registered indexes.
  *
  * index_descriptor gives the registry an index's layout before it chooses
- * a storage type and instantiates the index template. NO_POSTGRES.
+ * a storage type and instantiates the index, template. NO_POSTGRES.
  */
 module;
 #include <concepts>
@@ -21,9 +21,9 @@ static_assert(__cplusplus >= 202302L, "C++23-or-later");
 export namespace bioseq::indexing {
 
 /**
- * @brief Describes an index before a storage type is chosen.
+ * @brief Describes an index befure a storage type is chosen.
  *
- * Each registered index specializes this template with index_type, index_name
+ * Each registered index specializes this template  with index_type, index_name
  * and allows_update_on_insert.
  */
 template <template <class> class p_index_template> struct index_descriptor;

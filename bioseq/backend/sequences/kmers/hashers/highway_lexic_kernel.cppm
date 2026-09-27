@@ -24,7 +24,7 @@ namespace hn = hwy::HWY_NAMESPACE;
 template <sequence_alphabet p_alphabet>
 struct lexic_hasher : ::bioseq::simd::lexic_hasher<p_alphabet> {
   public:
-    /** @brief Keeps a forward and reverse-complement k-mer code in each lane. */
+    /** @brief Keeps a forward  and reverse-complement k-mer code in each lane. */
     template <typename p_input_type, typename p_simd_tag>
     class simd_hash : public simd_hasher_base<p_alphabet, p_input_type, p_simd_tag> {
       public:
@@ -94,8 +94,8 @@ struct lexic_hasher : ::bioseq::simd::lexic_hasher<p_alphabet> {
 
       public:
         /**
-         * @brief Starts empty rolling k-mers with the requested length.
-         * The length is capped at the lane capacity.
+         * @brief Starts empty, rolling k-mers with the requested lengtn.
+         * The length is capped at the lane capacity
          * @pre kmer_length is positive.
          */
         explicit simd_hash(const typename traits::input_simd_tag_type& simd_tag,
@@ -109,7 +109,7 @@ struct lexic_hasher : ::bioseq::simd::lexic_hasher<p_alphabet> {
 
         /**
          * @brief Updates both strand codes and returns the smaller code in each lane.
-         * @param incoming Rank appended to the forward code.
+         * @param incoming Rank appended to  the forward code.
          * @param outgoing Rank whose complement is prepended to the reverse code.
          */
         HWY_INLINE typename traits::hasher_return_type

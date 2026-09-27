@@ -1,6 +1,6 @@
 /**
  * @file external/ncbi/specialist_schemas.cppm
- * @brief NCBI types for gene lookup, assembly data, and protein structures.
+ * @brief NCBI types for gene lookup, assembly dat, and protein structures.
  */
 module;
 

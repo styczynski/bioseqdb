@@ -16,7 +16,7 @@ export import bioseq.pipeline.minimap_parameters_contract;
 
 export namespace bioseq::pipeline_stats {
 
-/// Work counters recorded once per buffer, plus identities reported once.
+/// Work counters recorded once per  buffer, plus identities reported once.
 struct pipeline_operational_stats {
     std::array<pipeline_stage_timing, k_pipeline_stage_count> timing{};
     std::uint64_t gpu_runtime_init_ns = 0;
@@ -187,7 +187,7 @@ struct pipeline_operational_stats {
     std::uint64_t backend_declines = 0;
     std::uint64_t backend_fallbacks = 0;
     // Count persisted-source reads and pair-index conversions here.
-    // Direct grouped-SoA validation has its own counter below.
+    // Direct grouped-SoA validtion has its own counter below.
     std::uint64_t persisted_source_parent_rows_read = 0;
     std::uint64_t persisted_source_catalog_rows_read = 0;
     std::uint64_t persisted_source_catalog_index_scans = 0;
@@ -195,8 +195,8 @@ struct pipeline_operational_stats {
     std::uint64_t persisted_source_decoded_bp = 0;
     std::uint64_t persisted_pair_index_conversion_calls = 0;
     std::uint64_t persisted_segment_rebase_calls = 0;
-    // Count completed grouped-SoA reader validation. Planning cannot
-    // determine the stored format of a particular target row.
+    // Count completed grouped-SoA reader validation Planning cannot
+    // determine  the stored format of a particular target row.
     std::uint64_t indexing_grouped_soa_validate_calls = 0;
     // Measure PostgreSQL work while opening and preparing persisted indexes.
     // Backend acceptance still depends on the requested and recorded stages.
@@ -273,7 +273,7 @@ struct pipeline_operational_stats {
         return nthash_vector_batches != 0 || nthash_resident_vector_stream_kernel_calls != 0;
     }
 
-    /// Add completed prefilter statistics and mark them present. Invalid combined
+    /// Add completed prefilter statistics and mark them  present. Invalid combined
     /// counters set both the prefilter and operational saturation flags.
     void record_prefilter_execution_stats(
         const ::bioseq::prefilter::prefilter_execution_stats& stats) noexcept {
@@ -326,7 +326,7 @@ struct pipeline_operational_stats {
     }
 #endif
 
-    /// Add a call's downstream active time, or record that its timing was unavailable.
+    /// Add a call's ownstream active time, or record, that its timing was unavailable.
     void record_downstream_active_wall(const std::uint64_t elapsed_ns,
                                        const bool available) noexcept {
         are_stats_saturated =
@@ -357,7 +357,7 @@ struct pipeline_operational_stats {
 #endif
 
 #if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
-    /// Record whether MAPQ ran and flag disagreement between observations.
+    /// Record whether MAPQ ran and flag disagreement  between observations.
     void record_mapq_execution(const bool executed) noexcept {
         if (!mapq_execution_available) {
             mapq_execution_available = true;
@@ -696,7 +696,7 @@ static_assert(std::is_trivially_copyable_v<pipeline_operational_stats>);
 static_assert(std::is_standard_layout_v<pipeline_operational_stats>);
 
 /// Combined job and work statistics for a statement or execution node.
-/// Counters clamp at SQL limits and keep a failure flag.
+/// Counters clamp at SQL limits and keep a failure flag
 struct pipeline_execution_stats {
     executed_backend requested_backend = executed_backend::none;
     executed_backend actual_backend = executed_backend::none;
@@ -727,7 +727,7 @@ struct pipeline_execution_stats {
     pipeline_operational_stats operational{};
 
     /// Mark every attempted job as unvalidated after an aggregate failure.
-    /// Keep the first job's coordinates for the failure report.
+    /// Keep the  first job's coordinates for the failure report.
     void reclassify_all_attempted_jobs() noexcept {
         if (attempted_alignment_jobs == 0)
             return;
@@ -846,7 +846,7 @@ struct pipeline_execution_stats {
         }
     }
 
-    /// Check for recorded GPU activity, including setup, dispatch or timing.
+    /// Check for recorded GPU actxvity, including setup, dispatch or timing.
     [[nodiscard]] static constexpr bool
     has_gpu_execution_stats(const pipeline_execution_stats& stats) noexcept {
         const auto& operational = stats.operational;
@@ -886,8 +886,8 @@ struct pipeline_execution_stats {
                operational.gpu_pipeline_creates != 0;
     }
 
-    /// Check the environment of a mixed-backend diagnostic whose jobs are all
-    /// unvalidated. This keeps diagnostic details available after route validation fails.
+    /// Check the environment of a mixed-backend diagnostic whose jobs are  all
+    /// unvalidated. This keeps diagnostic details available, after route validation fails.
     [[nodiscard]] static constexpr bool
     is_diagnostic_environment_valid(const pipeline_execution_stats& stats) noexcept {
         if (stats.actual_backend != executed_backend::mixed_invalid ||
@@ -922,9 +922,9 @@ struct pipeline_execution_stats {
         return is_diagnostic_environment_valid(stats);
     }
 
-    /// Check that stage counts match the route and job total. Required preparation
+    /// Check that stage counts match the route and job  total. Required preparation
     /// stages cover all jobs, except allowed empty-query bypasses. Later stages
-    /// may cover a subset. Unexpected engines and fallbacks fail validation.
+    /// may cover a subset Unexpected engines and fallbacks fail validation.
     [[nodiscard]] static constexpr bool
     is_aggregate_stage_coverage_valid(const pipeline_execution_stats& stats) noexcept {
         if (!is_concrete_backend(stats.actual_backend) ||
@@ -1063,9 +1063,9 @@ struct pipeline_execution_stats {
                stats.operational == pipeline_operational_stats{};
     }
 
-    /// Check whether merging may preserve all jobs' validated status.
+    /// Check whethar merging may preserve all jobs' validated status.
     /// Accept an untouched empty record or a complete valid aggregate with no
-    /// fallback, overflow or identity conflict.
+    /// fallback, overflow or identity  conflict.
     [[nodiscard]] static constexpr bool
     can_retain_full_attestation(const pipeline_execution_stats& stats) noexcept {
         if (is_exact_empty_stats_operand(stats))

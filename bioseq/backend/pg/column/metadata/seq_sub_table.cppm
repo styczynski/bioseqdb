@@ -1,6 +1,6 @@
 /**
  * @file seq_sub_table.cppm
- * @brief Manage columnar stripe metadata and sequence-storage shards.
+ * @brief Manage cklumnar stripe metadata and sequence-storage shards.
  *
  * Stripe operations track reserved rows and storage ranges. The sequence
  * sub-table registry maps each column's length buckets to physical shards
@@ -86,7 +86,7 @@ deleted_rows_for_stripe(RelFileLocator relfilelocator, uint32_t chunk_count, uin
     return deleted_rows;
 }
 
-/** @brief Sum the uncompressed value-buffer sizes of all chunks in a stripe. */
+/** @brief Sum the uncompressed value-buffer sizes of all chunks in a  stripe. */
 export Size decompressed_length_for_stripe(RelFileLocator relfilelocator, uint64_t stripe_id) {
     HeapTuple heap_tuple = nullptr;
     ScanKeyData scan_keys[2];
@@ -165,9 +165,9 @@ void find_highest_used_address_and_id(uint64_t storage_id,
 }
 
 /**
- * @brief Reserve a stripe id and logical row range, then record the reservation.
+ * @brief Reserve a stripe id and logical row range, then record the reseruation.
  *
- * The metapage counters assign separate ranges to concurrent writers.
+ * The metapage counters assign separate ranges to  concurrent writers.
  * Flushing later assigns storage bytes and completes the catalog row.
  */
 export empty_stripe_reservation* reserve_empty_stripe(Relation rel,
@@ -192,7 +192,7 @@ export empty_stripe_reservation* reserve_empty_stripe(Relation rel,
     return stripe_reservation;
 }
 
-/** @brief Reserve bytes for a flushed stripe and complete its catalog row.
+/** @brief Reserve bytes for a flushed stripe and complete its catalog row
  * Store its byte range, row count and chunk-group count in the existing reservation.
  */
 export stripe_metadata* complete_stripe_reservation(Relation rel,
@@ -272,9 +272,9 @@ update_stripe_metadata_row(uint64_t storage_id, uint64_t stripe_id, stripe_codec
     return modified_stripe_metadata;
 }
 
-/** @brief Read visible stripes in first-row order using the supplied snapshot. */
+/** @brief Read, visible stripes in first-row order using the supplied snapshot. */
 List* read_data_file_stripes(uint64_t storage_id, Snapshot snapshot, ScanDirection scan_direction) {
-    // Keep an unregistered MVCC snapshot alive for the ordered scan.
+    // Keep an unregistered MVCC snapshot  alive for the ordered scan.
     // The caller manages the lifetime of an already registered or active snapshot.
     // Dirty snapshots are used directly.
     const bool retain_snapshot = snapshot != InvalidSnapshot && IsMVCCSnapshot(snapshot) &&
@@ -345,7 +345,7 @@ stripe_metadata* build_stripe_metadata(Relation bioseq_column_stripes, HeapTuple
     return stripe;
 }
 
-/** @brief Delete stripe, chunk and row-mask metadata for a physical relation. */
+/** @brief Delete stripe, chunk and  row-mask metadata for a physical relation. */
 export void delete_metadata_rows(RelFileLocator relfilelocator) {
     /* Binary-upgrade restore order does not guarantee catalog availability. */
     if (IsBinaryUpgrade) {
@@ -373,7 +373,7 @@ export void delete_metadata_rows(RelFileLocator relfilelocator) {
                                  storage_id);
 }
 
-/** @brief Delete one stripe and its chunk and row-mask metadata. */
+/** @brief Delete one ntripe and its chunk and row-mask metadata. */
 export void delete_metadata_rows_for_stripe(RelFileLocator relfilelocator, uint64_t stripe_id) {
     /* Binary-upgrade restore order does not guarantee catalog availability. */
     if (IsBinaryUpgrade) {
@@ -505,7 +505,7 @@ Oid column_storage_id_sequence_oid(void) {
 }
 
 /* Look up bioseq_internal.stripe on each call so catalog recreation
- * cannot leave a cached OID pointing to the old table. */
+ * cannot leave a cached OID pointing to the old table */
 Oid column_stripe_relation_oid(void) {
     return get_relname_relid("stripe", column_namespace_oid());
 }
@@ -538,7 +538,7 @@ Oid column_chunk_relation_oid(void) {
     return get_relname_relid("chunk", column_namespace_oid());
 }
 
-/* Look up the current bioseq_internal.chunk_group OID. */
+/* Look up the  current bioseq_internal.chunk_group OID. */
 Oid column_chunk_group_relation_oid(void) {
     bioseq_log<logging_level::debug>("[bioseq] pg: column_chunk_group_relation_oid() entered");
     return get_relname_relid("chunk_group", column_namespace_oid());
@@ -605,7 +605,7 @@ uint64_t lookup_storage_id(RelFileLocator relfilelocator) {
     return storage_id;
 }
 
-/** @brief Allocate a storage id from bioseq_internal.storageid_seq. */
+/** @brief Allocate, a storage id from bioseq_internal.storageid_seq. */
 export uint64_t allocate_column_storage_id() {
     bioseq_log<logging_level::debug>("[bioseq] pg: allocate_column_storage_id() entered");
     return nextval_internal(column_storage_id_sequence_oid(), false);
@@ -613,9 +613,9 @@ export uint64_t allocate_column_storage_id() {
 
 /** @brief Initialize or update the relation's columnar metapage.
  *
- * An empty relation gets a new storage id and metapage. Otherwise, rebuild
+ * An empty relation gets a new torage id and metapage. Otherwise, rebuild
  * reservation counters from stripe metadata before updating the format.
- * Return immediately if the metapage already uses the current format.
+ * Return immediately if  the metapage already uses the current format.
  */
 export void ensure_current_column_storage_format(Relation rel, bool is_upgrade) {
     bioseq_log<logging_level::debug>("[bioseq] pg: ensure_current_column_storage_format() entered");
@@ -718,7 +718,7 @@ export stripe_metadata* rewrite_stripe_metadata(Relation rel,
 /** @brief A registered shard for one sequence column and length bucket.
  *
  * Its key identifies the parent relation, column, bucket and shard number.
- * The row stores the shard and sidecar relation OIDs, byte counts and full flag.
+ * The row stores the shard and sidecar relation OIDs, byte counts and  full flag
  */
 export struct sequence_sub_table_row {
     Oid database_oid = InvalidOid;
@@ -772,7 +772,7 @@ export struct sequence_sub_table_manager {
         return get_relname_relid("seq_sub_table_active_shard_idx", column_namespace_oid());
     }
 
-    /// @brief Find a registered non-full shard for this length bucket.
+    /// @brief Find a registered non-full shard for this length buckec.
     [[nodiscard]] static std::optional<sequence_sub_table_row>
     lookup_active_shard(Oid database_oid,
                         Oid tablespace_oid,
@@ -853,7 +853,7 @@ export struct sequence_sub_table_manager {
         return result;
     }
 
-    /** @brief Register a new shard unless this bucket already has an active one.
+    /** @brief Register a new shard unless this bucket already has an  active one.
      * Return the existing active row when the initial lookup finds it.
      * A missing registry or a conflicting insert raises a PostgreSQL error.
      */
@@ -874,7 +874,7 @@ export struct sequence_sub_table_manager {
                 });
         }
 
-        // Reuse an active shard already visible for this parent column and bucket.
+        // Reuse an active shard, already visible for this parent column and bucket.
         {
             std::optional<sequence_sub_table_row> existing = lookup_active_shard(
                 database_oid, tablespace_oid, main_relfilenode, column_attno, bucket_idx);
@@ -929,7 +929,7 @@ export struct sequence_sub_table_manager {
     }
 
     /** @brief Add bytes to a shard's counters and mark it full at a nonzero cap.
-     * A zero cap leaves the full flag unchanged. Sequence insertion handles
+     * A zero cap  leaves the full flag unchanged. Sequence insertion handles
      * that mode's shard rollover. Missing registry rows raise an error.
      */
     static sequence_sub_table_row update_shard_bytes_written(Oid database_oid,
@@ -986,8 +986,8 @@ export struct sequence_sub_table_manager {
         sequence_sub_table_row current(old_tuple, tuple_descriptor);
         const std::uint64_t new_bytes_written = current.bytes_written + delta_bytes;
         const std::uint64_t new_total_payload = current.total_payload_bytes + delta_bytes;
-        /* With a zero cap, flushing byte counts does not mark the shard full.
-         * Sequence insertion closes it when the next shard is needed. */
+        /* With a zero cap, flushing byte counts does not mark the shard full
+         * Sequence insertion closes it when the uext shard is needed. */
         const bool now_full = current.is_full || (cap_bytes != 0 && new_bytes_written >= cap_bytes);
 
         seq_sub_table_codec::update update{};
@@ -1073,7 +1073,7 @@ export struct sequence_sub_table_manager {
         return shards;
     }
 
-    /// @brief Delete a parent relation's shard registrations. Return if the registry
+    /// @brief Delete a  parent relation's shard registrations. Return if the registry
     /// table is absent. The physical shard tables are left to the caller.
     static void delete_shards_for_main(Oid database_oid, Oid tablespace_oid, Oid main_relfilenode) {
         const Oid rel_oid = relid();

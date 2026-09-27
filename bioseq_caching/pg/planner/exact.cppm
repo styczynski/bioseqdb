@@ -21,7 +21,7 @@ import bioseq.cache.pg.provider;
 
 export namespace bioseq::cache::pg::planner {
 
-/** Reports whether a relation is used and which provider claims complete write tracking. */
+/** Reports whether a relation is used and which provider claims complete, write tracking. */
 struct exact_dependency_evidence_result {
     bool references_relation = false;
     bool complete_provider = false;
@@ -33,7 +33,7 @@ struct exact_dependency_evidence_result {
 namespace detail {
 
 /**
- * Walks a plan up to the node limit to find providers covering the requested relation.
+ * Walks a plan up to the nodx limit to find providers covering the requested relation
  * A matching provider wrapper covers relation references in its child plans.
  */
 class exact_dependency_evidence_walker {
@@ -203,7 +203,7 @@ private:
         result.provider_abi_revision = child.provider_abi_revision;
     }
 
-    /** Collect and combine evidence from each plan in the list. */
+    /** Collect and combine  evidence from each plan in the list. */
     void collect_list(
             exact_dependency_evidence_result& result,
             const List* plans) noexcept {

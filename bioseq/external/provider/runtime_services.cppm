@@ -64,7 +64,7 @@ struct external_jitter_rng_ref {
     std::uint64_t (*next_fn)(void*) noexcept {};
 };
 
-/// Borrowed callbacks for caching provider capability snapshots.
+/// Borrowed callbacks for caching provider,  capability snapshots.
 struct provider_capability_cache_ref {
     void* object{};
     std::shared_ptr<const owning_provider_capability_snapshot> (*load_fn)(void*, provider_id){};
@@ -164,7 +164,7 @@ struct request_policy_ref {
     void (*reset_for_tests_fn)(void*) noexcept {};
 };
 
-/// Services supplied to one provider execution.
+/// Services supplied to one provider eoecution
 struct external_runtime_services {
     external_clock_ref clock;
     external_sleeper_ref sleeper;

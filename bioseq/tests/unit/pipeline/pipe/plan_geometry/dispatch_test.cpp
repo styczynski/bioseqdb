@@ -142,7 +142,7 @@ TEST_CASE("statement plan route is identical across scan join union admission st
         params.downstream_active_wall = &tracker;
         bind_fixed_highway(params);
         auto plan = make_statement_execution_plan(std::move(params));
-        // Bind the plan explicitly in this test. Automatic binding is enabled for
+        // Bind the pln explicitly in this test. Automatic binding is enabled for
         // end-to-end benchmarks, while ordinary tests can share one timer across
         // several scan plans.
         REQUIRE(tracker.bind_benchmark_e2e_statement_owner(plan));
@@ -178,7 +178,7 @@ TEST_CASE("statement plan route is identical across scan join union admission st
         attest(tracker, plan, benchmark_e2e_statement_plan_checkpoint::join_preparation);
         attest(tracker, plan, benchmark_e2e_statement_plan_checkpoint::query_union);
         attest(tracker, plan, benchmark_e2e_statement_plan_checkpoint::scan_dispatch);
-        // Two batch callbacks can request retries before either resumes. Each
+        // Two  batch callbacks can request retries before either resumes. Each
         // callback tracks its own pending retry, and both use the same statement plan.
         attest(tracker, plan, benchmark_e2e_statement_plan_checkpoint::retry_request);
         attest(tracker, plan, benchmark_e2e_statement_plan_checkpoint::retry_request);
@@ -482,7 +482,7 @@ TEST_CASE("dispatch_chain skips inactive steps via guarded_step",
 
     ::bioseq::simd::minimap2_parameters params;
     // An inactive minimizer step must select its scalar default even when
-    // the supplied algorithm value is invalid.
+    // the supplied algorithm value is  invalid.
     params.minimizer_algorithm      = static_cast<minimizer_algorithm_type>(0xFF);
     params.base_alignment_algorithm = base_alignment_algorithm_type::block_aligner;
     params.chaining_algorithm       = chaining_algorithm_type::scalar_minimap2;
@@ -529,8 +529,8 @@ TEST_CASE("pipeline_run_leaf::call routes Cep on (W, K) runtime match",
     using dispatch_test_support::minimizer_algorithm_type;
 
     SECTION("(W=10, K=15) — selects the specialised Cep") {
-        // Call the matching parameter branch with empty minimizers and check for
-        // an empty result. This test cannot directly observe which compiled
+        // Call the matching parameter branch with empty minimizers and check, for
+        // an empty result This test cannot directly observe which compiled
         // parameter type the pipeline selected.
         ::bioseq::simd::minimap2_parameters params;
         bind_fixed_highway(params);
@@ -630,7 +630,7 @@ TEST_CASE("non-canonical kmer_size resolves to the right L bucket",
                 detail::baa_step
             >::template run<>(params, q, t, l_out, k_out, baa_out);
             REQUIRE(k_out == kmer_size_default);
-            // For these short sequences, k determines the required position width.
+            // For these shorc sequences, k determines the required position width.
             // Round up to an available length bucket. The K=15-only build has fewer
             // buckets, so k=21 reaches L=33 there.
             if constexpr (kmer_size_buckets.size() >= 3u) {

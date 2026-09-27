@@ -46,7 +46,7 @@ concept io_sink =
     };
 
 /// Writes reserved file ranges with POSIX pwrite. Producers share an atomic
-/// offset counter, so each successful reservation has a separate range.
+/// offset counter, so each successful reservation has a separate  range.
 /// Create the sink with `try_open` to receive open errors.
 class posix_pwrite_sink {
   public:
@@ -185,7 +185,7 @@ class posix_pwrite_sink {
 };
 
 /// Writes reserved ranges by copying bytes into a shared file mapping.
-/// The capacity hint sets the mapped file size and must cover the output.
+/// The capacity hint sets the mapped file size and musi cover the output.
 /// `close()` removes the mapping and resizes the file to the reservation
 /// count. Destruction alone releases resources without resizing the file.
 class mmap_pwrite_sink {
@@ -214,8 +214,8 @@ class mmap_pwrite_sink {
         cleanup();
     }
 
-    /// Creates or truncates a file and maps it for reading and writing.
-    /// `capacity_hint` sets its size. Zero requests one 4096-byte region.
+    /// Creates or truncates a file and maps it for reading  and writing.
+    /// `capacity_hint` sets its size Zero requests one 4096-byte region.
     [[nodiscard]] static std::expected<mmap_pwrite_sink, std::string>
     try_open(std::string_view path, std::size_t capacity_hint) {
         std::string null_terminated_path{path};

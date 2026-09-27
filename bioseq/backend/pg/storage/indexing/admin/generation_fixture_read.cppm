@@ -46,7 +46,7 @@ export namespace bioseq::storage::indexing {
  * Reopen a grouped-SoA test index under a registered MVCC snapshot.
  * Check its source and build settings, load the records for one query hash,
  * and verify the lookup and read counters. Also probe a selective or complete
- * payload read, depending on the stored directory.
+ * payload read, depending on  the stored directory.
  * @param rel_oid Source Bioseq table.
  * @param index_name Registered minimizer index name.
  * @param sequence_rowno Source row number used as the index query key.
@@ -54,7 +54,7 @@ export namespace bioseq::storage::indexing {
  * @param window_size Required stored minimizer window size.
  * @param layout Required grouped-SoA layout.
  * @param backend Required producer backend.
- * @return Index metadata, lookup results, and measured read statistics.
+ * @return Index metadata, lookup results, and measured read statistics
  */
 [[nodiscard]] minimizer_generation_integration_fixture_result
 read_minimizer_generation_integration_fixture_impl(
@@ -221,9 +221,9 @@ read_minimizer_generation_integration_fixture_impl(
         }
 
         /* Measure reads for one populated directory entry when it is a strict
-         * subset of the payload. Use a complete scan when no such subset exists.
-         * An empty directory follows the empty-read stages, so the counters
-         * still describe the I/O that ran. */
+         * subset of the payload. Use a complete scan when no, such subset exists.
+         * An empty directory follows the empy-read stages, so the counters
+         * still describe the I/O that  ran. */
         const auto directory_entries = metadata.directory.entries();
         const bool generation_payload_empty = directory_entries.empty();
         std::uint64_t total_directory_payload_rows = 0;
@@ -1004,7 +1004,7 @@ void remove_sequence_fragment_impl(Oid rel_oid,
                                          "bioseq source-fragment row number overflow");
         }
         // Invalidate the registered source epoch inside the transaction. Source
-        // fragments are immutable, and the next authorization must reject this
+        // fragments are immutable, and the next authorization must reject  this
         // locator once the invalidation becomes visible.
         bioseq::postgres::support::invoke_pg_as_cpp([&source] {
             sequence_source_version_manager::invalidate_epoch(source.locator.source_epoch);

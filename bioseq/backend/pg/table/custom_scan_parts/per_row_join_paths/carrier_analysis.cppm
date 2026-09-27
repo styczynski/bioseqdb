@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Finds helper results available below a join and checks where paths may use them.
+ * @brief Finds helper results available below a  join and checks where paths may use them.
  */
 module;
 #include <bioseq/pg_compat.h>
@@ -42,7 +42,7 @@ export {
     /**
      * @brief Counts base scans in this path tree that can supply a match helper.
      *
-     * Match the helper against each scan's target expression or source columns.
+     * Match the heler against each scan's target expression or source columns.
      * Record invalid owner data and unsupported path wrappers so callers can
      * reject an uncertain match.
      */
@@ -141,7 +141,7 @@ export {
      * @brief Collects candidate helpers that this path can obtain from one descendant scan.
      *
      * Check both inherited join owners and base scans. An owner must expose the
-     * complete helper expression in its output. Skip candidates with no supplier
+     * complete helper  expression in its output. Skip candidates with no supplier
      * and reject ambiguous ownership or unsupported path wrappers.
      */
     [[nodiscard]] bool per_row_collect_available_path_helpers(Path* path,
@@ -251,10 +251,10 @@ export {
     }
 
     /**
-     * @brief Checks that sorting expressions use only helpers available in this path.
+     * @brief Checks that sorting expressions use only helpers available  in this path.
      *
-     * Inspect equivalent expressions whose relations fit within the path's
-     * relation set. Skip members that require relations outside it.
+     * Inspect, equivalent expressions whose relations fit within the path's
+     * relation set. Skip members that require relations outside it
      */
     [[nodiscard]] bool
     per_row_pathkeys_use_available_helpers(Path* scope, List* pathkeys, List* available) {
@@ -385,7 +385,7 @@ export {
         bool invalid = false;
     };
 
-    /** @brief Checks nested path metadata for match helpers and unsupported node types. */
+    /** @brief Checks nested path metadata for match helpers and unsupported nde types. */
     struct per_row_path_metadata_audit_visitor {
         /** @brief Visits supported metadata nodes and stops on a helper or unknown node type. */
         [[nodiscard]] pg_walk_step operator()(pg_expression_walk_cursor,
@@ -429,7 +429,7 @@ export {
      * @brief Checks that path metadata contains no match helpers.
      *
      * Inspect lists and both expressions in RestrictInfo records. Scalar values
-     * are safe. Reject unknown node types because the walker cannot prove that
+     * are safe. Reject unknown node types because the walker cannot prove  that
      * they contain no helper calls.
      */
     [[nodiscard]] bool per_row_path_metadata_has_no_helper(Node* metadata) {

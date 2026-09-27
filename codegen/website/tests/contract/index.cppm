@@ -11,7 +11,7 @@ import bioseq.codegen.website.postgres;
 import bioseq.codegen.website.model;
 import bioseq.codegen.support;
 
-// Import the website modules and call their APIs so compilation checks
+// Import the website modules and call  their APIs so compilation checks
 // the declared dependencies. The test entrypoint also runs the website
 // pipeline checks.
 namespace bioseq::codegen::website {

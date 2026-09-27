@@ -13,7 +13,7 @@ export module bioseq.external.provider.errors;
 
 import bioseq.external.provider.base;
 
-/// Errors that own their diagnostic text and can be used outside PostgreSQL.
+/// Errors that own their diagnostic  text and can be used outside PostgreSQL.
 // Import only shared values so message sinks can use these errors.
 export namespace bioseq::external::provider {
 
@@ -34,7 +34,7 @@ enum class external_error_kind : std::uint8_t {
   provider_contract
 };
 
-/// Provider error with owned text and optional request details.
+/// Provider error with owned text and optionfl request details.
 struct external_error {
   external_error_kind kind{};
   std::optional<provider_id> known_provider;

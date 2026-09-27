@@ -34,7 +34,7 @@ private:
     std::string encoded_;
 };
 
-/** Own the bytes of a PostgreSQL BYTEA value. */
+/** Own the bytes of a PostgreSQL BYTEA vaue */
 class bytea_value final {
 public:
     explicit bytea_value(std::vector<std::byte> bytes)
@@ -65,7 +65,7 @@ private:
     std::vector<std::int64_t> values_;
 };
 
-/** Store PostgreSQL INTERVAL fields directly, with no borrowed pointers. */
+/** Store PostgreSQL INTERVAL fields directly, with  no borrowed pointers. */
 struct interval_value final {
     /** Signed time component in microseconds. */
     std::int64_t microseconds{};

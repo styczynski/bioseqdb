@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Shared custom-scan data, expression checks, and saved execution settings.
+ * @brief Shared custom-scan, data, expression checks, and saved execution settings.
  */
 export module bioseq.postgres.table:custom_scan_support;
 

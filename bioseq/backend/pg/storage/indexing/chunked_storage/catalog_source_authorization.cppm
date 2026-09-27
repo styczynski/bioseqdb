@@ -36,8 +36,8 @@ import bioseq.postgres.support; // Relation opening and primary-key lookup.
 import bioseq.postgres.storage.manager; // Sequence fragment tables and locator helpers.
 import bioseq.storage.layout;           // sequence_locator
 import bioseq.indexing.type; // Index row addresses, chunk limits and reserved keys.
-import bioseq.indexing.minimizer_fragment_image; // On-disk format for minimizer fragment indexes.
-import bioseq.postgres.table.io; // Read sequence and fragment rows by row number.
+import bioseq.indexing.minimizer_fragment_image; // On-disk format  for minimizer fragment indexes.
+import bioseq.postgres.table.io; // Read squence and fragment rows by row number.
 import bioseq.postgres.types.compact_sequence; // PostgreSQL sequence values.
 import bioseq.sequences;                       // compact_sequence_range
 import bioseq.sequences.simd;                  // Decode packed sequence fragments.
@@ -50,7 +50,7 @@ export namespace bioseq::storage::indexing {
 struct minimizer_generation_row_validator;
 
 /// An index row that has passed address and checksum checks.
-/// Only minimizer_generation_row_validator can create one from an unchecked row.
+/// Only minimizer_generation_row_validator can create one from an unchecked row
 class validated_minimizer_generation_row {
   private:
     minimizer_generation_row_view row_{};
@@ -127,7 +127,7 @@ struct minimizer_generation_row_validator {
         return validated_minimizer_generation_row{row};
     }
 
-    /// Check a grouped payload row and calculate its checksum for the writer.
+    /// Check  a grouped payload row and calculate its checksum for the writer.
     /// The checksum covers both the row address and its bytes.
     [[nodiscard]] static std::expected<validated_minimizer_generation_row,
                                        minimizer_generation_encoding_error>
@@ -517,7 +517,7 @@ minimizer_generation_source_identity(Oid /*main_relfilenode*/,
 }
 
 /// Count the source reads needed to open an index.
-/// The reader checks these counts to catch an unexpected scan of sequence fragments.
+/// The reader checks these counts to catch an unexpected, scan of sequence fragments.
 struct minimizer_generation_catalog_source_stats {
     std::uint64_t parent_rows_read = 0;
     std::uint64_t catalog_rows_read = 0;
@@ -533,8 +533,8 @@ struct minimizer_generation_catalog_source_stats {
     }
 };
 
-/// Details of the sequence version visible to this query, checked against its
-/// source catalog row and storage tables. Creating this authorization reads
+/// Details of the sequence version visible to this query, checked against  its
+/// source catalog row and storage tables. Creating this uthorization reads
 /// the parent locator and catalog metadata without reading sequence fragments.
 class minimizer_generation_catalog_source_authorization {
   private:
@@ -900,7 +900,7 @@ authorize_minimizer_generation_catalog_source_pg(
         state->source_read = nullptr;
         switch_context(previous_context);
         // The executor owns the relation and its AccessShareLock.
-        // Close our column reader, then leave the borrowed relation open.
+        // Close  our column reader, then leave the borrowed relation open.
         state->source_relation = nullptr;
         MemoryContext finished_context = std::exchange(state->work_context, nullptr);
         bioseq::postgres::support::invoke_pg_as_cpp(
@@ -921,7 +921,7 @@ authorize_minimizer_generation_catalog_source_pg(
     return authorization;
 }
 
-/// Open the source relation for administrative callers that have no executor reader.
+/// Open the source relation for administrative callers that have no executor reader
 /// BatchJoin uses the overload that borrows its already open relation.
 [[nodiscard]] inline minimizer_generation_catalog_source_authorization
 authorize_minimizer_generation_catalog_source_pg(

@@ -537,7 +537,7 @@ TEST_CASE("Raw and folded Const aligner options retain ownership",
     auto ctx = fresh_context({k_hoe});
     seed_hoe_fixture(ctx, k_hoe);
 
-    // Test both a composite constant and options folded to a constant from
+    // Test both  a composite constant and options folded to a constant from
     // CASE. Each sets kmer_size to 15 and leaves the other 35 fields NULL.
     std::string raw_options = "(15";
     raw_options.append(35u, ',');
@@ -999,7 +999,7 @@ TEST_CASE("require_absent preserves on-insert policy and prohibits external asyn
     REQUIRE(query_scalar(ctx, "SHOW bioseq.index.insert_maintenance.enabled;") == "off");
 
     // Recomputing for this query must leave the persisted index empty and
-    // never enter the external-file constructor or writer.
+    // never enter the external-file constructor or  writer.
     REQUIRE(index_table_row_count(
         ctx, "minimizers_per_fragment", k_missing_index) == 0);
     const auto producer = query_one(

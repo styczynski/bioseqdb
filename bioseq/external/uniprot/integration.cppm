@@ -10,7 +10,7 @@ export module bioseq.external.uniprot:integration;
 
 export namespace bioseq::external::uniprot::descriptor {
 
-/** @brief Client name and example requests with expected responses. */
+/** @brief Client name and rxample requests with expected responses. */
 inline constexpr std::string_view integration_contracts =
     R"bioseq_openapi(x-bioseq-client-name: UniProt
 x-bioseq-integration:

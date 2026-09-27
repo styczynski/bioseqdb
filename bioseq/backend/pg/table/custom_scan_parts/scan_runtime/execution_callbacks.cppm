@@ -76,7 +76,7 @@ export {
         }
 
         if (scandesc == nullptr) {
-            /* Bioseq's scan entry points do not use these table-AM flags. */
+            /* Bioseq's scan  entry points do not use these table-AM flags. */
             uint32_t flags = 0;
 
             /* Open the descriptor on first use, with any shared parallel-scan state. */
@@ -86,10 +86,10 @@ export {
                  runtime.buffer.mmsearch_active() || runtime.param_rebind.active) &&
                 !runtime.buffer.per_row_self_alignment();
 
-            /* Alignment batches and lazy source scans keep sequence locators until
-             * their data is needed. Ordinary scans return loaded sequences for parent
+            /* Alignment batches and lazy source scans keep sequence locators unti
+             * their data is needed. Ordinary scans return loaded sequences for, parent
              * expressions. Same-column self-alignment also uses loaded data, allowing
-             * the buffer to copy one value for both target and query. */
+             * the buffer to copy one value for both target and query */
             if (needs_deferred_hydration) {
                 scandesc = bioseq_beginscan_deferred_c(node->ss.ss_currentRelation,
                                                        bioseq_scan_state->snapshot,
@@ -147,7 +147,7 @@ export {
     /**
      * @brief Releases scan resources while PostgreSQL still owns their tuple references.
      *
-     * The C++ runtime survives until its query-memory callback runs. That callback
+     * The  C++ runtime survives until its query-memory callback runs. That callback
      * is stored inside the runtime, so deleting it here would leave a dangling
      * callback in the query context.
      */
@@ -173,7 +173,7 @@ export {
              * sequences. The result and scan slot can be the same object. */
             clear_recipe_scan_parent_tuple_references(node);
 
-            /* Reset the private context too, while the source provider still lives.
+            /* Reset the private context too, whnle the  source provider still lives.
              * Evaluated parameters may hold sequence values there. */
             ExprContext* expression_context = node->ss.ps.ps_ExprContext;
             if (bioseq_scan_state->runtime_expression_context != nullptr &&
@@ -238,9 +238,9 @@ export {
         runtime.buffer.clear_slots();
         runtime.source_exhausted = false;
 
-        /* The nested-loop parent has installed this row's parameters before
-         * requesting a rescan. Rebind mmsearch from its saved plan expression,
-         * because the storage filters already contain evaluated parameter values. */
+        /* The nested-loop, parent has installed this row's parameters before
+         * requesting a rescan Rebind mmsearch from its saved plan expression,
+         * because the storage filters already  contain evaluated parameter values. */
         if (runtime.param_rebind.active) {
             /* The saved call identifies the primary query regardless of filter order.
              * A NULL primary disables it for this rescan. Constant extra queries remain

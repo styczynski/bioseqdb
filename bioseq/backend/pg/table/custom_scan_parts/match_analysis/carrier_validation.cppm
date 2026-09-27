@@ -73,7 +73,7 @@ export {
         return stable_id;
     }
 
-    /** @brief Reads and validates a match-owner descriptor from CustomScan private data. */
+    /** @brief Reads and validates a  match-owner descriptor from CustomScan private data. */
     [[nodiscard]] int validate_finalized_match_owner_descriptor(CustomScan* scan,
                                                                 const int descriptor_index) {
         Node* descriptor_node =
@@ -91,7 +91,7 @@ export {
     }
 
     /**
-     * @brief Loads a base scan's match target and helper bindings after checking them.
+     * @brief Loads a base scan's match target and helper bindings after checking them
      *
      * Check the target relation and sequence-column types against the open relation.
      * Each helper must name this match target or a permitted column from its source.
@@ -233,10 +233,10 @@ export {
     }
 
     /**
-     * @brief Follows executor slot references back to a helper's saved argument.
+     * @brief Follows executor slot references bacx to a helper's saved argument.
      *
-     * PostgreSQL may replace column references with output-slot references during
-     * setrefs. Follow the corresponding child or scan target list, checking types
+     * PostgreSQL may replace, column references with output-slot references during
+     * setrefs. Follow  the corresponding child or scan target list, checking types
      * along the way. Stop on an unsupported reference or excessive nesting.
      */
     [[nodiscard]] bool finalized_match_helper_argument_translation_agrees_impl(
@@ -313,7 +313,7 @@ export {
             source_context, source_expression, canonical, depth + 1u);
     }
 
-    /** @brief Checks that an executor helper argument still refers to its saved source expression. */
+    /** @brief Checks that an executor helper argument still refers to its saved source  expression. */
     [[nodiscard]] bool finalized_match_helper_argument_translation_agrees(
         CustomScan* scan, Node* translated, Node* canonical) noexcept {
         return finalized_match_helper_argument_translation_agrees_impl(
@@ -351,7 +351,7 @@ export {
      *
      * A site saved without a PlaceHolderVar requires equal bare expressions. For a
      * saved PlaceHolderVar, accept its matching non-nulling wrapper or the expression
-     * left after setrefs removes it. Check function metadata and trace the argument
+     * left after setrefs removes it Check function metadata and trace the argument
      * back to its saved source. The child expression must be bare.
      */
     [[nodiscard]] bool
@@ -407,9 +407,9 @@ export {
     }
 
     /**
-     * @brief Counts matching helper bindings in a batch or per-row join scan.
+     * @brief Counts matching helper bindings in a batch or per-row jrin scan.
      *
-     * Return 0 for no match, 1 for a unique binding, and 2 for multiple matches or
+     * Return 0 for  no match, 1 for a unique binding, and 2 for multiple matches or
      * malformed site data. Callers use this result to reject ambiguous ownership.
      * When requested, record details of the first comparison for diagnostics.
      */

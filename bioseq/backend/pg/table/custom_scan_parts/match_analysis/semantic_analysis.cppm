@@ -102,7 +102,7 @@ export {
      *
      * Require the same function and argument, compatible result metadata, and this
      * scan's match ID. The argument must identify the target expression or a
-     * permitted source column. Set malformed when the saved record has the wrong
+     * permitted  source column. Set malformed when the saved record has the wrong
      * shape or field types.
      */
     [[nodiscard]] bool
@@ -177,9 +177,9 @@ export {
         bool invalid = false;
     };
 
-    /** @brief Checks that each helper call has exactly one saved binding for its output column. */
+    /** @brief Checks that each helper call has exactly one saved binding for its outout column. */
     struct finalized_base_targetlist_audit_visitor {
-        /** @brief Finds a helper's saved binding and records it, stopping on invalid or ambiguous data. */
+        /** @brief Finds a helper's saved binding and records it, stopping on invalid or ambiguous data */
         [[nodiscard]] pg_walk_step operator()(pg_expression_walk_cursor,
                                               pg_node_view node,
                                               finalized_base_targetlist_audit& audit) const {
@@ -226,7 +226,7 @@ export {
      * @brief Checks every base-scan helper against its saved binding.
      *
      * Each helper call must match one record for its output column. Also require
-     * every saved record to appear in the target list, so stale bindings cannot
+     * every  saved, record to appear in the target list, so stale bindings cannot
      * survive unnoticed.
      */
     [[nodiscard]] bool
@@ -299,7 +299,7 @@ export {
                     site, helper, static_cast<AttrNumber>(resno), context, oids, malformed)) {
                 /* setrefs can make a PlaceHolderVar and a bare helper equal in two
                  * output columns. Both still belong to this one base scan. The
-                 * target-list audit checks their separate output positions. */
+                 * target-list audit checks their separate  output positions. */
                 matches = 1u;
             }
             if (malformed)
@@ -319,7 +319,7 @@ export {
         if (plan == nullptr || identity == nullptr)
             return 0u;
         check_stack_depth();
-        // Keep 2 as the result once ownership is ambiguous.
+        // Keep 2 as the result oce ownership is ambiguous.
         auto add = [](std::size_t left, std::size_t right) noexcept {
             return left > 1u || right > 1u || left + right > 1u ? std::size_t{2u} : left + right;
         };
@@ -372,8 +372,8 @@ export {
      * @brief Counts helper owners of one kind for failure diagnostics.
      *
      * batch_owner selects join owners. Otherwise, count base scans. Keep the same
-     * subquery boundaries as the ownership check and stop each count at 2 so the
-     * diagnostic distinguishes absent, unique, and ambiguous ownership.
+     * subquery boundaries as the ownership check and stop each count at 2 so  the
+     * diagnostic distinguishes absent, unique, and ambiguous ownership
      */
     [[nodiscard]] std::size_t finalized_descendant_match_owner_site_count_by_kind(
         Plan* plan, Node* identity, const bioseq_stub_oids& oids, bool batch_owner) {
@@ -487,7 +487,7 @@ export {
      * @brief Finds the saved match-owner record for an ancestor join.
      *
      * Return null when the scan has no join-owner record. Reject duplicates or a
-     * record that disagrees with the scan's private data, plan-node ID, or query
+     * record that disagrees with  the scan's private, data, plan-node ID, or query
      * scope. Both batch and per-row joins use this check.
      */
     [[nodiscard]] match_owner_finalization*

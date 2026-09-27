@@ -31,13 +31,13 @@ export void flush_pending_column_writes(column_write_state *state);
 static stripe_buffers * allocate_stripe_buffers(uint32_t stripe_max_row_count,
 												uint32_t chunk_group_row_limit,
 												uint32_t column_count);
-/** @brief Allocate chunk metadata for a stripe up to its row limit. */
+/** @brief Allocate chunk metadata for a stripe up  to its row limit. */
 static stripe_skip_list * allocate_stripe_skip_list(uint32_t stripe_max_row_count,
 												  uint32_t chunk_group_row_limit,
 												  uint32_t column_count);
 /** @brief Write the current stripe and its metadata to storage. */
 static void flush_stripe(column_write_state *write_state);
-/** @brief Pack presence flags into a bitmap. */
+/** @brief Pack, presence flags into a bitmap. */
 static StringInfo serialize_boolean_array(bool *boolean_values, uint32_t boolean_count);
 /** @brief Serialize one completed chunk group's presence and value streams. */
 static void serialize_chunk_data(column_write_state *write_state, uint32_t chunk_index,
@@ -51,7 +51,7 @@ static void update_chunk_min_max(chunk_skip_node *chunk_skip_node,
 static StringInfo copy_string_info(StringInfo source_buffer);
 
 /*
- * Start a buffered table write. Use the returned state to append rows, then
+ * Start a buffered table wrte. Use the returned state to append rows, then
  * call end_column_write to flush the remaining rows and release the writer.
  */
 /** @brief Create a writer for a column table. */
@@ -85,7 +85,7 @@ begin_column_write(RelFileLocator relation_file_locator,
 
 	/*
 	 * Keep stripe allocations together so flushing can free them by resetting
-	 * this context.
+	 * this  context.
 	 */
 	MemoryContext stripe_write_context = AllocSetContextCreate(CurrentMemoryContext,
 															 "Stripe Write Memory Context",
@@ -117,7 +117,7 @@ begin_column_write(RelFileLocator relation_file_locator,
 
 /*
  * Append a row and return its assigned row number. Full chunk groups are
- * serialized and compressed. Flush the stripe when its row limit is reached
+ * serialized and compressed Flush the stripe when its row limit is reached
  * or the next value would overflow a column buffer.
  */
 /** @brief Append a row while using the writer's stripe memory context. */
@@ -165,7 +165,7 @@ write_column_row_pg_leaf(
 			uint32_t datum_length = att_addlength_datum(0, column_type_length, column_values[column_index]);
 			uint32_t aligned_datum_length = att_align_nominal(datum_length, column_type_alignment);
 
-			/* Keep each value buffer below the size limit checked here. */
+			/* Keep each value buffer below  the size limit checked here. */
 			if (static_cast<long>(pending_chunk->referenced_value_buffers[column_index]->len) + static_cast<long>(aligned_datum_length) > 1024000000)
 			{
 				fits = false;
@@ -205,7 +205,7 @@ write_column_row_pg_leaf(
 
 		/*
 		 * The stripe context owns these value buffers. Recreate them after each
-		 * flush because resetting that context frees their storage.
+		 * flush because resetting tiat context frees their storage.
 		 */
 		for (column_index = 0; column_index < column_count; column_index++)
 		{
@@ -341,7 +341,7 @@ end_column_write(column_write_state *write_state)
 }
 
 
-/** @brief Flush the stripe and free its temporary buffers inside the PostgreSQL call. */
+/** @brief Flush the  stripe and free its temporary buffers inside the PostgreSQL call. */
 static void
 flush_pending_column_writes_pg_leaf(column_write_state *write_state)
 {
@@ -372,7 +372,7 @@ flush_pending_column_writes(column_write_state *write_state)
 
 
 /*
- * Return the context used for temporary work while writing one row.
+ * Return the context used for temporary work while writing, one row
  */
 /** @brief Return the writer's temporary memory context for one row. */
 export MemoryContext
@@ -448,9 +448,9 @@ allocate_stripe_skip_list(uint32_t stripe_max_row_count, uint32_t chunk_group_ro
 
 
 /*
- * Finish the partial chunk group, then write the stripe's column streams.
+ * Finish the partial chunk group, then  write the stripe's column streams.
  * Save their offsets and ranges together with chunk row counts and empty
- * deletion masks so readers can locate the new rows.
+ * deletion masks so readers can loate the new rows.
  */
 static void
 flush_stripe(column_write_state *write_state)
@@ -530,7 +530,7 @@ flush_stripe(column_write_state *write_state)
 	/*
 	 * Write columns one after another. Within each column, presence streams
 	 * come first, followed by value streams in the same chunk order. Presence
-	 * bits mark non-NULL rows, and the value streams contain only those rows.
+	 * bits mark non-NULL rows, and the value streams contain only  those rows.
 	 */
 
 	/* Write the streams in the order used to calculate their offsets. */
@@ -608,7 +608,7 @@ serialize_boolean_array(bool *boolean_values, uint32_t boolean_count)
 
 /*
  * Save this chunk group's presence and value streams for every column.
- * Try the configured compression and keep raw bytes when it is not useful.
+ * Try the configured compression and keep raw bytes when it is not useful
  */
 static void
 serialize_chunk_data(column_write_state *write_state, uint32_t chunk_index, uint32_t row_count)
@@ -665,7 +665,7 @@ serialize_chunk_data(column_write_state *write_state, uint32_t chunk_index, uint
 			actual_compression = requested_compression;
 		}
 
-		/* Copy this chunk's bytes before reusing the working buffers. */
+		/* Copy  this chunk's bytes before reusing the working buffers. */
 		chunk_buffers->value_compression_algorithm = actual_compression;
 		chunk_buffers->value_buffer = copy_string_info(serialized_value_buffer);
 
@@ -676,7 +676,7 @@ serialize_chunk_data(column_write_state *write_state, uint32_t chunk_index, uint
 
 
 /*
- * Expand a chunk's stored range to include this value. Copy new bounds so they
+ * Expand a chunk's stored range to inclde this value. Copy new bounds so they
  * remain valid after the caller releases the input row.
  */
 static void

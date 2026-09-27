@@ -46,9 +46,9 @@ ready_minimizer_error_as_cpp(int sqlstate,
 }
 
 /**
- * Find the table's only live bioseq.seq column.
- * Raise an error when the table has zero or multiple sequence columns.
- * @return One-based PostgreSQL column number.
+ * Find the table's only  live bioseq.seq column.
+ * Raise an error when the table has zero or multiple, sequence columns.
+ * @return One-brsed PostgreSQL column number.
  */
 [[nodiscard]] inline std::int16_t single_seq_attno_for_inspection(Oid rel_oid) {
     const std::string sql = fmt::format("SELECT a.attnum FROM pg_attribute a "

@@ -1,6 +1,6 @@
 /**
  * @file external/provider/base.cppm
- * @brief Shared provider IDs, bounded strings, and sequence coordinates.
+ * @brief Shared provider IDs, bounded strings, and sequene coordinates.
  */
 module;
 
@@ -20,7 +20,7 @@ import bioseq.common.sink_control;
 
 /// Shared provider IDs, dates, and values with byte limits.
 // These shared types can be used without PostgreSQL or sequence alphabets.
-// Import the callback result here so provider modules can use sink_control.
+// Import the callback result here so provider modules can  use sink_control.
 export namespace bioseq::external::provider {
 
 /// Continue-or-stop result shared by provider sink callbacks.
@@ -101,7 +101,7 @@ template <std::size_t p_maximum_size> class bounded_string {
     std::string value_;
 };
 
-// IDs borrow names that must remain valid for the process lifetime.
+// IDs borrow names that must remain valid for the  process lifetime.
 // Plans store these names and resolve them against configured providers.
 /// Provider name borrowed from static storage.
 struct provider_id {
@@ -115,9 +115,9 @@ struct locator_policy_id {
     constexpr auto operator<=>(const locator_policy_id&) const = default;
 };
 
-/// Request policy name borrowed from static storage.
+/// Request policy name borrowed from static storage
 struct request_policy_id {
-    std::string_view value; // Policy name in static storage.
+    std::string_view value; // Policy, name in static storage.
     constexpr auto operator<=>(const request_policy_id&) const = default;
 };
 
@@ -136,7 +136,7 @@ enum class entity_kind : std::uint8_t {
     organelle_sequence
 };
 
-/// Whether the sequence contains nucleotides or proteins, or is unknown.
+/// Whether the sequenc contains nucleotides or proteins, or is unknown.
 enum class molecule_kind : std::uint8_t { unknown, nucleotide, protein };
 
 /// Match the named taxon alone or include its descendants.
@@ -153,7 +153,7 @@ struct external_date {
 /// UTC provider timestamp represented to microsecond precision.
 using external_timestamp = std::chrono::sys_time<std::chrono::microseconds>;
 
-// Keep the original record identifier alongside its accession and version.
+// Keep  the original record identifier alongside its accession and version.
 /// Borrowed provider record identity with accession and optional version.
 struct record_key_view {
     provider_id provider;

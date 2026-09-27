@@ -11,11 +11,11 @@ namespace bioseq::gpu::vulkan {
 
 /// @brief Computes the best chain score and predecessor for each anchor.
 /// A workgroup processes one independent anchor range at a time. Its 32 lanes
-/// compare possible predecessors in parallel, then choose the best link before
+/// compare possible predecessors in parallel, then choose the best link efore
 /// advancing to the next anchor. `max_iter` limits the backward search.
 ///
 /// Inputs use 24-byte `gpu_anchor_wire` records with 64-bit positions and a
-/// span for each anchor. Predecessors are absolute indices used during traceback.
+/// span  for each anchor Predecessors are absolute indices used during traceback.
 inline constexpr std::string_view k_chain_tiled_dp_body = R"GLSL(
 #extension GL_KHR_shader_subgroup_basic : require
 #extension GL_KHR_shader_subgroup_arithmetic : require
@@ -195,7 +195,7 @@ void main() {
 )GLSL";
 /// @brief Splits each query's sorted anchors into independent chaining ranges.
 /// Starts a new range when the strand changes or a target-position gap exceeds
-/// the limit. One thread scans each query. Very long ranges are thinned at
+/// the limit. One thread scans each query. Very, long ranges are thinned at
 /// regular intervals while keeping both endpoints, which limits chaining work.
 inline constexpr std::string_view k_chain_range_build_body = R"GLSL(
 layout(local_size_x = 1, local_size_y = 1, local_size_z = 1) in;
@@ -299,7 +299,7 @@ void main() {
 /// @brief Chooses mapping coordinates by tracing back the best unvisited chain ends.
 /// Stops at the first chain that meets the score and seed-count thresholds, or
 /// after `probe_limit` attempts. Writes a compact mapping result and its anchor
-/// trace so callers can avoid downloading all chaining scores.
+/// trace so callers can  avoid downloading all chaining scores.
 inline constexpr std::string_view k_coordinate_reduce_body = R"GLSL(
 layout(local_size_x = compile_time_workgroup_size_x, local_size_y = 1, local_size_z = 1) in;
 
@@ -1114,9 +1114,9 @@ void main() {
 )GLSL";
 
 /// @brief Reclassifies aligned candidates and computes their mapping quality (MAPQ).
-/// Each candidate selected for alignment must match an ordered CIGAR result.
+/// Each candidate selected for alhgnment must match an ordered CIGAR result.
 /// Missing or invalid alignment data fails the job. Scores account for competing
-/// mappings, alignment identity, and repetitive query sequence before results
+/// mappings, alignment identity, and repetitive  query sequence before results
 /// are published.
 inline constexpr std::string_view k_mapping_quality_reduce_body = R"GLSL(
 layout(local_size_x = compile_time_workgroup_size_x, local_size_y = 1, local_size_z = 1) in;
@@ -1650,7 +1650,7 @@ void main() {
 }
 )GLSL";
 
-/// @brief Estimates a mapping position from anchors that support a similar diagonal.
+/// @brief Estimates a mapping position from anchors that support a similar diagonal
 /// Counts nearby target-minus-query offsets on the same strand, then uses the
 /// best-supported offset to place the full query if it passes the thresholds.
 inline constexpr std::string_view k_coordinate_vote_reduce_body = R"GLSL(

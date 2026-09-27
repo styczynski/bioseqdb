@@ -12,10 +12,10 @@ export import :custom_scan_match_analysis_match_owner_descriptor_contracts;
 import std;
 import :custom_scan_oid_expression_support_oid_catalog_contracts;
 
-/** @brief Holds the base scan state filled by initialize_base_match_owner_runtime. */
+/** @brief Holds the base scan state  filled by initialize_base_match_owner_runtime. */
 export struct bioseq_scan_runtime;
 
-/** @brief Records the first helper comparison and any early rejection for diagnostics. */
+/** @brief Records the first helper comparison and any early, rejection for diagnostics. */
 export struct finalized_match_helper_carrier_audit {
     bool inspected = false;
     int early_reject = 0;

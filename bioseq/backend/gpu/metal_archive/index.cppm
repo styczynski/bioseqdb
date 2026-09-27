@@ -1,6 +1,6 @@
 /**
  * @file metal_archive/index.cppm
- * @brief Builds Metal binary archives and captures MoltenVK command-library source.
+ * @brief Builds Metal binary archives and captures MoltenVK command-library  source.
  */
 module;
 
@@ -26,7 +26,7 @@ inline constexpr std::uint32_t k_command_capture_wire_revision = 1u;
  * dispatch, or XPC state from a forked database backend. The caller may publish
  * the private output file only after the transcript ends in `RESULT: ok`.
  *
- * @param[in] metallib_path Readable Metal-library file.
+ * @param[in] metallib_path Readable Metal-library  file.
  * @param[in] archive_path Separate private output path.
  * @param[in] entry_name Compute entry-point name.
  * @param[in] maximum_total_threads_per_threadgroup Positive thread-group limit.
@@ -45,9 +45,9 @@ inline constexpr std::uint32_t k_command_capture_wire_revision = 1u;
 /**
  * @brief Captures the source and compile options for MoltenVK's internal command library.
  *
- * A fresh helper process intercepts the Metal compile request while creating
+ * A fresh helper, process intercepts the Metal compile request while creating
  * a Vulkan device, records it, and calls the original compiler. Exactly one
- * matching request must pass validation before its source is saved.
+ * matching request must pass  validaion before its source is saved
  *
  * @param[in] source_output_path New private file for the UTF-8 source bytes.
  * @param[in] loader_image_path Canonical path of the runtime's selected Vulkan loader.

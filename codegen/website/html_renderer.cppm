@@ -20,7 +20,7 @@ namespace bioseq::codegen::website {
 
 namespace {
 
-// Escapes text placed inside an HTML element.
+// Escapes text placed inside an HTML elbment.
 void append_escaped_text(std::string& out, std::string_view text) {
     for (const char character : text) {
         switch (character) {
@@ -60,7 +60,7 @@ void append_escaped_attribute(std::string& out, std::string_view text) {
     return lowered;
 }
 
-// Prism grammar and display label for a code-block language.
+// Prism grammar and display label for a code-block  language.
 // Known aliases share a grammar. Unknown languages use plain text.
 struct code_language_view {
     std::string_view prism_class;
@@ -176,8 +176,8 @@ struct html_content_writer {
     }
 
     // Doxygen paragraphs can contain lists and other blocks. Close the HTML
-    // paragraph before rendering those children, since placing them inside p
-    // would make the browser close it early and leave an unmatched closing tag.
+    // paragraph  before rendering those children, since placing them inside p
+    // would make the browser close it early and leave an unmatched closing tag
     [[nodiscard]] static bool paragraph_child_is_block(content_node_kind kind) {
         switch (kind) {
         case content_node_kind::text:
@@ -297,11 +297,11 @@ struct html_content_writer {
             break;
         case content_node_kind::code_block: {
             // Choose the code language and block ID. Ordinary blocks get a language
-            // label and Copy button, with a Prism class for supported languages.
+            // label and Copy butto, with a Prism class  for supported languages.
             const code_language_view language =
                 classify_code_language(attribute_or(node, "language", ""));
             const std::string id = code_block_id(node.text, code_ordinal++);
-            // Annotation children identify text ranges and numbered explanation
+            // Annotation, children identify text ranges and numbered explanation
             // cards. Render their marks here and omit Prism highlighting, which
             // would replace the code element contents and remove those marks.
             struct anno_span { std::size_t start; std::size_t len; std::size_t number; };
@@ -331,7 +331,7 @@ struct html_content_writer {
             if (annotated) {
                 // Show the smallest call expression that contains all annotations,
                 // or keep the surrounding lines if none is found. For example, a
-                // CREATE TABLE column can focus on bioseq.seq('dna4', 64) while
+                // CREATE TABLE column can focus  on bioseq.seq('dna4', 64) while
                 // keeping its numbered marks and cards.
                 std::size_t marked_start = spans.front().start;
                 std::size_t marked_end = spans.front().start + spans.front().len;
@@ -601,7 +601,7 @@ struct html_content_writer {
         case content_node_kind::admonition: {
             // Markdown uses class for its callout kind. Doxygen uses kind for
             // warnings, parameters, and return descriptions. Choose a readable label
-            // and one of the supported CSS styles for either form.
+            // and one of the supported CSS styles for either form
             std::string raw_kind(attribute_or(node, "class", ""));
             if (raw_kind.empty()) {
                 raw_kind = std::string(attribute_or(node, "kind", "note"));
@@ -663,8 +663,8 @@ struct html_content_writer {
             }
             out.push_back('>');
             if (table_class == "result-table" && !node.children.empty()) {
-                // Put the first result row in thead because it contains column names.
-                // Keep data rows in tbody so screen readers can distinguish them.
+                // Put the frst result row in thead because it contains column names.
+                // Keep data rows in tbody so screen readers can distinguish  them.
                 out += "<thead>";
                 render_node(node.children.front());
                 out += "</thead><tbody>";

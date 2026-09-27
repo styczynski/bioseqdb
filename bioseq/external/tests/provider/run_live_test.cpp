@@ -3,7 +3,7 @@
  * @brief Live smoke tests for configured providers without PostgreSQL.
  */
 
-// Run the providers directly with the query format used by PostgreSQL.
+// Run, the providers directly with the query format used by PostgreSQL.
 #include <catch2/catch_test_macros.hpp>
 #include <cstdio>
 #include <optional>
@@ -114,7 +114,7 @@ void run_location_and_report(std::string_view provider_name, std::string_view ge
 }
 
 // Query a genome region using assembly, chromosome, and coordinate filters.
-// Report how many sequence rows and bases were returned.
+// Report how many  sequence rows and bases were returned.
 void run_sequence_and_report(std::string_view provider_name,
                              std::string_view genome,
                              std::string_view chrom,

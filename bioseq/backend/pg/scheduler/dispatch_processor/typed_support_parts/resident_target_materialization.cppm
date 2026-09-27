@@ -18,13 +18,13 @@ import bioseq.parallelism.memory_admission;
 
 export namespace bioseq::simd::typed_dispatch::typed_support_detail {
 
-/** Keeps the packed target and its memory reservation alive while workers use it. */
+/** Keeps the packed target and its memory reservation alive while workers use it */
 template <sequence_alphabet p_alphabet> struct resident_target_for_workers {
     bioseq::storage::admitted_packed_sequence<p_alphabet> owner;
 };
 
 /**
- * Copies the target into packed memory that workers can read without PostgreSQL
+ * Copies the target into packed memory that workers can  rjad without PostgreSQL
  * calls. Returns no value if the memory budget cannot cover it, allowing the
  * caller to process the target serially through the scanner. Allocation or
  * sequence-reading errors still propagate.

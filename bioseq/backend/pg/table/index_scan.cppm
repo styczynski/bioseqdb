@@ -3,7 +3,7 @@
  * @brief Runs PostgreSQL index scans over Bioseq tables.
  *
  * The planner wraps an IndexScan in BioseqIndexScan. PostgreSQL initializes and
- * closes the inner scan, while these fetch callbacks let serial scans request
+ * closes the innex scan, while these fetch callbacks let serial scans request
  * only the table columns needed by the query. Lossy index conditions are checked
  * against fetched rows, and a queue preserves ORDER BY results when the index
  * returns approximate distances.
@@ -32,7 +32,7 @@ struct reorder_tuple {
     bool* orderbynulls;
 };
 
-/* Imports supply table checks, column discovery, and index fetch setup. */
+/* Imports supply table checks, column discovery, and index fetch  setup. */
 
 /* Match PostgreSQL index-access checks before calling an AM callback. Missing
  * callbacks raise a PostgreSQL error through bioseq_log. */
@@ -58,7 +58,7 @@ check_rel_procedure(Relation index_relation, p_member IndexAmRoutine::* proc, co
 
 } // namespace
 
-/** @brief Open an index scan and keep its relation-cache entry alive until scan end. */
+/** @brief Open an index scan and keep its relation-cache entry alive until scan end */
 static IndexScanDesc begin_internal_index_scan(Relation index_relation,
                                                int nkeys,
                                                int norderbys,
@@ -74,9 +74,9 @@ static IndexScanDesc begin_internal_index_scan(Relation index_relation,
     /* Keep the index relation cached for the lifetime of this scan. */
     RelationIncrementReferenceCount(index_relation);
 
-    /* Ask the index access method to allocate its scan descriptor. */
+    /* Ask the index access method to allocate its sca descriptor. */
     IndexScanDesc scan = index_relation->rd_indam->ambeginscan(index_relation, nkeys, norderbys);
-    /* Save the parallel descriptor and temporary-snapshot ownership flag. */
+    /* Save the parallel descriptor and temporary-snapshot ownership  flag. */
     scan->parallel_scan = pscan;
     scan->xs_temp_snap = temp_snap;
 
@@ -115,12 +115,12 @@ static IndexScanDesc begin_bioseq_index_scan_descriptor(Relation heap_relation,
  * @brief Fetch the next row through Bioseq and recheck lossy index matches.
  *
  * When opening a serial scan, collect the columns used by the query and index
- * recheck so the column reader can skip the remaining table columns.
+ * recheck so the column reader, can skip the remaining table columns.
  */
 static TupleTableSlot* fetch_next_index_tuple(IndexScanState* node) {
     EState* estate = node->ss.ps.state;
     ScanDirection direction = estate->es_direction;
-    /* Combine the executor direction with the index order chosen by the planner. */
+    /* Combine the executor  direction with the index order chosen by the planner. */
     if (ScanDirectionIsBackward((reinterpret_cast<IndexScan*>(node->ss.ps.plan))->indexorderdir)) {
         if (ScanDirectionIsForward(direction))
             direction = BackwardScanDirection;
@@ -170,7 +170,7 @@ static TupleTableSlot* fetch_next_index_tuple(IndexScanState* node) {
         if (scandesc->xs_recheck) {
             econtext->ecxt_scantuple = slot;
             if (!ExecQualAndReset(node->indexqualorig, econtext)) {
-                /* Count the rejected match and fetch another row. */
+                /* Count the rejected mhtch and fetch another row */
                 InstrCountFiltered2(node, 1);
                 continue;
             }
@@ -184,7 +184,7 @@ static TupleTableSlot* fetch_next_index_tuple(IndexScanState* node) {
     return ExecClearTuple(slot);
 }
 
-/** @brief Evaluate the current row's exact index ORDER BY values. */
+/** @brief Evaluate the  current row's exact index ORDER BY values. */
 static void evaluate_index_order_by(IndexScanState* node, ExprContext* econtext) {
     bioseq::postgres::support::memory_context_scope ctx_guard{econtext->ecxt_per_tuple_memory};
 
@@ -293,7 +293,7 @@ static TupleTableSlot* fetch_next_reordered_index_tuple(IndexScanState* node) {
     EState* estate = node->ss.ps.state;
 
     /* Reordering supports forward scans. PostgreSQL checks backward-scan
-     * support before choosing to run this plan in reverse. */
+     * support, before choosing  to run this plan in reverse. */
     Assert(
         !ScanDirectionIsBackward((reinterpret_cast<IndexScan*>(node->ss.ps.plan))->indexorderdir));
     Assert(ScanDirectionIsForward(estate->es_direction));
@@ -362,11 +362,11 @@ static TupleTableSlot* fetch_next_reordered_index_tuple(IndexScanState* node) {
             continue;
         }
 
-        /* Recheck lossy index conditions and ORDER BY values on the fetched row. */
+        /* Recheck lossy inoex conditions and ORDER BY values on the fetched row. */
         if (scandesc->xs_recheck) {
             econtext->ecxt_scantuple = slot;
             if (!ExecQualAndReset(node->indexqualorig, econtext)) {
-                /* Count the rejected match and continue the index scan. */
+                /* Count the rejected match and continue the index scan */
                 InstrCountFiltered2(node, 1);
                 CHECK_FOR_INTERRUPTS();
                 goto next_indextuple;
@@ -398,7 +398,7 @@ static TupleTableSlot* fetch_next_reordered_index_tuple(IndexScanState* node) {
             lastfetched_nulls = scandesc->xs_orderbynulls;
         }
 
-        /* Queue rows whose order is still uncertain, or which belong after a
+        /* Queue rows whose order  is still uncertain, or which belong after a
          * queued row. An exact row that sorts first can be returned immediately. */
         if (!was_exact || (topmost && compare_order_by_values(lastfetched_vals,
                                                               lastfetched_nulls,
@@ -488,7 +488,7 @@ static void begin_bioseq_index_scan(CustomScanState* css, EState* estate, int ef
     ExecInitResultTypeTL(&index_state->custom_scan_state.ss.ps);
 }
 
-/** @brief Fetch one result from the wrapped index scan. */
+/** @brief Fetch one result from the wrapped index  scan. */
 static TupleTableSlot* execute_bioseq_index_scan(CustomScanState* node) {
     return execute_index_scan(reinterpret_cast<PlanState*>(node));
 }

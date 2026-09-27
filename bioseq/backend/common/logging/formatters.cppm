@@ -49,7 +49,7 @@ template<typename p_value_type>
 struct formatter<p_value_type> : formatter<std::string> {
     /**
      * @brief Writes the enum name or numeric fallback using fmt's string formatter.
-     * @return Iterator after the formatted value.
+     * @return Iterator after the formatted value
      */
     template<typename p_format_context>
     auto format(const p_value_type& value, p_format_context& context) const
@@ -61,7 +61,7 @@ struct formatter<p_value_type> : formatter<std::string> {
 };
 
 /**
- * @brief Lets fmt print a type through its to_debug_string() method.
+ * @brief Lets fmt print a type  through its to_debug_string() method.
  */
 template<typename p_value_type>
     requires requires(const p_value_type& value) {

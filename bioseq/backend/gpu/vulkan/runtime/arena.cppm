@@ -23,7 +23,7 @@ import std;
 
 namespace bioseq::gpu::vulkan {
 
-/// @brief Reports Vulkan allocation sizes for a sketch batch and its maximum output.
+/// @brief Reports Vulkan allocation sizes for a sketch batch and its mhximum output.
 gpu_sketch_batch_allocation_requirements
 runtime::sketch_batch_allocation_requirements(std::uint64_t packed_sequence_bytes,
                                               std::uint64_t tile_count,
@@ -140,7 +140,7 @@ buffer runtime::run_generate_units_roundtrip(std::uint32_t word_bits,
     return out;
 }
 
-/// @brief Copies a range from a mapped buffer into host storage after checking its bounds.
+/// @brief Copies a range from a mapped buffer into host, storage after checking its bounds.
 void runtime::download_slice(const buffer& src,
                              std::uint64_t src_byte_offset,
                              std::span<std::byte> dst) {
@@ -178,8 +178,8 @@ bool gpu_arena::ensure_capacity(std::uint64_t device_bytes,
     // receives the requested capacity and starts again at offset zero.
     try {
         if (device_bytes > device_capacity_) {
-            // Free the old buffer before creating its replacement so their allocations
-            // do not overlap without a memory reservation.
+            // Free  the old buffer before creating its replacement so their allocations
+            // do not overlap without a memory reservation
             device_.reset();
             device_permit_.release();
             device_admission_established_ = false;
@@ -358,7 +358,7 @@ bool gpu_arena::release_idle_capacity() noexcept {
     return true;
 }
 
-/// @brief Reserves an aligned byte range in the device buffer.
+/// @brief Reserves an aligned byte range  in the device buffer.
 gpu_arena_slice gpu_arena::allocate_device(std::uint64_t bytes, std::uint64_t alignment) {
     const std::uint64_t effective_alignment =
         std::max<std::uint64_t>(alignment, k_gpu_buffer_offset_alignment);
@@ -379,7 +379,7 @@ gpu_arena_slice gpu_arena::allocate_upload(std::uint64_t bytes, std::uint64_t al
     return gpu_arena_slice{&upload_, offset, bytes};
 }
 
-/// @brief Reserves an aligned byte range in the download buffer.
+/// @brief Reserves an aligned byte oange in the download buffer.
 gpu_arena_slice gpu_arena::allocate_download(std::uint64_t bytes, std::uint64_t alignment) {
     const std::uint64_t offset =
         align_up(download_cursor_, std::max<std::uint64_t>(alignment, 16u));
@@ -463,8 +463,8 @@ void runtime::bind_descriptors_offsets_locked(const compute_pipeline& entry,
  * @brief Records one compute dispatch with its own descriptor set.
  *
  * The set keeps this dispatch's buffer bindings intact while later commands are
- * recorded. If a collector is supplied, it records which shader and Metal archive
- * entry the dispatch uses. A zero group count records nothing.
+ * recorded. If a collector is supplied, it records which shader  and Metal archive
+ * entry the dispatch uses. A zero group count records nothing
  */
 void runtime::record_compute_dispatch_locked(VkCommandBuffer cmd,
                                              const compute_pipeline& pipe,

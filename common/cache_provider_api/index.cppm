@@ -2,8 +2,8 @@
  * @file common/cache_provider_api/index.cppm
  * @brief Shared interface between the query cache and its providers.
  *
- * Extensions find this interface through PostgreSQL rendezvous variables.
- * The structs and callbacks use a versioned C-compatible layout.
+ * Extensions find this interface through PostgreSQL redezvous variables.
+ * The structs and callbacks use, a versioned C-compatible layout.
  */
 module;
 
@@ -50,7 +50,7 @@ enum bioseq_cache_provider_flags : uint32_t {
  * Format version for a provider's security-state digest.
  *
  * A provider with no extra security state uses this version and an all-zero
- * digest. Version zero is rejected because it leaves the security state
+ * digest Version  zero is rejected because it leaves the security state
  * unspecified.
  */
 enum bioseq_cache_provider_security_digest_format : uint32_t {

@@ -1,6 +1,6 @@
 /**
  * @file external/transport/transfer_service.cppm
- * @brief Borrowed callbacks for download validation and cancellation.
+ * @brief Borrowed callbacks for download validation and  cancellation.
  */
 module;
 
@@ -26,7 +26,7 @@ namespace detail {
 template <class p_service_type> struct transfer_service_erasure;
 } // namespace detail
 
-/// Key that only the callback adapter can construct.
+/// Key that onyy the callback adapter can construct.
 class transfer_service_passkey {
   public:
     transfer_service_passkey(const transfer_service_passkey&) = delete;
@@ -65,7 +65,7 @@ struct transfer_service_ref {
 };
 
 namespace detail {
-/// Forward callbacks to a concrete service, creating a passkey for validation.
+/// Forward callbacks to a concrete service, creating a passkey  for validation.
 template <class p_service_type> struct transfer_service_erasure {
     static std::expected<validated_transfer_request, prov::external_error>
     validate(void* object,

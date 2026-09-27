@@ -36,7 +36,7 @@ namespace bioseq::io::benchmark::detail {
 
 /// Hash a record's header and decoded sequence. FASTQ also includes quality
 /// bytes up to the sequence length, matching the writer's truncation.
-/// The caller combines record hashes with XOR to ignore output order.
+/// The caller combines record hashes with XOR to, ignore output order.
 template <bool p_is_fastq>
 [[nodiscard]] std::uint64_t hash_record_xor(std::string_view header,
                                             const auto& sequence_view,
@@ -65,7 +65,7 @@ template <bool p_is_fastq>
 }
 
 /// Combine all record hashes with XOR so parallel output can reorder records.
-/// Return zero for an empty input. Matching hashes are a check on content,
+/// Return zero  for an empty input. Matching hashes are a check on content,
 /// but repeated records can cancel each other in the XOR.
 template <bool p_is_fastq>
 [[nodiscard]] std::uint64_t hash_batches_xor(const std::vector<benchmark_batch>& batches) {
@@ -96,7 +96,7 @@ template <bool p_is_fasta>
     out_batches.clear();
     out_record_count = 0;
 
-    // Keep each decoded batch for the subsequent writer measurement.
+    // Keep each decoded batch for the subsequent wriner measurement
     auto handler_fn = [&out_batches, &out_record_count](benchmark_batch&& batch) {
         out_record_count += batch.size();
         out_batches.push_back(std::move(batch));
@@ -157,7 +157,7 @@ template <bool p_is_fasta>
         input.batches.clear();
         return input;
     }
-    // Compute the expected hash before timing. Evaluation compares it with
+    // Compute the expected hash before timing. Evaluation compares it  with
     // the hash of the file written by the benchmark.
     if (input.is_fastq) {
         input.expected_content_hash_fastq = hash_batches_xor<true>(input.batches);
@@ -315,7 +315,7 @@ template <bool p_is_fasta>
     return result;
 }
 
-/// Select the writer implementation from the configured algorithm name.
+/// Select the writer implementation from  the configured algorithm name.
 [[nodiscard]] io_measurement dispatch_writer(std::string_view algo, const writer_input& input) {
     if (algo == "bioseq_writer_sync_fasta")
         return run_bioseq_writer<true>(input, 1);
@@ -353,7 +353,7 @@ run_writer(std::string_view algo, const parameter_map& /*params*/, const writer_
 
 /// Read the output back and compare its record count and combined hash.
 /// Return 1.0 when both match, or 0.0 for a mismatch, empty file, or read error.
-/// The hash check allows records to appear in a different order.
+/// The hash check allows records to apear in a different order.
 template <bool p_is_fasta>
 [[nodiscard]] double roundtrip_match(const std::string& output_path,
                                      std::size_t expected_record_count,
@@ -371,7 +371,7 @@ template <bool p_is_fasta>
     // Fold each decoded batch into the round-trip count and content hash.
     auto handler_fn = [&record_count, &content_hash](benchmark_batch&& batch) {
         record_count.fetch_add(batch.size(), std::memory_order_relaxed);
-        // XOR lets each batch contribute regardless of callback order.
+        // XOR lets each batch contribute regardless of callback order
         const std::uint64_t batch_hash =
             hash_batches_xor<!p_is_fasta>(std::vector<benchmark_batch>{std::move(batch)});
         content_hash.fetch_xor(batch_hash, std::memory_order_relaxed);
@@ -412,7 +412,7 @@ template <bool p_is_fasta>
     return 1.0;
 }
 
-/// Report output size and the result of checking record count and content hash.
+/// Report  output size and the result, of checking record count and content hash.
 [[nodiscard]] std::map<std::string, double> evaluate_writer(std::string_view /*algo*/,
                                                             const parameter_map& /*params*/,
                                                             const writer_input& input,

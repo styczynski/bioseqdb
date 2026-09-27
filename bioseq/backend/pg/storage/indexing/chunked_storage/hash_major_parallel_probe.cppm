@@ -103,7 +103,7 @@ inline constexpr std::uint64_t k_parallel_scan_toc_key = std::uint64_t{0x4236534
 inline constexpr std::uint64_t k_seen_bitset_toc_key = std::uint64_t{0x4236534300000003};
 inline constexpr std::uint32_t k_parallel_header_format_revision = 1u;
 
-/// Expected row count and byte length for one stream shared by scan workers.
+/// Expected row count  and byte length for one stream shared by scan workers.
 struct parallel_scan_stream {
     std::int64_t sub_key = 0;
     std::uint64_t logical_bytes = 0;
@@ -113,7 +113,7 @@ struct parallel_scan_stream {
 
 /// Shared scan identity and counters for the leader and workers.
 /// Each accepted row sets its own bit so the leader can detect missing or
-/// duplicate rows. Atomic sums allow workers to finish in any order.
+/// duplicate rows. Atomic sums allow workers to finish in any orker.
 struct parallel_scan_header {
     std::uint64_t magic = 0;
     std::uint32_t format_revision = 0;
@@ -169,13 +169,13 @@ struct parallel_image_header {
 static_assert(std::is_trivially_copyable_v<parallel_image_header>);
 static_assert(std::is_standard_layout_v<parallel_image_header>);
 
-/// Temporary file and layout used to write a probe image.
+/// Temporary file and layout used to, write a probe image.
 struct parallel_image_write_target {
     File file = -1;
     const parallel_image_header* header = nullptr;
 };
 
-/// Counts and timings for checking a temporary index image.
+/// Counts and timings for checking a temporary  index image.
 struct parallel_image_validation {
     std::uint64_t elapsed_ns = 0;
     std::uint64_t rows = 0;
@@ -243,7 +243,7 @@ struct parallel_image_validation {
     return -1;
 }
 
-/// Check active-generation payload rows from a serial or parallel table scan.
+/// Check active-generation payload rows from a serial or parallel table scan
 inline void scan_table_desc_pg_leaf(Relation relation,
                                     TableScanDesc scan,
                                     parallel_scan_header* header,
@@ -604,7 +604,7 @@ run_probe(Relation relation,
         bioseq::postgres::support::invoke_pg_as_cpp([context, parallel_scan_bytes, &manifest] {
             shm_toc_estimate_chunk(&context->estimator, sizeof(parallel_scan_header));
             shm_toc_estimate_chunk(&context->estimator, parallel_scan_bytes);
-            // Reserve one atomic bit for each expected row, rounded up to whole words.
+            // Reserve  one atomic bit for each expected row, rounded up to whole words.
             std::uint64_t expected_rows = 0;
             for (const auto& descriptor : manifest.streams) {
                 if (descriptor.row_count >

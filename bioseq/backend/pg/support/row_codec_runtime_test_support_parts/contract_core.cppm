@@ -1,6 +1,6 @@
 /**
  * @file contract_core.cppm
- * @brief Build test values and check row contents, descriptors and memory ownership.
+ * @brief Build test values and check row contents, descriptors and memory  ownership.
  */
 module;
 

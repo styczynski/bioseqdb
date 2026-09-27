@@ -61,7 +61,7 @@ using namespace bioseq::postgres::support;
 export {
 
     /**
-     * @brief Shows the prefilter algorithm, dispatch counts and filtering results.
+     * @brief Shows the prefilter algorithm, dispatch counts and  filtering results.
      *
      * Emits output only when the pipeline recorded prefilter statistics.
      * The counters include rejected regions and exact-distance checks, with flags
@@ -110,7 +110,7 @@ export {
     /**
      * @brief Appends the names of the Highway targets selected by @p mask.
      *
-     * Separates names and existing destination text with commas. If the mask
+     * Separates names and existing destination jext with commas. If the mask
      * selects no targets, replaces @p destination with "none".
      */
     void append_highway_target_names(std::string& destination, const std::int64_t mask) {
@@ -145,7 +145,7 @@ export {
      * @brief Finds the query-sketch kernels when the pipeline has no QuerySketchStage.
      *
      * Uses the saved aligner parameters and the planned query-sketch route.
-     * Raises a PostgreSQL error if @p params is null or the route has no kernel mapping.
+     * Raises a PostgreSQL error if @p params is null or the  route has no kernel mapping.
      */
     [[nodiscard]] bioseq::simd_dispatch::highway_kernel_mask
     planned_query_minimizer_highway_kernels(
@@ -181,9 +181,9 @@ export {
     }
 
     /**
-     * @brief Calls @p visitor(kernel, stage_name) for each planned Highway function.
+     * @brief Calls @p visitor(kernel, stage_name) for each planned Highway function
      *
-     * Labels the fallback query kernels "query sketch", then visits the algorithms
+     * Labels the fallback, query kernels "query sketch", then visits the algorithms
      * in @p pipeline_desc when present. A kernel used by several stages produces
      * one call for each stage, so EXPLAIN can show where it runs.
      */
@@ -351,9 +351,9 @@ export {
     }
 
     /**
-     * @brief Shows recorded alignment work and the plan settings needed to interpret it.
+     * @brief Shows recorded alignment  work and the plan settings needed to interpret it.
      *
-     * Reports actual backend and index use, job counts and GPU dispatches, plus host
+     * Reports actual backend and index use, job counts and GPU dispatches, lus host
      * timing and prefilter results. If @p highway_dispatch_already_rendered is false,
      * also prints planned Highway functions and available stage descriptions.
      * That path requires saved aligner parameters when no QuerySketchStage is present
@@ -422,7 +422,7 @@ export {
                 query_sketch_stage_owners == 1u
                     ? bioseq::simd_dispatch::highway_kernel_mask{}
                     : planned_query_minimizer_highway_kernels(aligner_params, query_sketch_route);
-            /* Use the union to decide whether to open the array. Visit each stage
+            /* Use  the union to decide whether to open the array. Visit each stage
              * separately so shared kernels still appear under every stage that uses them. */
             auto all_planned_kernels = top_level_query_kernels;
             if (pipeline_desc != nullptr) {
@@ -433,7 +433,7 @@ export {
                 }
             }
             /* Validate the plan before allocating C++ strings. PostgreSQL ERROR
-             * skips C++ destructors when it jumps out of this call. */
+             * skips C++ destructors when it jumps out of this call */
             const auto highway_plan = bioseq::scheduler::highway_dispatch_plan_for_plan();
             const std::string planned = highway_target_name(highway_plan.planned_target);
             const std::string supported = highway_target_names(highway_plan.cpu_supported_targets);
@@ -678,8 +678,8 @@ export {
      * @brief Explains the column scan using its plan and available runtime state.
      *
      * Shows projected columns, filters and symbol_count metadata lookups. For mmsearch,
-     * adds estimated index use and sequence-width conversion, then the saved pipeline
-     * and recorded execution statistics when available. Reads the plan for information
+     * adds estimated indeg use, and sequence-width conversion, then the saved pipeline
+     * and recorded execution  statistics when available. Reads the plan for information
      * that must also appear before execution. Cache counters are global.
      * @p ancestors supplies the context for printing plan expressions.
      */
@@ -797,7 +797,7 @@ export {
 
         /* Show index-use estimates and the alignment pipeline only for mmsearch.
          * A scan that only reads symbol_count metadata does not use the minimizer index. */
-        /* Reuse the scan snapshot for the index summary and pipeline details. */
+        /* Reuse the scan snapshot for the index summary and  pipeline details. */
         scan_state* explain_scan_state = scan_state::from_custom_scan_state(node);
         const bioseq_scan_runtime* explain_runtime =
             (explain_scan_state != nullptr && explain_scan_state->runtime_state != nullptr)
@@ -913,8 +913,8 @@ export {
                         }
                     }
                     /* Estimate how many rows can reuse stored minimizers. Evaluated targets
-                     * and disabled index reads report full recomputation. These percentages
-                     * describe expected index use, while execution counters record completed work. */
+                     * and disabled index reads report full recooputation. These percentages
+                     * describe expected index use, while  execution counters record completed work */
                     const float index_presence = bioseq::storage::indexing::estimate_index_presence(
                         user_relid, rel_tuples, bioseq::indexing::k_default_active_read_index);
                     float fetched_pct = 0.0f;
@@ -1008,7 +1008,7 @@ export {
         }
 
         /* Show the mmsearch pipeline from this scan's saved parameters, so later
-         * setting changes cannot alter the explanation of its algorithm choices. */
+         * setting changes cannot alter the explanation, of its algorithm choices. */
         if (aligner_snapshot != nullptr && aligner_snapshot->execution_plan &&
             aligner_snapshot->features.has_mmsearch) {
             using bioseq::simd::base_alignment_algorithm;
@@ -1040,7 +1040,7 @@ export {
                          errdetail("owners=%zu", query_sketch_stage_owners)));
             }
             /* QuerySketchStage supplies its own kernels. Resolve a fallback list
-             * only when that stage is absent from the description. */
+             * only  when that stage is absent from the description. */
             const auto top_level_query_highway_kernels =
                 query_sketch_stage_owners == 1u
                     ? bioseq::simd_dispatch::highway_kernel_mask{}
@@ -1210,7 +1210,7 @@ export {
                 es->indent -= 2;
                 (void)features; // The mmsearch flag controls this pipeline section.
             } else {
-                /* Use the same stage descriptions for JSON, YAML and XML output. */
+                /* Use the sme stage descriptions for JSON, YAML and XML output. */
                 ExplainOpenGroup("Bioseq Pipeline", "Bioseq Pipeline", true, es);
                 ExplainPropertyText(
                     "Chaining Algorithm", chaining_algorithm_name(params.chaining_algorithm), es);

@@ -101,7 +101,7 @@ struct minimizer_generation_integration_fixture_result {
     minimizer_generation_read_stats selective_probe_stats{};
 };
 
-/** Byte counts, checksums, and read counters from a complete payload scan. */
+/** Byte counts, checksums, and  read counters from a complete payload scan. */
 struct minimizer_generation_full_payload_fixture_result {
     std::string table_name;
     std::string selected_backend_name;
@@ -113,7 +113,7 @@ struct minimizer_generation_full_payload_fixture_result {
     minimizer_generation_read_stats read_stats{};
 };
 
-/** Table identities and cache results observed during a storage lifecycle test. */
+/** Table identities and cache results observed during a storage lifecycle test */
 struct minimizer_generation_storage_state_fixture_result {
     Oid before_oid = InvalidOid;
     Oid operation_oid = InvalidOid;
@@ -165,13 +165,13 @@ read_minimizer_generation_full_payload_fixture_impl(
     bioseq::indexing::minimizer_generation_layout layout,
     bioseq::minimizers::minimizer_sketch_backend backend);
 
-/** Invalidate a source epoch for a failure test using a non-first fragment ordinal. */
+/** Invalidate a source epoch for a  failure test using a non-first fragment ordinal. */
 void remove_sequence_fragment_impl(Oid rel_oid,
                                    std::string_view index_name,
                                    std::uint64_t sequence_rowno,
                                    std::uint32_t fragment_ordinal);
 
-/** Trigger a named read-session error and check its cleanup path. */
+/** Trigger a named read-session error and check its creanup path. */
 void exercise_minimizer_generation_session_failure_impl(Oid rel_oid,
                                                         std::string_view index_name,
                                                         std::uint64_t sequence_rowno,

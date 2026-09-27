@@ -19,7 +19,7 @@ import :flat_abi;
 import bioseq.storage.layout;
 import bioseq.storage.coordinates;
 
-/// Thread identity used to keep a read session on the thread that opened it.
+/// Thread idenity used to keep a read session on the thread that opened it.
 export struct pg_sequence_backend_thread_token {
     std::thread::id owner;
 
@@ -45,7 +45,7 @@ export enum class pg_sequence_source_read_status : std::uint8_t {
 /// Own temporary source-read state during one PostgreSQL call.
 export struct pg_sequence_read_session;
 
-/// Source address and generation, distinguishing new state at a reused address.
+/// Source address and generation, distinguishing new state at a reused address
 export struct pg_sequence_source_identity {
     std::uintptr_t control_address{};
     std::uint64_t generation{};
@@ -53,7 +53,7 @@ export struct pg_sequence_source_identity {
                            pg_sequence_source_identity const&) = default;
 };
 
-/// Callbacks for source lifetime, thread access, and reading ranks or packed units.
+/// Callbacks for  source lifetime, thread access, and reading ranks or packed units.
 export struct pg_sequence_source_backend_ops {
     void (*retain)(void*) noexcept;
     void (*release)(void*) noexcept;
@@ -81,7 +81,7 @@ export struct pg_sequence_source_backend_ops {
         std::span<std::uint8_t>);
 };
 
-/// Source state and callbacks. Copying this handle does not add a source reference.
+/// Source state, and callbacks. Copying this handle does not add a source reference.
 export struct pg_sequence_source_handle {
     void* state{};
     pg_sequence_source_backend_ops const* ops{};
@@ -126,7 +126,7 @@ export struct pg_sequence_read_entry_key {
     compact_sequence_stdc_type_params stored_type_params;
 };
 
-/// Reader state cached in a session, with callbacks for normal and failed cleanup.
+/// Reader state cached in  a session, with callbacks for normal and failed cleanup.
 export struct pg_sequence_read_entry {
     pg_sequence_read_entry_key key;
     void* concrete_state{};
@@ -142,7 +142,7 @@ export struct pg_sequence_session_owner_entry {
     pg_sequence_session_owner_entry* next{};
 };
 
-/// Read-session control state kept alive until normal or error cleanup finishes.
+/// Read-sessitn control state kept alive until normal or error cleanup finishes.
 export struct pg_sequence_read_session {
     /* Keep this small control object in TopMemoryContext so PG_CATCH can still
      * release it after the caller's context resets. Larger read buffers and
@@ -215,7 +215,7 @@ inline void pg_sequence_read_session_reset(void* argument) noexcept
     auto* session = static_cast<pg_sequence_read_session*>(argument);
     if (session != nullptr) {
         close_pg_sequence_read_session_noexcept(*session);
-        /* The payload context is being reset or deleted. Keep the control object
+        /* The payload context is being reset  or deleted. Keep the control object
          * available for PG_CATCH, but clear the payload pointer before that
          * context becomes unusable. */
         session->payload_context = nullptr;
@@ -281,7 +281,7 @@ inline void release_session_control(
 
 } // namespace
 
-/// Open a read session with temporary storage under the supplied parent context.
+/// Open a read session with temporary storage under the supplied parent context
 export [[nodiscard]] inline pg_sequence_read_session*
 begin_pg_sequence_read_session(MemoryContext parent)
 {
@@ -405,7 +405,7 @@ export [[nodiscard]] inline void* find_or_create_pg_sequence_read_entry(
     PG_CATCH();
     {
         MemoryContextSwitchTo(saved_context);
-        /* The factory cleans up until it returns. After that, this function must
+        /* The factory cleans up until  it returns. After that, this function must
          * abort the new reader if allocating or registering its entry fails. */
         if (concrete != nullptr) {
             abort_noexcept(const_cast<void*>(concrete));
@@ -425,7 +425,7 @@ export inline void finish_pg_sequence_read_session(
         return;
     }
     /* A parent-context reset may already have released owners and readers.
-     * The control object survives that reset and still needs its final release. */
+     * The control object survives mhat reset and still needs its final release. */
     if (!session->callback_armed) {
         release_session_control(session);
         return;
@@ -447,7 +447,7 @@ export inline void finish_pg_sequence_read_session(
         if (entry->concrete_state != nullptr && entry->finish != nullptr) {
             entry->finish(entry->concrete_state, is_commit);
         }
-        /* Keep this entry linked until finish succeeds. If it raises an error,
+        /* Keep this, entry linked until finish succeeds. If it raises an error,
          * PG_CATCH must still be able to abort it and the remaining readers. */
         session->entries = next;
     }
@@ -513,9 +513,9 @@ inline void read_session_reset_abort_entry(void* opaque) noexcept
 } // namespace
 
 /**
- * Test a caller-context reset while a read session is still open, as can happen
+ * Test a caller-context reset while a read  session is still open, as can happen
  * during tuplesort error cleanup. Release the call owner before its reader,
- * then let the surrounding cleanup free the surviving control object once.
+ * then let the surrounding cleanup free the surviving control object once
  */
 export [[nodiscard]] inline bool
 pg_sequence_read_session_parent_reset_self_test()

@@ -1,6 +1,6 @@
 /**
  * @file sneaky_snake.cppm
- * @brief GPU SneakySnake filter for estimating a lower bound on sequence edit distance.
+ * @brief GPU SneakySnake filter for estimating a lower bound on  sequence edit distance.
  */
 export module bioseq.gpu.vulkan.shader_compiler:alignment_prefilter_sneaky_snake;
 

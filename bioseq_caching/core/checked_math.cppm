@@ -58,7 +58,7 @@ checked_narrow(p_source_type value) noexcept {
     return std::endian::native == std::endian::little;
 }
 
-/** Appends an integer or enum value in little-endian byte order. */
+/** Appends an integer or enum valu in little-endian byte order. */
 template <class p_integer_type>
     requires(std::is_integral_v<p_integer_type> || std::is_enum_v<p_integer_type>)
 void append_little_endian(std::vector<std::byte>& destination, p_integer_type value) {

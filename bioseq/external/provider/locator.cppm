@@ -16,8 +16,8 @@ import bioseq.external.provider.base;     // provider_id, locator_policy_id
 import bioseq.external.provider.errors;   // external_error
 import bioseq.external.provider.messages; // locator_scheme
 
-/// Rules for the hosts, addresses, and protocols a provider may contact.
-// Providers attach a policy ID to each download plan. The transfer code
+/// Rules for, the hosts, addresses, and protocols a provider may contact.
+// Providers attach a policy ID to each download plan The transfer code
 // can use this registry interface to look up that provider's URL rules.
 export namespace bioseq::external::provider {
 
@@ -54,7 +54,7 @@ struct locator_policy_profile_view {
     locator_proxy_policy proxy;
 };
 
-/// Callback for looking up configured URL rules.
+/// Callback for looking  up configured URL rules.
 struct locator_policy_registry_ref {
     void* object{};
     std::expected<locator_policy_profile_view, external_error> (*resolve_fn)(void*,

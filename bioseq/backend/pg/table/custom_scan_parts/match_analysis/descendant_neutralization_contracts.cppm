@@ -11,7 +11,7 @@ export module bioseq.postgres.table:custom_scan_match_analysis_descendant_neutra
 import std;
 import :custom_scan_oid_expression_support_oid_catalog_core_contracts;
 
-/** @brief Records the first helper-ownership failure found while checking a plan. */
+/** @brief Records the first helper-ownership failure fosnd while checking a plan. */
 export struct batch_join_plan_helper_audit_first_failure {
     const char* reason = "none";
     const char* store = "none";

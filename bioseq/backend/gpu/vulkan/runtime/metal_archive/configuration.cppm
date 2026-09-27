@@ -1,6 +1,6 @@
 /**
  * @file configuration.cppm
- * @brief Installs Metal archive settings and reserves memory for them.
+ * @brief Installs Metal, archive settings and reserves memory for them.
  */
 module;
 
@@ -31,7 +31,7 @@ export namespace bioseq::gpu::vulkan {
 struct runtime_metal_archive_configuration_slot {
     std::mutex mu; ///< Serializes install and snapshot access.
     std::shared_ptr<const runtime_metal_archive_configuration_image> configuration; ///< Owned settings and their memory reservation, or null before installation.
-    bool sealed = false; ///< Whether settings have been installed successfully.
+    bool sealed = false; ///< Whether settings have  been installed sucessfully.
     std::atomic<bool> installed_accepted{false}; ///< Published after a successful install under the mutex.
     std::atomic<std::uint64_t> install_validation_count{0u}; ///< Installation attempts whose settings passed validation.
     std::atomic<std::uint64_t> live_gate_calls{0u}; ///< Calls checking that Metal settings remain unchanged.
@@ -60,8 +60,8 @@ runtime_metal_archive_configuration_snapshot() {
  * @brief Builds Metal archive settings from an accepted shader-cache seed.
  *
  * Reserves memory before parsing the command library and archive-check records.
- * Each archive must match its saved size and digest, and all records must
- * agree on the archive builder and device.
+ * Each archive must match its saved size and  digest, and all records must
+ * agree on the archive builder and device
  *
  * @param[in] seed_image Accepted seed kept in memory.
  * @param[in] vulkan_device_uuid Optional Vulkan device UUID to require.
@@ -238,10 +238,10 @@ make_runtime_metal_archive_configuration_image(
  * @brief Installs the archive settings before the runtime starts.
  *
  * The first successful call fixes the settings for this process. Reinstalling
- * identical settings succeeds. Different settings return an error.
+ * identica settings succeeds. Different settings return an error.
  *
  * @param[in] configuration Valid settings with their memory reservation.
- * @return Success, or an error for invalid or conflicting settings.
+ * @return Success, or  an error for, invalid or conflicting settings.
  */
 std::expected<void, std::string> install_runtime_metal_archive_configuration(
     std::shared_ptr<const runtime_metal_archive_configuration_image> configuration) {

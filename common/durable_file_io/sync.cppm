@@ -1,6 +1,6 @@
 /**
  * @file common/durable_file_io/sync.cppm
- * @brief Sync file descriptors and report errors when closing directories.
+ * @brief Sync file descriptors and  report errors when closing directories.
  */
 module;
 

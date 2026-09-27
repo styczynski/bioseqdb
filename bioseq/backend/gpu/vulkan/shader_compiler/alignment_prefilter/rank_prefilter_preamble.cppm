@@ -10,8 +10,8 @@ export namespace bioseq::gpu::vulkan {
 
 /// @brief Shares input layouts and rank readers between SneakySnake and GateKeeper.
 /// Symbols occupy one byte each. Jobs use 20 bytes, results use 16 bytes, and
-/// push constants supply the job count, mode, and input byte counts in 16 bytes.
-/// Checked readers enforce byte bounds. Unchecked readers require the caller
+/// push constants supply the job count, mode, and  input byte counts in 16 bytes.
+/// Checked readers enforce byte bounds. Unchecked readers require the, caller
 /// to validate the job and bound the index before reading.
 inline constexpr std::string_view k_rank_prefilter_preamble = R"GLSL(
 layout(local_size_x = compile_time_workgroup_size_x, local_size_y = 1, local_size_z = 1) in;

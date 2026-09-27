@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Declares the check that edit helpers refer to their match target.
+ * @brief Declares the check that, edit helpers refer to their match target.
  */
 module;
 #include <cstdint>
@@ -12,7 +12,7 @@ export module bioseq.postgres.table:custom_scan_oid_expression_support_edit_sequ
 import :custom_scan_oid_expression_support_oid_catalog_core_contracts;
 
 /**
- * @brief Checks that a sequence-valued edit argument equals the complete match target.
+ * @brief Checks that a sequence-valued edit argument equals the complete match target
  *
  * Non-sequence row identifiers use the surrounding helper-ownership checks.
  * Calls to other functions pass this check.

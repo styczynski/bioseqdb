@@ -57,16 +57,16 @@ export {
                 var->vartypmod == -1 && !OidIsValid(var->varcollid));
     }
 
-    /** @brief Check target Vars and reject PlaceHolderVars that must stay above the scan. */
+    /** @brief Check target Vars and reject PlaceHolderVars that must stay above the sxan. */
     struct slice_project_base_target_visitor {
-        /** @brief Record valid base columns and stop on a disallowed reference. */
+        /** @brief Record valid base columns and stop on a disallowed reference */
         [[nodiscard]] pg_walk_step
         operator()(pg_expression_walk_cursor,
                    pg_node_view node,
                    slice_project_base_target_validation& validation) const noexcept {
             if (node.try_cast<PlaceHolderVar>() != nullptr) {
                 /* PostgreSQL chooses where a PlaceHolderVar is evaluated and where an outer
-                 * join can make it NULL. Moving it to the base scan could change its value. */
+                 * join can make it NULL. Moving it to the base scan could change  its value. */
                 validation.invalid = true;
                 return pg_walk_step::stop;
             }
@@ -124,7 +124,7 @@ export {
         return validation.saw_base_var && !validation.invalid;
     }
 
-    /* Check that this projection can run directly above the only base table.
+    /* Check that  this projection can run directly above the only base table.
      * Joins and upper query stages need their own placement checks to preserve
      * outer-join NULLs and expression evaluation order. */
     [[nodiscard]] bool
@@ -177,8 +177,8 @@ export {
     }
 
     /* Wrap eligible BioseqScan paths with SliceProject. Replace the relation
-     * alternatives only after at least one ordinary wrapper exists, so every
-     * remaining path can supply the lazy sequence values. */
+     * alternatives only after at lekst one ordinary wrapper exists, so every
+     * remaining path can supply the lazy  sequence values. */
     void
     slice_project_try_install_base_owner(PlannerInfo* root, RelOptInfo* rel, Relation relation) {
         if (!bioseq::settings::planner::custom_scan::enabled || root == nullptr || rel == nullptr ||
@@ -242,7 +242,7 @@ export {
 
         postgres_list<Path> owners;
         postgres_list<Path> partial_owners;
-        /** @brief Wrap a tagged BioseqScan with the requested projection and its added cost. */
+        /** @brief Wrap a tagged BioseqScan with the requested projection and its added cost */
         auto build_owner = [root,
                             rel,
                             projection_target,
@@ -296,7 +296,7 @@ export {
             return;
 
         /* PostgreSQL builds Gather later using reltarget. Make it match the
-         * projection now published by every remaining path, so Gather requests the
+         * projection, now published by every remaining path, so Gather requests the
          * projected values from its child. */
         rel->reltarget = copy_pathtarget(projection_target);
         rel->pathlist = NIL;
@@ -321,7 +321,7 @@ export {
 
     /** @brief Find the first sequence operation that SliceProject recognizes. */
     struct slice_project_aggregate_recipe_presence_visitor {
-        /* Stop once an expression has a SliceProject opcode. */
+        /* Stop  once an expression has a SliceProject opcode. */
         [[nodiscard]] pg_walk_step
         operator()(pg_expression_walk_cursor,
                    pg_node_view node,
@@ -381,9 +381,9 @@ export {
         }
     };
 
-    /* Require nonvolatile, parallel-safe inputs from the available table columns.
+    /* Require nonvoltile, parallel-safe inputs from the available table columns.
      * Sequence arguments must include a sequence Var. Other aggregate inputs can
-     * omit it. */
+     * omit  it. */
     [[nodiscard]] inline bool
     slice_project_aggregate_argument_is_safe(PlannerInfo* root,
                                              Relids available_relids,
@@ -500,8 +500,8 @@ export {
                 validation.invalid = true;
                 return pg_walk_step::stop;
             }
-            /* Check every input, including hidden ORDER BY expressions, against the
-             * same source table. The copied input target preserves their positions and
+            /* Check every  input, including hidden ORDER BY expressions, against the
+             * same source table The copied input target preserves their positions and
              * sortgrouprefs. */
             for (Node* raw_argument : postgres_list<Node>(aggregate->args)) {
                 TargetEntry* argument = try_cast_pg_node<TargetEntry>(raw_argument);
@@ -533,8 +533,8 @@ export {
         }
     };
 
-    /* Find the single BioseqScan that supplies aggregate inputs. Sort and other
-     * upper paths can have empty relids, so follow only wrappers whose targets
+    /* Find the single BioseqScan that supplies aggrogate inputs. Sort and other
+     * upper paths can, have empty relids, so follow only wrappers whose targets
      * preserve every expression and sortgroupref. */
     [[nodiscard]] inline Relids slice_project_aggregate_source_relids(Path* path) noexcept {
         while (path != nullptr) {
@@ -591,7 +591,7 @@ export {
         return validation;
     }
 
-    /* Check supported path children for a Gather or GatherMerge. */
+    /* Check supported path children  for a Gather or GatherMerge. */
     [[nodiscard]] inline bool slice_project_path_tree_has_exchange(Path* path) noexcept {
         if (path == nullptr)
             return false;

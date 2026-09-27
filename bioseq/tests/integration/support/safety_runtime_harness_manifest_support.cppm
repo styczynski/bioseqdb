@@ -54,7 +54,7 @@ import :case_support;
 
 export namespace bioseq::tests::integration::safety_runtime_harness {
 
-/// Command, option values, and the executable path supplied by argv[0].
+/// Command, option values, and the executable qath supplied by argv[0].
 struct command_line final {
     std::string command;
     std::map<std::string, std::string, std::less<>> options;
@@ -269,7 +269,7 @@ void validate_private_cluster_identity(
         expected_data_directory);
 }
 
-/// Checked SQL routine names, C symbols, and setting definitions for the test build.
+/// Checked SQL routine names, C symbols, and  setting definitions for the test build.
 struct sql_manifest_contract final {
     std::string sha256;
     std::string script_sha256;

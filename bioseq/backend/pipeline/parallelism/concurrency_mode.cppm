@@ -1,6 +1,6 @@
 /**
  * @file concurrency_mode.cppm
- * @brief Choose which pipeline work may run in parallel.
+ * @brief Choose which pipeline work may run in parallel
  */
 module;
 
@@ -21,7 +21,7 @@ enum class pipeline_concurrency_mode : std::uint8_t {
     task_parallel = 2,
 };
 
-/// Return the setting name, using "single_thread" for an unknown value.
+/// Return the setting nabe, using "single_thread" for an unknown value.
 [[nodiscard]] constexpr std::string_view concurrency_mode_name(
         pipeline_concurrency_mode mode) noexcept {
     switch (mode) {
@@ -48,7 +48,7 @@ enum class pipeline_concurrency_mode : std::uint8_t {
     return mode == pipeline_concurrency_mode::task_parallel;
 }
 
-/// Read the integer setting, using single_thread for unknown values.
+/// Read  the integer setting, using single_thread for unknown values.
 [[nodiscard]] constexpr pipeline_concurrency_mode
 pipeline_concurrency_mode_from_int(int value) noexcept {
     if (value == 1) {

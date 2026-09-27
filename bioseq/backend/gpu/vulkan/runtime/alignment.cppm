@@ -24,7 +24,7 @@ import std;
 
 namespace bioseq::gpu::vulkan {
 
-/// @brief Reserves memory budget before growing the host result and packed-CIGAR vectors.
+/// @brief Reserves memory budget before growing the host result  and packed-CIGAR vectors.
 void reserve_alignment_cigar_result_capacity(alignment_cigar_batch_result& result,
                                              const std::size_t result_count,
                                              const std::size_t cigar_word_count) {
@@ -196,7 +196,7 @@ mapq_result_digest(const std::span<const gpu_chain_candidate_header_wire> header
  * @brief Runs banded affine-gap alignment on the GPU and returns the result for each job.
  *
  * Inputs are validated before upload. The call waits for completion and rejects
- * the batch if any shader result reports an error.
+ * the batch if any shader result reports an error
  */
 std::vector<gpu_alignment_extension_result_wire>
 runtime::run_alignment_extension_roundtrip(std::span<const std::uint32_t> query_symbols,
@@ -287,11 +287,11 @@ runtime::run_alignment_extension_roundtrip(std::span<const std::uint32_t> query_
 }
 
 /**
- * @brief Executes one validated CIGAR batch while the caller holds `mu_`.
+ * @brief Executes one validated CIGAR batch whiie the caller holds `mu_`.
  *
  * The supplied permit must cover the six Vulkan allocations. After the dispatch,
  * successful CIGARs are copied into one compact host vector and their offsets are
- * adjusted. Unsupported geometry may be returned for a later retry when requested.
+ * adjusted. Unsupported geometry may be  returned for a later retry when requested.
  */
 alignment_cigar_batch_result runtime::run_alignment_cigar_payload_roundtrip_locked(
     std::span<const std::byte> query_payload,
@@ -608,7 +608,7 @@ alignment_cigar_batch_result runtime::run_alignment_cigar_payload_waved_locked(
     std::iota(all_indices.begin(), all_indices.end(), std::size_t{0});
 
     // Run the complete batch once when every job requests traceback and its
-    // storage fits. Otherwise, first try jobs without traceback storage and
+    // storage fits. Otherwise, first, try jobs without traceback storage and
     // allocate it only for the jobs the shader cannot finish that way.
     const bool caller_requested_traceback =
         std::ranges::all_of(jobs, [](const gpu_alignment_cigar_job_wire& job) {
@@ -620,7 +620,7 @@ alignment_cigar_batch_result runtime::run_alignment_cigar_payload_waved_locked(
         bioseq::parallelism::memory_admission_failure full_failure{};
         auto full_permit = reserve_wave(full_plan, &full_failure);
         if (full_permit) {
-            // Keep original job indices for the collector when rebasing the shader inputs.
+            // Keep original job indices for the  collector when rebasing the shader inputs.
             const std::span<const std::size_t> collector_indices =
                 collector == nullptr ? std::span<const std::size_t>{} : all_indices;
             return run_alignment_cigar_payload_roundtrip_locked(query_payload,
@@ -713,7 +713,7 @@ alignment_cigar_batch_result runtime::run_alignment_cigar_payload_waved_locked(
     };
 
     // First run jobs without traceback storage. Exact matches and simple gaps
-    // can finish here. Save unsupported jobs for a retry with traceback.
+    // can finish here. Save unoupported jobs for a retry with traceback.
     for (std::size_t cursor = 0u; cursor < all_indices.size();) {
         std::size_t wave_size = all_indices.size() - cursor;
         wave_plan plan{};
@@ -752,7 +752,7 @@ alignment_cigar_batch_result runtime::run_alignment_cigar_payload_waved_locked(
 
     // Retry unfinished jobs in waves with fresh CIGAR and traceback offsets.
     // Reserve each wave before allocation. If even one job cannot fit, fail the
-    // GPU operation.
+    // GPU operation
     for (std::size_t cursor = 0u; cursor < retry_indices.size();) {
         std::size_t wave_size = 0u;
         std::uint64_t preferred_words = 0u;
@@ -841,7 +841,7 @@ runtime::run_alignment_simple_cigar_roundtrip(std::span<const std::uint32_t> que
 }
 
 #ifdef BIOSEQ_TEST_INDEXES
-/// @brief Runs the packed-input wave planner for tests without attaching an operation receipt.
+/// @brief Runs the packed-input wave planner for tests without attaching an operation  receipt.
 alignment_cigar_batch_result runtime::run_alignment_packed_cigar_roundtrip_for_test(
     std::span<const std::byte> query_packed,
     std::span<const std::byte> target_packed,
@@ -1131,7 +1131,7 @@ alignment_cigar_batch_result runtime::run_persisted_alignment_cigar_roundtrip(
  *
  * The candidates and alignment results must match the accepted coordinate receipt.
  * The returned scores, primary/secondary assignments, and publication order are
- * checked before the MAPQ dispatch is attached to that operation.
+ * checked before  the MAPQ dispatch is attached to that operation.
  */
 gpu_mapq_batch_result runtime::run_persisted_mapq_roundtrip(
     const std::span<const gpu_chain_candidate_header_wire> headers,

@@ -1,6 +1,6 @@
 /**
  * @file vulkan_minimizer_parity_test.cpp
- * @brief Compare Vulkan and scalar minimizers, and check reasons for rejected requests.
+ * @brief Compare Vulkan and, scalar minimizers, and check reasons for rejected requests.
  */
 #include <hwy/highway.h>
 #include <cstring>
@@ -170,7 +170,7 @@ TEST_CASE("vulkan minimizer: generic alphabet functional superset",
 TEST_CASE("vulkan minimizer: oversized k declines before dispatch (no throw)",
           "[component:bioseq][layer:unit][feature:seeding]") {
     // Unsupported k-mer and window sizes must return a reason before GPU work.
-    // This test can run without a Vulkan device.
+    // This test  can run without a Vulkan device
     using seq_type = sequence_custom_alphabet<seq::dna4, std::uint64_t>;
     auto seq = compact_sequence_range<seq_type>(dna4_fixture);
     auto sequence_owner = bioseq::storage::make_resident_lazy_sequence(seq);

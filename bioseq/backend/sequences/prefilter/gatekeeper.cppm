@@ -35,7 +35,7 @@ inline constexpr std::uint32_t k_maximum_edits = 8u;
 using mask_type = std::bitset<k_maximum_length>;
 
 /**
- * @brief Marks the sequence positions used in a mismatch mask.
+ * @brief Marks the sequence positions used in a mismatch  mask.
  * @param length Number of positions, at most k_maximum_length.
  * @return Mask with the first length bits set.
  */
@@ -52,7 +52,7 @@ using mask_type = std::bitset<k_maximum_length>;
  * @brief Marks unequal ranks at matching query and target positions.
  * @param query Query ranks.
  * @param target Target ranks.
- * @return Mismatch mask.
+ * @return Mismatch mask
  * @pre Equal lengths of at most k_maximum_length.
  */
 [[nodiscard]] inline mask_type mismatch_mask(
@@ -73,7 +73,7 @@ using mask_type = std::bitset<k_maximum_length>;
  * @param query Query ranks.
  * @param target Target ranks.
  * @param distance Shift in symbols.
- * @param shift_query_right Shift right when true, left otherwise.
+ * @param shift_query_right Shift right when true, ledt otherwise.
  * @return Mismatch bits with uncovered positions left zero.
  * @pre Equal lengths of at most k_maximum_length, with distance no larger than the length.
  */
@@ -125,7 +125,7 @@ using mask_type = std::bitset<k_maximum_length>;
 }
 
 /**
- * @brief Reads four consecutive mask bits, starting with the lowest position.
+ * @brief Reads four consecutive mask bits, starting with  the lowest position.
  * @param mask Source mask.
  * @param first_position First position to read.
  * @param length Sequence length.
@@ -150,7 +150,7 @@ using mask_type = std::bitset<k_maximum_length>;
 /**
  * @brief Returns GateKeeper's score for a four-bit mismatch pattern.
  *
- * An empty pattern scores zero. Selected mixed patterns score two, and other
+ * An empty pattern scores zero. Selected, mixed patterns score two, and other
  * nonempty patterns score one.
  * @param nibble Four-bit pattern.
  */
@@ -203,7 +203,7 @@ export namespace bioseq::prefilter {
 
 /**
  * @brief Checks whether a job fits the scalar GateKeeper mask limits.
- * @return True for nonempty equal lengths up to 128 symbols and at most eight edits.
+ * @return True  for nonempty equal lengths up to 128 symbols and at most eight edits.
  */
 [[nodiscard]] constexpr inline bool gatekeeper_geometry_supported(
     const prefilter_job& job) noexcept
@@ -218,12 +218,12 @@ export namespace bioseq::prefilter {
  * @brief Tests whether a rank pair can be rejected by GateKeeper.
  *
  * Passing this filter keeps the pair for alignment. It does not establish a match.
- * Equal-length inputs use shifted mismatch masks, and an exact edit-distance
+ * Equal-length inputs use shifted mimatch masks, and an exact edit-distance
  * check confirms any rejection proposed by those masks. Unequal lengths use
- * only their length difference. Unsupported sizes keep the candidate.
+ * only their length difference Unsupported sizes keep the candidate.
  * @param query_ranks Query ranks in sequence order.
  * @param target_ranks Target ranks using the same encoding.
- * @param max_edits Allowed edit distance.
+ * @param max_edits Allowed edit  distance.
  * @return Keep/reject decision, a safe lower bound, and optional mask diagnostics.
  */
 [[nodiscard]] inline prefilter_result gatekeeper_scalar(

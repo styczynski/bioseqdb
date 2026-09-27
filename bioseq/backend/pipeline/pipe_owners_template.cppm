@@ -1,6 +1,6 @@
 /**
  * @file pipeline/pipe_owners_template.cppm
- * @brief Input used to generate pipeline entry points for each alphabet and route.
+ * @brief Input used to generate pipeline  entry points for, each alphabet and route.
  *
  * Code generation reads this file. The build compiles the generated
  * implementations selected by its profile.
@@ -38,7 +38,7 @@ static constexpr bool owner_dna5
         "dna5", "true")]]
     = false;
 
-/// Split each alphabet's generated implementations across six route choices.
+/// Split each alphabet's generated implementations acros six route choices.
 static constexpr std::uint8_t owner_route
     [[bioseq::template_flatten(
         "shard", "route",
@@ -60,7 +60,7 @@ using owner_alphabet = std::conditional_t<
 
 /**
  * Check the query sketch against the statement plan, then call the pipeline
- * with its selected record type. Share the host records so they stay alive
+ * with its selected record type Share the host records so they stay alive
  * through index lookup and chaining.
  */
 template <class p_target_index>
@@ -123,7 +123,7 @@ template <class p_target_index>
         std::move(query_seq), std::move(target_seq), execution_plan);
 }
 
-/** Match the query against target segments within the memory budget. */
+/** Match  the query against target segments within the memory budget. */
 [[bioseq::template_flatten_when("route", "segmented")]]
 [[nodiscard, gnu::noinline]] match_result_collection
 minimap_port_segmented_owned(

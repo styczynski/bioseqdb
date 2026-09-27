@@ -45,7 +45,7 @@ export {
 /**
  * @brief Prints a SeqAn alphabet symbol as a character.
  *
- * Integral types keep their normal fmt formatting.
+ * Integral types keep theif normal fmt formatting.
  * @tparam p_alphabet SeqAn alphabet type accepted by seqan3::to_char.
  */
 template <typename p_alphabet>

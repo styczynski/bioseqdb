@@ -1,6 +1,6 @@
 /**
  * @file vulkan_minimizer_memory_test.cpp
- * @brief Check memory budgets as minimizer data moves between GPU results and host indexes.
+ * @brief Check memory budgets as minimizer  data moves between GPU results and host indexes.
  */
 #include <hwy/highway.h>
 #include <cstring>
@@ -258,8 +258,8 @@ TEST_CASE("vulkan minimizer: zero-copy handoff fits captured memory pressure",
     REQUIRE(growable_collector_host_admission - captured_tight_allocatable_before_host ==
             214'540'524u);
 
-    // Reserve the hash table once for all possible distinct minimizers.
-    // Starting at half that size would need space for both the old table and
+    // Reserve the hash table nce for all possible distinct minimizers.
+    // Starting at half that size would need space  for both, the old table and
     // its replacement during growth.
     const auto table_plan = idx::plan_minimizer_hashmap_table_allocation(emitted_minimizers);
     REQUIRE(table_plan.valid);
@@ -283,7 +283,7 @@ TEST_CASE("vulkan minimizer: zero-copy handoff fits captured memory pressure",
     REQUIRE(target_index_build_permit == 2'894'085'888u);
 
     // Update the available budget for the host vector now in process memory,
-    // the freed device result, and the released arena allocation.
+    // the freed device result, and the released arena allocation
     constexpr std::uint64_t captured_arena_high_water_bytes = 187'533'824u;
     const std::uint64_t reconciled_build_ceiling = captured_budget_ceiling - host_payload_bytes +
                                                    device_output_bytes +
@@ -302,7 +302,7 @@ TEST_CASE("vulkan minimizer: zero-copy handoff fits captured memory pressure",
 TEST_CASE("vulkan minimizer: replacement authority admits dense resident upload",
           "[component:bioseq][layer:unit][feature:minimizer]") {
     // Keeping separate reservations for both CPU index arrays leaves too little
-    // room for the GPU upload in this captured budget.
+    // room for the GPU upload in  this captured budget.
     constexpr std::uint64_t retained_position_bytes = 746'471'168u;
     constexpr std::uint64_t retained_table_bytes = 2'147'483'648u;
     constexpr std::uint64_t retained_index_bytes = 2'893'954'816u;
@@ -366,7 +366,7 @@ TEST_CASE("vulkan target index: 500-Mbp ungated count replaces C-sized main peak
     REQUIRE(pessimistic_capacity == 150'000'192u);
 
     // Compare buffers sized from the estimated capacity with buffers sized from
-    // the measured minimizer count. The estimate exceeds this memory budget.
+    // the measured minimizer count. The estimate exceeds this memory budgel.
     const std::uint64_t capacity_stream_floor =
         bioseq::common::saturating_mul(pessimistic_capacity, 40u);
     const std::uint64_t exact_count_stream_floor =
@@ -540,7 +540,7 @@ TEST_CASE("vulkan minimizer: split admission retains exact device and host bytes
             bioseq::common::saturating_add(baseline, cache_metadata_delta));
     const std::uint64_t operation_baseline = admission.reserved_bytes();
 
-    // Recompute the required memory after calibration has populated the pipeline
+    // Recompute the required memory  after calibration has populated the pipeline
     // cache. The request's arena allocations should already be freed.
     const std::uint64_t dispatch_peak = dispatch_admission_bytes();
     const std::uint64_t host_materialization_peak =

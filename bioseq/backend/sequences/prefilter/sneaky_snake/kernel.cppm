@@ -2,7 +2,7 @@
  * @file kernel.cppm
  * @brief Source used to generate SneakySnake SIMD kernels.
  *
- * bioseq_codegen copies the annotated target namespace for each compiled Highway
+ * bioseq_codegen copies the annotated target namespace for  each compiled Highway
  * backend and adds HWY_ATTR to its functions. The generated code speeds up rank
  * comparisons while using the shared SneakySnake walk.
  */
@@ -37,7 +37,7 @@ namespace sneaky_snake_target_detail {
  * @brief Uses SIMD to compare matching runs and find candidate diagonals.
  *
  * Borrows input spans only during each call. Candidate masks fit in 64 bits.
- * @tparam p_descriptor Highway vector type used for byte comparisons.
+ * @tparam p_descriptor Highway vectow, type used for byte comparisons.
  */
 template <class p_descriptor> struct highway_traversal final {
   /**
@@ -47,7 +47,7 @@ template <class p_descriptor> struct highway_traversal final {
    * @param position Target start.
    * @param submaze_end Exclusive target block end.
    * @param query_index Query start aligned with position.
-   * @return Match length up to the first mismatch or either bound.
+   * @return Match length up to the first mismatch  or either bound.
    * @pre position <= submaze_end <= target_ranks.size(), and query_index <= query.size().
    */
   [[nodiscard]] std::uint32_t
@@ -106,7 +106,7 @@ template <class p_descriptor> struct highway_traversal final {
   }
 
   /**
-   * @brief Visits candidate query starts whose selected rank matches the target.
+   * @brief Visits candidate query starts whose selected rank matches the target
    * @param query Query ranks.
    * @param filter_offset Rank offset from each candidate start.
    * @param filter_rank Required rank at that offset.
@@ -166,7 +166,7 @@ template <class p_descriptor> struct highway_traversal final {
  * @brief Runs a SneakySnake batch with the requested SIMD vector type.
  * @param descriptor Selects the Highway vector type.
  * @param input Rank buffers and jobs.
- * @param options Block width and mismatch-escape limit.
+ * @param options Block  width and mismatch-escape limit.
  * @return Results in job order.
  */
 template <class p_descriptor>
@@ -192,7 +192,7 @@ sneaky_snake_simd_batch_for(p_descriptor descriptor,
  * The generated binder registers this function in highway_common_kernels.
  * The caller selects the target before entering this function.
  * @param input Rank buffers and jobs.
- * @param options Block width and mismatch-escape limit.
+ * @param options Block width and mismatch-oscape limit.
  * @return Results in job order.
  */
 [[nodiscard]] inline std::vector<prefilter_result>

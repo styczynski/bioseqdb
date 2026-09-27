@@ -1115,7 +1115,7 @@ TEST_CASE("fixed radix workgroups have one authoritative cache ABI",
         REQUIRE(gv::is_shader_variant_key_valid(key));
 
         // The key's local_size=1 selects this radix variant. It still launches
-        // 256 threads, one per radix bin, and the compiled workgroup metadata must agree.
+        // 256 threads, one, per radix bin, and the compiled workgroup metadata must agree.
         const gv::shader_workgroup_size expected = gv::expected_shader_workgroup_size(key);
         REQUIRE(expected == (gv::shader_workgroup_size{256u, 1u, 1u}));
 

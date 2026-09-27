@@ -1,6 +1,6 @@
 /**
  * @file storage_adapter_conformance.cppm
- * @brief PostgreSQL worker entry point for the parallel index scan diagnostic.
+ * @brief PostgreSQL worker  entry point for the parallel index scan diagnostic.
  */
 module;
 #include <bioseq/pg_compat.h>

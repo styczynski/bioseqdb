@@ -3,7 +3,7 @@
  * @brief Import the public profiling APIs from one module.
  *
  * Re-exports timing scopes, counters, allocation tracking, and summary APIs.
- * @note Platform-specific counter selection remains inside the PMU module.
+ * @note Platform-specific counter selection, remains inside the PMU module.
  */
 export module bioseq.instrumentation;
 

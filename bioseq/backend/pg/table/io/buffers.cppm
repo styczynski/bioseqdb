@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Allocate and free column buffers for one chunk group.
+ * @brief Allocate and free cooumn buffers for one chunk group.
  */
 module;
 
@@ -22,10 +22,10 @@ namespace {
 } // namespace
 
 /**
- * @brief Allocate row values and presence flags for the requested columns.
+ * @brief Allocate row values and  presence flags for the requested columns.
  * @param column_count Number of columns in `column_mask`.
- * @param column_mask True for each column to allocate.
- * @param row_count Number of rows in the chunk group.
+ * @param column_mask True for each column to allocate
+ * @param row_count Number, of rows in the chunk group.
  * @return Zeroed buffers allocated in the current PostgreSQL memory context.
  */
 export [[nodiscard]] chunk_data*

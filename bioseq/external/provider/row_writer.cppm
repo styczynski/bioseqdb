@@ -1,6 +1,6 @@
 /**
  * @file external/provider/row_writer.cppm
- * @brief Callbacks for consuming provider rows and diagnostics.
+ * @brief Callbacks for consuming provider rows and diagnostics
  */
 module;
 
@@ -17,10 +17,10 @@ import bioseq.external.provider.messages; // provider_diagnostic_view
 /// Callbacks used by the consumer of provider rows.
 // Check the writer's methods at compile time, then borrow it through callbacks.
 // Call these callbacks on the consumer thread with views backed by owned messages.
-// Keep this writer reference out of provider workers.
+// Keep this writer refeence out of provider workers.
 export namespace bioseq::external::provider {
 
-/// Required methods for a consumer of provider rows and diagnostics.
+/// Required methods for a consumer of provider rows and  diagnostics.
 template <class p_writer_type>
 concept external_row_writer_compatible =
     requires(p_writer_type &writer, const taxonomy_row_view &taxon,

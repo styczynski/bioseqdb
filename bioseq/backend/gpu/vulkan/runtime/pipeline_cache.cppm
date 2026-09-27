@@ -27,7 +27,7 @@ namespace bioseq::gpu::vulkan {
 namespace {
 
 /// Record a successful native Vulkan pipeline creation. The cache entry
-/// keeps the shader module and pipeline handles alive while this record is used.
+/// keeps the shader module and pipeline handles alive while this record is used
 [[nodiscard]] runtime_metal_archive_pipeline_audit native_pipeline_audit(
     const vulkan_feature_set& features,
     const shader_variant_key& key,
@@ -87,7 +87,7 @@ void runtime::owned_pipeline_handles::reset() noexcept {
     pipeline = VK_NULL_HANDLE;
 }
 
-/// @brief Counts host storage kept by both pipeline caches, including their creation records.
+/// @brief Counts host, storage  kept by both pipeline caches, including their creation records.
 std::uint64_t runtime::pipeline_cache_metadata_bytes_locked() const noexcept {
     using bioseq::common::saturating_add;
     using bioseq::common::saturating_mul;
@@ -111,7 +111,7 @@ std::uint64_t runtime::pipeline_cache_metadata_bytes_locked() const noexcept {
     return owned;
 }
 
-/// @brief Reserves memory before either pipeline-cache vector grows.
+/// @brief Reserves memory before either pipeline-cche vector grows.
 /// @param[in] normal_capacity Requested capacity of the chaining-pipeline cache.
 /// @param[in] compute_pipeline_capacity Requested capacity of the general compute cache.
 /// @throws vulkan_runtime_error If the memory reservation cannot be obtained.
@@ -178,7 +178,7 @@ void runtime::reconcile_pipeline_cache_metadata_locked() noexcept {
     const std::uint64_t retained = pipeline_cache_metadata_bytes_locked();
     if (retained == (std::numeric_limits<std::uint64_t>::max)() ||
         retained > pipeline_cache_metadata_permit_.bytes()) {
-        // Keep the current reservation if the measured capacity exceeds it.
+        // Keep the current reservation if the  measured capacity exceeds it.
         // On Apple, record a failure for the next Metal settings check.
 #if defined(__APPLE__)
         mark_metal_archive_sticky_failure_literal(
@@ -273,7 +273,7 @@ runtime::chaining_pipeline runtime::create_pipeline_locked(const chaining_pipeli
         }
 
         // Check that the shader reads anchors with the same layout as the host.
-        // A wrong stride or field offset would make every anchor read incorrect.
+        // A wrong stride or  field offset would make every anchor read incorrect
         const spirv_layout_scan scan = scan_spirv_layout(spirv);
         if (!scan.has_array_stride(24)) {
             throw vulkan_runtime_error("SPIR-V Anchors array stride != 24");
@@ -379,7 +379,7 @@ runtime::chaining_pipeline runtime::create_pipeline_locked(const chaining_pipeli
 // General compute pipelines and their buffer bindings.
 
 /// @brief Finds or creates a cached compute pipeline for one shader variant.
-/// Checks workgroup limits and shader buffer layouts before creation.
+/// Checks workgroup limits and shadey buffer layouts before creation.
 /// The caller holds the runtime lock.
 /// @param[in] kind Shader to use.
 /// @param[in] local_size Workgroup-size setting for this variant.
@@ -531,7 +531,7 @@ runtime::compute_pipeline runtime::get_compute_pipeline_locked(shader_kind kind,
                 fmt::format("seed lookup shader compile failed: {}", compile_error.what()));
         }
 
-        // Check that shader buffer layouts match the host records used for each
+        // Check  that shader, buffer layouts match the host records used for each
         // operation. A wrong stride or offset would corrupt reads or writes.
         const spirv_layout_scan scan = scan_spirv_layout(spirv);
         const auto binding_scalar = [&scan](const std::uint32_t binding,

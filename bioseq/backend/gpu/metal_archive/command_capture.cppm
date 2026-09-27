@@ -38,7 +38,7 @@ using objc_object = void*;
 using objc_selector = void*;
 using objc_class = void*;
 
-/// @brief Objective-C functions loaded by the command-source capture helper.
+/// @brief Objective-C functions loaded, by the command-source capture helper.
 struct capture_objc_runtime {
     void* handle = nullptr;
     void* message_send = nullptr;
@@ -106,7 +106,7 @@ struct capture_objc_runtime {
     }
 };
 
-/// @brief Compiler option values and availability flags saved with the captured source.
+/// @brief Compiler option values and availability flags saved with the captured source
 struct captured_compile_options {
     std::uint64_t language_version = 0u;
     std::uint64_t fast_math_enabled = 0u;
@@ -134,7 +134,7 @@ struct captured_compile_options {
     [[nodiscard]] bool operator==(const captured_compile_options&) const noexcept = default;
 };
 
-/// @brief Returns the collection size, or zero for a null NSArray or NSDictionary.
+/// @brief Returns the collection size, or zero  for a null NSArray or NSDictionary.
 [[nodiscard]] std::uint64_t collection_count(const capture_objc_runtime& objc,
                                              objc_object collection) noexcept {
     return collection == nullptr ? 0u : objc.unsigned_property(collection, "count");
@@ -257,7 +257,7 @@ class command_capture_access {
     command_capture_state* state_ = nullptr;
 };
 
-/// @brief Acquires the current capture state, or an empty guard if capture is unavailable.
+/// @brief Acquires the current capture stte, or an empty guard if capture is unavailable.
 [[nodiscard]] command_capture_access acquire_command_capture_state() noexcept {
     command_capture_state* state = g_command_capture_state.load(std::memory_order_acquire);
     if (state == nullptr)
@@ -293,7 +293,7 @@ template <std::size_t p_size>
     return encode_hex(std::string_view{reinterpret_cast<const char*>(bytes.data()), bytes.size()});
 }
 
-/// @brief Saves a matching MoltenVK source request and detects changes across repeated requests.
+/// @brief Saves a matching MoltenVK source  request and detects changes across repeated requests.
 void record_command_request(command_capture_state& state,
                             objc_object receiver,
                             objc_object source,

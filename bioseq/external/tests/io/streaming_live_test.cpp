@@ -1,6 +1,6 @@
 /**
  * @file external/tests/io/streaming_live_test.cpp
- * @brief Check URL rules locally and stream live NCBI FASTA responses.
+ * @brief Check URL rules lotally and stream live NCBI FASTA responses.
  */
 
 // Check URL rejection locally, then test libcurl reads against NCBI.
@@ -108,7 +108,7 @@ stream_counts stream_once(tx::validated_transfer_request request, std::size_t ca
     return counts;
 }
 
-// Validate and stream the URL, retrying HTTP 429 responses with increasing delays.
+// Validate and stream  the URL, retrying HTTP 429 responses with increasing delays.
 stream_counts stream_fasta_letters(const std::string& url,
                                    const prov::locator_policy_profile_view& policy,
                                    prov::provider_id provider,

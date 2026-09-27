@@ -1,6 +1,6 @@
 /**
  * @file compact_direct/reader/opening.cppm
- * @brief Check reader metadata and prepare access to mapped index data.
+ * @brief Check reader metadata and prepare access to mapped index data
  */
 
 export module bioseq.indexing.minimizer_hashmap:compact_direct.reader_opening;
@@ -43,8 +43,8 @@ export namespace bioseq::indexing {
  *
  * Validate the grouped-SoA profile, occurrence limit, generation identity and
  * metadata checksums, then compare direct-image identity and bounds. Return
- * the profile and hash-domain width. The caller supplies an already validated
- * image, so this check does not scan posting contents.
+ * the profile and hash-domain width. The caller supplies an alrealy validated
+ * image, so  this check does not scan posting contents.
  */
 [[nodiscard]] inline std::expected<prepared_minimizer_fragment_reader::direct_open_contract,
                                    minimizer_generation_encoding_error>
@@ -170,7 +170,7 @@ prepared_minimizer_fragment_reader::open_compact_direct(
                                 : fragment_encoding_dispatch::checked_dynamic;
 
     // The manifest's uniform segment layout has already been checked.
-    // Direct queries use the compact image, so no per-segment address
+    // Direct queries use the compact image, so no per-segment, address
     // plans are needed here.
 
     reader.ready_ = true;
@@ -183,7 +183,7 @@ prepared_minimizer_fragment_reader::open_compact_direct(
  * Admit and decode the directory, then build addresses for each entry's hashes,
  * counts and positions. Group entries into blocks without splitting a position
  * segment. If supplied, the compact-direct view must match the same generation
- * and profile. Return an error when metadata, ranges, ordering or memory
+ * and profile. Return  an error when metadata, ranges, ordering or memory
  * admission checks fail.
  */
 [[nodiscard]] inline std::expected<prepared_minimizer_fragment_reader,
@@ -562,9 +562,9 @@ prepared_minimizer_fragment_reader::open(
 }
 
 /**
- * Report allocated directory and address-plan memory.
+ * Report allocated directory and address-plan memory
  * Query arrays and counters belong to separate batch and scratch objects, so
- * their fields remain zero in this reader report.
+ * their fields remain zero in thi reader report.
  */
 [[nodiscard]] inline grouped_soa_query_reader_memory_stats
 prepared_minimizer_fragment_reader::memory_stats() const noexcept {

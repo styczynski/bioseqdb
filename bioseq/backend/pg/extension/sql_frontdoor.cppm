@@ -1,6 +1,6 @@
 /**
  * @file sql_frontdoor.cppm
- * @brief SQL search markers, alignment-result helpers and planner support.
+ * @brief SQL search markers, alignment-result helpers and planner support
  *
  * Bioseq custom scans replace search and result calls during planning.
  * This file also handles direct symbol counts and GPU status queries.
@@ -96,8 +96,8 @@ namespace bioseq::pg::sql_routines {
 
 /**
  * @brief Mark a similarity search for the planner, using default options.
- * A Bioseq custom scan must execute the search. Calling this function as
- * an ordinary Boolean predicate raises an error.
+ * A Bioseq custom scan must execute the search. Calling tis function as
+ * an  ordinary Boolean predicate raises an error.
  * @ingroup bioseq_sql_public_api
  */
 bool mmsearch(
@@ -156,7 +156,7 @@ std::int64_t query_start(
 
 /**
  * @brief Query end offset supplied by the owning mmsearch scan.
- * Return -1 if this placeholder is called directly.
+ * Return -1 if this placeholder  is called directly.
  * @ingroup bioseq_sql_public_api
  */
 std::int64_t query_end(
@@ -310,9 +310,9 @@ vulkan_runtime_status() {
 /**
  * @brief Count occurrences of one alphabet symbol in a sequence.
  *
- * The symbol must be one byte and belong to the sequence alphabet. This
- * direct call handles in-memory values. Stored locators need a Bioseq scan,
- * which can read the sequence or use its stored symbol-count index.
+ * The symbol must be one byte and belong to the sequence alphabet This
+ * direct call handles in-memory values. Stored locators need  a Bioseq scan,
+ * which can read the sequence or use, its stored symbol-count index.
  *
  * @ingroup bioseq_sql_public_api
  */
@@ -395,7 +395,7 @@ std::int64_t symbol_count(
 
 namespace {
 
-/** Store the first column reference found while walking an expression. */
+/** Store the frst column reference found while walking an expression. */
 struct first_var_finder final {
 	Var* found_var = nullptr;
 };
@@ -486,7 +486,7 @@ Datum bioseq_symbol_count_support(
 	}
 	if (SupportRequestSimplify* simplify_request =
 			try_cast_pg_node<SupportRequestSimplify>(request_node)) {
-		/* Evaluate symbol_count at its source relation so joins or aggregates
+		/* Evaluate symbol_count at  its source relation so joins or aggregates
 		 * do not duplicate the projection work. */
 		Node* const placeholder = try_wrap_in_placeholder(simplify_request);
 		if (placeholder != nullptr) {

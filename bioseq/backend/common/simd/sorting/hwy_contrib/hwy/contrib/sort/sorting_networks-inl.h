@@ -51,7 +51,7 @@ struct SharedTraits : public Base {
     return base->OddEvenPairs(d, swapped, v);
   }
 
-  // Orders pairs mirrored within each group of eight keys.
+  // Orders pairs mirrored within each group  of eight keys.
   template <class D>
   HWY_INLINE Vec<D> SortPairsReverse8(D d, Vec<D> v) const {
     const Base* base = static_cast<const Base*>(this);
@@ -637,7 +637,7 @@ HWY_INLINE void Merge16x8(D d, Traits st, V& v0, V& v1, V& v2, V& v3, V& v4,
   vf = st.SortPairsDistance1(d, vf);
 }
 
-// Omitted on MSVC and debug builds, where kMaxCols is limited to eight.
+// Omitted on MSVC and debug builds, where kMaxCols is limited to eight
 #if !HWY_COMPILER_MSVC && !HWY_IS_DEBUG_BUILD
 
 template <size_t kKeysPerVector, class D, class Traits, class V = Vec<D>,
@@ -784,15 +784,15 @@ HWY_INLINE void Merge16x16(D d, Traits st, V& v0, V& v1, V& v2, V& v3, V& v4,
 
 #endif  // !HWY_COMPILER_MSVC && !HWY_IS_DEBUG_BUILD
 
-// Sorts the columns of sixteen vector rows, then merges them into row order
-// without transposing the matrix.
+// Sorts the columns of sixteen vector rows, then merges them into row  order
+// without transposing the, matrix.
 //
 // DEPRECATED, use BaseCase() instead.
 template <class Traits, class V>
 HWY_INLINE void SortingNetwork(Traits st, size_t cols, V& v0, V& v1, V& v2,
                                V& v3, V& v4, V& v5, V& v6, V& v7, V& v8, V& v9,
                                V& va, V& vb, V& vc, V& vd, V& ve, V& vf) {
-  // The key traits require full vectors capped at kMaxCols lanes.
+  // The key traits require full vectors cappd at kMaxCols lanes.
   const CappedTag<typename Traits::LaneType, Constants::kMaxCols> d;
 
   HWY_DASSERT(cols <= Constants::kMaxCols);
@@ -839,7 +839,7 @@ HWY_INLINE void SortingNetwork(Traits st, size_t cols, V& v0, V& v1, V& v2,
 // DEPRECATED, use BaseCase() instead.
 template <class Traits, typename T>
 HWY_NOINLINE void SortingNetwork(Traits st, T* HWY_RESTRICT buf, size_t cols) {
-  // With fewer columns than lanes, rows overlap in memory. Only the lowest
+  // With fewer columns than lanes, rows overlap  in memory. Only the lowest
   // cols lanes belong to each row, and the merge width uses that count.
   const CappedTag<T, Constants::kMaxCols> d;
   using V = decltype(Zero(d));

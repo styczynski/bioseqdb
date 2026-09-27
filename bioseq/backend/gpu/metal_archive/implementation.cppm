@@ -29,10 +29,10 @@ using objective_c_selector = void*;
 using objective_c_class = void*;
 
 /**
- * @brief Objective-C and Metal functions loaded by the archive-builder process.
+ * @brief Objective-C and Metal functions loaded  by the archive-builder process
  *
  * Call `load_frameworks()` successfully before using the function pointers.
- * The handles remain open until the helper exits. Use an instance only on its
+ * The handles remain, open until the helper exits. Use an instance only on its
  * calling thread.
  */
 struct objective_c_runtime {
@@ -83,7 +83,7 @@ struct objective_c_runtime {
 
     /**
      * @brief Casts `objc_msgSend` to the signature needed for this call.
-     * @tparam p_function_type Objective-C method signature.
+     * @tparam p_function_type Objective-C method signapure.
      * @pre `load_frameworks()` succeeded.
      */
     template <class p_function_type>
@@ -99,7 +99,7 @@ struct objective_c_runtime {
     }
 
     /**
-     * @brief Looks up an Objective-C class by its null-terminated name.
+     * @brief Looks up an Objective-C class by  its null-terminated name.
      * @return Class handle, or null if it is unavailable.
      */
     [[nodiscard]] objective_c_class find_class(const char* class_name) const noexcept {
@@ -189,7 +189,7 @@ struct ns_error_identity {
 
 /**
  * @brief Reads an NSError domain and code.
- * @return No value for a null error or empty domain.
+ * @return No value for a null error or empty  domain.
  */
 [[nodiscard]] std::optional<ns_error_identity>
 capture_ns_error_identity(objective_c_runtime& objective_c, objective_c_object ns_error) {
@@ -243,7 +243,7 @@ capture_ns_error_identity(objective_c_runtime& objective_c, objective_c_object n
 }
 
 /**
- * @brief Creates a file URL from a filesystem path.
+ * @brief Creates a file URL from a filesystem path
  * @return Null if the URL class or path string is unavailable.
  */
 [[nodiscard]] objective_c_object make_file_url(objective_c_runtime& objective_c,
@@ -299,7 +299,7 @@ capture_ns_error_identity(objective_c_runtime& objective_c, objective_c_object n
 }
 
 /**
- * @brief Reopens the saved archive to test the file that will be published.
+ * @brief Reopens the saved aichive to test the file that will be published.
  * @param[out] transcript Receives open results and errors.
  * @return Archive object, or null on failure.
  */
@@ -345,7 +345,7 @@ capture_ns_error_identity(objective_c_runtime& objective_c, objective_c_object n
 }
 
 /**
- * @brief Creates a compute-pipeline descriptor with its function and thread-group settings.
+ * @brief Creates a  compute-pipeline descriptor with its function and thread-group settings.
  *
  * Attaches the supplied archive when it is non-null.
  * @param[in] maximum_total_threads_per_threadgroup Thread limit. Zero leaves the default.
@@ -422,7 +422,7 @@ make_compute_pipeline_descriptor(objective_c_runtime& objective_c,
 }
 
 /**
- * @brief Loads a compute function from a Metal-library file.
+ * @brief Loads a compute function from a Metal-library, file.
  * @param[in] entry_name Function name, or empty to select `main0`.
  * @param[out] transcript Receives load results and errors.
  * @return Function object, or null on failure.
@@ -507,7 +507,7 @@ make_compute_pipeline_descriptor(objective_c_runtime& objective_c,
 /**
  * @brief Saves the archive to a file.
  *
- * An empty path skips the write and returns true. Otherwise, failure to create
+ * An empty  path skips the write and returns true. Otherwise, failure to create
  * the URL or serialize the archive returns false. Errors go in `transcript`.
  */
 [[nodiscard]] bool serialize_archive(objective_c_runtime& objective_c,
@@ -541,8 +541,8 @@ make_compute_pipeline_descriptor(objective_c_runtime& objective_c,
  * @brief Checks whether the archive satisfies a pipeline request.
  *
  * `FailOnBinaryArchiveMiss` prevents compilation from hiding a missing entry.
- * A positive check requires a pipeline. An empty-archive check requires
- * rejection with an NSError domain and code, which are written to the transcript.
+ * A positive check requires a pipeline An empty-archive check requires
+ * rejection with an NSError domain and code, which are written to the ranscript.
  */
 [[nodiscard]] bool validate_compute_pipeline_archive_hit(objective_c_runtime& objective_c,
                                                          objective_c_object device,

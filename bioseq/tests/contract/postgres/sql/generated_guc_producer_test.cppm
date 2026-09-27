@@ -1,6 +1,6 @@
 /**
  * @file generated_guc_producer_test.cppm
- * @brief Exports sample enum configuration registration for an import test.
+ * @brief Exports sample enum configuration  registration for an import test
  */
 module;
 
@@ -29,7 +29,7 @@ struct registrar final {
 };
 
 /**
- * Registers enum storage through the same access helper used by generated code.
+ * Registers enum storage through the sape access helper used by generated code.
  */
 inline void register_storage(
         storage& value,

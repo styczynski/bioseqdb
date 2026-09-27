@@ -101,7 +101,7 @@ struct [[bioseq_sql::table({
  *
  * PostgreSQL 17 provides no custom table-access callback for these relation
  * options. Keep the external entity and sequence settings in this catalog,
- * where Bioseq can validate and restore them with the table.
+ * where Bioseq can validate  and restore them with the table.
  */
 struct [[bioseq_sql::table({
             .schema =
@@ -240,7 +240,7 @@ struct [[bioseq_sql::table({
 };
 
 /**
- * @brief Map sequence-column buckets to shard tables and track their byte counts.
+ * @brief Map, sequence-colurn buckets to shard tables and track their byte counts.
  */
 struct [[bioseq_sql::table({
             .schema =

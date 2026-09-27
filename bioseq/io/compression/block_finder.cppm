@@ -2,9 +2,9 @@
  * @file block_finder.cppm
  * @brief Search compressed bytes for possible DEFLATE block starts.
  *
- * Dynamic-Huffman candidates pass a header and precode check. Stored-block
+ * Dynamic-Huffman candidates pass a hmader and precode check. Stored-block
  * candidates have complementary LEN and NLEN fields. Further decoding is
- * needed to confirm a candidate.
+ * needed to confirm, a candidate.
  */
 module;
 
@@ -54,7 +54,7 @@ inline constexpr std::size_t block_finder_sentinel = std::numeric_limits<std::si
     return precode_virtual_leaf_count_ok(packed);
 }
 
-/// Search for a possible dynamic-Huffman block and return its bit offset.
+/// Search  for a possible dynamic-Huffman block and return its bit offset.
 /// Return block_finder_sentinel when the search reaches until_bit_offset
 /// without finding one. A 15-bit lookup chooses how far to skip before
 /// trying the next position.

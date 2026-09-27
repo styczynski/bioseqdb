@@ -22,7 +22,7 @@ import bioseq.external.provider.base;
 export namespace bioseq::external::provider {
 
 // Requested rows, fields, and limits.
-/// Type of row requested from a provider.
+/// Type of row requested from a provider
 enum class query_target : std::uint8_t {
     taxonomy,
     catalog,
@@ -137,7 +137,7 @@ enum class predicate_operator : std::uint8_t {
     is_not_null
 };
 
-/// Field comparison with operands in the order required by the operator.
+/// Field, comparison with operands in the order required by the operator.
 struct comparison_predicate {
     predicate_operator operation; // Field comparison, such as equal or between.
     external_field field;
@@ -151,7 +151,7 @@ struct taxon_predicate {
     taxon_match match;
 };
 
-/// Part of a record searched by a text filter.
+/// Part of  a record searched by a text filter.
 enum class text_search_scope : std::uint8_t { any, organism, assembly, gene, record_description };
 
 /// Text filter limited to the chosen part of a record.
@@ -198,7 +198,7 @@ struct external_projection {
     external_field_mask fields;
 };
 
-/// Sort field with direction and placement of NULL values.
+/// Sort fild with direction and placement of NULL values.
 struct external_order_key {
     external_field field;
     bool is_descending;
@@ -218,7 +218,7 @@ struct normalized_external_query {
     std::optional<std::uint64_t> limit;
     std::optional<std::uint64_t> offset;
     std::size_t requested_page_size;
-    /// Estimate storage for the query and its filter values.
+    /// Estimate storage for the query and its  filter values.
     [[nodiscard]] std::size_t measure_deep_size_bytes() const noexcept {
         std::size_t total = sizeof(normalized_external_query);
         total += providers.capacity() * sizeof(provider_id);
@@ -249,7 +249,7 @@ struct normalized_external_query {
 enum class pushdown_quality : std::uint8_t {
     exact,      // Provider applies the requested filter exactly.
     superset,   // Provider may return extra rows, which need a local check.
-    local_only, // Returned metadata is sufficient to evaluate the filter locally.
+    local_only, // Returned metadata is sufficient to evaluate the filter locally
     unsupported // Provider cannot return enough data to evaluate it.
 };
 

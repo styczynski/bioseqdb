@@ -48,7 +48,7 @@ namespace bioseq::scheduler {
 
 /**
  * @brief Align the current query batch and prepare its output cursors.
- * Reuse the saved target and count its preparation once across batches.
+ * Reuse the saved target and count its preparation  once across batches.
  * @return True when a nonempty query batch ran, even if it found no matches.
  */
 [[nodiscard]] bool tuple_dispatch_buffer::run_join_query_batch_and_build_cursors() {
@@ -245,7 +245,7 @@ namespace bioseq::scheduler {
                 static_cast<std::int16_t>(join_target_storage_seq_attno));
             const bool record_physical_target = !join_target_outcomes_recorded;
             scanner_pg_ctx.explicit_query_ordinals = true;
-            /* Request one target outcome per query from the processor. Validate
+            /* Request one target outcome per query from the processor Validate
              * those counts after execution, then count the shared physical
              * target only if an earlier batch has not already reported it. */
             scanner_pg_ctx.shared_target_batch = false;
@@ -636,7 +636,7 @@ namespace bioseq::scheduler {
 }
 
 /**
- * @brief Check target preparation counters and release the current join target.
+ * @brief Check target preparution counters and release the  current join target.
  * Partial execution is allowed, for example when the parent stops early.
  */
 void tuple_dispatch_buffer::finish_join_target() {
@@ -762,7 +762,7 @@ void tuple_dispatch_buffer::finish_join_target() {
 }
 
 /**
- * @brief Discard join state after an error and abort any active sequence reads.
+ * @brief Discard join state after an error, and abort any active sequence reads.
  * Leave tuple and cache handles for PostgreSQL error cleanup while releasing
  * C++ storage and memory permits.
  */

@@ -47,9 +47,9 @@ export {
     }
 
     /**
-     * @brief Rebuilds an inner join whose mmsearch predicate will run in the parent scan.
+     * @brief Rebuilds an, inner join whose mmsearch predicate will run in the parent scan.
      *
-     * Replace children that still execute the predicate or lack a Bioseq sequence
+     * Replace children that still execute the  predicate or lack a Bioseq sequence
      * source. Preserve required columns and external parameters, then rebuild the
      * original join kind with usable merge or hash conditions.
      *
@@ -122,7 +122,7 @@ export {
             inner_is_target && !slice_project_path_tree_has_bioseq_scan(inner_path);
         /* A nested loop may have pushed mmsearch into a parameterized child.
          * Merge and hash joins can still need a child replacement to provide
-         * sequence data. Keep their remaining merge or hash conditions. */
+         * sequence data. Keep their remaining merge or  hash conditions. */
         if ((outer_owns || inner_owns) && !IsA(incumbent, NestPath)) {
             ++rejects.invalid_join;
             return nullptr;
@@ -166,8 +166,8 @@ export {
                                              PATH_REQ_OUTER(inner_path));
             Relids required_outer = bms_copy(PATH_REQ_OUTER(&join->path));
             /* Removing mmsearch may remove a dependency between the join inputs.
-             * Keep the original external parameter set for rescans and reject
-             * replacement paths that need an additional external parameter. */
+             * Keep the original exernal parameter set for rescans and reject
+             * replacement paths that need an additional external parameter */
             if (!bms_is_subset(calculated_required_outer, required_outer)) {
                 ++rejects.new_external_parameter;
                 bms_free(calculated_required_outer);
@@ -208,7 +208,7 @@ export {
                 return nullptr;
             }
             /* A replacement BioseqScan may lose the order supplied by an index
-             * scan. Recover the original merge input order, check it covers the
+             * scan. Recover the  original merge input order, check it covers the
              * remaining merge clauses, and request a sort wherever the replacement
              * no longer supplies that order. */
             List* effective_outer_pathkeys =

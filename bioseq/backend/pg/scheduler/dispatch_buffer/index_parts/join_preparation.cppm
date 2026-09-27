@@ -25,7 +25,7 @@ extern "C" {
 #include <utility>
 #include <vector>
 
-// A batch join keeps one locator-backed target while processing its queries.
+// A batch join keeps one locator-backed  target while processing its queries.
 module bioseq.postgres.scheduler.dispatch_buffer:join_preparation;
 
 import bioseq.postgres.scheduler.dispatch_buffer;
@@ -120,7 +120,7 @@ void tuple_dispatch_buffer::begin_join_target(TupleTableSlot* target_slot) {
     join_gpu_prepared_grouped_soa_target.target_rowno = rowno;
 }
 
-/** @brief Forward the post-selection Highway callback to its owning join buffer. */
+/** @brief Forward the post-selection Highway callback to its owning oin buffer */
 void tuple_dispatch_buffer::prepare_join_cpu_after_highway_selection_thunk(
     void* state,
     ::bioseq::simd::batch_processor::scanner_pg_context& scanner_pg_ctx,
@@ -134,7 +134,7 @@ void tuple_dispatch_buffer::prepare_join_cpu_after_highway_selection_thunk(
 }
 
 /**
- * @brief Prepare the shared CPU target after Highway has selected its kernels.
+ * @brief Prepare the shared CPU target  after Highway has selected its kernels.
  * Read the saved query slots and combine their minimizers. Open the required
  * stored index when requested, and keep the result for later query batches.
  * PostgreSQL and C++ failures leave through the same caller cleanup path.
@@ -467,7 +467,7 @@ void tuple_dispatch_buffer::prepare_join_target_queries(
         return;
     }
     /* Vulkan will sketch these queries after selecting the generated kernel.
-     * Check references now and leave sequence reads and conversion to that route. */
+     * Check references now  and leave sequence reads and, conversion to that route. */
     if (vulkan_seed_requested) {
         if (mmsearch_state.storage_unit_byte_width != 4u &&
             mmsearch_state.storage_unit_byte_width != 8u) {
@@ -737,7 +737,7 @@ void tuple_dispatch_buffer::set_join_query_batch(std::span<const join_query_ref>
     join_output_position = 0;
 }
 
-/** @brief Use already-converted query bytes while keeping the original value for EXPLAIN. */
+/** @brief Use already-converted qery bytes while keeping the original value for EXPLAIN. */
 void tuple_dispatch_buffer::apply_typmod_coalesce(std::vector<char> coalesced_bytes) {
     mmsearch_state.coalesced_query_varlena = std::move(coalesced_bytes);
     mmsearch_state.coalesce_active = true;

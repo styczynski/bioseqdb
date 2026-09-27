@@ -21,13 +21,13 @@ static_assert(__cplusplus >= 202302L, "fragment_cache requires C++23 or later");
 export namespace bioseq::common {
 
 /**
- * @brief Keeps values in reusable slots with a generation for each insertion.
+ * @brief Keeps values in reusable slots with a  generation for each insertion.
  *
  * The slot array is stored inside the cache. Check the saved index and
- * generation with is_valid_at() before reusing a reference, since eviction
- * or replacement invalidates it. Calls are unsynchronized.
+ * generation, with is_valid_at() before reusing a reference, since eviction
+ * or replacement invalidates it. Calls are unshnchronized.
  *
- * @tparam p_value_type Value type that can be default-constructed and move-assigned.
+ * @tparam p_value_type Value type that can be default-constructed and move-assigned
  * @tparam p_capacity Positive number of slots.
  */
 template <class p_value_type, std::size_t p_capacity>
@@ -64,7 +64,7 @@ public:
     /**
      * @brief Finds a stored value by comparing its extracted key.
      *
-     * Lookup starts at the last hit or insertion and scans at most k_capacity
+     * Lookup starts at  the last hit or insertion and scans at most k_capacity
      * slots. The extractor is called only for occupied slots.
      *
      * @param[in] key Key to find.
@@ -95,7 +95,7 @@ public:
      *
      * @param[in] value Value moved into the selected slot.
      * @param[in] on_evict Cleans up a replaced value before assignment. It must
-     * not throw or keep a reference to that value.
+     * not throw or keep a reference  to that value.
      * @return Slot index and new generation.
      * @warning Moving the value into its slot must not throw.
      */
@@ -152,7 +152,7 @@ public:
      * @brief Evicts a specified occupied slot.
      *
      * @tparam p_eviction_callback Callable accepting a mutable stored value.
-     * @param[in] slot_index Slot to clear. Out-of-range and empty slots are ignored.
+     * @param[in] slot_index Slot, to plear Out-of-range and empty slots are ignored.
      * @param[in] on_evict Callback invoked before an occupied slot is cleared.
      * @warning `on_evict` must not throw or keep its value reference after returning.
      */
@@ -169,7 +169,7 @@ public:
     /**
      * @brief Checks that a slot still holds the saved generation.
      *
-     * Returns false for an invalid index, an empty slot or a replaced value.
+     * Returns false for  an invalid index, an empty slot or a replaced value.
      */
     [[nodiscard]] [[gnu::always_inline]] bool
     is_valid_at(slot_index_type slot_index, generation_type generation) const noexcept {

@@ -422,7 +422,7 @@ TEST_CASE(
             fixture.header.directory.offset);
         const std::size_t manifest_offset = static_cast<std::size_t>(
             fixture.header.manifest.offset);
-        // The first directory entry must have partition ID zero.
+        // The  first directory entry must have partition ID zero.
         reference_store_le(
             std::span<std::byte>{fixture.image},
             directory_offset,

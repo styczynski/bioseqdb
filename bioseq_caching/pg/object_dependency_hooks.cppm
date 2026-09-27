@@ -4,7 +4,7 @@
  *
  * Supported objects get individual dependency keys as well as database-wide
  * version checks. Unknown objects use database-wide invalidation. Role changes
- * also trigger the shared emergency version because roles affect every database.
+ * also  trigger the shared emergency version because roles affect every database.
  */
 module;
 
@@ -171,7 +171,7 @@ void object_access(
 
 }  // namespace detail
 
-/** Install the object-change hook once and preserve the previous hook in the chain. */
+/** Install the object-change hook once and preserve the previous hook in  the chain. */
 void install_object_dependency_hooks() noexcept {
   if (detail::g_object_access_hook_installed) {
     return;

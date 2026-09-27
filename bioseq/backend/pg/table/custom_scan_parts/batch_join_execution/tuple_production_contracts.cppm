@@ -24,7 +24,7 @@ export void batch_join_set_placeholder_value(
     const bioseq_stub_oids& oids,
     MemoryContext output_context);
 
-/** Combine a target match with its query row, then filter and project the output. */
+/** Combine a target match with its query row, then  filter and project the output. */
 export TupleTableSlot* batch_join_project_output(
     CustomScanState* node,
     batch_join_runtime& runtime,

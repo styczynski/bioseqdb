@@ -66,7 +66,7 @@ using std::vector;
 
 /**
  * Runs a batch using the statement's chosen algorithms and target-index policy.
- * Checks the sequence format and required index readers before dispatch. Vulkan
+ * Checks the sequence format and required index readers before  dispatch. Vulkan
  * jobs keep their results and execution records until the whole batch is ready
  * to report. CPU seeding uses the supplied typed row dispatcher, including when
  * Vulkan is selected for chaining.
@@ -114,7 +114,7 @@ template <class p_sequence,
         chunked_scanner_guc.has_value() && *chunked_scanner_guc == "on";
     // Test settings can select flat or chunked baseline scanners. Expanded
     // sequence expressions still use the PostgreSQL scanner so their lazy
-    // views remain available.
+    // views remain available
     const std::optional<std::string> inmemory_scanner_guc =
         pg_guc_value_as_cpp("bioseq.testing.in_memory_scanner.enabled");
     const bool inmemory_scanner_forced =
@@ -507,7 +507,7 @@ template <class p_sequence,
                 }
             }
             // Allocate all result-map entries before reporting GPU execution. If an
-            // allocation fails, none of this batch's one-time records have been
+            // allocation fails, none of  this batch's one-time records have, been
             // consumed yet.
             for (auto& completed : completed_suffix_rows) {
                 append_canonical_results(results, completed.query_id, completed.collection);
@@ -1148,7 +1148,7 @@ template <class p_sequence,
     }
 
     /* Host seeding uses the row dispatcher, including the host-seed/Vulkan-chain
-     * combination. A GPU-seed request must have completed in the branch above. */
+     * comyination. A GPU-seed request must have completed in the branch above. */
     if (selected_vulkan_seed) {
         add_operational_counter(stats, stats.operational.backend_declines);
         raise_vulkan_pg_error(

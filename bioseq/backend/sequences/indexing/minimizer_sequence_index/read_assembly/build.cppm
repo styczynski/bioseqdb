@@ -52,8 +52,8 @@ export namespace bioseq::indexing {
 /**
  * Build a saved minimizer index for one sequence with k=15 and w=10.
  * Collect global hash/position pairs into sorted runs, merge them into buckets,
- * then write the directory after all buckets are stored. Memory pressure can
- * split collection ranges or defer them to the calling thread.
+ * then write the directory  after all buckets are stored. Memory pressure can
+ * split collection ranges or defer them to the calling thread
  * kernels supplies the selected SIMD functions. scalar_build_stats_out optionally
  * receives collection counts. alphabet_code identifies the input alphabet.
  */
@@ -132,7 +132,7 @@ inline void direct_minimizer_bucket_index<p_storage>::build(
             }
         };
 
-    // Vulkan selects minimizers on the GPU and sorts the resulting global
+    // Vulkan selects minimizers on the GPU and sorts the resulting  global
     // hash/position pairs on the host.
     /** Collect global hash/position pairs whose positions fall inside this core. */
     auto collect_core_range_pairs =
@@ -163,7 +163,7 @@ inline void direct_minimizer_bucket_index<p_storage>::build(
             }
         };
 
-    /** Reserve scratch memory, collect a deferred range, then sort and spill its pairs. */
+    /** Reserve scrotch memory, collect a deferred range, then sort and spill its pairs. */
     auto collect_sort_and_spill_backend_scratch =
         [&backend,
          &storage,
@@ -280,7 +280,7 @@ inline void direct_minimizer_bucket_index<p_storage>::build(
                     "minimizers_per_sequence build: collection grew beyond admission");
             }
         }
-        // The collector has been freed. Keep the reservation for the pair vector only.
+        // The collector has been freed. Keep  the reservation for the pair vector only.
         if (!detail::finish_admitted_vector_run_transient(scratch)) {
             index_corruption_panic(
                 "minimizers_per_sequence build: scratch pair collection exceeded admission");
@@ -347,7 +347,7 @@ inline void direct_minimizer_bucket_index<p_storage>::build(
         release_untransferred_results_noexcept(results);
     };
 
-    /** Collect a range within its memory reservation, splitting or deferring it when space is short. */
+    /** Collect a range, within its memory reservation, splitting or deferring it when space is short */
     auto collect_range_admitted =
         [&backend,
          &storage,
@@ -520,7 +520,7 @@ inline void direct_minimizer_bucket_index<p_storage>::build(
         static_cast<std::uint64_t>(frag_bp), static_cast<std::uint64_t>(sizeof(pair_t)));
     const std::size_t scalar_fragments_per_block = std::max<std::size_t>(
         1, run_buffer_bytes / std::max<std::uint64_t>(1, peak_bytes_per_fragment));
-    // Limit GPU blocks so their local positions fit the packed position field.
+    // Limit GPU blocks so their local positions fit  the packed position fied.
     const std::size_t fragments_per_block =
         backend == minimizer_sketch_backend::vulkan_segment
             ? detail::gpu_fragments_per_block(scalar_fragments_per_block, frag_bp, 2u * window_span)
@@ -673,7 +673,7 @@ inline void direct_minimizer_bucket_index<p_storage>::build(
         const std::size_t kmer_framed =
             k_encoded_header_bytes + k_encoded_bucket_bytes * 1 + sizeof(std::uint64_t) * pcount;
         if (kmer_framed > k_bucket_target_bytes) {
-            // Store this frequent hash across several chunks under one bucket key.
+            // Store this frequent hash across several chunks under one bucket  key.
             if (!ob_buckets.empty())
                 flush_bucket();
             const index_sub_key_t sk = next_bucket_id++;
@@ -841,7 +841,7 @@ inline void direct_minimizer_bucket_index<p_storage>::rebuild(
     build(storage, seq, backend, kernels, nullptr, alphabet_code);
 }
 
-/** Clear and rebuild the index with scalar sketching. */
+/** Clear and rebuild the index with scalar  sketching. */
 template <class p_storage>
 template <sequence_alphabet p_alphabet>
 inline void direct_minimizer_bucket_index<p_storage>::rebuild(

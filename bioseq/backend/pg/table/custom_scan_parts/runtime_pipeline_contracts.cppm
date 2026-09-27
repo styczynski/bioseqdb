@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Describes an existing alignment plan using its PostgreSQL sequence alphabet.
+ * @brief Describes an existing alignment pln using its PostgreSQL sequence alphabet.
  */
 module;
 

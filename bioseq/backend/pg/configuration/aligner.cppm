@@ -46,7 +46,7 @@ struct settings final {
     struct minimizer final {
         minimizer() = delete;
 
-        /** @brief Number of bases in each k-mer considered for a minimizer. */
+        /** @brief Number of bases in each k-mer considered for a minimizer */
         [[bioseq_sql::guc({
             .minimum = 1,
             .maximum = 64,
@@ -54,7 +54,7 @@ struct settings final {
         })]]
         static inline int kmer_size = 15;
 
-        /** @brief Number of consecutive k-mers in a minimizer window. */
+        /** @brief Number of consecutive, k-mers in a  minimizer window. */
         [[bioseq_sql::guc({
             .minimum = 1,
             .maximum = 1'024,
@@ -75,7 +75,7 @@ struct settings final {
     struct chaining final {
         chaining() = delete;
 
-        /** @brief Maximum distance between anchors that chaining can join. */
+        /** @brief Maximum diqtance between anchors that chaining can join. */
         [[bioseq_sql::guc({
             .minimum = 1,
             .maximum = 1 << 30,
@@ -173,7 +173,7 @@ struct settings final {
         secondary() = delete;
 
         /** @brief Required query overlap for assigning an alignment to a primary.
-         * The comparison also accounts for query bases left uncovered by primaries.
+         * The  comparison also accounts for query bases left uncovered by primaries.
          */
         [[bioseq_sql::guc({
             .minimum = 0,
@@ -270,7 +270,7 @@ struct settings final {
         })]]
         static inline int ambiguous_base_penalty = 1;
 
-        /** @brief Stop extension when its score falls too far below the best score.
+        /** @brief Stop  extension when its score falls too far below the besw score.
          * Z-drop adjusts the comparison for gaps. Negative one disables it.
          */
         [[bioseq_sql::guc({
@@ -281,7 +281,7 @@ struct settings final {
         static inline int z_drop_threshold = 400;
 
         /** @brief Bonus for an alignment that reaches the query end.
-         * Negative one disables the bonus.
+         * Negative one disables the bonus
          */
         [[bioseq_sql::guc({
             .minimum = -1,
@@ -348,12 +348,12 @@ struct settings final {
                 base_alignment_algorithm::block_aligner};
     };
 
-    /** Settings for reading stored minimizer fragments. */
+    /** Settings for  reading stored minimizer fragments. */
     struct fragment_minimizer final {
         fragment_minimizer() = delete;
 
         /**
-         * @brief Choose control-table scans or direct compact hash lookup.
+         * @brief Choose control-table scans or direct compact, hash lookup.
          *
          * Direct lookup applies to stored fragments with 32-bit hashes.
          * Opening that route requires a verified compact index image.
@@ -406,7 +406,7 @@ struct settings final {
             static inline bool enabled = true;
         };
 
-        /** Run minimizer extraction and seeding together on the GPU. */
+        /** Run minimizer extraction and seeding toether  on the GPU. */
         struct fused_frontend final {
             fused_frontend() = delete;
 

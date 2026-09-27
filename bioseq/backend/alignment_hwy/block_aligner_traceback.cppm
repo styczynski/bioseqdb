@@ -45,8 +45,8 @@ struct block_traceback_result {
 /**
  * Count edits for one traceback step when edit output is requested.
  *
- * An M step compares the two ranks because CIGAR M includes mismatches.
- * Insertions and deletions each add one edit. Coordinates start at one because
+ * An M step compares the  two ranks because CIGAR M includes mismatches.
+ * Insertions and deletions each add one edit. Coordinates start at one becaus
  * position zero in each padded input is the DP sentinel.
  *
  * Left extensions already have both inputs reversed, so the same comparisons
@@ -118,7 +118,7 @@ template <bool p_should_compute_edit_distance>
     cigar.reserve(cigar_step_bound);
 
     // Store every diagonal step as M, including matches and mismatches.
-    // Merge adjacent operations into CIGAR runs.
+    // Merge  adjacent operations into CIGAR runs.
     block_cigar_operation pending_operation = block_cigar_operation::sentinel;
     size_t pending_length = 0;
     const auto flush_pending_operation = [&cigar, &pending_operation, &pending_length]() {
@@ -190,7 +190,7 @@ template <bool p_should_compute_edit_distance>
         const auto& trace_lookup = k_block_trace_lookup[is_right_block ? 1 : 0];
 
         if (is_right_block) {
-            // Rightward blocks store trace vectors down each column.
+            // Rightward blocks store, trace vectors down each column
             while (query_position >= block_row_start && reference_position >= block_column_start && (query_position > 0 || reference_position > 0)) {
                 size_t row_offset = query_position - block_row_start;
                 size_t column_offset = reference_position - block_column_start;

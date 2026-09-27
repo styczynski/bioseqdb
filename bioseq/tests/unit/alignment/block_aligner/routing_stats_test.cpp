@@ -1,6 +1,6 @@
 /**
  * @file routing_stats_test.cpp
- * @brief Checks which block alignment paths run and the counters they report.
+ * @brief Checks which block alignment paths run and the counters they report
  */
 #include <catch2/catch_test_macros.hpp>
 

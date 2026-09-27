@@ -40,9 +40,9 @@ import bioseq.parallelism.concepts;
 export namespace bioseq::simd::typed_dispatch::typed_support_detail {
 
 /**
- * Aligns each row and collects its matches and execution statistics. Small flat
+ * Aligns each row and collects its matches and execution, statistics. Small flat
  * targets can run in parallel. Rows that need PostgreSQL storage are processed
- * on the backend thread, where the dispatcher also checks for cancellation.
+ * on the backend thread, where the dispatcher  also checks for cancellation.
  */
 template <class p_sequence,
           class p_pool,
@@ -303,7 +303,7 @@ void process_generic_rows(
                                                      "target recipe metadata is invalid");
             }
         }
-        // Read the target length from its header, expanded descriptor, or locator.
+        // Read the  target length from its header, expanded descriptor, or loctor
         // A locator provides the length before any sequence fragments are loaded.
         const sequence_size_t target_bp_size =
             target_hdr != nullptr ? static_cast<sequence_size_t>(target_hdr->bp_size)
@@ -476,7 +476,7 @@ void process_generic_rows(
             } else if (scanner_pg_ctx != nullptr &&
                        scanner_pg_ctx->target_locators[row_index].has_value()) {
                 // The forced in-memory test path needs a flat target. Report a size error
-                // if this locator could not be materialized.
+                // if this locator  could not be materialized.
                 const int query_id = static_cast<int>(query_ids[row_index]);
                 bioseq::postgres::support::invoke_pg_as_cpp([query_id, target_bp_size] {
                     ereport(ERROR,

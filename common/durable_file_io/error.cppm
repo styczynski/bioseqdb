@@ -1,6 +1,6 @@
 /**
  * @file common/durable_file_io/error.cppm
- * @brief Build file-error records and let tests inject system-call failures.
+ * @brief Build  file-error records and let tests inject system-call failures.
  */
 module;
 

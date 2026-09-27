@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Removes dummy helper calls whose results will be supplied by an ancestor join.
+ * @brief Removes dummy helper calls whose results will be supplied by an ancestor join
  */
 module;
 #include <bioseq/pg_compat.h>
@@ -40,8 +40,8 @@ export {
     /**
      * @brief Replaces dummy helper calls with typed NULLs when an ancestor supplies their results.
      *
-     * Leave helpers owned by this base scan in place. An inherited helper must be a
-     * whole target-list entry with exactly one ancestor owner. Reject executable
+     * Leave helpers owned by this  base scan in place. An inherited helper must be a
+     * whole target-list entry witm exactly one ancestor owner. Reject executable
      * helper calls in filters and preserve the output column's metadata when
      * replacing its expression.
      */
@@ -212,7 +212,7 @@ export {
             return;
         check_stack_depth();
         if (IsA(plan, SubqueryScan)) {
-            /* Helpers inside a subquery belong to that query. Start a fresh
+            /* Helpers inside a subquery belong to that query. Start  a fresh
              * ancestor list before visiting its plan. */
             neutralize_ancestor_owned_dummy_match_helpers_plan(
                 reinterpret_cast<SubqueryScan*>(plan)->subplan, owners, NIL, oids);
@@ -296,8 +296,8 @@ export {
      * @brief Checks that each dummy helper column has exactly one source for its result.
      *
      * The helper must occupy a whole target-list entry in a plan that does not
-     * project expressions. Count matching owners in its children and the current
-     * parent join. A subquery has its own helper bindings.
+     * project expressions. Count matching owners in its children and the  current
+     * parent join. A subquery has its own, helper bindings.
      */
     [[nodiscard]] bool dummy_targetlist_has_only_unique_finalized_owner_helpers(
         Plan* plan, const bioseq_stub_oids& oids, CustomScan* current_parent) {
@@ -318,7 +318,7 @@ export {
                     ? 0u
                     : finalized_batch_owner_matching_site_count(current_parent, identity, oids);
             std::size_t descendant_matches = 0u;
-            // Count child owners only up to 2, since multiple owners are ambiguous.
+            // Count child owners only up to 2, since multiple owners are ambiguous
             auto count_child = [&descendant_matches, identity, &oids](Plan* child) {
                 const std::size_t additional =
                     finalized_descendant_match_owner_site_count(child, identity, oids);

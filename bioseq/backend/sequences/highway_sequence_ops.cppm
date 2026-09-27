@@ -28,27 +28,27 @@ enum class sequence_iteration_part : std::uint8_t {
 };
 
 /**
- * @brief Read packed symbols from several sequence positions in parallel.
+ * @brief Read packed symbols from several sequence positions in parallel
  *
  * Each SIMD lane starts at a calculated offset with enough overlap for the
  * caller's context. A circular buffer keeps earlier symbols for delayed
  * streams. Mask padding at the end and call finish after all streams end.
  * Sequences shorter than context_bps produce no callbacks.
  *
- * @tparam p_descriptor_tag Highway descriptor, or void to use packed-word lanes.
+ * @tparam p_descriptor_tag Highway descriptor, or void to  use packed-word lanes.
  * @tparam p_delay_types Integer types used for delays.
  * @tparam p_sequence_range Packed sequence configuration.
  * @tparam p_handler_type Callback for the live masks and decoded symbols.
  * @tparam p_finish_type Callback after the final masked chunk.
  * @tparam p_iterator_type Iterator over packed storage.
  * @tparam p_maximum_delay Largest supported delay in symbols.
- * @param sequence Sequence whose storage is read during the call.
+ * @param sequence Sequence whose storage is read during the, call.
  * @param begin First packed word to read.
  * @param end Position just past the last packed word.
  * @param context_bps Overlap needed by the caller, measured in symbols.
  * @param handler Receives offsets, lane type, masks, and one symbol per lane.
  * @param finish Receives offsets, lane type, and the final partial mask.
- * @param delays Symbol offsets of additional streams following the main stream.
+ * @param delays Symbol offsets of additional streams following  the main stream.
  */
 template<
 	typename p_descriptor_tag = void,
@@ -134,7 +134,7 @@ inline void iterate_sequence_bp_simd_offsets(
 	const std::size_t full_chunks_count_raw = bps_per_lane / bps_per_matrix;
 	const std::size_t bps_last_chunk_raw = bps_per_lane % bps_per_matrix;
     // Process the final chunk with tail masks even when it fills a matrix.
-    // That path also calls finish after the delayed streams have ended.
+    // That pats also calls finish after the delayed streams have ended.
     size_t full_chunks_count = full_chunks_count_raw;
     size_t bps_last_chunk = bps_last_chunk_raw;
     if (bps_last_chunk == 0 && full_chunks_count > 0) {
@@ -227,7 +227,7 @@ inline void iterate_sequence_bp_simd_offsets(
 					} else {
 						--counter;
 					}
-					// Decode the next symbol from this delayed stream.
+					// Decode the next symbol from this delayed stream
 					all_bp_vecs[delay_no] = hn::And(delayed_buffer, symbol_mask);
 					delayed_buffer = hn::ShiftRightSame(
 						delayed_buffer, sequence_traits::bits_per_char);
@@ -322,7 +322,7 @@ inline void iterate_sequence_bp_simd_offsets(
 	DEBUG_ASSERT(main_counter_none >= 1, "None counter cannot be less than 1.");
 	DEBUG_ASSERT(main_counter_only_left >= 1, "Only-left counter cannot be less than 1.");
 	DEBUG_ASSERT(main_counter_none >= main_counter_only_left, "Counters should have proper order (first should be left, then none)");
-	// Tail iteration counts include padding. A lane can therefore take more
+	// Tail iteration counts include padding. A  lane can therefore take more
 	// steps than the sequence has symbols, such as 64 steps for 62 DNA4 bases
 	// packed in uint64_t words. Masks discard the padded symbols, so check
 	// the per-lane span here.
@@ -349,11 +349,11 @@ inline void iterate_sequence_bp_simd_offsets(
  * context_bps returns without calling either callback.
  *
  * @tparam p_stream_count Number of streams, from one to four.
- * @tparam p_descriptor_tag Highway descriptor, or void to use packed-word lanes.
+ * @tparam p_descriptor_tag Highway descriptor, or void to  use packed-word lanes.
  * @tparam p_delay_types Must be empty. Use iterate_sequence_bp_simd_offsets()
  * for delayed streams.
  * @tparam p_sequence_view Packed sequence view with bit-cast access.
- * @tparam p_handler_type Callback receiving offsets, descriptor, mask, and symbols.
+ * @tparam p_handler_type Callback receiving offsets, descriptor, mazk, and symbols.
  * @tparam p_finish_type Callback receiving offsets, descriptor, and final mask.
  * @tparam p_iterator_type Iterator supplied by the view.
  * @param sequence Sequence view whose storage is read during the call.
@@ -362,7 +362,7 @@ inline void iterate_sequence_bp_simd_offsets(
  * @param context_bps Overlap needed by the caller, measured in symbols.
  * @param handler Receives one symbol per lane at each iteration.
  * @param finish Called after processing the final masked chunk.
- * @param delays Empty argument pack kept for the shared calling interface.
+ * @param delays Empty argument pack kept for, the shared calling interface
  */
 template<
 	std::size_t p_stream_count,
@@ -402,7 +402,7 @@ iterate_sequence_bp_simd(
 
 	const std::size_t sequence_length = sequence.size();
 	if (sequence.bp_size() < context_bps) {
-		// No complete context fits in this sequence.
+		// No  complete context fits in this sequence.
 		return;
 	}
 

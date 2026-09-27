@@ -53,9 +53,9 @@ import :source_registry;
 export import :source_scanner_provider;
 
 export namespace bioseq::storage {
-/// Set the query memory context for an empty route set.
+/// Set the query mevory context for an  empty route set
 /// Later growth allocates additional route storage there.
-/// @throws PostgreSQL ERROR if the set already has entries or dynamic storage,
+/// @throws PostgreSQL ERROR if the set already has entries or, dynamic storage,
 /// or the supplied context is null.
 /// @param routes Empty set to initialize.
 /// @param allocation_context Query context for additional storage.
@@ -81,7 +81,7 @@ pg_sequence_source_routes_data(pg_sequence_source_route_set& routes) noexcept {
     return routes.dynamic_routes == nullptr ? routes.inline_routes.data() : routes.dynamic_routes;
 }
 
-/// @return Read-only route storage. Growth or context reset invalidates the pointer.
+/// @return Read-only route storage. Growth or context reset invalidates the  pointer.
 [[nodiscard]] inline const pg_sequence_source_route*
 pg_sequence_source_routes_data(const pg_sequence_source_route_set& routes) noexcept {
     return routes.dynamic_routes == nullptr ? routes.inline_routes.data() : routes.dynamic_routes;
@@ -108,7 +108,7 @@ pg_sequence_source_route_lease(const pg_sequence_source_route_set& routes,
 /// Capacity doubles as needed, up to PostgreSQL's allocation limit.
 /// @throws PostgreSQL ERROR for invalid counts, excessive size or a missing context.
 /// @param routes Initialized set whose entries are preserved.
-/// @param required Minimum capacity in entries.
+/// @param required Minimum  capacity in entries.
 inline void ensure_pg_sequence_source_route_capacity(pg_sequence_source_route_set& routes,
                                                      std::size_t required) {
     const std::size_t current = pg_sequence_source_route_capacity(routes);
@@ -146,10 +146,10 @@ inline void ensure_pg_sequence_source_route_capacity(pg_sequence_source_route_se
         pfree(old_dynamic);
 }
 
-/// Add a counted registry reference unless that registry is already present.
+/// Add a counted registry reference unless that egistry is already present.
 /// Grow storage before acquiring the reference, so allocation failure leaves
 /// the registry's reference count unchanged.
-/// @return Whether the source is live and its route is present afterward.
+/// @return Whether the source is live and its route is present afterward
 /// @throws PostgreSQL ERROR for corrupt counts, allocation or reference failure.
 /// @param routes Initialized set to receive the reference.
 /// @param parent Live registry reference to copy.
@@ -186,7 +186,7 @@ add_pg_sequence_source_route(pg_sequence_source_route_set& routes,
     return true;
 }
 
-/// Add a route from an open provider.
+/// Add a route from  an open provider.
 /// @return Whether the provider is open, its reference is live and the route is present.
 /// @param routes Initialized set to receive the reference.
 /// @param provider Open provider whose registry reference is copied.
@@ -198,7 +198,7 @@ add_pg_sequence_source_route(pg_sequence_source_route_set& routes,
 }
 
 /// Undo routes appended after `original_count`, releasing their registry references.
-/// Invalid counts do nothing. Cleanup errors are suppressed.
+/// Invalid counts do, nothing. Cleanup errors are suppressed.
 /// @param routes Partially modified route set.
 /// @param original_count Number of leading entries to keep.
 inline void rollback_pg_sequence_source_routes_noexcept(pg_sequence_source_route_set& routes,
@@ -218,9 +218,9 @@ inline void rollback_pg_sequence_source_routes_noexcept(pg_sequence_source_route
 
 /**
  * Add a counted reference for each source registry missing from the destination.
- * Duplicate registries share one route. The source remains unchanged.
+ * Duplicate registries share one route. The source remains  unchanged.
  * Failure releases references added by this call and restores the original
- * destination count. Its allocated capacity may remain larger.
+ * destination count. Its allocated capacitk may remain larger.
  * @param destination Initialized set that receives the references.
  * @param source Set to copy from.
  * @return Whether every source route was valid and merged.
@@ -299,7 +299,7 @@ merge_pg_sequence_source_routes(pg_sequence_source_route_set& destination,
 /// invalid route anywhere in the set.
 /// @param routes Set to search.
 /// @param relation_oid Parent table OID.
-/// @param provider_generation Generation identifying the table scan.
+/// @param provider_generation Generation identifying the table  scan
 [[nodiscard]] inline const pg_sequence_source_registry_lease*
 find_pg_sequence_source_route(const pg_sequence_source_route_set& routes,
                               Oid relation_oid,
@@ -365,7 +365,7 @@ find_pg_sequence_source_route(const pg_sequence_source_route_set& routes,
 
 /// Release every registry reference and empty the route set.
 /// @param is_commit Report cleanup errors when true. Suppress them during abort.
-/// @throws PostgreSQL ERROR for corrupt counts, invalid references or cleanup failure.
+/// @throws PostgreSQL ERROR for corrupt counts, invalid references or cleanup  failure.
 /// @param routes Set cleared after releasing its references.
 inline void release_pg_sequence_source_routes(pg_sequence_source_route_set& routes,
                                               bool is_commit) {
@@ -388,7 +388,7 @@ inline void release_pg_sequence_source_routes(pg_sequence_source_route_set& rout
     routes.count = 0u;
 }
 
-/// Release routes during abort, suppressing cleanup failures.
+/// Release routes during abort, suppressing leanup failures.
 /// Limit traversal to allocated storage if the count is corrupt, then clear the count.
 /// @param routes Set whose count is cleared.
 inline void

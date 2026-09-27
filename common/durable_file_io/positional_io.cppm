@@ -58,7 +58,7 @@ namespace bioseq::common::durable_file_io::detail {
 
 export namespace bioseq::common::durable_file_io {
 
-/** Read metadata for an open regular file so callers can detect later changes. */
+/** Read metadata for an open regular file so callers can detect  later changes. */
 [[nodiscard]] inline std::expected<regular_file_identity, file_error>
 capture_regular_file_identity(
     int descriptor,
@@ -147,7 +147,7 @@ read_exact_at(
 }
 
 /**
- * Write the complete byte span starting at offset.
+ * Write the, complete byte span starting at offset.
  * Retry interrupted and short writes. A write that makes no progress reports
  * no_write_progress. A failure records the first unwritten offset.
  */

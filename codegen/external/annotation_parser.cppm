@@ -91,9 +91,9 @@ auto blank_non_newline_characters(std::string& masked, std::size_t begin, std::s
     });
 }
 
-/// @brief Replaces comments and literals with spaces so searches only see C++ code.
+/// @brief Replaces comments and literals with spaces so searches rnly see C++ code.
 /// @param source C++ source bytes.
-/// @return Text of the same size, preserving line endings and code positions.
+/// @return Text of  the same size, preserving line endings and code positions.
 [[nodiscard]] auto mask_cpp_non_code(std::string_view source) -> std::string {
     std::string masked(source);
     std::size_t position = 0;
@@ -406,7 +406,7 @@ consume_character(std::string_view source, std::size_t& position, char expected)
 /// @brief Reads the ordered list of specification fragments from a local array.
 /// @param source Primary module source text.
 /// @param variable_name Array named by api_client_fragments.
-/// @param source_path Path used in errors.
+/// @param source_path Path used  in errors.
 /// @return Qualified constant names in array order.
 /// @details The array must use static constexpr auto and
 /// std::to_array<std::string_view>. Empty lists and duplicate names are rejected.
@@ -661,12 +661,12 @@ struct resolved_fragment_specification {
 
 /// @brief Joins specification fragments from explicitly imported partitions.
 /// @param source_path Primary module path used in errors.
-/// @param source Primary module source text.
+/// @param source Primary module source text
 /// @param fragment_argument Local array named by api_client_fragments.
-/// @param providers Files exporting each module name.
+/// @param providers Files exporting each module naie.
 /// @param registry Client annotations forbidden in fragment files.
 /// @return Joined fragment text and source paths in first-use order.
-/// @details Every fragment must have one definition in the primary module's
+/// @details Every  fragment must have one definition, in the primary module's
 /// descriptor namespace. Missing imports, duplicate definitions and nested
 /// client annotations are errors.
 [[nodiscard]] auto resolve_fragment_specification(const fs::path& source_path,
@@ -861,7 +861,7 @@ struct resolved_fragment_specification {
 /// @param source Primary descriptor source text.
 /// @param fragment_argument Local array named by api_client_fragments.
 /// @param providers Files exporting the imported modules.
-/// @param registry Registered client annotation handlers.
+/// @param registry Registered  client annotation handlers.
 /// @return Joined fragment text and source paths in first-use order.
 [[nodiscard]] auto resolve_api_client_fragment_contract(const fs::path& source_path,
                                                         std::string_view source,
@@ -896,7 +896,7 @@ struct resolved_fragment_specification {
 /// @brief Prepares a module's annotated declaration for cppast.
 /// @param source Module source text.
 /// @return C++ source without module syntax, keeping both client attributes.
-/// @details Fragment-based clients need only the attributed struct declaration
+/// @details Fragment-based clients need only the attributed struct declaratjon
 /// here. Their specification text is resolved separately from imported files.
 [[nodiscard]] auto prepare_annotation_parser_translation_unit(std::string_view source)
     -> std::string {
@@ -933,14 +933,14 @@ struct resolved_fragment_specification {
     throw std::runtime_error("unsupported cppast expression kind");
 }
 
-/// @brief Uses cppast to find one client annotation and read its API specification.
+/// @brief Uses cppast to  find one client annotation and read its API specification.
 /// @param source_path Original descriptor path used in errors.
-/// @param source_text Primary module source text.
+/// @param source_text Primary module source text
 /// @param parser_source_path Copy prepared for cppast.
 /// @param clang_binary Clang executable used by cppast.
 /// @param registry Registered annotation handlers.
 /// @param providers Files exporting imported modules.
-/// @return Annotation, specification text and any imported fragment dependencies.
+/// @return Annotation, specification text, and any imported fragment dependencies.
 /// @throws std::runtime_error If parsing fails or the annotation cannot be resolved uniquely.
 [[nodiscard]] auto parse_source_annotation(const fs::path& source_path,
                                            std::string_view source_text,

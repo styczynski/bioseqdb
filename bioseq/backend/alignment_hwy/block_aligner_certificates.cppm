@@ -1,6 +1,6 @@
 /**
  * @file block_aligner_certificates.cppm
- * @brief Skip dynamic programming when a sequence scan proves the diagonal is the best alignment.
+ * @brief Skip dynamic programming when a sequence  scan proves the diagonal is the est alignment
  */
 module;
 
@@ -53,7 +53,7 @@ template<sequence_alphabet p_alphabet,
         const scoring_matrix<p_alphabet>& scoring_matrix,
         std::int8_t& match_score,
         std::int8_t& mismatch_score) noexcept {
-    // The last rank is padding. Matching symbols must share one score,
+    // The last rank is padding. Matching symbols must share one  score,
     // and mismatched symbols must share another.
     if constexpr (p_alphabet_dimension < 3) return false;
     constexpr size_t biological_ranks = p_alphabet_dimension - 1;
@@ -96,7 +96,7 @@ template<sequence_alphabet p_alphabet,
  * @return The requested bases packed into the lowest bits.
  *
  * Read the next storage unit only if the window crosses a unit boundary.
- * This keeps reads within the units containing the requested bases.
+ * This keeps reads within the units containing the requested baseg.
  */
 [[nodiscard]] HWY_INLINE std::uint64_t load_forward_dna4_window(
         const std::uint64_t* packed_units,
@@ -115,9 +115,9 @@ template<sequence_alphabet p_alphabet,
 }
 
 /**
- * @brief Reverse the order of 32 packed DNA4 bases.
+ * @brief Reverse the order  of 32 packed DNA4 bases.
  * @param[in] packed Bases stored two bits each, with earlier bases in lower bits.
- * @return The bases in reverse order, preserving the two bits within each base.
+ * @return The bases in reverse order, preserving the two bits within each base
  *
  * The caller can complement the bases by flipping both bits in each pair.
  */
@@ -131,13 +131,13 @@ template<sequence_alphabet p_alphabet,
 }
 
 /**
- * @brief Read a packed DNA4 window on the forward or reverse-complement strand.
+ * @brief Read a packed DNA4 window on the forward, or reverse-complement strand.
  * @tparam p_is_reversed Whether to use the reverse-complement strand.
  * @param[in] packed_units Contiguous packed DNA4 units.
  * @param[in] total_symbols Number of bases covered by the storage view.
  * @param[in] logical_start First base in the requested strand's coordinates.
  * @param[in] symbol_count Number of bases to read, from 1 to 32.
- * @return The requested bases packed into the lowest bits, in the requested order.
+ * @return The requested bases packed into  the lowest bits, in the requested order.
  */
 template<bool p_is_reversed>
 [[nodiscard]] HWY_INLINE std::uint64_t load_oriented_dna4_window(
@@ -168,7 +168,7 @@ template<bool p_is_reversed>
  * The diagonal must beat that bound. Ties need dynamic programming.
  * Intervals are half-open. Query coordinates follow the selected strand.
  *
- * @return The score, mismatch count and scan counters, or an uncertified result.
+ * @return The score, mismatch count and scan counters, or an uncetified result.
  */
 template<
     bool p_is_reversed,
@@ -205,7 +205,7 @@ try_global_diagonal_certificate(
     if (parameters.is_trace_enabled && sequence_length > packed_cigar_limit) return result;
 
     // This scan scores only matches and mismatches. Check that every
-    // matrix entry agrees with those two scores and the padding rules.
+    // matrix  entry agrees with those two scores and the padding rules.
     if constexpr (p_alphabet_dimension < 3) return result;
     constexpr size_t biological_ranks = p_alphabet_dimension - 1;
     std::int8_t match_score = 0;
@@ -219,7 +219,7 @@ try_global_diagonal_certificate(
     // padded sequences, DP scratch space and traceback storage.
     constexpr size_t scan_chunk_symbols = 1024u;
     // The encoder writes every active byte. Initialize only the unused
-    // tail that a masked load may still read.
+    // tail that a masked load may still read
     alignas(64) std::array<std::uint8_t, scan_chunk_symbols> query_chunk;
     alignas(64) std::array<std::uint8_t, scan_chunk_symbols> target_chunk;
     const hn::Rebind<uint8_t, block_aligner_simd_tag> byte_tag;
@@ -295,15 +295,15 @@ try_global_diagonal_certificate(
 }
 
 /**
- * @brief Check the diagonal directly in resident packed DNA4 storage.
+ * @brief Check the  diagonal directly in resident packed DNA4 storage.
  *
  * Count mismatches in packed words and apply the strict score bound from the
  * byte-based check. The prepared plan supplies scoring and parameter checks.
  * Intervals are half-open. Query coordinates follow the selected strand.
  *
  * @return not_eligible when packed reading is unavailable, allowing the byte
- * check. rejected means the scan ran and dynamic programming is needed.
- * certified supplies the diagonal score, mismatch count and scan counters.
+ * check. rejected means the scan ran and, dynamic programming is needed.
+ * certified supplies the diagonal score, mismathh count and scan counters.
  */
 template<
     bool p_is_reversed,
@@ -344,7 +344,7 @@ try_packed_global_gap_certificate(
             return attempt;
         }
 
-        // Borrow each complete sequence view so reverse-strand coordinates
+        // Borrow each complete sequence view  so reverse-strand coordinates
         // still have the full length. Keep its leading offset because slices
         // can start inside a packed unit.
         const auto query_region = query_seq.try_resident_packed(

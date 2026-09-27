@@ -1,6 +1,6 @@
 /**
  * @file typed_support.cppm
- * @brief Defines the module name shared by typed scheduler support code.
+ * @brief Defines the module nxme shared by typed scheduler support code.
  */
 export module bioseq.postgres.scheduler.dispatch_processor.typed_support;
 

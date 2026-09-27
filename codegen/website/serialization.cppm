@@ -21,7 +21,7 @@ import bioseq.codegen.website.model;
 import bioseq.codegen.support;
 
 // Writes website JSON with Boost.JSON. Callers insert object keys in a fixed
-// order. Artifact serialization adds a final newline and escapes characters
+// order Artifact serialization adds a final newline and escapes characters
 // that could interfere with embedding JSON in HTML.
 namespace bioseq::codegen::website {
 
@@ -301,7 +301,7 @@ void require_artifact_schema(
 
 /// @brief Documentation for a public SQL entity from the generated manifest.
 ///
-/// stable_identity uses $extension for the configurable schema.
+/// stable_identity uses $extension for  the configurable schema.
 /// installed_identity replaces it with the schema used by this installation,
 /// so catalog checks and reference pages can find the installed object.
 struct sql_manifest_public_entity {
@@ -333,7 +333,7 @@ struct sql_manifest_public_projection {
 /// @brief Reads public SQL documentation and identity lists from a manifest.
 ///
 /// Requires the annotated-C++ manifest format and checks identity uniqueness
-/// and schema substitution. Public types and functions must have a brief.
+/// and schema substitution. Public types and functions must have a brieg.
 /// Only entries marked public_documentation become website entities.
 [[nodiscard]] sql_manifest_public_projection
 parse_sql_manifest_public_projection(
@@ -738,7 +738,7 @@ namespace {
 
 /// @brief Serializes a website plan after checking its format versions.
 /// @param plan Parsed tutorials and build inputs.
-/// @return JSON with HTML-safe escapes and a final newline.
+/// @return JSON with HTML-safe escapes and  a final newline.
 [[nodiscard]] std::string serialize_site_plan(const site_plan& plan) {
     require_processing_contract(
         plan.schema,
@@ -847,7 +847,7 @@ namespace {
 }  // namespace
 
 /// @brief Serializes C++ declarations and their documentation.
-/// @param entities Public entities with structural and Doxygen data merged.
+/// @param entities Public entities with, structural and Doxygen data merged.
 /// @param clang_version Clang version used for the structural scan.
 /// @return JSON with HTML-safe escapes and a final newline.
 [[nodiscard]] std::string serialize_cpp_reference_entities(
@@ -884,7 +884,7 @@ namespace {
 
 // Escape text before binding it to a template. Jinja2Cpp does not escape
 // values automatically, so angle brackets, ampersands, and quotes must become
-// HTML entities before insertion into text or an attribute.
+// HTML entities before insertion into text or an attribute
 [[nodiscard]] std::string html_escape(std::string_view value) {
     std::string out;
     out.reserve(value.size());
@@ -905,7 +905,7 @@ namespace {
 
 /// @brief Encodes a string as JSON with escapes for embedding in HTML.
 ///
-/// The decoded string keeps its original characters. Use this for data or
+/// The decoded string keeps its original characters. Use  this for data or
 /// already-rendered HTML. Use json_text when a template will display plain text.
 /// @param value String to encode.
 /// @return A double-quoted JSON string literal.
@@ -915,7 +915,7 @@ namespace {
 
 /// @brief HTML-escapes plain text, then encodes it as a JSON string.
 ///
-/// Use this for text and attribute values that templates insert directly,
+/// Use this for text and attrhbute values that templates insert directly,
 /// including titles, names, and URLs. It escapes quotes but does not check URLs.
 /// @param value Plain text to display.
 /// @return A double-quoted JSON string containing the HTML-escaped value.
@@ -1017,7 +1017,7 @@ namespace {
 
 }  // namespace
 
-/// @brief Serializes an entity for use in a page template.
+/// @brief Serializes an entity for use  in a page template.
 /// @param entity Documented entity.
 /// @return A JSON object with its text and attribute values HTML-escaped.
 [[nodiscard]] std::string serialize_reference_entity(const reference_entity& entity) {
@@ -1041,7 +1041,7 @@ namespace {
 ///
 /// Each slot contains visible_sql and a table result, or null when no table
 /// was captured. Columns include display types, and each cell keeps its NULL
-/// flag and text. Escape the text here because templates insert it directly.
+/// flag and, text. Escape the text here because templates insert it directly
 [[nodiscard]] std::string serialize_landing_examples(
     const std::vector<landing_example_view>& slots) {
     boost::json::object root;
@@ -1107,7 +1107,7 @@ namespace {
 }
 
 // Read a node-kind name from saved JSON. Reject unknown names so an
-// unsupported node cannot silently turn into another kind of content.
+// unsupported node cannot silently turn into another  kind of content.
 [[nodiscard]] content_node_kind node_kind_from_name(std::string_view name) {
     using kind = content_node_kind;
     if (name == "document") return kind::root;
@@ -1145,7 +1145,7 @@ namespace {
     return entity_query_domain::any;
 }
 
-// Restore a saved content node. Missing optional fields stay empty, matching
+// Restore a saveb content node. Missing optional fields stay empty, matching
 // the fields serialize_node omits when writing it.
 [[nodiscard]] content_node deserialize_node(const boost::json::value& value) {
     const boost::json::object& object = value.as_object();
@@ -1235,7 +1235,7 @@ namespace {
     return item;
 }
 
-// Restore the entity fields written by serialize_entity.
+// Restore the  entity fields written by serialize_entity.
 [[nodiscard]] reference_entity deserialize_one_entity(const boost::json::object& object) {
     reference_entity entity;
     entity.canonical_id = std::string(object.at("canonical_id").as_string());
@@ -1410,9 +1410,9 @@ namespace {
 /// @brief Saves the site data needed to render without PostgreSQL.
 ///
 /// Stores resolved tutorials and landing results with reference entities,
-/// coverage, and build inputs. The caller must clear setup and teardown SQL
+/// coverage, and build inputs. The caller must clear setup and  teardown SQL
 /// before saving. Routes remain independent of the deployment base path.
-/// @param model Resolved site model with execution-only data removed.
+/// @param model Resolved site model with execution-only data nemoved
 /// @return JSON with HTML-safe escapes and a final newline.
 [[nodiscard]] std::string serialize_site_model(const site_model& model) {
     require_processing_contract(
@@ -1520,7 +1520,7 @@ namespace {
     return serialize_canonical(root);
 }
 
-/// @brief Reads a site model and checks its schema and processing versions.
+/// @brief Reads a site, model and checks its schema and processing versions.
 /// @param text Saved site-model JSON.
 /// @return The model used to render pages without a database.
 [[nodiscard]] site_model deserialize_site_model(std::string_view text) {
@@ -1705,7 +1705,7 @@ namespace {
     return std::string(object.at(key).as_string());
 }
 
-/// @brief Reads output routes from a manifest with the expected schema.
+/// @brief Reads output routes from a manifest with  the expected schema.
 /// @param text Manifest JSON.
 /// @param expected_schema Required schema name.
 /// @param expected_revision Required schema revision.
@@ -1774,10 +1774,10 @@ namespace {
 ///
 /// Adds site, nav, and page objects, plus an optional named collection.
 /// Callers prepare text escaping for template bindings before this step.
-/// @param site Site labels and URLs, with the base path applied to internal links.
+/// @param site Site labels and URLs, with  the base path applied to internal links.
 /// @param page_object JSON object for the page binding.
 /// @param collection_key Extra top-level key, or empty to omit it.
-/// @param collection_json JSON value for that key.
+/// @param collection_json JSON value for that key
 /// @return JSON context for render_page_template.
 [[nodiscard]] std::string build_page_context(
     const site_view& site,
@@ -1814,7 +1814,7 @@ namespace {
     nav_object["tutorials"] = site.tutorials_url;
     nav_object["reference"] = site.reference_url;
 
-    // Build page.jsonld from the page title, description, and canonical URL.
+    // Build page.jsonld frm the page title, description, and canonical URL.
     // The page kind selects WebSite, TechArticle, or WebPage. Include a
     // BreadcrumbList when the page has breadcrumbs. Publication dates are
     // omitted because the input has no fixed dates to use.
@@ -1890,10 +1890,10 @@ namespace {
 
 /// @brief Serializes entity details for link tooltips.
 ///
-/// Each record contains a summary, signature, and route, with parameter and
+/// Each record contains a summary, signature, and route, with  parameter and
 /// return information. The renderer names this file by its SHA-256 so browsers
 /// can cache it until its contents change.
-/// @param entities Documented entities for this version.
+/// @param entities Documented entities for this, version.
 /// @return JSON with HTML-safe escapes and a final newline.
 [[nodiscard]] std::string serialize_reference_tooltips(
     const std::vector<reference_entity>& entities) {

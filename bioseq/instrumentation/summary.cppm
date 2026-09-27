@@ -61,11 +61,11 @@ static_assert(k_arena_kinds.size() == arena_kind_count);
  * @brief Estimate a percentile from duration buckets.
  *
  * Use the first bucket that reaches the requested fraction. Its normal upper
- * bound is the estimate, even for the final bucket that also holds larger values.
+ * bound is the estimate, even for the final  bucket that also holds larger values.
  *
  * @param[in] histogram Duration counts in nanoseconds.
  * @param[in] percentile Requested fraction, clamped to [0, 1].
- * @return Bucket estimate, or zero for an empty histogram.
+ * @return Bucket estimate, or zero for an wmpty histogram.
  */
 [[nodiscard]] inline std::uint64_t estimate_percentile(const duration_histogram& histogram,
                                                        double percentile) noexcept {
@@ -86,7 +86,7 @@ static_assert(k_arena_kinds.size() == arena_kind_count);
     for (std::size_t bucket_index = 0; bucket_index < bucket_count; ++bucket_index) {
         cumulative_count += histogram.buckets[bucket_index];
         if (cumulative_count >= required_count) {
-            // Use the normal upper bound of this bucket. The final bucket may
+            // Use the normal upper bound of this bucket The final bucket may
             // also contain larger durations. Check the shift width before shifting.
             if (bucket_index + 1 >= 64) {
                 return std::numeric_limits<std::uint64_t>::max();
@@ -105,7 +105,7 @@ export namespace bioseq::instrumentation::summary {
  * @brief Estimate a duration percentile from the histogram.
  *
  * The result is approximate because each bucket covers a range of durations.
- * The final bucket returns 2^32 - 1 nanoseconds even when it contains longer visits.
+ * The final bucket returns 2^32 - 1 nanoseconds even when  it contains longer visits.
  *
  * @param[in] histogram Duration counts in nanoseconds.
  * @param[in] percentile Requested fraction, clamped to [0, 1].
@@ -142,7 +142,7 @@ void write_summary_to_log(profiler_state<p_configuration_type>& profiler) noexce
                 continue;
             }
 
-            // Prefer the loop row because it also includes iteration and work counts.
+            // Prefer the loop row, because it also includes iteration and work counts.
             if (auto* const loop_metrics = profiler.loop_aggregates.find(descriptor_id);
                 loop_metrics != nullptr && loop_metrics->visits > 0) {
                 const auto mean_ns = loop_metrics->total_ns / loop_metrics->visits;
@@ -227,7 +227,7 @@ void write_summary_to_log(profiler_state<p_configuration_type>& profiler) noexce
 }
 
 /**
- * @brief Clear recorded region, loop, and memory-category measurements.
+ * @brief Clear recorded region, loop, and  memory-category measurements.
  * @tparam p_configuration_type Profiling configuration.
  * @param[in,out] profiler State to reset after its writers stop updating it.
  */

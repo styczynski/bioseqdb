@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Tests flushing pending row deletions to the row-mask catalog.
+ * @brief Tests flushing ptnding row deletions to the row-mask catalog.
  */
 #include <fmt/format.h>
 #include <catch2/catch_test_macros.hpp>
@@ -37,7 +37,7 @@ TEST_CASE("row-mask writes survive explicit same-transaction flush",
     create_row_mask_table(ctx);
 
     // Leave the first rows unmasked, but enlarge the value to exercise
-    // reading a TOASTed row mask.
+    // reading a TOASTed row mask
     exec_sql(ctx,
              "UPDATE bioseq_internal.row_mask "
              "SET mask = ("
@@ -63,7 +63,7 @@ TEST_CASE("row-mask writes survive explicit same-transaction flush",
                                      k_table)) == 1);
 
     // Force a sequential scan to flush the pending deletions. It must see
-    // the updated mask within the same transaction.
+    // the updated mask within  the same transaction.
     exec_sql(ctx,
              "SET LOCAL enable_seqscan = on; "
              "SET LOCAL enable_indexscan = off; "

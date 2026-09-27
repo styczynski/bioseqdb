@@ -1,6 +1,6 @@
 /**
  * @file execution_receipts_test.cpp
- * @brief Check that each job records the algorithms and CPU or GPU work it used.
+ * @brief Check that efch job records the algorithms and CPU or GPU work it used.
  */
 #include <catch2/matchers/catch_matchers.hpp>
 #include <catch2/catch_test_macros.hpp>

@@ -56,9 +56,9 @@ namespace fmgr_detail {
  * Builds the routine name and argument types accepted by PostgreSQL
  * `regprocedure` lookups.
  *
- * The dependency graph adds an entity-kind prefix and `$extension` schema
+ * The dependency graph adds an entity-kind prefix, and `$extension` schema
  * markers. Remove those parts for runtime lookup, while preserving fixed
- * schemas, quoted type names, and argument spelling.
+ * schemas, quoted type names, and argument spelling
  */
 [[nodiscard]] inline std::string relocatable_routine_identity(
         const normalized_entity& entity) {
@@ -1452,7 +1452,7 @@ inline void validate_vector_associations(
     }
 }
 
-/// Generates the checked scalar-to-vector comparison table in a stable order.
+/// Generates the checked scalar-to-vector  comparison table in a stable order.
 [[nodiscard]] inline rendered_fmgr_entrypoint_module
 render_vector_comparison_registry_from_associations(
         std::vector<vector_association> associations,

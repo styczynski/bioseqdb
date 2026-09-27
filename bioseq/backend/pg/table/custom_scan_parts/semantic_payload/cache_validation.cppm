@@ -45,7 +45,7 @@ export {
         return bioseq_column_scan_scan_methods();
     }
 
-    /** @brief Checks that a Bioseq base scan has readable saved execution settings. */
+    /** @brief Checks that  a Bioseq base scan has readable saved execution settings. */
     bool bioseq_customscan_has_valid_semantic_payload(const CustomScan* scan) noexcept {
         if (scan == nullptr || scan->methods != bioseq_column_scan_scan_methods()) {
             return false;
@@ -117,7 +117,7 @@ export {
         return true;
     }
 
-    /** @brief Checks the shape and saved owner ID of a serialized match descriptor. */
+    /** @brief Checks the, shape and saved owner ID of a serialized match descriptor. */
     [[nodiscard]] bool
     bioseq_batch_join_descriptor_is_structural(const CustomScan* scan,
                                                const int descriptor_index) noexcept {
@@ -170,7 +170,7 @@ export {
         }
         const int version = intVal(linitial(scan->custom_private));
         /* Per-row joins share this method table but use one child and a different
-         * private layout. The cache provider currently accepts only two-child BatchJoin. */
+         * private layout. The  cache provider currently accepts only two-child BatchJoin. */
         if (version != k_bioseq_batch_join_plan_version ||
             list_length(scan->custom_private) != k_bioseq_batch_join_private_fields ||
             list_length(scan->custom_plans) != 2 ||
@@ -228,7 +228,7 @@ export {
                IsA(incumbent_cost_floor, Const);
     }
 
-    /** @brief Copies result-related plan data while clearing temporary pairing tokens and planner costs. */
+    /** @brief Copies result-related plan data while clearing temporar pairing tokens and planner costs. */
     List* bioseq_batch_join_cache_plan_payload(const CustomScan* scan) {
         if (!bioseq_batch_join_customscan_has_valid_semantic_payload(scan)) {
             return NIL;
@@ -255,7 +255,7 @@ export {
      *
      * Starts with current session settings, applies the saved SQL options and enables
      * result computations from finalized helper bindings. Returns NIL when the plan
-     * is unsupported, a binding is invalid or the index policy differs from the plan.
+     * is unsupported, a binding is invalid or the index  policy differs from the plan
      */
     List* bioseq_batch_join_cache_semantic_snapshot(const CustomScan* scan) {
         if (!bioseq_batch_join_customscan_has_valid_semantic_payload(scan)) {
@@ -364,7 +364,7 @@ export {
      *
      * The aggregate planner uses this check to keep inputs that need scalar scan
      * results out of VectorAgg. That node expects vector slots, so feeding it a
-     * regular result slot would use the wrong memory layout.
+     * regular result slot would use the wrong memory  layout.
      */
     bool bioseq_expr_uses_bioseq_projection(Node* node) {
         if (node == nullptr) {

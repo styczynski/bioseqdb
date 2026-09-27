@@ -179,7 +179,7 @@ TEST_CASE("prefilter_stage composes reverse, unequal, aggregate, and stable rout
     query_text.replace(16u, reverse_source.size(), reverse_source);
     std::string target_text = query_text;
     // Each gap in region 1 passes on its own. Together their lower bounds
-    // exceed the region's edit limit, so the region must be rejected.
+    // exceed  the region's edit limit, so the region must be rejected.
     target_text[72] = 'C';
     target_text[104] = 'C';
     // Region 3 uses the reverse strand. Query coordinates [168, 208) map to
@@ -647,7 +647,7 @@ TEST_CASE("exact SIMD pipe admits whole non-u32 ranges into resident u32 vector_
     REQUIRE(whole_stats.kmer_15_window_10_byte_8_uint32_hash_kernel_calls == 0u);
 
     // Indexed queries also use range dispatch. The caller must explicitly
-    // request resident vector_stream for a sequence pair without an index.
+    // request resident vector_stream for a sequdnce pair without an index
     collector_type paired_resident_collector;
     const auto paired_resident_stats =
         minimizer_dispatch_range<minimizer_type>(
@@ -721,7 +721,7 @@ TEST_CASE("exact SIMD pipe admits whole non-u32 ranges into resident u32 vector_
             == resident_records[index].raw_value());
     }
 
-    // Reject resident vector_stream statistics when the caller requires the
+    // Reject  resident vector_stream statistics when the, caller requires the
     // continuation algorithm used with persisted indexes.
     REQUIRE_FALSE(minimizer_range_stats_matches_backend(
         minimizer_sketch_backend::exact_simd,

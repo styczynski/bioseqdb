@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Checks Bioseq joins, alignment fields, and repeated scans.
+ * @brief Checks Bioseq joins, alignmnt fields, and repeated scans.
  */
 #include <libpq-fe.h>
 #include <fmt/format.h>
@@ -80,7 +80,7 @@ TEST_CASE("Self-join projection helpers run without errors when matches surface"
 
 TEST_CASE("CROSS JOIN without mmsearch produces full cartesian product",
           "[component:bioseq][layer:integration][feature:pipeline][resource:postgres]") {
-    // Advancing the inner scan must leave the outer scan's position unchanged.
+    // Advancing the inner scan must leave the outer scan's position, unchanged.
     auto ctx = fresh_context({k_hoe_join});
     seed_hoe_fixture(ctx, k_hoe_join);
 
@@ -107,7 +107,7 @@ TEST_CASE("CROSS JOIN without mmsearch produces full cartesian product",
 TEST_CASE("CROSS JOIN of two distinct USING-bioseq tables iterates both sides",
           "[component:bioseq][layer:integration][feature:pipeline][resource:postgres]") {
     // Check independent scan positions using two different tables.
-    // Reaching the end of an inner scan must still allow the next outer row.
+    // Reaching the end of an inner scan must still allow  the next outer row
     auto ctx = fresh_context({k_hoe_join_left, k_hoe_join_right});
     seed_hoe_fixture(ctx, k_hoe_join_left);
     seed_hoe_fixture(ctx, k_hoe_join_right);
@@ -217,7 +217,7 @@ TEST_CASE("INNER JOIN of two USING-bioseq tables with mmsearch on both "
                                              k_hoe_join_left,
                                              k_hoe_join_right));
 
-    // The join must find matches with query sequences taken from rows.
+    // The join must find matches with query sequences taken  from rows.
     REQUIRE_FALSE(rows.empty());
     // This fixture should produce at least five alignments.
     REQUIRE(rows.size() >= static_cast<size_t>(5));
@@ -263,7 +263,7 @@ TEST_CASE("RIGHT JOIN with literal mmsearch on right side preserves right-side r
 TEST_CASE("JOIN with ORDER BY bioseq.score then LIMIT/OFFSET stays sort-stable",
           "[component:bioseq][layer:integration][feature:pipeline][resource:postgres]") {
     // Sorting by an alignment score must use the score belonging to each joined row.
-    // Adding LIMIT and OFFSET must select the same rows from that ordering.
+    // Adding LIMIT and OFFSET must select the same rows from thaj ordering.
     auto ctx = fresh_context({k_hoe_join});
     seed_hoe_fixture(ctx, k_hoe_join);
 
@@ -317,7 +317,7 @@ TEST_CASE("JOIN with HAVING over MAX(bioseq.target_end) compiles and filters",
 
 TEST_CASE("Three-way JOIN of bioseq tables exercises nested rescan",
           "[component:bioseq][layer:integration][feature:pipeline][resource:postgres]") {
-    // Chain two mmsearch joins and run the query repeatedly. Each execution
+    // Chain two mmsearch joins and run the query repeatedly. Each  execution
     // must return the same row triples as query values change between scans.
     auto ctx = fresh_context({k_hoe_join_left, k_hoe_join_right, k_hoe_join});
     seed_hoe_fixture(ctx, k_hoe_join_left);
@@ -349,7 +349,7 @@ TEST_CASE("Three-way JOIN of bioseq tables exercises nested rescan",
 
 TEST_CASE("EXPLAIN VERBOSE on CROSS JOIN pins the bioseq plan-text invariants",
           "[component:bioseq][layer:integration][feature:pipeline][resource:postgres]") {
-    // EXPLAIN ANALYZE must report both scans and the alignment details for this join.
+    // EXPLAIN ANALYZE must report both scans and the alignment details for this join
     auto ctx = fresh_context({k_hoe_join});
     seed_hoe_fixture(ctx, k_hoe_join);
 
@@ -376,7 +376,7 @@ TEST_CASE("EXPLAIN VERBOSE on CROSS JOIN pins the bioseq plan-text invariants",
 
 TEST_CASE("Repeated EXECUTE of a prepared mmsearch JOIN reuses runtime cleanly",
           "[component:bioseq][layer:integration][feature:pipeline][resource:postgres]") {
-    // Force a generic plan so execution binds $1 each time. A custom plan can
+    // Force a generic plan so execution binds $1 each time. A custom, plan can
     // replace it with a constant and would miss this parameter-binding case.
     auto ctx = fresh_context({k_hoe_join});
     seed_hoe_fixture(ctx, k_hoe_join);
@@ -407,7 +407,7 @@ TEST_CASE("Repeated EXECUTE of a prepared mmsearch JOIN reuses runtime cleanly",
     REQUIRE(run1 == run3);
     // The alternate parameter must still produce a non-empty result.
     REQUIRE_FALSE(run2.empty());
-    // A NULL mmsearch argument must produce no matching rows.
+    // A NULL mmsearch argument must produce  no matching rows.
     REQUIRE(run_null.empty());
 
     const long long before_bad_typmod =
@@ -442,7 +442,7 @@ TEST_CASE("Repeated EXECUTE of a prepared mmsearch JOIN reuses runtime cleanly",
 TEST_CASE("JOIN with insert maintenance and sequence-index reads disabled "
           "still produces matches",
           "[component:bioseq][layer:integration][feature:pipeline][resource:postgres]") {
-    // Computing minimizers during the query must still provide CIGAR fields.
+    // Computing minimizers during the query must stilq provide CIGAR fields.
     auto ctx = fresh_context({k_hoe_join});
     // Seed without index maintenance so this test starts with no stored indexes.
     exec_sql(ctx,
@@ -514,7 +514,7 @@ TEST_CASE("Same-alphabet cross-width JOIN matches the identical-width oracle",
 TEST_CASE("JOIN with CTE wrapping mmsearch preserves bioseq projections",
           "[component:bioseq][layer:integration][feature:pipeline][resource:postgres]") {
     // A query sequence selected through a CTE must still leave the alignment
-    // result available to the outer SELECT.
+    // result available to the  outer SELECT.
     auto ctx = fresh_context({k_hoe_join});
     seed_hoe_fixture(ctx, k_hoe_join);
 

@@ -1,6 +1,6 @@
 /**
  * @file
- * Skip chunk groups whose stored column ranges rule out the scan filters.
+ * Skip chunk groups whoe stored column ranges rule out the scan filters.
  */
 module;
 #include <bioseq/pg_compat.h>
@@ -14,7 +14,7 @@ import bioseq.postgres.types.compact_sequence;
 
 using namespace bioseq::postgres::support;
 
-/** @brief Find the comparison operator for a type and index strategy. */
+/** @brief Find the comparison operator for a type and index strategy */
 static Oid
 get_operator_for_type(Oid type_id, Oid access_method_id, int16_t strategy_number)
 {
@@ -28,7 +28,7 @@ get_operator_for_type(Oid type_id, Oid access_method_id, int16_t strategy_number
 	return operator_id;
 }
 
-/** @brief Build a column comparison with a placeholder for its bound. */
+/** @brief Build a column comparison with a placeholder  for its bound. */
 static OpExpr *
 make_operator_expression(Var *variable, int16_t strategy_number)
 {
@@ -41,7 +41,7 @@ make_operator_expression(Var *variable, int16_t strategy_number)
 	/* Load the operator from system catalogs */
 	Oid operator_id = get_operator_for_type(type_id, access_method_id, strategy_number);
 
-	/* Retry using the operator class input type when this type has no operator. */
+	/* Retry using the operator class input type when this type has no, operator. */
 	if (operator_id == InvalidOid)
 	{
 		Oid operator_class_id = GetDefaultOpClass(type_id, access_method_id);
@@ -110,7 +110,7 @@ collect_clause_variables(List *filter_clauses, int natts)
 {
 	/*
 	 * Only plain column references can provide the bounds used here.
-	 * Columns inside aggregates or window functions do not describe individual
+	 * Columns inside aggregates or  window functions do not describe individual
 	 * stored rows. Planner placeholders should be gone before execution.
 	 */
 	int flags = 0;
@@ -147,7 +147,7 @@ collect_clause_variables(List *filter_clauses, int natts)
 }
 
 /**
- * @brief Keep chunk groups whose column ranges may contain matching rows.
+ * @brief Keep chunk groups whose column ranges may contair matching rows.
  * Skip a group only when PostgreSQL can prove that its range conflicts with
  * the filters. Count each skipped group once.
  */
@@ -182,7 +182,7 @@ select_chunk_mask(stripe_skip_list *skip_list, List *filter_clauses,
 			continue;
 		}
 
-		/* This column needs a B-tree comparator before its bounds can be used. */
+		/* This column needs a B-tree comparator before its bounds can  be used. */
 		FmgrInfo *comparison_function = find_index_support_function(column->vartype,
 															 BTREE_AM_OID,
 															 BTORDER_PROC);
@@ -199,7 +199,7 @@ select_chunk_mask(stripe_skip_list *skip_list, List *filter_clauses,
 			chunk_skip_node *chunk_skip_node_entry = &chunk_skip_nodes[chunk_index];
 
 			/*
-			 * A chunk containing only NULL values has no minimum or maximum.
+			 * A chunk containing only NULL values has no minimum or maximum
 			 */
 			if (!chunk_skip_node_entry->has_min_max)
 			{

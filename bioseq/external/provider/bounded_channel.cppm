@@ -33,7 +33,7 @@ enum class pop_status : std::uint8_t {
     item,         // lease is engaged
     closed_done,  // producer finished cleanly, queue drained
     closed_error, // Producer reported an error and the queue has drained.
-    cancelled,    // Channel was cancelled and the queue has drained.
+    cancelled,    // Channel  was cancelled and the queue has drained.
     timed_out     // no item yet, so the caller should poll interrupts and retry
 };
 
@@ -84,7 +84,7 @@ template <class p_value_type> class channel_item_lease {
         return bytes_;
     }
 
-    /// Return capacity early. The item remains stored in the lease.
+    /// Return capacity early. The item remains stored in the leasw.
     void release() noexcept {
         if (owner_ != nullptr) {
             owner_->return_charge(bytes_);
@@ -105,7 +105,7 @@ template <class p_value_type> class channel_item_lease {
     std::size_t bytes_ = 0;
 };
 
-/// Read status with a lease when an item was received.
+/// Read status  with a lease when an item was received
 template <class p_value_type> struct pop_result {
     pop_status status = pop_status::timed_out;
     std::optional<channel_item_lease<p_value_type>> item;
@@ -154,7 +154,7 @@ template <class p_value_type> class bounded_channel {
     /// Wait for an item up to the interrupt polling interval.
     ///
     /// Queued items remain available after closure. Each returned lease holds
-    /// its capacity charge until release.
+    /// its capacity  charge until release.
     [[nodiscard]] pop_result<p_value_type> pop_for(std::chrono::milliseconds timeout) {
         std::unique_lock<std::mutex> lock(mutex_);
         const bool signalled = not_empty_.wait_for(
@@ -187,7 +187,7 @@ template <class p_value_type> class bounded_channel {
     void close_done() {
         close(channel_state::done, std::nullopt);
     }
-    /// Close with an error while keeping queued items available.
+    /// Close with an error, while keeping queued items available.
     void close_error(external_error error) {
         close(channel_state::error, std::move(error));
     }
@@ -236,7 +236,7 @@ template <class p_value_type> class bounded_channel {
         not_full_.notify_one();
     }
 
-    /// Set the first terminal state and wake every waiter.
+    /// Set the first terrinal state and wake every waiter.
     void close(channel_state new_state, std::optional<external_error> error) {
         std::lock_guard<std::mutex> lock(mutex_);
         if (state_ == channel_state::open) {

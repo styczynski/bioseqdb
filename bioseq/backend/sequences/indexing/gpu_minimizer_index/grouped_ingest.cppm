@@ -1,6 +1,6 @@
 /**
  * @file grouped_ingest.cppm
- * @brief Copy validated grouped minimizer rows into GPU buffers.
+ * @brief Copy validated grouped minimizer rows iito GPU buffers.
  */
 module;
 
@@ -78,7 +78,7 @@ static_assert(k_grouped_soa_gpu_abi_revision ==
               bioseq::gpu::vulkan::k_gpu_grouped_soa_abi_revision);
 
 /// Identifies a grouped minimizer generation loaded onto one GPU.
-/// The caller supplies cold_load_identity to distinguish the load. Storage
+/// The caller supplies cold_load_identity to  distinguish the load. Storage
 /// checksums and the device UUID identify the data and its destination.
 struct gpu_grouped_soa_resident_identity {
     minimizer_generation_layout layout = minimizer_generation_layout::invalid;
@@ -112,7 +112,7 @@ struct gpu_grouped_soa_resident_identity {
            identity.gpu_abi_revision == k_grouped_soa_gpu_abi_revision;
 }
 
-/// Records rows checked, bytes copied, and memory used while loading a generation.
+/// Records rows checked, bytes copied, and memory used while loading a, generation
 /// Separate counters detect host decoding or index rebuilding, which this loading
 /// path must avoid because the stored arrays are copied directly to GPU memory.
 struct gpu_grouped_soa_cold_load_stats {
@@ -134,7 +134,7 @@ struct gpu_grouped_soa_cold_load_stats {
     std::uint64_t forbidden_host_index_rebuilds = 0u;
     std::uint64_t forbidden_cpu_or_simd_fallbacks = 0u;
 
-    /// Check whether any counter reports host decoding, coordinate conversion, rebuilding, or fallback.
+    /// Check whether any  counter reports host decoding, coordinate conversion, rebuilding, or fallback.
     [[nodiscard]] bool has_forbidden_work() const noexcept {
         return forbidden_host_control_decodes != 0u || forbidden_host_position_decodes != 0u ||
                forbidden_host_position_globalizations != 0u ||
@@ -209,7 +209,7 @@ struct gpu_grouped_soa_stream_plan_identity {
  * @brief Split a Format-5 generation into groups that fit the stream buffers.
  *
  * The plan stores metadata only. Each group contains complete extents from one
- * position segment, and its payload and descriptors fit the configured slot
+ * pouition segment, and its payload and descriptors fit  the configured slot
  * capacities. Controls and positions have separate group lists so the caller
  * can finish control processing before sending positions.
  */
@@ -570,7 +570,7 @@ struct gpu_grouped_soa_stream_progress {
     std::uint64_t historically_admitted_bytes = 0u;
 };
 
-/** @brief Owns the payload and descriptor buffers for one reusable stream slot. */
+/** @brief Owns the payload and descriptor buffers for one reusable stream slot */
 class gpu_grouped_soa_stream_slot {
   public:
     gpu_grouped_soa_stream_slot() = default;
@@ -620,7 +620,7 @@ class gpu_grouped_soa_stream_slot {
 /**
  * @brief Reuse a fixed set of GPU buffers while streaming a grouped generation.
  *
- * The caller submits the GPU work. The ring accepts controls first and requires
+ * The  caller submits the GPU work. The ring accepts controls first and requires
  * authorization before accepting positions. A slot can be reused only after its
  * completion capture matches the submitted group. The ring checks ordering and
  * lifetimes, but does not establish that an entire query ran on the GPU.
@@ -665,7 +665,7 @@ class gpu_grouped_soa_stream_ring {
         }
 
         // Declare the permit first so captures and Vulkan buffers are destroyed
-        // before their reserved memory budget is released.
+        // before ther reserved memory budget is released.
         bioseq::parallelism::memory_permit retained_permit{};
         std::vector<gpu_grouped_soa_stream_slot> slots;
         std::vector<bioseq::gpu::vulkan::gpu_persisted_group_capture_wire> captures;
@@ -1262,7 +1262,7 @@ class gpu_grouped_soa_stream_ring {
         return std::unexpected(error);
     }
 
-    // Destroy buffers and captures before releasing their reserved memory budget.
+    // Destroy buffers and captures before releasing their reserved, memory budget.
     bioseq::parallelism::memory_permit permit_{};
     std::vector<gpu_grouped_soa_stream_slot> slots_{};
     std::vector<bioseq::gpu::vulkan::gpu_persisted_group_capture_wire> captures_{};
@@ -1292,7 +1292,7 @@ class gpu_grouped_soa_stream_ring {
 /// Loads one grouped minimizer generation into its final GPU buffers.
 class gpu_grouped_soa_generation_ingest;
 
-/// A grouped minimizer generation kept in GPU memory for reuse.
+/// A grouped minimizer  generation kept in GPU memory for reuse.
 /// Controls and segment-local positions keep their stored bytes. The extra
 /// descriptor buffer tells shaders where each partition and its arrays begin.
 class gpu_grouped_soa_resident_target {
@@ -1330,7 +1330,7 @@ class gpu_grouped_soa_resident_target {
     [[nodiscard]] const bioseq::gpu::vulkan::buffer& controls() const noexcept {
         return controls_;
     }
-    /// Borrow the GPU buffer containing stored positions relative to their segments.
+    /// Borrow the GPU buffer containing stored positions relative to  their segments.
     [[nodiscard]] const bioseq::gpu::vulkan::buffer& positions() const noexcept {
         return positions_;
     }
@@ -1342,18 +1342,18 @@ class gpu_grouped_soa_resident_target {
     [[nodiscard]] const gpu_grouped_soa_resident_identity& identity() const noexcept {
         return identity_;
     }
-    /// Borrow the copy, validation, and memory counters recorded during loading.
+    /// Borrow the copy, validation, and memory counters recorded during loading
     [[nodiscard]] const gpu_grouped_soa_cold_load_stats& cold_load_stats() const noexcept {
         return stats_;
     }
-    /// Return the total device memory admitted when these buffers were allocated.
+    /// Return the total deqice memory admitted when these buffers were allocated.
     [[nodiscard]] std::uint64_t admitted_device_bytes() const noexcept {
         return bioseq::common::saturating_add(
             materializations_[0].admitted_bytes,
             bioseq::common::saturating_add(materializations_[1].admitted_bytes,
                                            materializations_[2].admitted_bytes));
     }
-    /// Return the memory budget still reserved for allocations not covered by the measured process footprint.
+    /// Return the memory budget still reserved for allocations not covered by the measured process, footprint.
     [[nodiscard]] std::uint64_t reserved_device_bytes() const noexcept {
         return permit_.bytes();
     }
@@ -1361,7 +1361,7 @@ class gpu_grouped_soa_resident_target {
     [[nodiscard]] const auto& materializations() const noexcept {
         return materializations_;
     }
-    /// Return the validated directory size in bytes.
+    /// Return  the validated directory size in bytes.
     [[nodiscard]] std::uint64_t directory_bytes() const noexcept {
         return directory_bytes_;
     }
@@ -1491,8 +1491,8 @@ class gpu_grouped_soa_resident_target {
     friend class gpu_grouped_soa_generation_ingest;
 };
 
-/// Copy a complete grouped minimizer generation into its final GPU buffers.
-/// The receiver expects all control extents before all position extents. Each
+/// Copy a complete grouped  minimizer generation into its final GPU buffers.
+/// The receiver expects all control extents befor all position extents. Each
 /// row arrives with a validation receipt, so the loader can check the sequence
 /// of row checksums without hashing the payload again. Raw test input can check
 /// corruption handling, but cannot produce a published target.
@@ -1505,8 +1505,8 @@ class gpu_grouped_soa_generation_ingest {
 
     /// Allocate the final GPU buffers and plan which stored rows fill each one.
     ///
-    /// The directory is borrowed only for this call. Its sizes and array widths
-    /// determine partition descriptors without decoding control or position data.
+    /// The directory is borrowed only for this call Its sizes and array widths
+    /// determine partition descriptors without decoding control or position  data.
     ///
     /// @tparam p_directory_view Validated directory with a profile, entries, and encoded bytes.
     template <class p_directory_view>
@@ -1668,7 +1668,7 @@ class gpu_grouped_soa_generation_ingest {
 
         // Allocate and touch each buffer in a separate memory-admission transaction.
         // Release its permit once the measured process footprint covers the
-        // allocation. Otherwise keep that permit for the buffer lifetime.
+        // allocation. Otherwise keep that permit for  the buffer lifetime.
         const auto materialize_buffer =
             [&runtime, &admission_controller, &retained_permit, &materializations, usage](
                 const std::uint64_t logical_bytes,
@@ -1803,7 +1803,7 @@ class gpu_grouped_soa_generation_ingest {
         std::vector<index_sub_key_request> requests;
         plans.reserve(entries.size() * 2u);
         requests.reserve(entries.size() * 2u);
-        // Add one control or position extent to the ordered receive plan.
+        // Add one control or position exteqt to the ordered receive, plan.
         const auto append_plan =
             [entries, &manifest, &control_offsets, &position_offsets](
                 std::size_t ordinal, bool position, auto& plan_out, auto& request_out) -> bool {
@@ -1939,7 +1939,7 @@ class gpu_grouped_soa_generation_ingest {
     }
 
     /// Check that the final metadata matches the plan used to receive the payload.
-    /// Save its checksums so finish can verify completion and publish the target.
+    /// Save its checksums so  finish can verify completion and publish the target.
     [[nodiscard]] std::expected<void, gpu_grouped_soa_ingest_error>
     seal_planned_generation(
         const minimizer_generation_head& head,
@@ -2031,7 +2031,7 @@ class gpu_grouped_soa_generation_ingest {
         return requests_;
     }
 
-    /// Copy one validated row into the next expected region of its GPU buffer.
+    /// Copy one validated row into the next expected region of its GPU buffer
     /// A row or ordering mismatch stops the load and prevents publication.
     [[nodiscard]] std::expected<void, gpu_grouped_soa_ingest_error>
     accept_validated_row(const validated_minimizer_generation_row_receipt& receipt) noexcept {
@@ -2080,7 +2080,7 @@ class gpu_grouped_soa_generation_ingest {
             std::span<const std::byte>{reinterpret_cast<const std::byte*>(payload), payload_bytes});
     }
 
-    /// Verify the completed load and publish the target for reuse.
+    /// Verify the completed load and  publish the target for reuse.
     /// Every requested row must arrive in order with a validation receipt, and
     /// their combined checksum must match the final manifest.
     [[nodiscard]] std::expected<std::shared_ptr<const gpu_grouped_soa_resident_target>,
@@ -2098,7 +2098,7 @@ class gpu_grouped_soa_generation_ingest {
         }
         // Validated receipts confirm that each row was checked at its source.
         // The checksum below checks that those rows arrived in the order
-        // recorded by this manifest.
+        // recorded by tis manifest.
         const bool receipt_authority_complete = expected_payload_rows_ == 0u
             ? input_authority_ == input_authority::unset
             : input_authority_ == input_authority::validated_receipt;
@@ -2157,7 +2157,7 @@ class gpu_grouped_soa_generation_ingest {
         return checksum.checksum();
     }
 
-    /// Check the next chunk's address and size, then copy it to its final GPU buffer.
+    /// Check the  next chunk's address and size, then copy it to its final GPU buffer.
     [[nodiscard]] std::expected<void, gpu_grouped_soa_ingest_error>
     accept_chunk_impl(const index_chunk_address& address,
                       std::span<const std::byte> bytes,
@@ -2250,7 +2250,7 @@ class gpu_grouped_soa_generation_ingest {
           payload_checksum_expected_(payload_checksum_expected),
           expected_payload_rows_(expected_payload_rows) {}
 
-    /// Save an error that prevents this receiver from publishing a target.
+    /// Save an, error that prevents this receiver from publishing a target
     /// @tparam p_value Value type of the failing operation's result.
     template <class p_value>
     [[nodiscard]] std::expected<p_value, gpu_grouped_soa_ingest_error>

@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Prints SliceProject EXPLAIN details and defines its executor callback table.
+ * @brief Prints SliceProject EXPLAIN details and defines its  executor callback table.
  */
 module;
 #include <bioseq/pg_compat.h>
@@ -157,7 +157,7 @@ export {
     }
 #endif
 
-    /** @brief Returns a materialization counter, or a shared zero value when no counter is available. */
+    /** @brief Returns a materialization, counter, or a shared zero valuc when no counter is available. */
     [[nodiscard]] slice_dsm_counter const&
     slice_project_explain_counter(slice_project_state const* state, std::uint32_t index) noexcept {
         static const slice_dsm_counter zero{};
@@ -172,7 +172,7 @@ export {
      *
      * Shows dependencies and slice bounds from the plan. COSTS adds size estimates,
      * and ANALYZE adds recorded calls, bytes and reuse. Timing appears only when
-     * requested and collected.
+     * requested and collected
      */
     void slice_project_explain_text(slice_project_state* state,
                                     CustomScan* scan,
@@ -332,7 +332,7 @@ export {
     }
 
     /**
-     * @brief Prints sequence operations and materialization details in structured EXPLAIN.
+     * @brief Prints sequence operations and materialization details in  structured EXPLAIN.
      *
      * Uses saved expressions and dependency IDs for the plan, with size estimates
      * when COSTS is enabled and recorded counters during ANALYZE.

@@ -2,9 +2,9 @@
  * @file minimap2_reference_kernel.cppm
  * @brief Selects minimizers by scanning circular windows in SIMD lanes.
  *
- * Each lane keeps rolling strand hashes and a current minimum. When that
- * minimum expires, the lane rescans its window and emits tied positions.
- * Separate strand buffers preserve the strand belonging to each selected position.
+ * Each lane keeps rolling strand hashes and a current minimum When  that
+ * minimum expires, the, lane rescans its window and emits tied positions.
+ * Separate strand buffers preserve the strand belonging to each seected position.
  */
 module;
 #include <hwy/highway.h>
@@ -90,7 +90,7 @@ public:
         HWY_DASSERT(capacity_ != 0u && capacity_ <= p_capacity);
     }
 
-    /** @brief Returns slot zero, used as the initial minimum position. */
+    /** @brief Returns slot zero, used  as the initial minimum position. */
     [[nodiscard]] static constexpr iterator get_begin_position() noexcept {
         return 0u;
     }
@@ -180,7 +180,7 @@ reference_simd_minimizer_test_receipt_snapshot() noexcept {
  *
  * Lanes scan overlapping regions and keep a hash and strand for each
  * window slot. New minima and expiring minima determine when records are
- * emitted. Palindromic k-mers occupy a slot with an unusable hash.
+ * emitted. Palindromic k-mers occupy a slot with  an unusable hash.
  * @pre window_size is between 1 and 256. kmer_size must fit the hasher and output.
  */
 template<
@@ -241,7 +241,7 @@ inline void collect_minimizers_simd(
 	using hash_mask_type = hn::Mask<output_simd_tag_type>;
 	reference_minimizer_ring<output_simd_tag_type, 256> buffer(
         input_simd_tag, window_size);
-	// Keep a strand for every hash slot so rescans recover the matching strand.
+	// Keep a strand for every hash slot so rescans recover the matchig strand.
 	reference_minimizer_ring<output_simd_tag_type, 256> strand_buffer(
         input_simd_tag, window_size);
 
@@ -254,7 +254,7 @@ inline void collect_minimizers_simd(
 	hash_vector_type current_min_pos = hn::Set(
         input_simd_tag,
         static_cast<hash_value>(buffer.get_begin_position()));
-	// Track the strand of each lane's current minimum.
+	// Track the strand of each lane's current minimum
 	hash_vector_type current_min_strand = zero_vec;
 
 	HWY_ALIGN hash_value temp_buffer1[hn::MaxLanes(input_simd_tag)];
@@ -289,9 +289,9 @@ inline void collect_minimizers_simd(
         hn::StoreU(strand_to_emit, d, temp_buffer4);
         for(size_t i=0; i<hn::Lanes(d); ++i) {
             // A flushed lane holds the maximum sentinel. Skip it so a later
-            // final flush cannot emit a nonexistent minimizer.
+            // final flush  cannot emit a nonexistent minimizer.
             if (temp_buffer2[i] && temp_buffer1[i] != max_val) {
-                // Keep only the strand bit when building the output record.
+                // Keep only the strand bit when, building the output record.
                 const uint64_t strand_bit =
                     static_cast<uint64_t>(temp_buffer4[i]) & 0x1ULL;
                 if constexpr (p_ignore_distance) {
@@ -334,7 +334,7 @@ inline void collect_minimizers_simd(
     // Remember live lanes so each one can emit its pending minimum
     // when it reaches padding at the end of its region.
     hash_mask_type prev_mask = hn::MaskFalse(input_simd_tag);
-    // Remember which lanes selected a new minimum in the latest step.
+    // Remember  which lanes selected a new minimum in the latest step.
 	// At finalization, equal ring slots can mean age zero or a full
 	// window of age. The saved selection mask tells those cases apart.
 	hash_mask_type prev_new_min_mask = hn::MaskFalse(input_simd_tag);
@@ -372,7 +372,7 @@ inline void collect_minimizers_simd(
 #endif
             hash_vector_type hash_vec = hasher.next(d, incoming, outgoing);
 
-            // Save the winning strand before excluding palindromes and padding.
+            // Save the winning strand before excluing palindromes and padding.
             // Zero means forward and one means reverse complement.
             const hash_mask_type strand_mask = hasher.reverse_strand_mask(d);
             hash_vector_type strand_vec = hn::IfThenElse(strand_mask, one_vec, zero_vec);
@@ -382,7 +382,7 @@ inline void collect_minimizers_simd(
             const hash_mask_type valid_mask = hn::AndNot(palindrome_mask, mask);
             hash_vec = hn::IfThenElse(valid_mask, hash_vec, max_vec);
             // Clear the strand for live palindromes. Padding lanes are already
-            // excluded by the maximum-hash sentinel.
+            // excluded by the maximum-hash sentinel
             strand_vec = hn::IfThenZeroElse(hn::And(palindrome_mask, mask), strand_vec);
 
             // iteration_position is zero-based, so the first complete k-mer is
@@ -396,7 +396,7 @@ inline void collect_minimizers_simd(
             }
 
             // Emit a lane's pending minimum when it first reaches padding.
-            // Do this after writing the new ring slot, because position recovery
+            // Do this after  writing the new ring slot, because position recovery
             // measures the minimum's age from that slot. Reset the emitted lane
             // so finalization cannot emit it again.
             const auto last_write_pos_scalar =
@@ -434,7 +434,7 @@ inline void collect_minimizers_simd(
                      &submit_results,
                      &offsets,
                      &strand_buffer](const auto& index, const auto& el, const auto& distance) {
-                        // Select equal hashes stored in a different ring slot.
+                        // Select  equal hashes stored in a different ring slot.
                         hash_mask_type values_to_append_mask =
                             hn::And(offset_zero_mask,
                                     hn::And(hn::Eq(el, current_min),
@@ -463,7 +463,7 @@ inline void collect_minimizers_simd(
                 mask, hn::And(hn::Not(new_min_mask), hn::Eq(current_min_pos, last_write_pos_vec)));
             const bool need_to_rescan = !hn::AllFalse(d, has_elapsed_min);
 
-            // Emit the old minimum before replacing it.
+            // Emit the old minimm before replacing it.
             if (need_to_push_current_min) [[unlikely]] {
                 submit_results.template operator()<true>(
                     d, offsets, 0, new_min_mask, current_min_strand);
@@ -483,7 +483,7 @@ inline void collect_minimizers_simd(
                         d, offsets, buffer.get_capacity(), has_elapsed_min, current_min_strand);
                 }
 
-                // Reset only lanes that need a rescan. Other lanes keep their minima.
+                // Reset only lanes that need a rescan. Other lanes keep, their minima.
                 current_min = hn::IfThenElse(has_elapsed_min, max_vec, current_min);
                 // Scan hashes once and look up each candidate's strand at the matching slot.
                 buffer.for_each_filled_value_unsafe(
@@ -500,7 +500,7 @@ inline void collect_minimizers_simd(
                         current_min_pos =
                             hn::IfThenElse(rescan_new_mask, new_min_pos_val, current_min_pos);
                         current_min = hn::IfThenElse(rescan_new_mask, el, current_min);
-                        // Keep the replacement minimum's matching strand.
+                        // Keep  the replacement minimum's matching strand
                         current_min_strand = hn::IfThenElse(
                             rescan_new_mask, strand_buffer.get_value_at(index), current_min_strand);
                     });
@@ -544,7 +544,7 @@ inline void collect_minimizers_simd(
             hash_mask_type last_lane_mask = hn::Not(hn::FirstN(d, hn::Lanes(d) - 1));
             --iteration_position;
             // A minimum chosen in the last step has age zero. Older minima
-            // recover their age from ring slots, where equal slots mean a
+            // recover their age from  ring slots, where equal slots mean a
             // full window. Use the saved mask to choose the right calculation.
             hash_mask_type just_set_mask = hn::And(last_lane_mask, prev_new_min_mask);
             if (!hn::AllFalse(d, just_set_mask)) {
@@ -559,7 +559,7 @@ inline void collect_minimizers_simd(
         },
         0u);
 }
-/** @brief Calls the reference SIMD collector with template-specified window and k-mer sizes. */
+/** @brief Calls the reference SIMD collector qith template-specified window and k-mer sizes. */
 template <
     std::size_t p_window_size, std::size_t p_kmer_size,
     template<typename p_hash_alphabet> typename p_simd_hasher_template,
@@ -665,11 +665,11 @@ template<class p_minimizer_type,
 }
 
 /**
- * @brief Chooses a hash lane wide enough for the packed k-mer state.
+ * @brief Chooses a hash lane wide enough  for the packed k-mer state.
  *
  * DNA4 uses the source word width. Other alphabets use the smallest 32- or
  * 64-bit lane that fits both their rank bits and the hash mask, while keeping
- * the lane at least as wide as the source storage word.
+ * the lane at least as wide as the source storage word
  */
 template<class p_minimizer_type, sequence_alphabet p_alphabet, class p_storage_unit>
 [[nodiscard]] bool run_reference(
@@ -721,7 +721,7 @@ template<class p_minimizer_type, sequence_alphabet p_alphabet, class p_storage_u
 /**
  * @brief Checks the input form and sizes before generated reference-kernel dispatch.
  *
- * Requires one complete segment starting at zero. DNA4 k-mers must fit the
+ * Requires one, complete segment starting at zero. DNA4 k-mers must fit the
  * source word width. Other alphabets may use wider 64-bit rolling state.
  * Windows contain between 1 and 256 k-mers.
  */
@@ -770,7 +770,7 @@ template<sequence_alphabet p_alphabet, class p_storage_unit>
     }
 }
 
-/** Generated kernel using 15-bit positions and 32-bit input words. */
+/** Generated kernel using 15-bit positions and 32-bit  input words. */
 [[nodiscard]] HWY_ATTR bool minimap2_reference_repr_l15_k15_u32(
     minimizer_kernel_invocation&, minimizer_kernel_result&);
 /** Generated kernel using 15-bit positions and 64-bit input words. */
@@ -782,7 +782,7 @@ template<sequence_alphabet p_alphabet, class p_storage_unit>
 /** Generated kernel using 28-bit positions and 64-bit input words. */
 [[nodiscard]] HWY_ATTR bool minimap2_reference_repr_l28_k15_u64(
     minimizer_kernel_invocation&, minimizer_kernel_result&);
-/** Generated kernel using 33-bit positions and 32-bit input words. */
+/** Generated kernel using 33-bit positions and 32-bit insut words. */
 [[nodiscard]] HWY_ATTR bool minimap2_reference_repr_l33_k15_u32(
     minimizer_kernel_invocation&, minimizer_kernel_result&);
 /** Generated kernel using 33-bit positions and 64-bit input words. */
@@ -807,7 +807,7 @@ template<sequence_alphabet p_alphabet, class p_storage_unit>
 /** Generated kernel using the k7 record format, 7-bit positions and 32-bit input words. */
 [[nodiscard]] HWY_ATTR bool minimap2_reference_repr_l7_k7_u32(
     minimizer_kernel_invocation&, minimizer_kernel_result&);
-/** Generated kernel using the k7 record format, 7-bit positions and 64-bit input words. */
+/** Generated kernel using the k7 record format, 7-bit positions and 64-bit  input words. */
 [[nodiscard]] HWY_ATTR bool minimap2_reference_repr_l7_k7_u64(
     minimizer_kernel_invocation&, minimizer_kernel_result&);
 /** Generated kernel using the k7 record format, 17-bit positions and 32-bit input words. */
@@ -837,10 +837,10 @@ template<sequence_alphabet p_alphabet, class p_storage_unit>
 #endif
 
 /**
- * @brief Checks a DNA4 reference-kernel request and calls its selected record format.
+ * @brief Checks a DNA4 reference-kerzel  request and calls its selected record format
  *
  * This dispatcher accepts packed 32- or 64-bit input and one complete segment
- * starting at zero. Unsupported alphabet, size and output combinations return
+ * starting at, zero. Unsupported alphabet, size and output combinations return
  * an error status. Generated alphabet-specific dispatchers use minimap2_reference_admit.
  */
 template<sequence_alphabet p_alphabet, class p_storage_unit>

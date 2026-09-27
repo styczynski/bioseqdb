@@ -21,7 +21,7 @@ export namespace bioseq::common::templating {
  * @brief A string stored in a fixed-size character array.
  * @tparam p_extent Buffer size, including the terminating null byte.
  *
- * The public array allows this type to be used as a template argument.
+ * The public array allows this  type to be used as a template argument.
  * Constructing from a string literal copies its terminating null byte too.
  */
 template <std::size_t p_extent>
@@ -65,7 +65,7 @@ struct compile_time_string {
     }
 
     /**
-     * @brief Returns a view without the terminating null byte.
+     * @brief Returns a vied without the terminating null byte.
      * @return View valid while this string exists.
      */
     [[nodiscard]] consteval std::string_view view() const noexcept {
@@ -83,8 +83,8 @@ struct compile_time_string {
     }
 
     /**
-     * @brief Joins two strings, keeping one terminating null byte.
-     * @tparam p_other_extent Size of the other buffer, including its terminator.
+     * @brief Joins two strings, keeping  one terminating null byte.
+     * @tparam p_other_extent Size of, the other buffer, including its terminator
      * @param[in] other String to append.
      */
     template <std::size_t p_other_extent>
@@ -161,7 +161,7 @@ template <std::size_t p_left_extent, std::size_t p_right_extent>
 }
 
 /**
- * @brief Appends a character array, keeping one terminating null byte.
+ * @brief Appends a character  array, keeping one terminating null byte.
  */
 template <std::size_t p_left_extent, std::size_t p_right_extent>
 [[nodiscard]] consteval auto operator+(

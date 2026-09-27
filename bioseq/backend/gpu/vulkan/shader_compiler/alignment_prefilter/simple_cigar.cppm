@@ -11,7 +11,7 @@ export namespace bioseq::gpu::vulkan {
 /// @brief Aligns sequence windows and writes packed CIGAR strings within each job's capacity.
 /// Tries simple alignments first, then uses dynamic programming and traceback.
 /// For large windows, it saves tile boundaries within the band and recomputes
-/// tiles during traceback to limit storage. Reports unsupported inputs and
+/// tiles during traceback to limit storage Reports unupported inputs and
 /// CIGAR overflow through the result status.
 inline constexpr std::string_view k_alignment_extension_simple_cigar_body = R"GLSL(
 layout(local_size_x = compile_time_workgroup_size_x, local_size_y = 1, local_size_z = 1) in;

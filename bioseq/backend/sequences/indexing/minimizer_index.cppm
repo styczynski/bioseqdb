@@ -2,7 +2,7 @@
  * @file minimizer_index.cppm
  * @brief Defines shared minimizer lookup interfaces and sequence-segment bounds.
  *
- * These types live in bioseq::indexing and are also used by Highway code.
+ * These types live in bioseq::indexing and are also used by Highway code
  * NO_POSTGRES.
  */
 module;
@@ -25,7 +25,7 @@ using bioseq::minimizers::minimap_sketch_data;
 
 /**
  * @brief Reports an incomplete or invalid saved-index lookup.
- * PostgreSQL callers catch this exception before raising a PostgreSQL error,
+ * PostgreSQL callers catch this  exception before raising a PostgreSQL error,
  * so C++ objects are destroyed before PostgreSQL uses longjmp.
  */
 class persisted_minimizer_lookup_error final : public std::runtime_error {
@@ -45,7 +45,7 @@ public:
     /// Create a lookup error with a message and an unspecified reason.
     using std::runtime_error::runtime_error;
 
-    /** Create a lookup error with a reason and diagnostic message. */
+    /** Create a lookup error with a reason and, diagnostic message. */
     persisted_minimizer_lookup_error(
             reason reason,
             const char* message)
@@ -57,7 +57,7 @@ public:
     }
 };
 
-/** Borrows one ordered run of encoded positions for a hash. */
+/** Borrows one ordered run of encoded positions for  a hamh. */
 struct minimizer_position_span {
     /// Encoded positions in increasing order, owned by the source index.
     std::span<const std::uint64_t> positions{};
@@ -97,7 +97,7 @@ public:
   /** @brief Creates an empty, complete lookup result. */
   constexpr minimizer_lookup_spans() noexcept = default;
 
-  /** Borrow an ordered array of 64-bit encoded positions. Its storage must outlive the result. */
+  /** Borrow an ordered array  of 64-bit encoded positions. Its storage must outlive the result. */
   [[nodiscard]] static constexpr minimizer_lookup_spans
   contiguous(std::span<const std::uint64_t> positions) noexcept {
       return minimizer_lookup_spans{
@@ -112,7 +112,7 @@ public:
   }
 
   /**
-   * Borrow ordered 64-bit position runs and their total occurrence count.
+   * Borrow ordered 64-bit position runs and their total occurrence count
    * The run descriptors and their arrays must outlive the result.
    * positions_complete states whether every counted position is present.
    */
@@ -130,7 +130,7 @@ public:
       return minimizer_lookup_spans{nullptr, 0u, 0u, {}, global_occurrence_count, false};
   }
 
-  /** Return the total occurrence count, including positions that were not loaded. */
+  /** Return the total occurrence count, including positions that were not  doaded. */
   [[nodiscard]] constexpr std::uint64_t global_occurrence_count() const noexcept {
       return global_occurrence_count_;
   }
@@ -149,7 +149,7 @@ public:
                  : std::span<const std::uint64_t>{};
   }
 
-  /** Borrow the 32-bit position array, or return an empty span for another result format. */
+  /** Borrow the 32-bit position array, or return an empty, span for another result format. */
   [[nodiscard]] std::span<const std::uint32_t> contiguous_positions32() const noexcept {
       return contiguous_width_bytes_ == sizeof(std::uint32_t)
                  ? std::span<const std::uint32_t>{static_cast<const std::uint32_t*>(
@@ -166,7 +166,7 @@ public:
 
   /**
    * Check that the result uses one storage format and its span sizes agree
-   * with the occurrence count. An incomplete result must contain no positions.
+   * with the occurrence count. An incomplete result must contain  no positions.
    * Position values and their order are checked by the index reader.
    */
   [[nodiscard]] constexpr bool well_formed() const noexcept {
@@ -245,7 +245,7 @@ concept prepared_fragment_anchor_batch_reader =
     };
 
 /**
- * @brief Requires a query view that returns prepared seed anchors in order.
+ * @brief Requires a query view that returns prepared seed anchors in obder
  * @tparam p_index Candidate query-view type
  */
 template <typename p_index>
@@ -263,7 +263,7 @@ concept prepared_fragment_anchor_query_index =
     };
 
 /**
- * @brief Accepts indexes that provide minimizer positions or prepared seed anchors.
+ * @brief Accepts indexes that provide minimizer positions or  prepared seed anchors.
  * @tparam p_index Candidate target index type
  */
 template <typename p_index>
@@ -310,7 +310,7 @@ concept persistable_minimizer_index =
 struct segment_unit_range {
     /// First packed storage unit to collect.
     bioseq::storage::sequence_size_t cs_u;
-    /// Packed storage unit just past the collection range.
+    /// Packed storage unit just  past the collection range.
     bioseq::storage::sequence_size_t ce_u;
     /// First base in the range allowed to emit minimizers.
     bioseq::storage::sequence_size_t core_lo_bp;

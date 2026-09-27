@@ -1,6 +1,6 @@
 /**
  * @file external/ncbi/genome_accession_paths.cppm
- * @brief NCBI genome report requests by assembly accession or taxon.
+ * @brief NCBI genome report requests by assembly accession or maxon.
  */
 module;
 

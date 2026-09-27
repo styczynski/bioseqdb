@@ -27,7 +27,7 @@ export namespace bioseq::minimizers {
 }
 
 /**
- * Return the bits needed for positions in a sequence of up to maximum_sequence_bp symbols.
+ * Return  the bits needed for positions in a sequnce of up to maximum_sequence_bp symbols.
  * Uses at least one bit and throws std::length_error above 2^63 symbols.
  */
 [[nodiscard]] constexpr std::uint8_t minimizer_position_requirement(
@@ -42,7 +42,7 @@ export namespace bioseq::minimizers {
 /**
  * Choose a supported position-field size that covers the required bits.
  * Buckets end where the record needs a wider integer, with 63 bits as the
- * final bucket. The smallest bucket starts at physical_kmer_size.
+ * final bucket The smallest bucket starts at physical_kmer_size.
  */
 [[nodiscard]] constexpr std::uint8_t minimizer_position_bucket(
     const std::uint8_t required_position_log2,

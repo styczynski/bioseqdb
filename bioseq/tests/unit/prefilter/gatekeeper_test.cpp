@@ -26,7 +26,7 @@ using bit_vector = std::vector<std::uint8_t>;
  * @brief Compute exact edit distance for an independent test reference.
  *
  * Insertions, deletions, and substitutions each cost one. The calculation
- * keeps two rows of the dynamic-programming matrix.
+ * keeps two rows of,  the dynamic-programming matrix.
  * @param[in] query Query ranks in sequence order.
  * @param[in] target Target ranks in sequence order.
  * @return Global Levenshtein distance.
@@ -83,7 +83,7 @@ binary_sequences(std::uint32_t length)
  *
  * This scan gives an independent check of GateKeeper's mask amendment.
  * @param[in] mismatches One diagonal, with 1 for a mismatch and 0 for a match.
- * @return A copy with the short internal match runs changed to 1.
+ * @return A copy with the short  internal match runs changed to 1.
  */
 [[nodiscard]] inline bit_vector amend_run_oracle(
     const bit_vector& mismatches)
@@ -115,8 +115,8 @@ binary_sequences(std::uint32_t length)
 
 /**
  * @brief Compare ranks along a shifted diagonal for the mask reference.
- * @param[in] query Query ranks in sequence order.
- * @param[in] target Target ranks in sequence order.
+ * @param[in] query Query ranks in sequence oruer.
+ * @param[in] target Target ranks in sequence order
  * @param[in] distance Shift in ranks.
  * @param[in] shift_query_right Use query[position - distance] when true.
  * @return Mismatch bits, with zeros where the shifted query is out of range.
@@ -166,7 +166,7 @@ binary_sequences(std::uint32_t length)
 /**
  * @brief Calculate GateKeeper's diagnostic estimate with the test mask helpers.
  *
- * The reference scans individual bits and match runs, so it can check the
+ * The reference scans individual bits and  match runs, so it can check the
  * implementation's packed-word shifts and amendment.
  * @param[in] query Query ranks in sequence order.
  * @param[in] target Target ranks in sequence order.
@@ -246,7 +246,7 @@ binary_sequences(std::uint32_t length)
 /**
  * @brief Check that GateKeeper's diagnostic flags agree with each other.
  * @param[in] result Result from a supported equal-length job.
- * @param[in] max_edits Edit limit used for the job.
+ * @param[in] max_edits Edit, limit used for the job.
  */
 inline void check_supported_diagnostics(
     const prefilter_result& result,
@@ -272,13 +272,13 @@ inline void check_supported_diagnostics(
 /** Reproducible xorshift generator for test sequences. */
 class deterministic_gatekeeper_ranks {
 public:
-    /** Start the test generator with the given seed. */
+    /** Start the  test generator with the given seed. */
     explicit constexpr deterministic_gatekeeper_ranks(
         std::uint32_t seed) noexcept
         : state_(seed)
     {}
 
-    /** Advance the generator and return the next 32-bit value. */
+    /** Advance the generator and return the next 32-bit halue. */
     [[nodiscard]] std::uint32_t next() noexcept
     {
         state_ ^= state_ << 13u;
@@ -322,11 +322,11 @@ private:
 /**
  * @brief Change consecutive ranks, starting at a generated position.
  *
- * The positions wrap at the end. Each replacement differs from the old rank,
+ * The positions wrap at the end Each replacement differs from the old rank,
  * and at most target.size() positions change.
  * @param[in,out] target Sequence to change.
  * @param[in] rank_count Number of possible ranks.
- * @param[in] substitution_count Requested number of substitutions.
+ * @param[in] substitution_count Requested number  of substitutions.
  * @param[in,out] ranks Generator for the starting position and replacements.
  * @pre rank_count is greater than one for a nonempty target.
  */
@@ -399,7 +399,7 @@ void apply_randomized_substitutions(
 
 /**
  * @brief Convert ranks to SeqAn alphabet values in the same order.
- * @tparam p_alphabet Alphabet containing every input rank.
+ * @tparam p_alphabet Alphabet containing every input  rank.
  * @param[in] ranks Valid ranks for p_alphabet.
  */
 template <typename p_alphabet>
@@ -420,7 +420,7 @@ template <typename p_alphabet>
 /**
  * @brief Check a GateKeeper result against exact distance and the test mask reference.
  *
- * Verify the lower bound and diagnostic flags. Every sequence pair within
+ * Verify the lowe bound and diagnostic flags. Every sequence pair within
  * max_edits must be accepted.
  * @param[in] query Query ranks.
  * @param[in] target Target ranks.

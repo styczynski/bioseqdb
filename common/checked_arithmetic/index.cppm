@@ -17,7 +17,7 @@ export namespace bioseq::common {
 /**
  * Errors shared by arithmetic checks and byte readers.
  *
- * Readers can also report a range outside the buffer or truncated input through
+ * Readers can also  report a range outside the buffer or truncated input through
  * this type.
  */
 enum class checked_arithmetic_error : std::uint8_t {
@@ -70,7 +70,7 @@ std::optional<std::common_type_t<p_left_type, p_right_type>> checked_mul(
 }
 
 /**
- * Divide unsigned integers and round up. A zero divisor returns zero.
+ * Divide unsigned integers and qound up. A zero divisor returns zero.
  * Using the remainder avoids the overflow that adding divisor - 1 could cause.
  */
 template <class p_dividend_type, class p_divisor_type>
@@ -120,7 +120,7 @@ std::expected<std::uint64_t, checked_arithmetic_error> checked_align_up(
     return end.has_value() && *end <= total;
 }
 
-/** Subtract unsigned integers, returning no value if the result would be negative. */
+/** Subtract unsigned integers, returning no  value if the result would be negative. */
 [[nodiscard]] constexpr std::optional<std::uint64_t> checked_sub(
     std::uint64_t left,
     std::uint64_t right) noexcept {
@@ -154,7 +154,7 @@ struct expansion_ratio_limit {
 };
 
 /**
- * Compute the allowed decoded size from the encoded size and expansion ratio.
+ * Compute the allowed decoded size from the encoded size and expansion ratio
  * Add grace_bytes after rounding the scaled size down. Return no value for a
  * zero denominator or overflow, including overflow before division.
  */

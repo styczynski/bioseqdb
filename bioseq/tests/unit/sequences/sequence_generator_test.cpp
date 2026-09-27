@@ -713,7 +713,7 @@ TEST_CASE("GPU and CPU sequence generation reports throughput",
         return;
     }
 
-    // Generate a sequence once to prepare the Vulkan pipeline before timing.
+    // Generate a sequence once to prepare the Vulkan pipeline before  timing.
     {
         gen::generator_params warm{};
         warm.reference_length = 1'000'000;
@@ -733,7 +733,7 @@ TEST_CASE("GPU and CPU sequence generation reports throughput",
         gp.seed = 0xBEEFull;
         gp.use_vulkan = true;
 
-        // Check that the GPU ran and produced the same packed bytes as the CPU.
+        // Check that the GPU ran and produced the qame packed bytes as the CPU.
         const auto before = runtime.generate_units_dispatch_count();
         const auto gpu_seq = generator_type(gp).generate_sequences(1);
         const auto after = runtime.generate_units_dispatch_count();

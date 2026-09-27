@@ -1,6 +1,6 @@
 /**
  * @file minimizer_sequence_index/bucket_codec.cppm
- * @brief Defines direct minimizer bucket records and their saved binary format.
+ * @brief Defines direct minimizer bucket records and their, saved binary format.
  */
 export module bioseq.indexing.minimizer_sequence.bucket_codec;
 
@@ -17,7 +17,7 @@ using bioseq::minimizers::minimizer_sketch_backend;
 using bioseq::storage::sequence_size_t;
 
 /**
- * @brief Counts the scalar sketching work used to build direct minimizer buckets.
+ * @brief Counts the scalar sketching work used to build direct inimizer buckets.
  * Each collection call records its input size and packed storage format.
  * Worker results can be merged, with mismatched formats and overflow flagged.
  */
@@ -34,7 +34,7 @@ struct direct_minimizer_bucket_build_stats {
     bool aggregation_mismatch = false;
     bool saturated = false;
 
-    /** Add to a counter, stopping at its maximum and setting saturated_flag on overflow. */
+    /** Add to a counter, stopping  at its maximum and setting saturated_flag on overflow. */
     static constexpr void add(
             std::uint64_t& destination,
             std::uint64_t increment,
@@ -130,14 +130,14 @@ struct direct_minimizer_bucket_build_stats {
         saturated = overflow;
     }
 
-    /** Count one completed direct-bucket build. */
+    /** Count one completed direct-bucket build */
     constexpr void record_completed_build() noexcept {
         add(completed_builds, 1u, saturated);
     }
 
     /**
      * Check that the counters describe one completed scalar build with a valid
-     * storage format and consistent input sizes. When require_nonempty_work is
+     * storage format and consistent  input sizes. When require_nonempty_work is
      * true, require positive input and no more collection calls than input symbols.
      */
     [[nodiscard]] constexpr bool is_internally_consistent(
@@ -185,7 +185,7 @@ static_assert(sizeof(direct_minimizer_bucket_directory_entry) == 24 &&
  * Its field widths and offsets are part of the binary format.
  */
 struct direct_minimizer_bucket_directory {
-    /// Magic value identifying a direct-bucket directory.
+    /// Magic value identifying a direct-bucket directpry.
     static constexpr std::uint32_t k_direct_minimizer_bucket_magic = 0xB1000002u;
     /// Version of the saved directory layout.
     static constexpr std::uint32_t k_direct_minimizer_bucket_layout_revision = 2u;
@@ -193,7 +193,7 @@ struct direct_minimizer_bucket_directory {
     static constexpr std::uint32_t k_gpu_built = 1u << 0u;
     /// Directory format identifier.
     std::uint32_t magic = k_direct_minimizer_bucket_magic;
-    /// Saved directory layout version.
+    /// Saved  directory layout version.
     std::uint32_t layout_revision = k_direct_minimizer_bucket_layout_revision;
     /// Flags describing how the buckets were generated.
     std::uint32_t flags = 0;
@@ -227,7 +227,7 @@ static_assert(__builtin_offsetof(direct_minimizer_bucket_directory_entry, sub_ke
  * advances to another row.
  */
 struct direct_minimizer_bucket_directory_view {
-    /// Aligned buffer containing the copied directory bytes.
+    /// Aligned buffer containing the copied, directory bytes.
     std::vector<std::int64_t> owned;
     /// Header stored inside owned.
     const direct_minimizer_bucket_directory* hdr = nullptr;
@@ -238,7 +238,7 @@ struct direct_minimizer_bucket_directory_view {
 
     /**
      * Copy a saved directory and check its magic, version, byte size and bucket order.
-     * Report malformed input through index_corruption_panic().
+     * Report malformed  input through index_corruption_panic().
      */
     direct_minimizer_bucket_directory_view(const char* blob, std::size_t bytes) {
         if (bytes < sizeof(direct_minimizer_bucket_directory)) {
@@ -296,7 +296,7 @@ using encoded_bucket_header = minimizer_hashmap_fragment_index::encoded_header;
 using encoded_bucket_record = minimizer_hashmap_fragment_index::encoded_bucket;
 
 constexpr std::size_t k_encoded_header_bytes = minimizer_hashmap_fragment_index::k_encoded_header_bytes;     // Header bytes.
-constexpr std::size_t k_encoded_bucket_bytes = minimizer_hashmap_fragment_index::k_encoded_bucket_bytes;     // Bytes per hash record.
+constexpr std::size_t k_encoded_bucket_bytes = minimizer_hashmap_fragment_index::k_encoded_bucket_bytes;     // Bytes per hash record
 
 /**
  * Write the header, hash records and encoded positions into one bucket image.

@@ -65,7 +65,7 @@ class parallel_gzip_source {
         source._impl->mapped_source = std::move(mmap_in);
         source._impl->compressed_view = compressed_view;
 
-        // Use the configured chunk size and worker count, with defaults for zero.
+        // Use  the configured chunk size and worker count, with defaults for zero.
         std::size_t chunk_bytes = options.io.parallel_gzip_chunk_bytes;
         if (chunk_bytes == 0) {
             chunk_bytes = 4 * 1024 * 1024; // default_parallel_gzip_chunk_size

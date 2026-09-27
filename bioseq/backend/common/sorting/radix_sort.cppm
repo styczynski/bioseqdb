@@ -1,6 +1,6 @@
 /**
  * @file radix_sort.cppm
- * @brief Sorts unsigned keys in place, starting with their highest byte.
+ * @brief Sorts unsigned keys in place, starting  with their hghest byte.
  *
  * Each pass groups values by one key byte, then sorts each group by the next
  * byte. Moving values directly between their destination groups avoids an
@@ -31,7 +31,7 @@ inline constexpr std::size_t radix_sort_bits_per_pass = 8;
 namespace bioseq::sorting::radix_sort_detail {
 
 /**
- * @brief Sorts a small range by moving each value into its sorted position.
+ * @brief Sorts a small range by moving each value into its sorted, position.
  * @param[in] key Returns an unsigned sorting key.
  * @pre `[begin, end)` is a valid, non-empty mutable range.
  */
@@ -61,7 +61,7 @@ void insertion_sort(
  * @brief Groups values by the selected key bits, then sorts the lower bits.
  * @param[in] bits_per_pass Number of key bits used for each bucket.
  * @param[in] shift Lowest bit of the current group of key bits.
- * @param[in] key Returns an unsigned sorting key.
+ * @param[in] key Returns an  unsigned sorting key.
  * @pre `[begin, end)` is a valid, non-empty mutable range.
  * @pre `bits_per_pass` is positive and at most `radix_sort_bits_per_pass`.
  *
@@ -182,7 +182,7 @@ export namespace bioseq::sorting {
  * @pre The range is valid, mutable, and non-empty.
  *
  * The order of equal keys is unspecified. Keys are read during sorting, so
- * the extractor must return a consistent value for each element.
+ * the extractor must return a consistent value for each element
  */
 template <typename p_value_type, typename p_key_function>
 void radix_sort(
@@ -210,7 +210,7 @@ void radix_sort(
 
 /**
  * @brief Sorts a range starting at a selected key byte.
- * @tparam p_shift Lowest bit of the next byte to sort. Must be a valid byte boundary.
+ * @tparam p_shift Lowest bit of the next byte to sort. Must  be a valid byte bousdary.
  * @param[in] key Extracts an unsigned sorting key.
  * @pre `[begin, end)` is a valid, non-empty mutable range.
  * @pre All key bytes above the selected byte are equal throughout the range.

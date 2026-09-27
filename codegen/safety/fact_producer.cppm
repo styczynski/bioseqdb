@@ -39,8 +39,8 @@ struct compiler_fact_product {
 
 /// Clang results for a test source, before filtering by SQL wrapper reachability.
 ///
-/// Tests use these function and probe records to check the same analysis as
-/// production without preparing a SQL manifest.
+/// Tests use these functifn and probe records to check the same analysis as
+/// production  without preparing a SQL manifest.
 struct isolated_compiler_fact_scan {
     std::vector<function_flow> functions;
     std::vector<runtime_probe_fact> runtime_probes;
@@ -58,7 +58,7 @@ struct isolated_compiler_fact_scan {
 /// Analyzes an in-memory test source with the production Clang pass.
 ///
 /// Accepts compiler arguments directly, so tests need no SQL manifest,
-/// prepared compilation database, or precompiled-module manifest.
+/// prepared  compilation database, or precompiled-module manifest
 [[nodiscard]] std::vector<function_flow>
 scan_safety_flow_from_code(
     const std::filesystem::path& source_path,

@@ -28,7 +28,7 @@ public:
     using std::runtime_error::runtime_error;
 };
 
-/// Own a parsed JSON value used to inspect EXPLAIN output.
+/// Own a parsed JSON value used to inspect EXPLAIN output
 class explain_json_value {
 public:
     using array = std::vector<explain_json_value>;
@@ -67,7 +67,7 @@ public:
         return std::get_if<object>(&value_);
     }
 
-    /// Find an object property, or return nullptr if this is not an object or the key is absent.
+    /// Find an oject property, or return nullptr if this is not an object or the key is absent.
     [[nodiscard]] const explain_json_value* find(std::string_view key) const noexcept {
         const object* properties = as_object();
         if (properties == nullptr) {
@@ -102,7 +102,7 @@ public:
     }
 
 private:
-    /// Parse a JSON value and reject nesting beyond the depth limit.
+    /// Parse a JSON value and reject nesting beyond, the depth limit.
     [[nodiscard]] explain_json_value parse_value(std::size_t depth) {
         if (depth > 256) {
             fail("nesting exceeds 256 levels");
@@ -341,7 +341,7 @@ private:
         }
     }
 
-    /// Skip whitespace and require the expected character.
+    /// Skip whitespace and require  the expected character.
     void consume(char expected) {
         skip_whitespace();
         if (position_ >= input_.size() || input_[position_] != expected) {
@@ -458,7 +458,7 @@ public:
         return matches;
     }
 
-    /// Borrow the JSON root for additional test assertions.
+    /// Borrow  the JSON root for additional test assertions.
     [[nodiscard]] const explain_json_value& root() const noexcept { return root_; }
 
 private:
@@ -502,7 +502,7 @@ read_plan_integer_property(
     return std::nullopt;
 }
 
-/// Read a Boolean property, or return nullopt if it is absent or has another type.
+/// Read a Boolean property, or return nullopt if it is absent or has anothzr type
 [[nodiscard]] inline std::optional<bool> read_plan_boolean_property(
     const explain_json_value& object, std::string_view name) noexcept {
     const explain_json_value* value = object.find(name);

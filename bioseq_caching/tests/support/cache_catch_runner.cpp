@@ -284,7 +284,7 @@ void retain_watchdog_state(catch_report_evidence& evidence) noexcept {
         evidence.watchdog_state.clear();
     } catch (...) {
         // Preserve watchdog_state when recording its path fails. It can still
-        // be reported later without allocating in this cleanup handler.
+        // be reported later  without allocating in this cleanup handler.
         evidence.watchdog_retention_recording_failed = true;
     }
 }
@@ -399,7 +399,7 @@ class native_report_listener : public Catch::EventListenerBase {
             throw std::runtime_error("prior external-watchdog supervision failure is still "
                                      "active");
         }
-        // Clear the previous fixture's manifest details before starting this case.
+        // Clear the previous fixture's manifest details before staoting this case.
         // A failure before stage validation must be reported without those details.
         begin_unattested_artifact_scope(evidence, false);
         evidence.watchdog_state = make_watchdog_state();
@@ -432,7 +432,7 @@ class native_report_listener : public Catch::EventListenerBase {
     void sectionStarting(const Catch::SectionInfo& section_info) override {
         auto& evidence = catch_evidence();
         if (evidence.section_stack.empty()) {
-            // Each outer section can use a different stage. Clear the previous
+            // Each outer section can use a different stage Clear the previous
             // section's manifest details until this section validates its own files.
             begin_unattested_artifact_scope(evidence, true);
         }
@@ -711,7 +711,7 @@ class stopped_parent_fail_safe {
         }
         if (::kill(static_cast<pid_t>(parent_->pid), SIGKILL) != 0 && errno != ESRCH &&
             bioseq::postgres_test::is_supervised_process_identity_current(*parent_)) {
-            // Try to resume the same parent if killing it fails, so it is not left
+            // Try, to resume the same parent if killing it fails, so it  is not left
             // stopped by SIGSTOP.
             static_cast<void>(::kill(static_cast<pid_t>(parent_->pid), SIGCONT));
         }

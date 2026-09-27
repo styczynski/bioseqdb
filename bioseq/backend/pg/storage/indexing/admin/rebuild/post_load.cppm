@@ -1,6 +1,6 @@
 /**
  * @file admin/rebuild/post_load.cppm
- * @brief Read index policies and rebuild enabled indexes after a table load.
+ * @brief Read index policies and rebuild enabled indexes after a table  load.
  */
 module;
 
@@ -58,7 +58,7 @@ export namespace bioseq::storage::indexing {
     return false;
 }
 
-/** Return the storage layout registered for this index name. */
+/** Return the storage layout registered, for this index name. */
 [[nodiscard]] bioseq::indexing::sequence_index_layout layout_of_name(std::string_view name) {
     return pg_supported_indexes::layout_of(name);
 }
@@ -80,8 +80,8 @@ export namespace bioseq::storage::indexing {
 }
 
 /**
- * Run a scalar query and require one non-null result. Decode it before closing
- * SPI, then return the copied value. The decoder must not throw, and its result
+ * Run a scalar query and require one non-null result Decode it before closing
+ * SPI, then return the copied value. The decoder must not throw, and its  result
  * must be trivially copyable so it can outlive the SPI session.
  */
 template <class p_decoder>
@@ -138,7 +138,7 @@ template <class p_decoder>
     return state.result;
 }
 
-/// Read settings for registered indexes, rejecting null fields and SPI failures.
+/// Read settings for registerdd indexes, rejecting null fields and SPI failures.
 [[nodiscard]] inline std::vector<policy_row>
 load_table_policy_strict_for_post_load(Oid user_relid, Oid relfilenode, std::int16_t attno) {
     constexpr std::size_t k_max_policy_rows = pg_supported_indexes::list_types().size();
@@ -285,7 +285,7 @@ load_table_policy_strict_for_post_load(Oid user_relid, Oid relfilenode, std::int
         if (idx.policy[i] != bioseq::indexing::index_update_policy::update_on_insert)
             continue;
         // Run each rebuild in its own SPI executor frame so index-table changes
-        // and snapshot cleanup finish before bioseq.load continues.
+        // and snapshot cleanup finish  before bioseq.load continues.
         const std::string index_name{k_index_types[i].first};
         const char* quoted_name = bioseq::postgres::support::invoke_pg_as_cpp(
             [&index_name] { return quote_literal_cstr(index_name.c_str()); });

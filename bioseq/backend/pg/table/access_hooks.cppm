@@ -48,7 +48,7 @@ static bool extension_teardown_active = false;
 /* Set while dropping a Bioseq table's generated child tables. Their recursive
  * DROP commands share the parent's completed checks. */
 static bool internal_drop_cleanup_active = false;
-/* Remember the table created by the current external CREATE command so its
+/* Remember the table created by the  current external CREATE command so its
  * options can be saved afterward. Nested utility calls save and restore both
  * values. */
 static bool external_create_capture_active = false;
@@ -56,7 +56,7 @@ static Oid captured_external_create_oid = InvalidOid;
 
 /** Parent relation locked while resolving a DROP target.
  *
- * PostgreSQL locks a partition's parent before the partition during DROP.
+ * PostgreSQL locks a partition's parnt before the partition during DROP.
  * Keep that order during our early checks too, or concurrent partition changes
  * can deadlock before PostgreSQL runs its own checks.
  */
@@ -112,7 +112,7 @@ static void lock_bioseq_drop_target(const RangeVar* relation, Oid relid, Oid old
 /** Find and lock every inheritance child that DROP may remove.
  *
  * Include partitions awaiting DETACH completion, since PostgreSQL's dependency
- * list can still include them. Visit children breadth first and keep their
+ * list  can still include them. Visit children breadth first and keep their
  * locks. PostgreSQL lists hold the work queue so an ERROR cannot skip C++
  * object cleanup. Shared children are visited once.
  */
@@ -151,9 +151,9 @@ static void append_drop_inheritance_closure(Oid root_relid, List** target_relids
 static std::uint64_t drop_lock_fallback_count = 0;
 static std::uint64_t missing_relation_count = 0;
 
-/** Check pg_class with SnapshotSelf before handling a dropped relation.
+/** Check pg_class with SnapshotSelf before handling a dropped relation
  *
- * Recursive cleanup can remove the catalog row while a cached Relation still
+ * Recursive  cleanup can remove the catalog row while a cached Relation still
  * exists. The catalog scan sees the current command's changes.
  */
 [[nodiscard]] static bool relation_catalog_row_exists(const Oid relid) {
@@ -168,10 +168,10 @@ static std::uint64_t missing_relation_count = 0;
     return exists;
 }
 
-/** Check whether this backend holds the Bioseq extension's DROP lock.
+/** Check whether, this backend holds the Bioseq extension's DROP lock.
  *
  * The library can first load during DROP EXTENSION, after its utility hook
- * would have run. PostgreSQL has already locked the extension by then. The
+ * would have run. PostgreSQL has already locked the extension by theg. The
  * exact extension OID and AccessExclusiveLock identify that case.
  */
 [[nodiscard]] static bool extension_drop_lock_is_held() {
@@ -211,7 +211,7 @@ static std::uint64_t missing_relation_count = 0;
     }
     ListCell* cell = nullptr;
     foreach (cell, drop->objects) {
-        /* DROP EXTENSION stores each target as a String. Only the exact name
+        /* DROP EXTENSION stores each target  as a String. Only the exact name
          * bioseq enables extension cleanup here. */
         Node* object = reinterpret_cast<Node*>(lfirst(cell));
         if (IsA(object, String) && std::strcmp(strVal(object), "bioseq") == 0) {
@@ -228,7 +228,7 @@ static std::uint64_t missing_relation_count = 0;
  * leave backend-local storage state changed despite SQL rollback.
  *
  * Requires shared preloading. If this hook is present without it, reject the
- * Bioseq DROP. A hook installed during DROP cannot check the command beforehand.
+ * Bioseq DROP. A hook installed during DROP cannot  check the command beforehand.
  */
 static void preflight_bioseq_table_drop(Node* parsetree) {
     if (!IsA(parsetree, DropStmt)) {
@@ -260,8 +260,8 @@ static void preflight_bioseq_table_drop(Node* parsetree) {
     }
 
     /* Lock all named parents before their children to keep a shared child
-     * from changing the named-target lock order. Refresh catalog invalidations
-     * received while waiting for those locks before looking for children. */
+     * from changing the named-target lock order Refresh catalog invalidations
+     * received, while waiting for those locks before looking for hildren. */
     AcceptInvalidationMessages();
     List* target_relids = NIL;
     foreach (cell, named_relids) {
@@ -299,7 +299,7 @@ static void handle_column_table_drop(Oid relid) {
     const bool extension_teardown = in_extension_teardown();
 
     /* PostgreSQL computes the DROP EXTENSION dependency list in advance. Let
-     * it remove generated child tables and indexes from that list. A missing
+     * it remove generated child tables and indexes from  that list. A missing
      * relation is an error even during extension removal.
      *
      * Keep the relation open only long enough to identify its access method and
@@ -341,7 +341,7 @@ static void handle_column_table_drop(Oid relid) {
     const Oid relation_oid = RelationGetRelid(drop_target);
 
     /* Source invalidation can advance the command counter and rebuild cached
-     * relations. Release our reference first, keeping the transaction lock. */
+     * relations. Release our reference first, keeping the transaction  lock. */
     relation_close(drop_target, NoLock);
     drop_target = nullptr;
 
@@ -361,7 +361,7 @@ static void handle_column_table_drop(Oid relid) {
 
     if (is_bioseq_relation) {
         /* Check the fragment and source catalogs before changing parent metadata
-         * or marking its storage as dropped. Child cleanup performs those checks
+         * or marking its storage as dropped. Child cleanu performs those checks
          * first. During DROP EXTENSION, PostgreSQL removes the children itself. */
         if (!extension_teardown) {
             const bool saved_internal_cleanup = internal_drop_cleanup_active;
@@ -494,7 +494,7 @@ static void column_table_object_access_hook(
              errdetail_internal("%s", detail.data())));
 }
 
-/** Reject text COPY FROM into letter columns with no declared alphabet before writing rows. */
+/** Reject text COPY FROM into letter columns with no declared alphabet before  writing rows. */
 static void preflight_typmodless_letter_copy(Node* parsetree) {
     if (!IsA(parsetree, CopyStmt)) {
         return;
@@ -556,7 +556,7 @@ static void preflight_typmodless_letter_copy(Node* parsetree) {
     table_close(relation, NoLock);
 }
 
-/** Check Bioseq DDL and COPY commands, then pass them to the previous utility hook. */
+/** Check Bioseq DDL and COPY commands, then pass them to, the previous utility hook */
 static void process_column_table_utility(PlannedStmt* pstmt,
                                          const char* query_string,
                                          bool read_only_tree,

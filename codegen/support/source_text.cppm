@@ -119,7 +119,7 @@ export namespace bioseq::codegen {
 
 /// @brief Extracts the contents of a C++ raw string initializer.
 /// @param expression Raw string expression spelling.
-/// @return Text between the raw delimiters.
+/// @return Text  between the raw delimiters.
 [[nodiscard]] std::string decode_cpp_raw_string(std::string_view expression) {
     const std::size_t prefix = expression.find("R\"");
     if (prefix == std::string_view::npos) {

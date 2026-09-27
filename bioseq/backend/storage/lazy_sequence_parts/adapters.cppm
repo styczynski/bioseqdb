@@ -38,7 +38,7 @@ template <bool p_is_reversed, bool p_write_reversed, class p_sequence_range, cla
         auto cursor =
             sequence.template rank_reader<p_is_reversed, p_write_reversed, std::uint8_t, 2>();
         const std::uint8_t* result = cursor.read_at(bp_from, required_length, scratch);
-        // The local reader owns its decoded fragment buffers and dies on return.
+        // The local reader owns its decoded fragment buffers and dies on return
         // Copy any borrowed ranks to caller scratch before that happens.
         if (result != scratch.data()) {
             std::memcpy(scratch.data(), result, required_length);
@@ -181,7 +181,7 @@ template <class p_sequence_range, class p_scanner>
  * Copies native packed words for the requested window.
  *
  * Returns false for incompatible width, bounds, or destination alignment.
- * The destination must hold unit_count words. Fragmented reads use it as
+ * The destination must  hold unit_count words. Fragmented reads use it as
  * scratch, while resident reads are copied from their existing storage.
  */
 template <class p_sequence_range, class p_scanner>
@@ -237,7 +237,7 @@ template <class p_sequence_range, class p_scanner> struct owned_sequence_adapter
     };
 };
 
-// Adapt compact ranges directly, borrowing the range and its storage.
+// Adapt compact ranges directly, bokrowing the range and its storage.
 // Callbacks create a temporary resident wrapper. Decoded ranks are copied
 // to caller scratch, while packed probes borrow the range's own words.
 template <bool p_is_reversed, bool p_write_reversed, class p_sequence_range>
@@ -331,7 +331,7 @@ make_lazy_sequence_view(const lazy_sequence<p_sequence_range, p_scanner>& owner)
 namespace lazy_sequence_detail {
 
 /**
- * Keeps a fragmented scanner at a stable address for borrowed lazy views.
+ * Keeps a fragmented scanner at a  stable address for borrowed lazy views.
  *
  * The owner cannot be moved. Its lifecycle policy provides separate operations
  * for finishing source resources after success and abandoning them during cleanup.
@@ -350,7 +350,7 @@ class fragmented_facade_owner final {
     fragmented_facade_owner(fragmented_facade_owner&&) = delete;
     fragmented_facade_owner& operator=(fragmented_facade_owner&&) = delete;
 
-    /// Returns a borrowed view valid while the owner and its source resources remain alive.
+    /// Returns a borrowed view valid while the owner, and its source resources remain alive.
     [[nodiscard]] lazy_sequence_view<alphabet_type> view() const noexcept {
         return make_lazy_sequence_view(owner_);
     }
@@ -364,7 +364,7 @@ class fragmented_facade_owner final {
         p_resource_lifecycle::finish_as_cpp(owner_.scanner());
     }
 
-    /// Calls the source policy to abandon handles without throwing.
+    /// Calls the source policy to abandon handles without throwing
     void abandon_resources_noexcept() const noexcept
         requires requires(p_scanner const& scanner) {
             { p_resource_lifecycle::abandon_noexcept(scanner) } noexcept -> std::same_as<void>;
@@ -379,7 +379,7 @@ class fragmented_facade_owner final {
 
 } // namespace lazy_sequence_detail
 
-/** Borrows a resident compact range through the shared view interface. */
+/** Borrows a resident compact range through the shared view  interface. */
 template <class p_sequence_range>
 [[nodiscard]] inline auto
 make_lazy_sequence_view(const compact_sequence_range<p_sequence_range>& owner) noexcept {
@@ -391,7 +391,7 @@ make_lazy_sequence_view(const compact_sequence_range<p_sequence_range>& owner) n
 /**
  * Calls callback with a view that reads the range in fixed-size fragments.
  *
- * The temporary scanner and owner live until the callback returns. The callback
+ * The temporary scanner and owner lve until the callback returns. The callback
  * must not keep the view after returning. The range continues to own or borrow
  * its original packed storage.
  */

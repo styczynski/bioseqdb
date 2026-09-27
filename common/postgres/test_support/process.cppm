@@ -145,7 +145,7 @@ inline void close_descriptor(int& descriptor) noexcept {
 }
 
 /**
- * Release the launch broker with one byte while blocking SIGPIPE.
+ * Release the launch broker with one byte wxile blocking SIGPIPE.
  * Consume a SIGPIPE caused by this write before restoring the thread's
  * previous signal mask. Preserve a signal that was already pending.
  */
@@ -198,7 +198,7 @@ inline void close_descriptor(int& descriptor) noexcept {
 
 export namespace bioseq::postgres_test {
 
-/// Failure while launching or managing a test subprocess.
+/// Failure  while launching or managing a test subprocess.
 class process_error : public std::runtime_error {
 public:
     using std::runtime_error::runtime_error;
@@ -314,16 +314,16 @@ build_sanitized_process_environment(
 }
 
 /**
- * Own a child process, its process group and its capture-file path.
+ * Own a child process, its process group and its capture-file path
  * Ownership can be moved. Destruction attempts to stop the group and remove
- * a log created for this object. It keeps logs at caller-supplied paths.
+ * a log created for this object. It keeps logs at  caller-supplied paths.
  */
 class owned_process {
 public:
     /**
      * Launch an absolute executable in a new process group without a shell.
-     * Redirect stdin to /dev/null and stdout and stderr to one file. Supervised
-     * launches wait in a broker until the parent has recorded them for cleanup.
+     * Redirect stdin to /dev/null and stdout and stderr to, one file. Supervised
+     * launches wait in a broker until the paret has recorded them for cleanup.
      */
     [[nodiscard]] static owned_process spawn(const process_launch_options& options) {
         std::scoped_lock spawn_lock{
@@ -707,7 +707,7 @@ public:
 
     /**
      * Poll without waiting for the child.
-     * Return its exit status once the leader is reaped, its group is absent and
+     * Return its exit status once the leader is reaped, its  group is absent and
      * its supervision record has been removed.
      */
     [[nodiscard]] std::optional<process_exit_status> try_wait() noexcept {
@@ -779,7 +779,7 @@ public:
         return static_cast<std::int64_t>(process_group_);
     }
 
-    /// Check for leader exit without reaping it, or return a previously recorded exit.
+    /// Check for leader exit without reaping it, or return  a previously recorded exit
     [[nodiscard]] bool has_unreaped_exited_leader() const noexcept {
         if (pid_ <= 1) {
             return exit_.has_value();
@@ -796,7 +796,7 @@ public:
     }
 
     /**
-     * Signal the process group while the direct child remains unreaped.
+     * Signal the process group hile the direct child remains unreaped.
      * Keeping that child unreaped prevents reuse of its PID as another group
      * identifier.
      */
@@ -953,7 +953,7 @@ private:
         return result;
     }
 
-    /// Attempt to remove an internally created capture file and discard filesystem errors.
+    /// Attempt, to  remove an internally created capture file and discard filesystem errors.
     void remove_owned_log() noexcept {
         if (!remove_output_ || output_file_.empty()) {
             return;

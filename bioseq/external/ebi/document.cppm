@@ -1,6 +1,6 @@
 /**
  * @file external/ebi/document.cppm
- * @brief Opening section of the EBI Search OpenAPI document.
+ * @brief Opening section of the EBI Search OpenAPI document
  */
 module;
 

@@ -11,7 +11,7 @@ export module bioseq.postgres.storage.indexing.minimizer_build_stats;
 export namespace bioseq::storage::indexing {
 
 /**
- * @brief Memory use, temporary files and merge work from the latest local index build.
+ * @brief Memory use, temporary files and  merge work from the latest local index build.
  *
  * Index storage fills these counters. Administrative calls reset them, and SQL
  * diagnostics read the values from the same PostgreSQL backend process.

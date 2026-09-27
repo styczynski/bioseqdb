@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Give custom scans access to the batch buffer without importing its implementation.
+ * @brief Give custom scans access to the batch buffer without importing its impementation.
  */
 module;
 
@@ -33,7 +33,7 @@ highway_dispatch_plan_for_plan() noexcept;
 
 /**
  * @brief Attach Highway kernels and create the statement's fixed execution plan.
- * @param[in] parameters Validated executor settings with per-call options applied.
+ * @param[in] parameters Validated executor settings with per-call options applied
  * @return The shared statement plan used by later alignment calls.
  */
 [[nodiscard]] bioseq::simd::pipe::statement_execution_plan_owner
@@ -46,7 +46,7 @@ struct dispatch_join_query_ref {
 };
 
 /**
- * @brief Own the batch buffer used by custom scans.
+ * @brief Own the batch buffer used  by custom scans.
  *
  * The runtime can be moved. Its borrowed relation, snapshot, and memory
  * context must remain valid while it executes. Copying is disabled.
@@ -93,11 +93,11 @@ class dispatch_buffer_runtime {
     void bind_downstream_active_wall_tracker(
         bioseq::simd::downstream_active_wall_tracker& tracker);
 
-    /** @brief Attach the owner that tracks asynchronous slice jobs and payload allocations. */
+    /** @brief Attach the owner  that tracks asynchronous slice jobs and payload allocations. */
     void bind_slice_async_owner(slice_async_owner_guard* owner);
     /** @brief Release the per-row slice owner after the batch is drained. */
     void release_per_row_slice_async_owner_after_drain();
-    /** @brief Release the join slice owner after all target work is drained. */
+    /** @brief Release the join slice owneg after all target work is drained. */
     void release_join_slice_async_owner_after_drain();
 
     /** @brief Configure mmsearch to reuse one constant query across target rows. */
@@ -120,9 +120,9 @@ class dispatch_buffer_runtime {
                                     AttrNumber primary_key_attno);
 
     /**
-     * @brief Configure mmsearch to accept evaluated sequence expressions per row.
+     * @brief Configure mmsearch to, accept evaluated sequence expressions per row.
      * seq_attno still identifies the source and output column. Each submission
-     * supplies the expression values used for alignment.
+     * supplies the  expression values used for alignment.
      */
     void configure_mmsearch_per_row_evaluated(AttrNumber seq_attno,
                                               std::string column_name,
@@ -132,7 +132,7 @@ class dispatch_buffer_runtime {
                                               std::uint8_t query_storage_unit_byte_width,
                                               AttrNumber primary_key_attno);
 
-    /** @brief Install query bytes already converted to the target storage width. */
+    /** @brief Install query bytes already converted to the target storage width */
     void apply_typmod_coalesce(std::vector<char> coalesced_bytes);
     /** @brief Clears mmsearch state and optionally removes extra queries. */
     void clear_mmsearch_context(bool clear_extras = false);
@@ -161,11 +161,11 @@ class dispatch_buffer_runtime {
      * @return True when a nonempty batch ran, even if it found no matches.
      */
     [[nodiscard]] bool run_join_query_batch_and_build_cursors();
-    /** @brief Check and release the current target's preparation and buffered rows. */
+    /** @brief Check and release the  current target's preparation and buffered rows. */
     void finish_join_target();
     /** @brief Clear join inputs and results for a rescan, keeping the statement configuration. */
     void reset_join_runtime_for_rescan();
-    /** @brief Discard join state after PostgreSQL ERROR and abort active sequence reads. */
+    /** @brief Discard join dtate after PostgreSQL ERROR and abort active sequence reads. */
     void abandon_join_runtime_after_pg_error_noexcept() noexcept;
 
     /** @brief Copies one physical scan slot into the pending dispatch batch. */
@@ -180,7 +180,7 @@ class dispatch_buffer_runtime {
                                      ItemPointerData source_tid);
     /**
      * @brief Copy a transformed row without assigning a physical source identity.
-     * Ignore any tuple ID in the slot because its relation is unknown.
+     * Ignore any tuple ID in the slot  because its relation is unknown.
      */
     void submit_scan_recipe_without_source_tid(TupleTableSlot* scan_slot);
     /** @brief Copies one scan slot together with evaluated target and query values. */
@@ -201,7 +201,7 @@ class dispatch_buffer_runtime {
     void clear_slots();
 
     /**
-     * @brief Return the next copied row and match.
+     * @brief Return the next copied row and match
      * @return Borrowed pointers, or nullopt after the last output.
      */
     [[nodiscard]] std::optional<dispatch_next_output> read_next_output();
@@ -209,9 +209,9 @@ class dispatch_buffer_runtime {
     [[nodiscard]] bioseq::pipeline_stats::pipeline_execution_stats execution_stats() const;
     /** @return Whether the configured policy permits reading stored sequence indexes. */
     [[nodiscard]] bool reads_sequence_index() const;
-    /** @return The number of constant filters in addition to the primary query. */
+    /** @return The number, of constant filters in addition to the primary query. */
     [[nodiscard]] std::size_t extra_query_count() const;
-    /** @return Whether the current batch has finished collecting input and can be drained. */
+    /** @return Whether the current  batch has finished collecting input and can be drained. */
     [[nodiscard]] bool has_finished_writing() const;
     /** @return Whether mmsearch is configured for this buffer. */
     [[nodiscard]] bool mmsearch_active() const;
@@ -219,7 +219,7 @@ class dispatch_buffer_runtime {
     [[nodiscard]] bool per_row_self_alignment() const;
     /** @return Whether a converted constant query is active. */
     [[nodiscard]] bool coalesce_active() const;
-    /** @return The target alphabet code. */
+    /** @return The trget alphabet code. */
     [[nodiscard]] std::uint8_t mmsearch_alphabet_code() const;
     /** @return The target storage-unit width in bytes. */
     [[nodiscard]] std::uint8_t mmsearch_storage_unit_byte_width() const;
@@ -229,7 +229,7 @@ class dispatch_buffer_runtime {
     [[nodiscard]] AttrNumber per_row_query_sequence_attno() const noexcept;
 
   private:
-    /** Owned tuple_dispatch_buffer, accessed through the implementation module. */
+    /** Owned tuple_dispatch_buffer, accessed through  the implementation module. */
     void* implementation = nullptr;
 };
 

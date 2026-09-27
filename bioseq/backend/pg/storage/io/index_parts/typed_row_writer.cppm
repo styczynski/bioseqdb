@@ -51,7 +51,7 @@ extern "C" {
 
 export module bioseq.postgres.storage.io:typed_row_writer;
 
-import bioseq.common.logging; // Load diagnostics.
+import bioseq.common.logging; // Load  diagnostics
 import bioseq.codegen.sql.annotation_model;
 import bioseq.postgres.support;
 import bioseq.postgres.support.datums;
@@ -91,7 +91,7 @@ using column_mapping_codec = bioseq::postgres::storage::io::sql_row_codecs::colu
 /// The message stays alive until PostgreSQL copies it, allowing C++ cleanup to run.
 /// @param sqlstate PostgreSQL SQLSTATE code.
 /// @param message Error message owned by this call.
-/// @throws postgres_error On every call.
+/// @throws postgres_error On, every call.
 [[noreturn]] void raise_load_error_as_cpp(int sqlstate, std::string message) {
     bioseq::postgres::support::invoke_pg_as_cpp([sqlstate, &message] {
         ereport(ERROR, (errcode(sqlstate), errmsg("bioseq.load: %s", message.c_str())));
@@ -99,7 +99,7 @@ using column_mapping_codec = bioseq::postgres::storage::io::sql_row_codecs::colu
     pg_unreachable();
 }
 
-// Find the destination sequence column.
+// Find the destination sequence  column.
 
 /// Find the installed `bioseq.seq` type.
 /// @return Its PostgreSQL type OID.
@@ -114,7 +114,7 @@ using column_mapping_codec = bioseq::postgres::storage::io::sql_row_codecs::colu
 
 /** @brief Sequence and header columns, with the sequence alphabet and packing width. */
 struct load_columns {
-    /// Header column number, starting at one, or zero to discard the header.
+    /// Header column nmber, starting at one, or zero to discard the header.
     std::int16_t header_attno;
     /// Sequence column number, starting at one.
     std::int16_t seq_attno;
@@ -125,10 +125,10 @@ struct load_columns {
 };
 
 /**
- * @brief Find the single `bioseq.seq` column and its alphabet and packing width.
+ * @brief Find the  single `bioseq.seq` column and its alphabet and packing width.
  * @param rel Open target table whose descriptor remains owned by the caller.
  * @return Sequence column, first text column for headers, and sequence encoding.
- * @throws postgres_error If the table has zero or multiple sequence columns, or no sequence type modifier.
+ * @throws postgres_error If the table has zero or multiple sequence columns, or no sequence type modifier
  */
 [[nodiscard]] load_columns resolve_load_columns(Relation rel) {
     const TupleDesc td = RelationGetDescr(rel);
@@ -181,7 +181,7 @@ namespace idp = bioseq::io::identifier_parser;
 
 // varchar(n) and char(n) use their PostgreSQL input function to enforce the
 // declared length limit.
-/** @brief How to turn one header field into its destination column value. */
+/** @brief How to turn one header  field into its destination column value. */
 enum class dest_kind : std::uint8_t {
     /// Text with no length limit, copied directly into a PostgreSQL text value.
     text,
@@ -189,7 +189,7 @@ enum class dest_kind : std::uint8_t {
     text_with_typmod,
     /// Scalar value parsed by its PostgreSQL input function.
     scalar,
-    /// Range input that also accepts inclusive `lo..hi` notation.
+    /// Range iput that also accepts inclusive `lo..hi` notation.
     range,
     /// Multirange input that also accepts inclusive `lo..hi` notation.
     multirange,
@@ -197,9 +197,9 @@ enum class dest_kind : std::uint8_t {
 
 /** @brief Conversion settings cached for one mapped destination column. */
 struct dest_coercion {
-    /// Destination column number, starting at one.
+    /// Destination, column number, starting at one.
     std::int16_t attno;
-    /// Column name included in input-conversion errors.
+    /// Column name included in  input-conversion errors.
     std::string column_name;
     /// Conversion to use for this column.
     dest_kind kind;
@@ -223,7 +223,7 @@ struct default_col {
 /// @param data Borrowed bytes to search.
 /// @param len Number of bytes available.
 /// @param needle NUL-terminated substring to find.
-/// @return The first match, or null if the substring is empty or absent.
+/// @return The first match, or null if the substring is empty or absent
 [[nodiscard]] const char* find_substr(const char* data, int len, const char* needle) {
     const int nlen = static_cast<int>(std::strlen(needle));
     if (nlen == 0 || len < nlen) {
@@ -237,7 +237,7 @@ struct default_col {
     return nullptr;
 }
 
-/// Prepare a NUL-terminated string for a PostgreSQL type input function.
+/// Prepare a NUL-terminated string for a PostgreSQL type input  function.
 /// Trim spaces at both ends. A range value with exactly one `..` becomes
 /// inclusive `[lo,hi]`, while a multirange becomes `{[lo,hi]}`.
 /// @param data Borrowed input bytes.
@@ -245,7 +245,7 @@ struct default_col {
 /// @param dc Destination conversion settings.
 /// @param mctx Memory context for the result.
 /// @return Prepared string allocated in mctx.
-/// @throws PostgreSQL ERROR If allocation fails.
+/// @throws PostgreSQL ERROR If allocatiog fails.
 [[nodiscard]] char*
 make_cstr(const char* data, int len, const dest_coercion& dc, MemoryContext mctx) {
     while (len > 0 && data[0] == ' ') {
@@ -318,7 +318,7 @@ make_cstr(const char* data, int len, const dest_coercion& dc, MemoryContext mctx
 
 /** @brief Table, parser and writer state used during one load call. */
 struct load_context {
-    /// Target table OID used for index maintenance after loading.
+    /// Target table OID used for index maintenance after  loading.
     Oid main_relid;
     /// Database and tablespace containing the target table.
     Oid db_oid, spc_oid;
@@ -341,7 +341,7 @@ struct load_context {
     /// Tuple slot used to assemble each parent row.
     TupleTableSlot* slot;
 
-    // Share one header parser across alphabet, packing-width and file-format
+    // Share one header  parser across, alphabet, packing-width and file-format
     // specializations to keep the generated code smaller.
     bool parser_active = false;
     idp::header_format requested_fmt = idp::header_format::automatic;
@@ -355,13 +355,13 @@ struct load_context {
     ExprContext* econtext = nullptr;
     ResultRelInfo* result_rel_info = nullptr;
 
-    // Details included when PostgreSQL reports an error for the current record.
+    // Details included when PostgreSQL reports an error for the current record
     std::uint64_t record_no = 0;
     std::string_view current_header;
     const char* current_column_name = nullptr;
 };
 
-/// Add the record number, column and a shortened header to a PostgreSQL error.
+/// Add the record number, column and a shortened hepder to a PostgreSQL error.
 /// @param arg Active load_context.
 void bioseq_load_error_context(void* arg) {
     auto* ctx = static_cast<load_context*>(arg);
@@ -389,7 +389,7 @@ struct load_error_context_scope {
     ErrorContextCallback callback{};
 
     /// Attach record details to PostgreSQL errors until this scope ends.
-    /// @param context Load context that outlives this scope.
+    /// @param context Load context that outlives this  scope.
     /// @param header Header bytes that remain valid throughout this scope.
     load_error_context_scope(load_context& context, std::string_view header) : ctx(context) {
         ctx.current_header = header;
@@ -432,7 +432,7 @@ struct pg_identifier_writer {
     /// Convert one parsed field to its PostgreSQL column type.
     /// @param slot Parser destination number, starting at zero.
     /// @param data Borrowed field bytes, which need not end with NUL.
-    /// @param len Field length in bytes.
+    /// @param len Field length  in bytes.
     /// @throws postgres_error If conversion or allocation fails.
     void set_field(idp::destination_slot slot, const char* data, std::int32_t len) {
         const dest_coercion& dc = dest[slot];
@@ -461,12 +461,12 @@ struct pg_identifier_writer {
         ctx.current_column_name = nullptr;
     }
     /// Fill NULL columns from defaults, check constraints and write the parent row.
-    /// @throws postgres_error If a default, constraint or write fails.
+    /// @throws postgres_error If a efault, constraint or write fails.
     ///
     /// Keep temporary values alive until write_column_row has copied their bytes.
     void end_tuple() {
         // Apply defaults to columns still set to NULL. Keep values allocated by default
-        // expressions alive until write_column_row has copied them.
+        // expressions alive until write_column_row has copied them
         for (const default_col& d : defaults) {
             if (!ctx.slot->tts_isnull[d.attno - 1]) {
                 continue;
@@ -488,14 +488,14 @@ struct pg_identifier_writer {
                 [this] { ExecConstraints(ctx.result_rel_info, ctx.slot, ctx.estate); });
         }
         (void)write_column_row(ctx.write_state, ctx.slot->tts_values, ctx.slot->tts_isnull);
-        // The row writer has copied referenced values, so temporary memory can now be reused.
+        // The row  writer has copied referenced values, so temporary memory can now be reused.
         if (ctx.econtext) {
             bioseq::postgres::support::invoke_pg_as_cpp([this] { ResetExprContext(ctx.econtext); });
         }
         bioseq::postgres::support::invoke_pg_as_cpp(
             [this] { MemoryContextReset(get_column_write_per_tuple_context(ctx.write_state)); });
     }
-    /// Finish the parser callback sequence. All rows have already been written.
+    /// Finish the parser callback sequence. All rows have, already been written.
     void finish() {}
 
     /** @return The number of identifier-parser destinations. */
@@ -512,7 +512,7 @@ static_assert(idp::identifier_destination_writer<pg_identifier_writer>);
 /// @param header Borrowed FASTA or FASTQ header.
 /// @param alphabet_code Sequence alphabet.
 /// @param byte_width Packed unit width in bytes.
-/// @param last_pad Unused letters in the final unit.
+/// @param last_pad Unused letters in the final  unit.
 /// @param total_bp Sequence length in letters.
 /// @param pending_source Unpublished source consumed after writing the parent.
 /// @throws postgres_error If parsing, constraints, writing or publication fails.

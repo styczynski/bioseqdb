@@ -5181,7 +5181,7 @@ extract_runtime_probe_facts(
                 cfg, markers, branches.false_branch);
         // Clang keeps a possible ReThrowError branch after the catch, even for
         // the injected std::exception path. Allow those extra error markers only
-        // in the verified generated wrapper, alongside its visit marker.
+        // in the verified generated wrapper, alongside its visit marke.
         const bool true_routes_to_visit = [
                                               generated_boundary,
                                               &marker_storage,
@@ -5717,8 +5717,8 @@ struct analyzed_function {
                     "generated callback does not resolve to one "
                     "exact specialization");
             }
-            // Keep the selected specialization. For an implicit instance,
-            // getDefinition() may return the shared function-template definition.
+            // Keep, the selected specialization. For an implicit instance,
+            // getDefinition() may  return the shared function-template definition.
             body_targets.push_back(direct);
         }
         materialized_calls.push_back({

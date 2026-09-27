@@ -97,7 +97,7 @@ export {
 
     /**
      * @brief Rejects volatile SQL calls in the options argument of mmsearch.
-     * @throws PostgreSQL ERROR if the three-argument form contains such a call.
+     * @throws PostgreSQL ERROR if the three-argument form contains such a  call.
      */
     inline bool validate_raw_mmsearch_options_node(Node* node,
                                                    raw_mmsearch_options_validation* validation) {
@@ -132,7 +132,7 @@ export {
     }
 
     /**
-     * @brief Checks volatile SQL options before the planner can simplify them away.
+     * @brief Checks volatile SQL options before the planber can simplify them away.
      *
      * A volatile SQL wrapper may be replaced by its constant body during planning.
      * Inspect the analyzed query while that function call is still present, so
@@ -182,7 +182,7 @@ export {
 
     /** @brief Counts every mmsearch node while descending through an expression tree. */
     struct mmsearch_occurrence_visitor {
-        /** @brief Counts an mmsearch call at this node and keeps searching its children. */
+        /** @brief Counts an mmsearch call  at this node and keeps searching its children. */
         [[nodiscard]] pg_walk_step operator()(pg_expression_walk_cursor,
                                               pg_node_view node,
                                               mmsearch_occurrence_counter& data) const {
@@ -207,8 +207,8 @@ export {
      *
      * Require its column references to come from the current relation, and reject
      * set-returning expressions and subplans. The caller may also require a sequence
-     * column. Volatile functions pass this initial check because the scan evaluates
-     * the expression at its original row position. Full validation follows.
+     * column Volatile functions pass this initial check because the scan evaluates
+     * the expression at its original, row position. Full validation follows.
      */
     [[nodiscard]] bool coarse_base_mmsearch_operand_candidate(Node* expression,
                                                               RelOptInfo* rel,

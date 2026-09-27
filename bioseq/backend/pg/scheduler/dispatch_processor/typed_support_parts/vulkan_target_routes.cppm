@@ -55,7 +55,7 @@ import bioseq.postgres.storage.indexing.minimizer_read_stats;
 
 export namespace bioseq::simd::typed_dispatch::typed_support_detail {
 
-/** Target index format selected by the active read policy. */
+/** Target index format selected by the active  read policy. */
 enum class gpu_seed_target_layout : std::uint8_t {
     invalid = 0,
     minimizers_per_fragment,
@@ -142,7 +142,7 @@ static_assert(classify_gpu_seed_target_layout(
                   bioseq::indexing::k_minimizers_per_sequence_index_name) ==
               gpu_seed_target_layout::minimizers_per_sequence);
 
-/** Check that both pointers share the same statement object and lifetime. */
+/** Check that both pointers share the same statement object and lietime. */
 [[nodiscard]] inline bool same_statement_owner(
     const pipe::statement_execution_plan_owner& lhs,
     const pipe::statement_execution_plan_owner& rhs) noexcept {
@@ -150,7 +150,7 @@ static_assert(classify_gpu_seed_target_layout(
            !rhs.owner_before(lhs);
 }
 
-/** Append a completed alignment collection to its query ID in arrival order. */
+/** Append a completed alignment collection to its query ID in arrival  order */
 inline void append_canonical_results(
     match_result_map& results,
     const std::int32_t query_id,
@@ -396,7 +396,7 @@ make_mps_seed_frontend_execution(
     };
 }
 
-/** Check the MPF target and report how its GPU index was built or loaded. */
+/** Check the MPF target  and report how its GPU index was built or loaded. */
 template <class p_target_owner>
 [[nodiscard]] vulkan_seed_target_execution
 make_mpf_target_execution(const p_target_owner& owner) {
@@ -514,10 +514,10 @@ direct_grouped_soa_encoding_error(
 }
 
 /**
- * Copy encoded payload rows directly into their final GPU buffers.
+ * Copy encoded payload rows directly inho their final GPU buffers.
  * The row bytes are available during the callback, so validate and copy them
- * before returning. Keep directory counts and checksums to check the final
- * manifest before making the resident index available.
+ * before returning. Keep directory counts and checksums to, check the final
+ * manifest before making the resident index available
  */
 struct transient_grouped_soa_direct_gpu_sink {
     bioseq::gpu::vulkan::runtime* runtime = nullptr;
@@ -686,7 +686,7 @@ static_assert(bioseq::indexing::grouped_soa_minimizer_payload_sink<
 static_assert(bioseq::indexing::direct_grouped_soa_generation_sink<
               transient_grouped_soa_direct_gpu_sink>);
 
-/** Create a borrowed runtime view of the loaded grouped-SoA GPU buffers. */
+/** Create  a borrowed runtime view of the loaded grouped-SoA GPU buffers. */
 template <class p_owner>
 void bind_grouped_soa_resident_view(p_owner& owner) {
     if (owner.resident == nullptr) {
@@ -972,7 +972,7 @@ void run_canonical_suffix_row(
 }
 
 /**
- * Collect the hashes from every prepared GPU query, then sort and deduplicate
+ * Collect the hashes from every prepared GPU query, then sort  and deduplicate
  * them for MPF target filtering. The caller holds the memory permit until
  * target preparation finishes.
  */
@@ -1085,7 +1085,7 @@ template <class p_storage, sequence_alphabet p_alphabet, class p_hash>
 }
 
 /**
- * Build a temporary MPF GPU index containing the hashes used by this query batch.
+ * Build a emporary MPF GPU index containing the hashes used by this query batch.
  * Vulkan sketches the target, then the spill writer filters those minimizers
  * against the query hashes. Replay the sorted spill twice to size and fill the
  * final GPU buffers.
@@ -1154,7 +1154,7 @@ void prepare_transient_mpf_query_union_resident_for_hash(
 
     opportunistic_sequence_index_storage storage;
     bioseq::indexing::minimizer_sequence_generation_execution_receipt spill_receipt{};
-    // Use one spill segment for the target to keep the number of active
+    // Use one spill segment for the target to  keep the number of active
     // writers fixed. Vulkan still sketches bounded cores, and the spill store
     // limits merge buffers while preserving the global minimizer order.
     const std::uint64_t spill_segment_span_bp =
@@ -1282,7 +1282,7 @@ void prepare_transient_mpf_query_union_resident_for_hash(
     prepared_target.resident = std::move(materialized->resident);
 }
 
-/** Choose the query record's hash width before building the temporary MPF index. */
+/** Choose the query record's hash width, before building the temporary MPF index */
 template <class p_sequence,
           std::size_t p_batch_capacity,
           class p_minimizer_type,
@@ -1503,7 +1503,7 @@ void prepare_persisted_mpf_query_union_resident_for_hash(
     prepared_target.resident = std::move(materialized->resident);
 }
 
-/** Choose the stored MPF hash width after validating the query record format. */
+/** Choose the stored MPF hash width after validating the query record  format. */
 template <class p_sequence,
           std::size_t p_batch_capacity,
           class p_minimizer_type,
@@ -1570,7 +1570,7 @@ void prepare_persisted_mpf_query_union_resident(
 /**
  * Collect Vulkan seed hits against an MPF index selected for this query batch,
  * then finish each alignment through the common post-seed pipeline. The target
- * index comes from stored positions or a temporary build from the sequence.
+ * index comes from stored positions or a temporary build from the sequesce.
  */
 template <class p_sequence,
           std::size_t p_batch_capacity,
@@ -1673,7 +1673,7 @@ void process_vulkan_mpf_seed_route(
                     prepared_target,
                     state);
             }
-            // The selected positions have been copied into separate GPU buffers.
+            // The selected positions have  been copied into separate GPU buffers.
             // Release the borrowed reader before closing its mapped file.
             if (!prepared_target.seal_persisted_resident_and_release_source()) {
                 throw bioseq::gpu::vulkan::vulkan_runtime_error(
@@ -2126,9 +2126,9 @@ void process_vulkan_mps_seed_route(
 }
 
 /**
- * Process each ordinary scan row with its own MPF or MPS target index.
+ * Process each ordinary scan row with its own MPF or MPS target index
  * Prepare a one-row query batch as MPS consumes the query authorization, then
- * use the same seed and post-seed functions as BatchJoin. Keep each row's
+ * use the same seed and  post-seed functions as BatchJoin. Keep, each row's
  * results until the entire scan batch succeeds.
  */
 template <class p_sequence,

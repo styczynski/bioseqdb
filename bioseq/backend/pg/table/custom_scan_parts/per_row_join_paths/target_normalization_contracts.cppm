@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Declares child-path output adjustment and test fixtures for path wrappers.
+ * @brief Declares child-path  output adjustment and test fixtures for path wrappers.
  */
 module;
 #include <bioseq/pg_compat.h>
@@ -21,7 +21,7 @@ export void match_helper_wrapper_probe_init_path(Path* path,
 export [[nodiscard]] RelOptInfo*
 match_helper_wrapper_probe_rel(RelOptKind kind, Index relid, Relids relids);
 
-/** @brief Adjusts a private path tree to the helper results available at each node. */
+/** @brief Adjusts a private path tree to the helper results available at each node */
 export [[nodiscard]] bool per_row_normalize_private_path_spine(
     PlannerInfo* root,
     Path* path,

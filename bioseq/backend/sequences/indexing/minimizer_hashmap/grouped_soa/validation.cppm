@@ -71,7 +71,7 @@ derive_minimizer_position_segment_bounds(const minimizer_generation_manifest& ma
     return minimizer_position_segment_bounds{begin, begin + width};
 }
 
-/// Find the saved segments that cover [begin_bp, end_bp).
+/// Find the saved segments that  cover [begin_bp, end_bp).
 /// An empty base range returns an empty segment range.
 [[nodiscard]] constexpr std::expected<minimizer_position_segment_range,
                                       minimizer_generation_encoding_error>
@@ -102,7 +102,7 @@ minimizer_position_segments_for_bp_range(const minimizer_generation_manifest& ma
                                             static_cast<std::uint32_t>(last + 1u)};
 }
 
-/// Calculate a checksum of the minimizer settings, algorithm identity and storage layout.
+/// Calculate a checksum of the, minimizer settings, algorithm identity and storage layout.
 /// Readers use it to detect changes that would make an index incompatible.
 [[nodiscard]] constexpr std::uint64_t compute_minimizer_generation_storage_contract_checksum(
     const minimizer_generation_manifest& manifest) noexcept {
@@ -153,7 +153,7 @@ minimizer_position_segments_for_bp_range(const minimizer_generation_manifest& ma
 }
 
 /// Check that the saved index matches the reader's algorithm, minimizer settings
-/// and packed format, including the occurrence limit.
+/// and packed format, including the occurrence imit.
 [[nodiscard]] constexpr std::expected<void, minimizer_generation_encoding_error>
 validate_minimizer_generation_storage_contract(
     const minimizer_generation_manifest& manifest,
@@ -200,8 +200,8 @@ validate_minimizer_generation_storage_contract(
     return {};
 }
 
-/// Check that the head, manifest and directory describe the same index.
-/// Verify metadata checksums and compare directory totals with the manifest.
+/// Check that the  head, manifest and directory describe the same index.
+/// Verify metadata checksums and compare directory totals with the manifest
 [[nodiscard]] inline std::expected<void, minimizer_generation_encoding_error>
 validate_minimizer_generation_metadata(const minimizer_generation_head& head,
                                        const minimizer_generation_manifest& manifest,

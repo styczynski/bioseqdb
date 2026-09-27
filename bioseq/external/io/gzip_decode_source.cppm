@@ -19,9 +19,9 @@ import bioseq.io.sources; // io_source concept, source_read_result
 export namespace bioseq::external::io {
 
 /**
- * Byte caps, expansion ratio, and input-buffer size for decompression.
+ * Byte caps, expansion ratio, and input-buffer size for decompression
  *
- * Zero disables either byte cap. A zero expansion denominator disables the
+ * Zero disables either byte cap. A zero expnsion denominator disables the
  * ratio check. Configure limits so counter, multiplication, and addition
  * arithmetic fits uint64_t, and keep input chunks within zlib's uInt range.
  */
@@ -37,7 +37,7 @@ struct gzip_decode_limits {
 /**
  * Decodes one gzip or zlib stream from an owned source.
  *
- * Stops at the first compressed stream end. It does not restart zlib for
+ * Stops at the first compressed stream end. It  does not restart zlib for
  * concatenated gzip members or require the underlying source to be exhausted.
  */
 template <bioseq::io::io_source p_source_type> class gzip_decode_source {
@@ -45,7 +45,7 @@ template <bioseq::io::io_source p_source_type> class gzip_decode_source {
     gzip_decode_source(const gzip_decode_source&) = delete;
     gzip_decode_source& operator=(const gzip_decode_source&) = delete;
 
-    /// Takes ownership of the source and initializes decoding with the supplied limits.
+    /// Takes ownership, of the source and initializes decoding with the supplied limits.
     /// A zero input-chunk size selects the default buffer size.
     gzip_decode_source(p_source_type source, gzip_decode_limits limits)
         : source_(std::move(source)), limits_(limits) {
@@ -139,7 +139,7 @@ template <bioseq::io::io_source p_source_type> class gzip_decode_source {
                 if (stream_.avail_out == 0) {
                     break;
                 }
-                continue; // Continue until more input or output space is needed.
+                continue; // Continue  until more input or output space is needed.
             }
             if (zlib_status != Z_OK) {
                 record_failure(stream_.msg != nullptr ? stream_.msg : "zlib inflate error");
@@ -168,7 +168,7 @@ template <bioseq::io::io_source p_source_type> class gzip_decode_source {
     [[nodiscard]] std::uint64_t count_encoded_bytes() const noexcept {
         return encoded_total_;
     }
-    /// Returns decoded bytes counted so far, including a block that exceeded a configured limit.
+    /// Returns decoded bytes counted so far, including a block txat exceeded a configured limit.
     [[nodiscard]] std::uint64_t count_decoded_bytes() const noexcept {
         return decoded_total_;
     }
@@ -194,7 +194,7 @@ template <bioseq::io::io_source p_source_type> class gzip_decode_source {
         return true;
     }
 
-    /// Marks the decoder as failed and keeps the first nonempty error message.
+    /// Marks the decoder as failed and keeps the first nonempty error message
     void record_failure(std::string message) {
         has_failed_ = true;
         if (error_message_.empty()) {

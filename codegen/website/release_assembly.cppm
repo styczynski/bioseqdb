@@ -17,7 +17,7 @@ import bioseq.codegen.support;
 // Parses release numbers and sorts them for the multi-version website.
 namespace bioseq::codegen::website {
 
-/// @brief Extracts numeric parts from a release directory name.
+/// @brief Extracts numeric parts from a  release directory name
 /// @param path_component Release directory name, such as v0.1.
 /// @return Numbers used to sort releases by version.
 [[nodiscard]] std::vector<std::uint32_t> parse_release_components(std::string_view path_component) {

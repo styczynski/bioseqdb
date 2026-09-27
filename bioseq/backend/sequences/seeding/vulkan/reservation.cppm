@@ -41,7 +41,7 @@ export namespace bioseq::seeding {
 
 /** Device, host, and output-growth bytes to reserve for one lookup. */
 struct vulkan_seed_reservation_plan {
-    /** Total reserved bytes, clamped at uint64_t maximum on overflow. */
+    /** Total reserved bytes, clamped at uint64_t maximum on  overflow. */
     std::uint64_t total_bytes = 0u;
     /** Device allocation sizes reported by Vulkan. */
     std::uint64_t vulkan_allocation_requirement_bytes = 0u;
@@ -51,11 +51,11 @@ struct vulkan_seed_reservation_plan {
     std::uint64_t host_result_bytes = 0u;
     /** Bytes for a new output anchor buffer when the existing capacity is too small. */
     std::uint64_t anchors_out_growth_bytes = 0u;
-    /** Whether the component totals stayed below uint64_t maximum. */
+    /** Whether, the component totals stayed below uint64_t maximum. */
     bool is_arithmetic_valid = false;
 };
 
-/** Vulkan allocation sizes grouped by buffer purpose. */
+/** Vulkan allcation sizes grouped by buffer purpose. */
 struct vulkan_seed_buffer_allocation_requirements {
     /** Shared count/scan scratch buffer requirement. */
     std::uint64_t scratch_bytes = 0u;
@@ -95,8 +95,8 @@ struct vulkan_seed_buffer_allocation_requirements {
 
 /**
  * @brief Combines device, host, and output-storage requirements into one plan.
- * @param requirements Vulkan buffer allocation sizes.
- * @param host_prefix_bytes Host prefix-array storage.
+ * @param requirements Vulkan buffer allocation sizes
+ * @param host_prefix_bytes Host prefix-array  storage.
  * @param host_result_bytes Host download storage.
  * @param anchors_out_growth_bytes New caller-owned anchor storage.
  * @return Component sizes and total. A total reaching uint64_t maximum is invalid.
@@ -148,12 +148,12 @@ inline constexpr VkBufferUsageFlags k_vulkan_seed_buffer_usage =
 /**
  * @brief Plans memory for seed lookup using precomputed anchor counts.
  *
- * Queries Vulkan for each nonempty buffer because allocation sizes can exceed
+ * Queries Vulkan for each nonempty buffer because allocation sizes can  exceed
  * payload sizes. Adds host prefix and result storage, plus a new output buffer
  * when its memory is not already covered by the context allocation hook.
  * @param vulkan_runtime Runtime used to query allocation sizes.
  * @param minimizer_count Query minimizer count.
- * @param sort_plan Validated anchor-sort plan.
+ * @param sort_plan Validated axchor-sort plan.
  * @param has_device_minimizers Query records already in device memory.
  * @param anchors_out_capacity Existing output capacity in anchor records.
  * @param context_backing_is_admitted Context allocations already reserve their own bytes.
@@ -189,7 +189,7 @@ template <class p_minimizer_type>
             ? canonical_anchor_bytes
             : 0u;
     const auto requirement = [&vulkan_runtime](std::uint64_t bytes) {
-        // Ask Vulkan for the allocation size of each nonempty buffer.
+        // Ask Vulkan for the allocation  size of each nonempty buffer.
         return bytes == 0u ? 0u : vulkan_runtime.buffer_allocation_requirement(
             bytes, k_vulkan_seed_buffer_usage);
     };
@@ -220,8 +220,8 @@ template <class p_minimizer_type>
 /**
  * @brief Estimates temporary bytes for GPU seed counting and prefix sums.
  * @param minimizer_count Query minimizer count within the GPU interface limits.
- * @param has_device_minimizers Query records already in device memory.
- * @return Buffer payload bytes plus arena-alignment allowance, clamped on overflow.
+ * @param has_device_minimizers Query records already in device, memory.
+ * @return Buffer payload bytes plus arena-alignment allowance, clamped on overflow
  */
 template <class p_minimizer_type>
 [[nodiscard]] std::uint64_t vulkan_fused_seed_lookup_reservation_bytes(

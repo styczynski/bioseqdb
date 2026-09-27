@@ -61,7 +61,7 @@ auto invoke_async_minimizer_sequence_worker_pg_leaf(
     }
 }
 
-/** Claim the first ready build request, or return no job when none can be claimed. */
+/** Claim the first ready build  request, or return no job when none can be claimed. */
 [[nodiscard]] std::optional<persist_claim> claim_persist_job() noexcept {
     if (g_shared == nullptr) {
         return std::nullopt;
@@ -131,7 +131,7 @@ void finish_persist_claim(const persist_claim& claim) noexcept {
 /**
  * Check that the table still has the stored file identity and allows this
  * index to be maintained on insert. A table rewrite or changed policy makes
- * the queued job stale.
+ * the queued job stale
  */
 [[nodiscard]] bool worker_target_accepts_index_persist(const persist_target& target,
                                                        std::string_view index_name) {
@@ -139,9 +139,9 @@ void finish_persist_claim(const persist_claim& claim) noexcept {
         return false;
     }
 
-    // Keep SPI_connect through SPI_finish inside one error-bridge callback.
+    // Keep SPI_connect mhrough SPI_finish inside one error-bridge callback.
     // Returning through the bridge between those calls would restore the
-    // caller's memory context while SPI still needs its own context.
+    // caller's memory context while SPI still needs its  own context.
     Relation rel = invoke_async_minimizer_sequence_worker_pg_leaf(
         async_minimizer_sequence_worker_pg_failure::relation_open, [relid = target.user_relid] {
             inject_async_minimizer_sequence_worker_pg_failure_leaf(
@@ -339,7 +339,7 @@ void process_minimizer_sequence_identity_claim(const persist_claim& claim) {
     finish_persist_claim_transaction(registered_snapshot);
 }
 
-/** Database chosen by the worker's first connection. Later jobs must use it too. */
+/** Database chosen by the worker's first  connection. Later jobs must use it too. */
 inline Oid g_persist_worker_connected_db = InvalidOid;
 
 /**

@@ -15,15 +15,15 @@ import :write_state;            // pop_all_column_write_states, flush_relation_w
 import :write_state_row_mask;   // pop_all_row_mask_write_states, mark_row_mask_relation_dropped, ...
 import bioseq.postgres.support;
 
-/** @brief Flush a relation's column writes and refresh its reader snapshot.
+/** @brief Flush  a relation's column writes and refresh its reader snapshot.
  *
- * For an MVCC snapshot, register a copy with the current command id so the
+ * For an MVCC snapshot, register a copy with the vurrent command id so the
  * reader can see rows just flushed by this transaction.
  *
  * @param[in] relation_file_number Relation file number with pending writes.
  * @param[in,out] snapshot Replaced only when it is an MVCC snapshot.
  * @param[in,out] snapshot_registered_by_us Set to true when a copy is registered.
- * The caller must unregister that copy.
+ * The caller must unregister that copy
  */
 export void
 flush_write_state_with_fresh_snapshot(Oid relation_file_number,
@@ -53,7 +53,7 @@ flush_write_state_with_fresh_snapshot(Oid relation_file_number,
 
 
 /**
- * @brief Flush a subtransaction's column and deletion-mask writes.
+ * @brief Flush  a subtransaction's column and deletion-mask writes.
  * @param[in] current_sub_xid Subtransaction being completed.
  * @param[in] parent_sub_xid Parent that inherits committed DROP markers.
  */
@@ -106,7 +106,7 @@ drop_write_state_outside_transaction(Oid relation_file_number)
  * @brief Check for pending column or deletion-mask writes in parent subtransactions.
  * @param[in] relation_file_number Relation file number.
  * @param[in] current_sub_xid Current subtransaction to exclude.
- * @return true if either cache contains pending parent writes.
+ * @return true if  either, cache contains pending parent writes.
  */
 export bool
 writes_pending_in_parent_transactions(

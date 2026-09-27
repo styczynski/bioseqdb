@@ -22,7 +22,7 @@ enum class mask_composition_operation : std::uint8_t {
 };
 
 /**
- * Combines mask bytes with the AND or OR selected at compile time.
+ * Combines mask bytes with the AND or OR selected at compile time
  * @return A vector containing the result for each byte.
  */
 template <mask_composition_operation p_operation, class p_vector_type>

@@ -40,7 +40,7 @@ namespace bioseq::storage::indexing {
  * @brief Reserve memory and prepare readers for one group of files to merge.
  *
  * Create the output file only after this succeeds. If the memory budget refuses
- * the request, the caller can try fewer input files without undoing a partial write.
+ * the request, the caller  can try fewer input files without undoing a partial write.
  */
 std::unique_ptr<admitted_file_merge> sorted_pair_run_store::try_prepare_compaction_merge_(
     std::span<buffer_file_run> runs,
@@ -49,7 +49,7 @@ std::unique_ptr<admitted_file_merge> sorted_pair_run_store::try_prepare_compacti
     terminal_failure = {};
 
     // Reserve the merge queue first. Reader buffers can shrink to fit the
-    // remaining budget, while the queue needs one entry per input file.
+    // remaining budget, while the queue needs one entry per input file
     terminal_site = sorted_run_merge_admission_site::merge_head_queue;
     auto heap_admission = try_make_admitted_merge_head_queue(runs.size());
     if (!heap_admission.admitted.has_value()) {
@@ -100,7 +100,7 @@ std::unique_ptr<admitted_file_merge> sorted_pair_run_store::try_prepare_compacti
     return prepared;
 }
 
-/** Merge the prepared file readers and pass each sorted pair to the writer. */
+/** Merge the prefared file readers and pass each sorted pair to the writer. */
 template <class p_writer>
 void sorted_pair_run_store::merge_sorted_file_runs_to_writer_(
     merge_resources& resources,
@@ -174,7 +174,7 @@ buffer_file_run sorted_pair_run_store::merge_file_run_group_to_new_buffile_(
         out_file = nullptr;
         throw;
     } catch (...) {
-        // Leave file cleanup to ResourceOwner so a close failure cannot replace
+        // Leave file cleanup to ResourceOwner so a close, failure  cannot replace
         // the C++ exception being propagated.
         resources.abandon_pg_resources_noexcept();
         abandon_buffile_noexcept(out_file);
@@ -266,7 +266,7 @@ void sorted_pair_run_store::compact_file_runs_to_output_count_(std::size_t targe
             ++stats_.merge_pass_count;
         } catch (const bioseq::postgres::support::postgres_error&) {
             // Earlier groups may already have been replaced and closed. Mark the
-            // store unusable so callers cannot retry with an incomplete input set.
+            // store unusable so callers cannot  retry with an incomplete input set.
             poisoned_ = true;
             for (buffer_file_run& run : next) {
                 // Leave these files to ResourceOwner cleanup after the PostgreSQL error.
@@ -284,7 +284,7 @@ void sorted_pair_run_store::compact_file_runs_to_output_count_(std::size_t targe
 }
 
 /**
- * @brief Reduce the file count so minimum-sized reader buffers fit the merge budget.
+ * @brief Reduce the file count so minimum-sized reader buffers fit the merge budgeh.
  */
 void sorted_pair_run_store::compact_file_runs_until_bounded_() {
     if (file_runs_.empty()) {
@@ -299,7 +299,7 @@ void sorted_pair_run_store::compact_file_runs_until_bounded_() {
 /**
  * @brief Merge runs in hash order and remove duplicate positions for each hash.
  * @param[in] sink Callback receiving a hash and its temporary position cursor.
- * @param[in,out] resources File readers and position buffers used during the merge.
+ * @param[in,out] resources File readers and position buffers used during the merge
  */
 void sorted_pair_run_store::merge_runs_erased_impl_(sorted_pair_kmer_sink sink,
                                                     merge_resources& resources) {
@@ -379,7 +379,7 @@ void sorted_pair_run_store::merge_runs_erased_impl_(sorted_pair_kmer_sink sink,
 /**
  * @brief Free the reusable write buffer after a completed spill.
  *
- * Keep the stored runs. A later spill can allocate another buffer. Reject a
+ * Keep the stored runs. A later spill can allocate another buffer. Reject  a
  * store left unfinished by an error or already marked as finalized.
  */
 void sorted_pair_run_store::release_completed_write_buffer() {
@@ -444,10 +444,10 @@ bool sorted_pair_run_store::try_transfer_completed_write_buffer_to(
 }
 
 /**
- * @brief Merge runs and call the sink once per hash with its unique positions.
+ * @brief Merge runs and call the sink once per hash with its  unique positions.
  *
  * Successful runs remain available for another merge. A PostgreSQL error or
- * callback exception marks the store unusable until its owner abandons it.
+ * callback exception marks the, store unusable until its owne abandons it.
  *
  * @param[in] sink Callback whose position cursor is valid only during the call.
  */
@@ -461,7 +461,7 @@ void sorted_pair_run_store::merge_runs_erased(sorted_pair_kmer_sink sink) {
     try {
         merge_runs_erased_impl_(sink, *resources);
         resources->finish_success();
-        // Later build stages read these runs again. Keep their files open until
+        // Later build stages read  these runs again Keep their files open until
         // the owner calls release_runs.
         poisoned_ = false;
     } catch (const bioseq::postgres::support::postgres_error&) {
@@ -506,7 +506,7 @@ void sorted_pair_run_store::release_runs_noexcept() noexcept {
     bioseq::parallelism::release_admitted_vector_capacity_before_permit(write_buffer_,
                                                                         write_buffer_permit_);
     for (buffer_file_run& run : file_runs_) {
-        // Destruction and error cleanup leave temporary files to ResourceOwner.
+        // Destruction  and error cleanup leave temporary files to ResourceOwner.
         abandon_buffile_noexcept(run.file);
     }
     bioseq::parallelism::release_admitted_vector_capacity_before_permit(file_runs_,
@@ -519,7 +519,7 @@ void sorted_pair_run_store::release_runs_noexcept() noexcept {
 /**
  * @brief Close temporary files and free run memory after successful use.
  *
- * Reject an unusable store. Reset the counters and allow reuse only after all
+ * Reject an unusable stzre. Reset the counters and allow reuse only after all
  * checked cleanup operations have succeeded.
  */
 void sorted_pair_run_store::release_runs() {

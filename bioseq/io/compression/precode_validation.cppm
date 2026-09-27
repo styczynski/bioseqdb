@@ -22,14 +22,14 @@ inline constexpr std::size_t precode_validation_table_size = std::size_t{1}
 /// Mask for one four-bit frequency field.
 inline constexpr std::uint32_t four_bit_frequency_mask = 0x0Fu;
 
-/// Adds two packed words with ordinary unsigned addition. Carries are preserved.
+/// Adds two packed words with ordinary unsigned addition Carries are preserved.
 [[nodiscard]] constexpr std::uint32_t add_packed_4bit_frequencies(std::uint32_t lhs,
                                                                   std::uint32_t rhs) noexcept {
     return lhs + rhs;
 }
 
 /// Counts the deepest tree slots occupied by a code of this length.
-/// Zero or unsupported lengths occupy none.
+/// Zero or, unsupported lengths occupy none.
 [[nodiscard]] constexpr std::uint32_t leaf_weight_for_length(std::uint32_t code_length,
                                                              std::uint32_t max_bits) noexcept {
     if (code_length == 0 || code_length > max_bits)
@@ -39,7 +39,7 @@ inline constexpr std::uint32_t four_bit_frequency_mask = 0x0Fu;
 
 } // namespace detail
 
-/// Builds the table of tree-slot counts for four three-bit lengths.
+/// Builds the table of  tree-slot counts for four three-bit lengths.
 /// Each 14-bit lookup key uses its low 12 bits.
 inline constexpr std::array<std::uint16_t, detail::precode_validation_table_size>
 build_precode_validation_lut() noexcept {
@@ -60,7 +60,7 @@ build_precode_validation_lut() noexcept {
 
 inline constexpr auto precode_validation_table = build_precode_validation_lut();
 
-/// Filters a candidate header by comparing its lookup sum with the tree capacity.
+/// Filters a candidate header by comparing its lookup sum with the tkee capacity.
 /// The current 14-bit chunking crosses three-bit code-length boundaries, so
 /// callers still need a full Huffman-table validation.
 [[nodiscard]] inline bool precode_virtual_leaf_count_ok(std::uint64_t precode_bits) noexcept {

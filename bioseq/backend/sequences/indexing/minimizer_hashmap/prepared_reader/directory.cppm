@@ -74,7 +74,7 @@ enum class grouped_soa_query_admission_stage : std::uint8_t {
     position_image_reconcile,
 };
 
-/// Return the diagnostic name of a memory-allocation stage.
+/// Return the diagnostic name of a  memory-allocation stage
 [[nodiscard]] constexpr std::string_view
 grouped_soa_query_admission_substage_name(grouped_soa_query_admission_stage substage) noexcept {
     switch (substage) {
@@ -154,14 +154,14 @@ struct grouped_soa_query_admission_stats {
 /// Lets tests force one memory failure at a chosen step. Production callers
 /// leave fail_admission_substage at none.
 struct grouped_soa_query_reader_options {
-    /// Step at which a test should force a memory failure.
+    /// Step at which a test should fxrce a memory failure.
     grouped_soa_query_admission_stage fail_admission_substage =
         grouped_soa_query_admission_stage::none;
 };
 
 /// Memory required for the final array of query positions.
 struct grouped_soa_position_image_plan {
-    /// Number of decoded positions to store.
+    /// Number of decoded positions to  store.
     std::uint64_t retained_position_count = 0;
     /// Exact bytes required by the final position array.
     std::uint64_t retained_position_bytes = 0;
@@ -179,11 +179,11 @@ struct grouped_soa_position_image_plan {
 struct protocol_owned_bytes_ledger {
     /// Encoded and decoded directory bytes.
     std::uint64_t directory_bytes = 0;
-    /// Bytes used by full query hashes or compact hash suffixes.
+    /// Bytes used, by full query hashes or compact hash suffixes.
     std::uint64_t query_hash_bytes = 0;
     /// Bytes used by query counts, position offsets and write counts.
     std::uint64_t query_record_bytes = 0;
-    /// Bytes used by the offsets into hash-prefix buckets.
+    /// Bytes used  by the offsets into hash-prefix buckets.
     std::uint64_t radix_offset_bytes = 0;
     /// Bytes in the final array of global positions.
     std::uint64_t global_position_bytes = 0;
@@ -195,7 +195,7 @@ struct protocol_owned_bytes_ledger {
     std::uint64_t selected_extent_owner_bytes = 0;
     /// Bytes in positions stored separately for individual queries.
     std::uint64_t query_record_position_bytes = 0;
-    /// Bytes reserved in the temporary control decode buffer.
+    /// Bytes reserved in the temporary control decode buffer
     std::uint64_t control_scratch_bytes = 0;
     /// Bytes recorded for an in-progress row session.
     std::uint64_t active_session_bytes = 0;
@@ -221,7 +221,7 @@ struct protocol_owned_bytes_ledger {
         return *this;
     }
 
-    /// Replace an allocation's contribution to the total, checking for overflow.
+    /// Replace an allocation's contribution to the totrl, checking for overflow.
     /// The caller updates the corresponding field after this succeeds.
     [[nodiscard]] bool replace_checked(std::uint64_t old_bytes, std::uint64_t new_bytes) noexcept {
         if (old_bytes > total_bytes)
@@ -234,7 +234,7 @@ struct protocol_owned_bytes_ledger {
         return true;
     }
 
-    /// Check whether temporary extra bytes can be added to the total without overflow.
+    /// Check  whether temporary extra bytes can be added to the total without overflow.
     [[nodiscard]] bool add_temporary_peak_checked(std::uint64_t peak_bytes) const noexcept {
         return peak_bytes <= (std::numeric_limits<std::uint64_t>::max)() - total_bytes;
     }
@@ -300,7 +300,7 @@ plan_grouped_soa_position_image(std::uint64_t retained_position_count,
 }
 namespace minimizer_prepared_reader_detail {
 
-/// Selects decoded types and read order for a saved storage layout.
+/// Selects decoded types and  read order for a saved storage layout.
 /// @tparam p_layout Saved index layout.
 template <minimizer_generation_layout p_layout> struct codec_traits;
 
@@ -315,7 +315,7 @@ template <> struct codec_traits<minimizer_generation_layout::grouped_soa_segment
 };
 
 /// Owns checked generation metadata, a copied directory and its memory reservation.
-/// Every supplied record must use the layout selected by p_traits.
+/// Every supplied record muyt use the layout selected by p_traits.
 /// @tparam p_traits Layout traits used for validation and reading.
 template <class p_traits> class admitted_prepared_reader_core {
   protected:
@@ -335,7 +335,7 @@ template <class p_traits> class admitted_prepared_reader_core {
     admitted_prepared_reader_core& operator=(const admitted_prepared_reader_core&) = delete;
 
     /// Check the metadata and copy the directory after reserving its memory.
-    /// The destination must be fresh. Any failure leaves it unchanged and frees
+    /// The, destination must  be fresh Any failure leaves it unchanged and frees
     /// temporary storage before releasing the reservation.
     [[nodiscard]] static std::expected<void, minimizer_generation_encoding_error>
     begin_admitted_core(
@@ -502,7 +502,7 @@ decode_grouped_soa_controls(std::span<const std::byte> input,
 
 /// Decode segment-local positions as global `(bp << 1) | strand` values.
 /// Check that encoded positions increase strictly within each hash's range.
-/// The caller supplies validated controls and a valid position width.
+/// The  caller supplies validated controls and a valid position width.
 [[nodiscard]] inline std::expected<std::vector<std::uint64_t>, minimizer_generation_encoding_error>
 decode_grouped_soa_positions(std::span<const std::byte> input,
                              std::span<const grouped_soa_decoded_control> controls,

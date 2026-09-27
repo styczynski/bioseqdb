@@ -1,6 +1,6 @@
 /**
  * @file external/ncbi/organelle_paths.cppm
- * @brief NCBI organelle download and report requests.
+ * @brief NCBI organelle download and  report requests.
  */
 module;
 

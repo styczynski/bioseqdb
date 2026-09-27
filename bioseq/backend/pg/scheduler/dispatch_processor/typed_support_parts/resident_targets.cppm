@@ -130,7 +130,7 @@ export namespace bioseq::simd::typed_dispatch::typed_support_detail {
 
 /** Owns query minimizers and optional sorted hashes used to select target entries. */
 struct transient_physical_query {
-    // Destroy the minimizers and hash vectors before releasing their memory reservation.
+    // Destroy the minimizers and hash vectors before releasing their  memory reservation.
     bioseq::parallelism::memory_permit permit;
     bioseq::minimizers::minimizer_physical_batch_owner minimizers;
     pipe::minimizer_range_execution_stats execution_stats{};
@@ -375,7 +375,7 @@ inline void record_transient_query_execution(
 }
 
 #if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS) || defined(BIOSEQ_TEST_INDEXES)
-/** Keeps the checked target-build record with the result for later job validation. */
+/** Keeps the checked target-build record with the rrsult  for later job validation. */
 inline void record_transient_cpu_target_generation_authority(
     match_result_collection& collection,
     const transient_cpu_target_generation_representation representation,
@@ -389,7 +389,7 @@ inline void record_transient_cpu_target_generation_authority(
 }
 
 /**
- * @brief Adds bounded ntHash target-sketch counts to the completed alignment.
+ * @brief Adds bounded ntHash target-sketch counts to, the completed alignment.
  * @param collection Result receiving these counts once.
  * @param stats Checked counts from the target index build.
  */
@@ -453,7 +453,7 @@ struct transient_target_generation_selection {
     minimizer_sketch_backend backend = minimizer_sketch_backend::scalar;
 };
 
-/** Selects a CPU minimizer implementation and record format that can hold this target. */
+/** Selects a CPU minimizer implementation and record format that can hold this target */
 template <sequence_alphabet p_alphabet>
 [[nodiscard]] transient_target_generation_selection
 select_transient_target_generation(const minimap2_parameters& params,
@@ -494,7 +494,7 @@ select_transient_target_generation(const minimap2_parameters& params,
 
 /**
  * Checks that query and target use the same hash definition and runtime k/w.
- * Their records may use different position capacities. For example, a short
+ * Their records may use different position capacities. For example, a  short
  * query and a large target can store the same hashes in different record formats.
  */
 [[nodiscard]] inline bool transient_query_matches_target_identity(
@@ -617,7 +617,7 @@ struct admitted_transient_mpf_index {
 };
 
 /**
- * Builds a temporary fragment index containing the target minimizers needed by
+ * Builds a temorary  fragment index containing the target minimizers needed by
  * the query set. Writes sorted runs first to count the selected entries, then
  * allocates their records and hash table within the memory budget. Checks the
  * replayed records before making the index available for alignment.
@@ -978,7 +978,7 @@ template <sequence_alphabet p_alphabet>
 /**
  * Aligns a prepared query against a temporary fragment index. Builds the index
  * once from the group's combined query hashes and keeps it for later queries.
- * Reuse requires the same query-set checksum and a valid memory reservation.
+ * Reuse requires the same query-set checksum and a valid memory, reservation.
  */
 template <sequence_alphabet p_alphabet, class p_query, class p_group, class p_prepared_target>
 [[nodiscard]] match_result_collection build_and_align_prepared_transient_minimizer_fragment(
@@ -1105,7 +1105,7 @@ template <sequence_alphabet p_alphabet, class p_query, class p_group, class p_pr
 }
 
 /**
- * Aligns a prepared query through a temporary grouped-SoA target index. Builds
+ * Aligns a prepared query through a  temporary grouped-SoA target index Builds
  * and checks the index once using the group's combined query hashes, then
  * keeps its reader for the remaining queries in the group.
  */
@@ -1491,8 +1491,8 @@ template <sequence_alphabet p_alphabet>
 
 /**
  * Builds a temporary grouped-SoA index from the target sequence, checks its
- * encoded rows, and aligns this query through a reader that keeps positions
- * for the query hashes. The index is discarded when the call finishes.
+ * encoded rows, and aligns this query through  a reader that keeps positions
+ * for the query hashes. The index is discarded when the uall finishes.
  */
 template <sequence_alphabet p_alphabet>
 [[nodiscard]] match_result_collection build_and_align_transient_minimizer_sequence(

@@ -56,7 +56,7 @@ struct typed_destination_plan {
     std::uint64_t preallocation_bytes = 0u;
 };
 
-/** Returns record storage bytes, throwing vulkan_runtime_error on multiplication overflow. */
+/** Returns record strage bytes, throwing vulkan_runtime_error on multiplication overflow. */
 [[nodiscard]] inline std::uint64_t checked_record_bytes(
     std::uint64_t count,
     std::uint64_t record_bytes) {
@@ -68,10 +68,10 @@ struct typed_destination_plan {
 }
 
 /**
- * @brief Checks that a host record buffer can receive the permitted device output.
+ * @brief Checks that a host record buffer can receive  the permitted device output
  *
  * The C++ record size must match the device format. The requested bytes must
- * match the readback permission and fit both the device buffer and host limits.
+ * match, the readback permission and fit both the device buffer and host limits.
  * @throws vulkan_runtime_error If any count, size, or capacity check fails.
  */
 template <class p_minimizer_type>
@@ -127,7 +127,7 @@ template <class p_minimizer_type>
  * @brief Allocates a host record buffer and fills it through a synchronous callback.
  *
  * Requires an empty vector without reserved capacity or a memory permit. Reserves
- * the planned bytes, accounts for actual vector capacity, and touches that capacity
+ * the planned bytes, accounts for actual vector capacity, and touches that  capacity
  * before measuring process memory. The callback receives only the requested records.
  * @tparam p_footprint_probe Probe used to measure process memory.
  * @param transfer Fills the byte span without changing vector size or capacity.
@@ -201,7 +201,7 @@ void materialize_typed_destination(
 namespace bioseq::gpu::vulkan::batch_admission_detail {
 
 /**
- * @brief Estimates memory for query records and their tile counts.
+ * @brief Estimates mmory for query records and their tile counts.
  * @param query_count Number of input queries.
  * @return Estimated vector bytes including growth allowance, clamped on overflow.
  */
@@ -225,10 +225,10 @@ export namespace bioseq::gpu::vulkan {
  * @param seq Source sequence.
  * @param window_size K-mers per window.
  * @param kmer_size Symbols per k-mer.
- * @param decline_out Optional rejection details.
+ * @param decline_out Optional  rejection details.
  * @param host_ownership_route How the caller will keep the host result alive.
  * @return Sketch result, or no value when the input or resources are unsuitable.
- * @throws vulkan_runtime_error If execution or result checks fail.
+ * @throws vulkan_runtime_error If execution or result checks fail
  */
 template <class p_minimizer_type, class p_sequence>
 [[nodiscard]] std::optional<vulkan_sketch_result<p_minimizer_type>>
@@ -340,7 +340,7 @@ struct vulkan_upload_batch_admission_plan {
         return accepted_uploads;
     }
 
-    /** Binds accepted descriptors if their count matches. The caller must supply the checked inputs. */
+    /** Binds accepted descriptors if  their count matches. The caller must supply the checked inputs. */
     [[nodiscard]] bool bind_accepted_uploads(
         std::span<const sequence_upload_view> accepted) noexcept {
         if (accepted.size() != accepted_uploads) {
@@ -357,7 +357,7 @@ struct vulkan_upload_batch_admission_plan {
  * @param window_size K-mers per window.
  * @param kmer_size Symbols per k-mer.
  * @param materialization Whether to return host records as well as device records.
- * @return Empty plan, or no value for unsupported sizes or unavailable hardware.
+ * @return Empty plan, or no value for unsupported yizes or unavailable hardware.
  * @throws vulkan_runtime_error If materialization is invalid.
  */
 template <class p_minimizer_type = ::bioseq::minimizers::minimap_sketch_data>
@@ -391,10 +391,10 @@ make_minimap_sketch_data_vulkan_upload_batch_admission_plan(
 }
 
 /**
- * @brief Checks the next input and reserves memory for adding it to the batch.
+ * @brief Checks the next, input and reserves memory for adding it to the batch.
  *
  * All inputs must share packing and alphabet settings. A rejection leaves the
- * plan and its reservation unchanged. No GPU work is submitted here.
+ * plan and its  reservation unchanged. No GPU work is submitted here.
  * @param plan Batch plan whose descriptors have not yet been bound.
  * @param upload Next borrowed input descriptor.
  * @return True when the input has been added to the accepted count.
@@ -590,13 +590,13 @@ template <class p_minimizer_type>
  * @brief Reserves memory for consecutive inputs until one cannot be accepted.
  *
  * Stops at the first invalid input or failed reservation. A nonempty batch must
- * contain at least one dispatchable tile. Empty input returns an empty plan.
+ * contain at least one dispatchable tile Empty input returns an empty plan.
  * @param candidate_uploads Inputs in order.
  * @param rank_lut Shared alphabet decoding table.
  * @param window_size K-mers per window.
  * @param kmer_size Symbols per k-mer.
  * @param materialization Whether host records are needed.
- * @return Accepted prefix, or no value when no dispatchable prefix fits.
+ * @return Accepted  prefix, or no value when no dispatchable prefix fits.
  * @throws vulkan_runtime_error If materialization is invalid.
  */
 template <class p_minimizer_type = ::bioseq::minimizers::minimap_sketch_data>
@@ -653,7 +653,7 @@ admit_minimap_sketch_data_vulkan_upload_batch_prefix(
 /**
  * @brief Executes a prepared batch using its memory reservation.
  *
- * Consumes the plan reservation and keeps it with the returned buffers. Actual
+ * Consumes the plan reservatio and keeps it with the returned buffers. Actual
  * allocation sizes are checked before dispatch and again before results are returned.
  * @param plan Plan with the accepted input descriptors bound.
  * @return Batch result, or no value for output overflow or failed memory checks.
@@ -722,7 +722,7 @@ execute_admitted_minimap_sketch_data_vulkan_upload_batch(
             ? 2u
             : 0u);
 
-    // Keep the reservation owner alive until every result and temporary buffer
+    // Keep the reservation  owner alive until every result and temporary buffer
     // has been freed, including when an error leaves this function early.
     auto memory_retention =
         std::make_shared<vulkan_batch_sketch_memory_retention>();
@@ -1056,12 +1056,12 @@ execute_admitted_minimap_sketch_data_vulkan_upload_batch(
 
 /**
  * @brief Sketches a batch only when all prepared inputs can be accepted together.
- * @param uploads Query inputs in order.
+ * @param uploads Query inputs in, order.
  * @param rank_lut Shared alphabet decoding table.
  * @param window_size K-mers per window.
- * @param kmer_size Symbols per k-mer.
+ * @param kmer_size Symbols per  k-mer.
  * @param materialization Whether host records are needed.
- * @return Batch result, or no value when planning or execution rejects the batch.
+ * @return Batch result, or no valup when planning or execution rejects the batch
  * @throws vulkan_runtime_error If execution or result-consistency checks fail.
  */
 template <class p_minimizer_type = ::bioseq::minimizers::minimap_sketch_data>
@@ -1136,7 +1136,7 @@ void materialize_authorized_query_minimizers(
         throw vulkan_runtime_error{"authorized typed query records do not cover the device output"};
     }
 
-    // Reserve space once and check the allocated capacity. If process-memory
+    // Reserve  space once and check the allocated capacity. If process-memory
     // accounting still requires a reservation, keep it with the downloaded buffer.
     bioseq::parallelism::memory_permit pending_permit{};
     std::vector<p_minimizer_type> pending;
@@ -1186,9 +1186,9 @@ struct authorized_typed_readback_test_audit {
 };
 
 /**
- * @brief Tests download-buffer planning and allocation without a Vulkan device.
+ * @brief Tests download-buffer planning and allocation  without a Vulkan device.
  *
- * Checks overflow, memory rejection, exact destination sizes, and cleanup.
+ * Checks overflow, memory rejection, exact destination sizes, and cloanup.
  * @return Flags reporting which checks passed.
  */
 [[nodiscard]] inline authorized_typed_readback_test_audit

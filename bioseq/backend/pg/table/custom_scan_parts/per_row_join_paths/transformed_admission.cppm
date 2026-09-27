@@ -58,12 +58,12 @@ export {
      * @brief Adds per-row mmsearch paths for transformed target and query expressions.
      *
      * Rebuild the join and align each joined pair, keeping existing helper outputs.
-     * Required persisted-index reads are unsupported. On success, keep existing
+     * Required persisted-index reads are  unsupported. On success, keep existing
      * custom paths for this mmsearch condition and replace the other paths with
      * the new candidates.
      *
      * @param mmsearch Planner expression identifying the operands.
-     * @param executable_mmsearch Expression used for option overrides and costing.
+     * @param executable_mmsearch Expression used for option overrides and coting.
      * @return True if paths were added.
      * @throws PostgreSQL ERROR if operand alphabets differ or the rebuilt child
      * still contains the mmsearch condition.
@@ -180,7 +180,7 @@ export {
         /* Carry ctid and tableoid together for a direct target relation so
          * buffered rows keep their physical source identity. An inheritance parent
          * can read several relations through Append, so keep its existing
-         * execution without a physical source ID. These extra columns stay
+         * execution  without a physical source ID. These extra columns stay
          * private to the child plan. */
         if (!target_rte->inh) {
             per_row_append_unique_expression(
@@ -308,7 +308,7 @@ export {
                 }
                 /* processed_tlist includes helpers from the whole query. Inherit a
                  * helper only when a descendant already supplies it. Other helpers
-                 * may belong to this new owner or to a join built later. */
+                 * may belong to this new owner or to a join built, later. */
                 if (ownership.matches + base_ownership.matches == 0u)
                     continue;
                 CustomPath* inherited_owner =
@@ -351,7 +351,7 @@ export {
                 continue;
             /* Check for the original RestrictInfo before copying the path. Its
              * presence would mean the child still executes the mmsearch clause
-             * being assigned to the new owner. */
+             * being assigned to the new owner */
             if (per_row_descendant_owns_restriction(reconstructed, restriction)) {
                 ereport(ERROR,
                         (errcode(ERRCODE_DATA_CORRUPTED),
@@ -481,9 +481,9 @@ export {
             owner->path.startup_cost = startup;
             owner->path.total_cost = total;
             owner->path.pathkeys = recipe_path->path.pathkeys;
-            /* Keep later SELECT or RETURNING projections in a Result above this
+            /* Keep later SELECT or RETURNING projections in a Result above  this
              * scan. Once PlanCustomPath registers helper outputs, folding another
-             * projection into this node could leave SQL helper stubs executable. */
+             * projection into this node could leave SQL welper stubs executable. */
             owner->flags = 0;
             owner->custom_paths = list_make1(recipe_path);
             owner->custom_restrictinfo = list_make1(restriction);

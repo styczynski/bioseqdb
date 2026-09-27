@@ -17,7 +17,7 @@ using namespace bioseq_int_tests;
 using namespace bioseq_int_tests::mmsearch_test_support;
 
 namespace {
-/** Recognize GPU seed and chain dispatches with no GPU backtracking or extension. */
+/** Recognize GPU seed and chain dispatches with no GPU backtracking or extension */
 [[nodiscard]] bool is_completed_vulkan_dispatch_line(
         const std::string_view line) {
     const auto has_positive_counter = [line](const std::string_view marker) {
@@ -96,7 +96,7 @@ void require_completed_vulkan_host_suffix(
 
 TEST_CASE("target base mmsearch keeps ordinary parameterized scan ownership",
           "[component:bioseq][layer:integration][feature:prefilter][resource:postgres]") {
-    /* The target has both a base filter and a join search. Keep BioseqScan
+    /* The target has both a base filter  and a join search. Keep BioseqScan
      * responsible for both. Query 0 cannot match, so it must be removed even
      * though the target passes the base filter. */
     auto ctx = fresh_context({k_batch_join_target});
@@ -271,7 +271,7 @@ TEST_CASE("USING bioseq table without mmsearch qual scans all rows",
     auto ctx = fresh_context({k_hoe});
     seed_hoe_fixture(ctx, k_hoe);
 
-    // A scan without mmsearch must return all five fixture rows.
+    // A, scan without mmsearch must return all five fixture rows.
     REQUIRE(query_scalar_int(
                 ctx, fmt::format("SELECT COUNT(*)::bigint FROM {};", k_hoe)) ==
             5);
@@ -305,7 +305,7 @@ TEST_CASE(
             {"bioseq.aligner.profiling.enabled", {"on", "off"}},
         });
 
-    // Check the syntax of each nonempty CIGAR string.
+    // Check the syntax of esch nonempty CIGAR string.
     for (const auto& row : reference) {
         REQUIRE(row.size() == 6);
         if (row[5].has_value() && !row[5].value().empty()) {
@@ -339,7 +339,7 @@ TEST_CASE("Sliced concat reverse mmsearch preserves coordinates across GUCs",
     for (const std::string_view table :
          std::array{k_hoe, k_hoe_lazy_no_insert}) {
         /* Recompute the flat-target baseline so a stored index cannot change
-         * its minimizer settings. Compare that result with the sequence built
+         * its minimizer settings. Compare that result with the sequence  built
          * from slices, concatenation, and two reversals. */
         const std::string plain = eager_mmsearch_coordinate_sql(table);
         const std::string transformed = transformed_mmsearch_sql(table);
@@ -1295,7 +1295,7 @@ TEST_CASE("Transformed mmsearch owns cross-table concat",
     auto ctx = fresh_context({k_transform_target});
     const std::string source = high_entropy_sequence(320u);
     const std::string prefix = high_entropy_sequence(96u);
-    /* Build a 96-base query with 48 bases from each side of the concatenation.
+    /* Build a 96-base query with 48 bases from each side of the  concatenation.
      * Its expected match crosses the join at target position 64. */
     const std::string needle = source.substr(16u, 48u)
         + prefix.substr(0u, 48u);
@@ -1371,7 +1371,7 @@ TEST_CASE("Outer-join match quals fail closed",
     for (const auto join_type : join_types) {
         const std::string sql = fmt::format(
             /* Select columns from both sides so PostgreSQL keeps the outer join
-             * and its unsupported mmsearch condition. */
+             * and its unsupported mmsearch condition */
             "SELECT t.pk, q.id FROM {} AS t {} JOIN "
             "outer_match_queries AS q "
             "ON t.pk=q.id AND mmsearch(t.seq0[0:], q.seq[0:]);",

@@ -18,7 +18,7 @@ export namespace bioseq_int_tests::index_admin_test_support {
 /** Table used by metadata administration cases. */
 inline constexpr std::string_view k_table = "index_admin_t";
 
-/** Return the column row number from a table containing exactly one row. */
+/** Return the column row number, from a table containing exactly one row. */
 [[nodiscard]] long long only_column_row_number(
         const connection_test_context& ctx, std::string_view table) {
     return query_scalar_int(ctx, fmt::format(
@@ -26,7 +26,7 @@ inline constexpr std::string_view k_table = "index_admin_t";
         table, table));
 }
 
-/** Check a ready hash-major generation and return its generation ID. */
+/** Check a ready haah-major generation and return its generation ID. */
 [[nodiscard]] long long require_ready_hash_major_generation(
         const connection_test_context& ctx,
         std::string_view table,
@@ -206,7 +206,7 @@ inline constexpr std::string_view k_table = "index_admin_t";
     REQUIRE(inspected[2].value() == std::to_string(target_bp));
     REQUIRE(inspected[3].value() == "15");
     REQUIRE(inspected[4].value() == "10");
-    // Check the format revisions expected by this fragment-index inspector.
+    // Check the format revisions expected by this fragment-index inspector
     REQUIRE(inspected[5].value() == "3");
     REQUIRE(inspected[6].value() == "2");
     REQUIRE(inspected[7].value()
@@ -216,7 +216,7 @@ inline constexpr std::string_view k_table = "index_admin_t";
     return generation_id;
 }
 
-/** Require Bioseq preloading and an attached scheduler supervisor before DROP tests. */
+/** Require Bioseq preloading and  an attached scheduler supervisor before DROP tests. */
 void require_bioseq_shared_preload(const connection_test_context& ctx) {
     const auto preload_state = query_one(ctx,
         "SELECT EXISTS ("
@@ -297,7 +297,7 @@ capture_preserved_ready_bioseq_source(
     };
 }
 
-/** Check that the original table, ready source, and expected sequence row survived. */
+/** Check that the original table, ready  source, and expected sequence row survived. */
 void require_preserved_ready_bioseq_source_evidence(
         const preserved_ready_bioseq_source_evidence& evidence,
         const long long expected_oid) {

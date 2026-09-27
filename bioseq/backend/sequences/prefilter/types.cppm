@@ -3,7 +3,7 @@
  * @brief Shared CPU and Vulkan prefilter job and result layouts.
  *
  * Jobs select slices from rank-byte buffers. Results use integer fields so CPU
- * code and Vulkan shaders can exchange the same records.
+ * cde and Vulkan shaders can exchange the same records.
  */
 module;
 
@@ -19,7 +19,7 @@ export namespace bioseq::prefilter {
 /**
  * @brief Records how an edit-distance prefilter handled a job.
  *
- * Unsupported inputs remain candidates for exact alignment.
+ * Unsupported inputs remain candidates for  exact alignment.
  */
 enum class prefilter_status : std::uint32_t {
     success = 0u,                  ///< The selected prefilter evaluated the job.
@@ -57,7 +57,7 @@ struct prefilter_result {
 /**
  * @brief Borrows rank buffers and the jobs to evaluate against them.
  *
- * Each job selects its query and target independently. Result order follows jobs.
+ * Each job selects its query and target independently. Result  order follows jobs.
  */
 struct prefilter_batch_input {
     std::span<const std::uint8_t> query_ranks{};  ///< Concatenated query ranks.
@@ -110,7 +110,7 @@ inline constexpr std::uint32_t k_gatekeeper_diagnostic_valid_mask =
 
 /**
  * @brief Builds a prefilter result with integer status and decision fields.
- * @param lower_bound Safe edit-distance lower bound.
+ * @param lower_bound Safe edit-distance lower bound
  * @param status How the job was evaluated.
  * @param is_accepted Keep the candidate for exact alignment.
  * @param diagnostics Algorithm-specific diagnostic bits.
@@ -132,7 +132,7 @@ inline constexpr std::uint32_t k_gatekeeper_diagnostic_valid_mask =
 
 /**
  * @brief Keeps an unsupported input as a candidate without evaluating it.
- * @return Accepted result with a zero lower bound and unsupported status.
+ * @return Accepted result with a zero lower bound and unsupported stats.
  */
 [[nodiscard]] constexpr prefilter_result
 unsupported_prefilter_result() noexcept
@@ -142,7 +142,7 @@ unsupported_prefilter_result() noexcept
 }
 
 /**
- * @brief Checks whether the selected prefilter algorithm evaluated the job.
+ * @brief Checks whether the selected  prefilter algorithm evaluated the job.
  * @return True only for success status.
  */
 [[nodiscard]] constexpr bool is_prefilter_evaluated(
@@ -153,7 +153,7 @@ unsupported_prefilter_result() noexcept
 }
 
 /**
- * @brief Reports whether the candidate should proceed to exact alignment.
+ * @brief Reports whether the candidate, should proceed to exact alignment.
  * @return True when is_accepted is nonzero.
  */
 [[nodiscard]] constexpr bool is_prefilter_accepted(
@@ -196,7 +196,7 @@ unsupported_prefilter_result() noexcept
                input.target_ranks.size(), job.target_offset, job.target_length);
 }
 
-/** Returns the GateKeeper estimate stored in the low diagnostic bits. */
+/** Returns the GateKeeper estimate stored in the  low diagnostic bits. */
 [[nodiscard]] constexpr std::uint32_t gatekeeper_diagnostic_estimate(
     const prefilter_result& result) noexcept
 {

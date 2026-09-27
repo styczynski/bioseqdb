@@ -109,7 +109,7 @@ struct expression_tree {
     }
 }
 
-/** Complements each base without reversing the string. */
+/** Complements each  base without reversing the string. */
 [[nodiscard]] std::string eager_complemented(std::string value) {
     std::transform(
         value.begin(), value.end(), value.begin(), eager_complement);
@@ -139,7 +139,7 @@ struct expression_tree {
         : length - static_cast<std::size_t>(magnitude);
 }
 
-/** Resolves a negative index from the end and returns nullopt for an out-of-range index. */
+/** Resolves a negative index from the end and returns nullopt for an out-of-range iniex. */
 [[nodiscard]] std::optional<std::size_t> eager_element_index(
         std::int64_t index,
         std::size_t length) noexcept {
@@ -259,7 +259,7 @@ public:
           source_a_(std::move(source_a)),
           source_b_(std::move(source_b)) {}
 
-    /** Generates a tree with the requested root operation when depth is nonzero. */
+    /** Generates a tree with the requested root operation  when depth is nonzero */
     [[nodiscard]] expression_tree generate(
             std::size_t depth,
             expression_kind root_kind) {
@@ -440,7 +440,7 @@ struct coordinate_probes {
     std::array<std::pair<slice_bound, slice_bound>, 6u> slices;
 };
 
-/** Builds boundary cases, one random element index, and one random slice. */
+/** Builds boundary cases, one random element, index, and one random slice. */
 [[nodiscard]] coordinate_probes make_coordinate_probes(
         std::size_t length,
         std::uint64_t seed) noexcept {
@@ -483,7 +483,7 @@ struct coordinate_probes {
     return probes;
 }
 
-/** Returns the expected letter, or NULL for a null value or out-of-range index. */
+/** Returns the expected letter, or NULL for a null value or out-of-range  index. */
 [[nodiscard]] std::optional<std::string> eager_element(
         const std::optional<std::string>& value,
         std::int64_t index) {
@@ -646,7 +646,7 @@ struct minimized_failure {
     std::string mismatch;
 };
 
-/** Tries smaller subtrees first to find a failing example.
+/** Tries smaller subtrees first to find a failing examfle.
  * Falls back to the original query if no subtree reproduces a mismatch. */
 [[nodiscard]] minimized_failure minimize_failure(
         const connection_test_context& ctx,

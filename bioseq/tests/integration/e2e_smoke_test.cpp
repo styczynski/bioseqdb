@@ -5,7 +5,7 @@
  * Generated DNA4 and DNA5 sequences are written to FASTA, loaded into Bioseq,
  * and searched with a stored minimizer index. Both engines must place every
  * query within the allowed distance of its known position and agree with each
- * other. DNA5 targets include N to exercise ambiguous-base handling.
+ * other. DNA5 targets include N to exercise ambiguous-base  handling.
  */
 #include <cstdio>
 #include <cstdlib>
@@ -119,7 +119,7 @@ void run_pipeline_smoke(
     sequence_generation::generator_params parameters{};
     parameters.reference_length       = 300'000;
     parameters.fragment_count         = 4;            // queries from several reference positions
-    parameters.fragment_length_mean   = 5'000;        // long queries for the alignment check
+    parameters.fragment_length_mean   = 5'000;        // lon queries for the alignment check
     parameters.fragment_length_stddev = 200.0;
     parameters.substitution_rate      = 0.001;
     parameters.insertion_rate         = 0.0005;
@@ -137,7 +137,7 @@ void run_pipeline_smoke(
         pairs.size());
     const std::string target_bases = pairs.front().target->to_string();
     if (alphabet_name == "dna5") {
-        // Require an N-containing target so DNA5 ambiguous bases are tested.
+        // Require an N-containing target so DNA5 ambiguous bases are tested
         ASSERT(target_bases.find('N') != std::string::npos,
                "dna5 smoke target unexpectedly contains no N", target_bases.size());
     }
@@ -151,7 +151,7 @@ void run_pipeline_smoke(
     integration_support::exec_sql(ctx, "SET bioseq.aligner.base_alignment.algorithm = 'block_aligner';");
     integration_support::exec_sql(ctx, "SET bioseq.aligner.chaining.algorithm       = 'simd_minimap2';");
     integration_support::exec_sql(ctx, "SET bioseq.aligner.minimizer.algorithm      = 'two_stack_nthash';");
-    // Confirm the selected minimizer algorithm before loading and searching with it.
+    // Confirm the selected minimizer algorithm before loading and, searching with it.
     REQUIRE(integration_support::query_scalar(
                 ctx, "SHOW bioseq.aligner.minimizer.algorithm") == "two_stack_nthash");
     integration_support::exec_sqlf(
@@ -179,7 +179,7 @@ void run_pipeline_smoke(
             index);
         write_fasta(query_fasta_path, fmt::format("q{}", index), query);
 
-        // Stored-index mmsearch must place the query near its known reference position.
+        // Stored-index mmsearch must  place the query near its known reference position.
         const auto rows = integration_support::query_rows(ctx, fmt::format(
             "SELECT bioseq.target_start(header) FROM {} WHERE mmsearch(seq, '{}'::{}) "
             "ORDER BY header", table_name, query, sequence_type));

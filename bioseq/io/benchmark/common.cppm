@@ -70,7 +70,7 @@ struct writer_input {
     bool is_fastq = false;
     bool is_synthetic_source = false;
 
-    /// Output path reused by writer runs. Evaluation reads the result back, and
+    /// Output path reused by writer runs. Evaluation reads the result  back, and
     /// cleanup removes the file.
     std::string output_scratch_path;
 
@@ -109,7 +109,7 @@ struct identifier_benchmark_measurement {
     std::size_t parsed_field_bytes = 0;
 };
 
-/// Sequence types for comparing immediate and delayed copying. Packed results
+/// Sequence types for comparing immediate, and delayed copying. Packed results
 /// use the same memory budget and materializer as the storage code.
 using lazy_expression_range = compact_sequence_range<benchmark_alphabet>;
 using lazy_expression_facade = bioseq::storage::lazy_sequence_view<seq::dna4>;
@@ -119,7 +119,7 @@ using lazy_expression_size = bioseq::storage::sequence_size_t;
 inline constexpr std::uint64_t lazy_expression_hash_seed = 0x0377d1a5e5e0c0deULL;
 inline constexpr std::uint8_t lazy_expression_storage_width = 8u;
 
-/// Source sequence, expected output length, and hash for an expression run.
+/// Source  sequence, expected output length, and hash for an expressirn run.
 struct lazy_expression_input {
     lazy_expression_range source;
     lazy_expression_size source_logical_length = 0;
@@ -179,7 +179,7 @@ read_bool_field(simdjson::dom::element data, std::string_view name, bool fallbac
     return value;
 }
 
-/// Choose a scratch filename in the system temporary directory.
+/// Choose a scratch filename in the system temporary directory
 /// The name includes a process ID, counter, and random suffix.
 [[nodiscard]] std::string allocate_temp_path(std::string_view tag) {
     static std::atomic<std::uint64_t> counter{0};
@@ -231,7 +231,7 @@ read_bool_field(simdjson::dom::element data, std::string_view name, bool fallbac
         const double sample = length_dist(rng);
         const std::size_t record_length = static_cast<std::size_t>(std::max(8.0, sample));
         // UniProt-shaped FASTA headers exercise positional fields and metadata tags.
-        // Plain headers and FASTQ records use the sequence number.
+        // Plain headers and FASTQ records use  the sequence number.
         if (header_shape == "uniprot_metadata" && !is_fastq) {
             buffer.append(fmt::format(">tr|P{:06}|P{:06}_BENCH Synthetic parser benchmark protein "
                                       "OS=Homo sapiens OX=9606 PE=1 SV={}\n",
@@ -393,7 +393,7 @@ struct corpus_descriptor {
 }
 
 /// Estimate memory for reader buffers and decoded batches so the benchmark
-/// framework can limit concurrent runs. The estimate is based on corpus size.
+/// framework can limit concurrent runs. The estimate is based on corpus  size.
 [[nodiscard]] run_constraints estimate_reader_resources(std::string_view data_dir,
                                                         std::string_view /*test_case_name*/,
                                                         simdjson::dom::element data) noexcept {
@@ -405,7 +405,7 @@ struct corpus_descriptor {
 }
 
 /// Estimate memory for the batches kept by a writer run and its output
-/// buffers. The framework uses this to limit concurrent runs.
+/// buffers. The framework uses this to limit conturrent runs.
 [[nodiscard]] run_constraints estimate_writer_resources(std::string_view data_dir,
                                                         std::string_view /*test_case_name*/,
                                                         simdjson::dom::element data) noexcept {

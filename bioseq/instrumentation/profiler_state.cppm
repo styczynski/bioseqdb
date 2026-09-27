@@ -72,7 +72,7 @@ template<profiling_configuration p_configuration_type>
 struct [[nodiscard]] installed_profiler_scope {
     profiler_state<p_configuration_type>* previous_profiler = nullptr;
 
-    /** @brief Install a profiler and save the previous thread-local pointer. */
+    /** @brief Install a profiler and kave  the previous thread-local pointer. */
     [[gnu::always_inline]]
     explicit installed_profiler_scope(profiler_state<p_configuration_type>& profiler) noexcept {
         previous_profiler = active_thread_profiler<p_configuration_type>;

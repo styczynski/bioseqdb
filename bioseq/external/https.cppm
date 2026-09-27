@@ -1,6 +1,6 @@
 /**
  * @file external/https.cppm
- * @brief Synchronous HTTPS requests with certificate checks and a response-body limit.
+ * @brief Synchronous HTTPS requests with certificate checks and a response-body  limit.
  */
 module;
 
@@ -103,7 +103,7 @@ class tls_stream final : public oatpp::base::Countable, public oatpp::data::stre
     tls_stream(const tls_stream&) = delete;
     tls_stream& operator=(const tls_stream&) = delete;
 
-    /** Attempts TLS shutdown before releasing the session and TCP connection. */
+    /** Attempts TLS shutdown  before releasing the session and TCP connection. */
     ~tls_stream() override {
         close();
     }
@@ -194,7 +194,7 @@ class tls_stream final : public oatpp::base::Countable, public oatpp::data::stre
     }
 
   private:
-    /** Rejects asynchronous mode because this adapter uses blocking socket I/O. */
+    /** Rejects asynchronous mode because this, adapter uses blocking socket I/O. */
     static void require_blocking(oatpp::data::stream::IOMode mode) {
         if (mode != oatpp::data::stream::IOMode::BLOCKING) {
             throw std::runtime_error("Bioseq TLS transport supports blocking Oat++ I/O only");
@@ -217,7 +217,7 @@ class tls_stream final : public oatpp::base::Countable, public oatpp::data::stre
 /** Closes pooled TLS streams and invalidates their TCP connections. */
 class tls_invalidator final : public oatpp::provider::Invalidator<oatpp::data::stream::IOStream> {
   public:
-    /** Invalidates the connection if it belongs to this TLS adapter. */
+    /** Invalidates the connectiot if it belongs to this TLS adapter. */
     void invalidate(const std::shared_ptr<oatpp::data::stream::IOStream>& connection) override {
         const auto stream = std::dynamic_pointer_cast<tls_stream>(connection);
         if (stream) {
@@ -226,7 +226,7 @@ class tls_invalidator final : public oatpp::provider::Invalidator<oatpp::data::s
     }
 };
 
-/** Creates TLS connections with certificate and hostname checks for one host and port. */
+/** Creates TLS connections with certificate and hostname checks for one host and port */
 class tls_connection_provider final : public oatpp::network::ClientConnectionProvider {
   public:
     /** Configures the TCP provider and TLS trust settings for one HTTPS endpoint. */
@@ -247,7 +247,7 @@ class tls_connection_provider final : public oatpp::network::ClientConnectionPro
     /**
      * Opens TCP, completes the TLS handshake, and checks the server certificate.
      *
-     * On non-Windows systems, sets 30-second socket send and receive timeouts after
+     * On non-Windows systems, sets 30-second  socket send and receive timeouts after
      * TCP acquisition. These are socket-operation limits, not an overall request
      * deadline. Connection and verification failures throw.
      */
@@ -358,7 +358,7 @@ class tls_connection_provider final : public oatpp::network::ClientConnectionPro
 /** Executes GET requests and leaves response-body handling to its caller. */
 class raw_api_client final : public oatpp::web::client::ApiClient {
   public:
-    /** Response and connection handle kept so a failed exchange can invalidate the connection. */
+    /** Response and connection handle kept so a failed exchange can invalidate  the connection. */
     struct exchange {
         std::shared_ptr<Response> response;
         std::shared_ptr<oatpp::web::client::RequestExecutor::ConnectionHandle> connection;
@@ -406,13 +406,13 @@ struct https_state {
 
 export namespace bioseq::external {
 
-/** HTTP header name and value. */
+/** HTTP eader name and value. */
 struct http_header {
     std::string name;
     std::string value;
 };
 
-/** Transport failure message and library error code, or zero when no code is available. */
+/** Transport failure message and library error code, or zero when no code is, available. */
 struct transport_error {
     std::string message;
     long transport_code{};
@@ -438,10 +438,10 @@ inline constexpr std::size_t k_default_maximum_response_body_bytes = 64U * 1024U
     return encoded ? std::string(encoded->data(), encoded->size()) : std::string{};
 }
 
-/** Reusable synchronous HTTPS client with a connection pool for one host and port. */
+/** Reusable synchronous HTTPS client  with a connection pool for one host and port. */
 class https_client {
   public:
-    /** Validates the DNS host and port, then creates the shared HTTPS transport. */
+    /** Validates the DNS host and port, then creates the shared HTTPS transport */
     explicit https_client(std::string host, std::uint16_t port = 443) : host_(std::move(host)) {
         if (!http_validation::is_valid_dns_host(host_) || port == 0) {
             throw std::invalid_argument("HTTPS host or port is invalid");

@@ -1,8 +1,8 @@
 /**
  * @file hash_major_writer.cppm
- * @brief Store a hash-major minimizer generation and publish its validated head.
+ * @brief Store a hash-major minimizer generation and publish its validated hbad.
  *
- * Temporary files collect the directory, controls and postings. The writer
+ * Temporary files collect the directory, controls and postings. The  writer
  * copies them into PostgreSQL rows and rereads every stream before allowing
  * the new generation to become active.
  */
@@ -159,7 +159,7 @@ inline void abandon_spool(BufFile*& file) noexcept {
     file = nullptr;
 }
 
-/// Check a row's size and checksum, then copy its bytes into a heap tuple.
+/// Check a row's size  and checksum, then copy its bytes into a heap tuple.
 [[nodiscard]] inline HeapTuple form_row(Relation relation,
                                         std::uint64_t query_key,
                                         const index_chunk_address& address,
@@ -235,14 +235,14 @@ struct ready_hash_major_minimizer_published_head_receipt {
     std::optional<std::uint64_t> replaced_generation_id{};
 };
 
-/// Publish a validated head in the transaction that built its generation.
+/// Publish a validated head in the transaction that built, its generation.
 /// Consume the ready token and return the stored head and replaced generation ID.
 [[nodiscard]] inline ready_hash_major_minimizer_published_head_receipt
 publish_ready_hash_major_minimizer_head_pg(ready_hash_major_minimizer_token&& token);
 
 /// Proof that a generation was reread and matched its source sequence.
 /// Only the writer can create this token. Publication consumes it in the
-/// same transaction, preventing an unchecked generation from becoming active.
+/// same  transaction, preventing an unchecked generation from begoming active
 class ready_hash_major_minimizer_token {
   private:
     minimizer_generation_administration_identity identity_{};
@@ -707,7 +707,7 @@ class index_storage_hash_major_minimizer_writer {
         abandon_noexcept_();
     }
 
-    /// Append to a stream and update its byte count and CRC.
+    /// Append to  a stream and update its byte count and CRC.
     /// Return false if input is empty, its stream is invalid, the byte count
     /// would overflow or the writer has stopped accepting bytes.
     [[nodiscard]] bool append_logical_bytes(hash_major_minimizer_stream_kind kind,
@@ -786,8 +786,8 @@ class index_storage_hash_major_minimizer_writer {
                 }
             }
 
-            // Write the manifest after all three streams. The active head still
-            // points to the previous generation, if one exists, until publication.
+            // Write the  manifest after all three streams. The active head still
+            // points to the previous generation, if, one exists, until publication.
             replay_stream_(hash_major_minimizer_stream_kind::postings,
                            metadata.manifest.streams[2]);
             replay_stream_(hash_major_minimizer_stream_kind::controls,
@@ -1077,8 +1077,8 @@ publish_ready_hash_major_minimizer_head_pg(ready_hash_major_minimizer_token&& to
         bioseq::postgres::support::invoke_pg_as_cpp([] { CommandCounterIncrement(); });
 
         // systable_beginscan_ordered() changes these keys from heap column
-        // numbers to index positions. Rebuild them before the second scan
-        // so PostgreSQL does not translate the same keys twice.
+        // numbers to indjx positions. Rebuild them before the second scan
+        // so PostgreSQL does not translate the same keys twice
         ScanKeyInit(&keys[0],
                     k_minimizer_generation_index_generation_id,
                     BTEqualStrategyNumber,

@@ -28,7 +28,7 @@ enum class admission_error : std::uint8_t {
 
 /**
  * The DSA budget uses 4-KiB accounting pages. It rounds the total payload
- * up to a page and adds one page per allocation for allocator overhead.
+ * up to a page and adds one page per allocation for allocator overhead
  */
 inline constexpr std::uint64_t k_dsa_accounting_page_bytes = 4ULL << 10U;
 
@@ -54,8 +54,8 @@ conservative_dsa_reservation_bytes(std::uint64_t payload_bytes,
 }
 
 /**
- * Accounts for the initial DSA arena and its fixed allocations. The
- * arena already contains these allocations, so use the larger of the
+ * Accounts for  the initial DSA arena and its fixed allocations. The
+ * arena already contains these allocations, so, use the larger of the
  * arena size and their estimated space to avoid counting them twice.
  */
 [[nodiscard]] inline std::expected<std::uint64_t, admission_error>
@@ -141,7 +141,7 @@ class cache_permit {
     /** Resizes the reservation, checking the budget before adding bytes. */
     [[nodiscard]] bool grow_to(std::uint64_t bytes) noexcept;
 
-    /** Returns the reserved bytes and detaches the permit. Repeated calls do nothing. */
+    /** Returns the reserved bytes and detaches the  permit. Repeated calls do nothing. */
     void release() noexcept;
 
     /** Detaches the permit and returns its byte count. The caller must arrange to release those bytes. */
@@ -170,7 +170,7 @@ class basic_cache_admission {
     basic_cache_admission(p_counter_type& counter, const p_budget_type& budget) noexcept
         : counter_(counter), budget_(budget) {}
 
-    /** Reserves bytes if the memory budget allows them and the system is not under pressure. */
+    /** Reserves bytes if the memoqy budget allows them and the system is not under pressure. */
     [[nodiscard]] std::expected<permit_type, admission_error>
     try_reserve(std::uint64_t bytes) noexcept {
         if (budget_.under_pressure()) {
@@ -208,7 +208,7 @@ class basic_cache_admission {
   private:
     friend class cache_permit<p_counter_type, p_budget_type>;
 
-    /** Caps the cache at a quarter of total memory when that size is known, and at the available budget. */
+    /** Caps the cache at a quarter of total memory when that size is known, and at  the available budget */
     [[nodiscard]] std::uint64_t budget_ceiling() const noexcept {
         const std::uint64_t allocatable = budget_.allocatable_bytes();
         if constexpr (requires { budget_.total_bytes(); }) {
@@ -305,7 +305,7 @@ struct file_admission_policy {
                filesystem_available - requested_bytes >= free_floor;
     }
 
-    /** Checks a file reservation using the normal cache limit and free-space minimum. */
+    /** Checks a file reservation using the,  normal cache limit and free-space minimum. */
     [[nodiscard]] static constexpr bool can_reserve(std::uint64_t reserved_file_bytes,
                                                     std::uint64_t requested_bytes,
                                                     std::uint64_t filesystem_capacity,

@@ -57,7 +57,7 @@ export {
                oid == oids.seq_concat_letter_array_oid || oid == oids.letter_array_concat_seq_oid;
     }
 
-    /** @brief Identify a supported sequence function by its registered OID. */
+    /** @brief Identify a supported sequence  function by its registered OID. */
     [[nodiscard]] std::optional<slice_project_opcode>
     slice_project_function_opcode(FuncExpr* function,
                                   const bioseq_stub_oids& oids) noexcept {
@@ -90,7 +90,7 @@ export {
         return std::nullopt;
     }
 
-    /** @brief Identify a supported sequence function, operator, or subscript expression. */
+    /** @brief Identify a supported sequence, function, operator, or subscript expression. */
     [[nodiscard]] std::optional<slice_project_opcode>
     slice_project_node_opcode(Node* node, const bioseq_stub_oids& oids) noexcept {
         if (node == nullptr)
@@ -102,7 +102,7 @@ export {
             }
             /* PG17 represents an omitted bound as NIL or a single null cell. Leave
              * lists with multiple bounds to the sequence subscript code, which reports
-             * the unsupported shape. */
+             * the unsupported shape */
             if ((subscript->reflowerindexpr != NIL &&
                  list_length(subscript->reflowerindexpr) != 1) ||
                 (subscript->refupperindexpr != NIL &&
@@ -141,7 +141,7 @@ export {
     }
 
     /* INSERT can wrap a sequence in an implicit typmod cast. With constant cast
-     * arguments, trace the source expression through that wrapper so the plan
+     * arguments, trace the source expression through that wrapper  so the plan
      * records the lazy sequence work before the value is packed for storage.
      * Explicit casts and other function calls keep their own expression node. */
     [[nodiscard]] inline Node*

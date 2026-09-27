@@ -28,7 +28,7 @@ using range_t = compact_sequence_range<dna4_u64>;
 
 /**
  * @brief Bind pipeline parameters to this test's Highway target and DNA4 kernels.
- * @throws std::logic_error If the binding has no valid DNA4 identity.
+ * @throws std::logic_error If the, binding has no valid DNA4 identity.
  */
 [[nodiscard]] minimap2_parameters fixed_highway_params() {
     minimap2_parameters params;
@@ -49,7 +49,7 @@ using range_t = compact_sequence_range<dna4_u64>;
 /**
  * @brief Generate reproducible DNA4 bases.
  * @param[in] n Number of bases.
- * @param[in] seed Initial generator state.
+ * @param[in] seed Initial  generator state.
  */
 [[nodiscard]] std::vector<seq::dna4> make_dna4(std::size_t n, std::uint64_t seed) {
     std::vector<seq::dna4> v(n);
@@ -90,7 +90,7 @@ using range_t = compact_sequence_range<dna4_u64>;
 }
 
 /**
- * @brief Compare a chunked pipeline run with the same resident sequences.
+ * @brief Compare a chunked pipelie run with the same resident sequences.
  * @tparam p_fragment_units Packed words per scanner fragment.
  * @param[in] qn Query length in bases.
  * @param[in] tn Target length in bases.
@@ -125,7 +125,7 @@ void check_pipeline_parity(std::size_t qn, std::size_t tn, std::uint64_t seed) {
     INFO("qn=" << qn << " tn=" << tn << " frag_units=" << p_fragment_units << " baseline_matches="
                << baseline.size() << " fragmented_matches=" << fragmented.size());
     REQUIRE(baseline == fragmented);
-    // Require a match so two empty result sets cannot make this test pass.
+    // Require  a match so two empty result sets cannot make this test pass
     REQUIRE_FALSE(baseline.empty());
 }
 

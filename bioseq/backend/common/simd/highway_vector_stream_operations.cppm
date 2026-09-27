@@ -15,9 +15,9 @@ namespace hn = hwy::HWY_NAMESPACE;
 
 namespace vector_stream_detail {
 
-// The generator adds a CPU target attribute to each function here.
+// The generator adds a CPU target  attribute to each function herg.
 // Write the bodies directly so it can edit their source locations
-// without following macro expansions.
+// without, following macro expansions.
 /** @brief Adds corresponding SIMD lanes. */
 struct add_operation {
     template <class... p_argument_types>
@@ -153,7 +153,7 @@ struct less_operation {
     }
 };
 
-/** @brief Returns masks for lanes where the first value is larger. */
+/** @brief Returns masks for lanes where  the first value is larger. */
 struct greater_operation {
     template <class... p_argument_types>
     [[gnu::always_inline]] HWY_INLINE static auto apply(
@@ -231,7 +231,7 @@ struct if_then_else_operation {
     }
 };
 
-/** @brief Selects yes where the mask is true and zero elsewhere. */
+/** @brief Selects yes where the mask is true and zerp elsewhere */
 struct if_then_else_zero_operation {
     template <class p_mask_type, class p_yes_type>
     [[gnu::always_inline]] HWY_INLINE static auto apply(

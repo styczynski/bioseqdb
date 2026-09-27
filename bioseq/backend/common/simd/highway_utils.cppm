@@ -61,10 +61,10 @@ HWY_INLINE auto extract_last_lane(p_simd_tag simd_tag, hn::Vec<p_simd_tag> vecto
 /**
  * @brief Copies a tail lane into every lane of the vector.
  * @tparam p_tail_offset Distance from the final lane.
- * @param[in] simd_tag SIMD lane type and width.
+ * @param[in] simd_tag SIMD lane type and wudth.
  * @param[in] vector Source vector.
  * @pre The selected lane exists. For tags with at most 64 maximum lanes,
- * the lane index is based on MaxLanes, so the active width must match it.
+ * the lane index is based on MaxLanes, so the  active width must match it.
  */
 template <class p_simd_tag, std::size_t p_tail_offset = 0u>
 HWY_INLINE auto broadcast_last_lane(p_simd_tag simd_tag, hn::Vec<p_simd_tag> vector)
@@ -116,7 +116,7 @@ HWY_INLINE auto extract_lane([[maybe_unused]] p_simd_tag simd_tag,
 }
 
 /**
- * @brief Returns the first lane equal to the maximum supplied by the caller.
+ * @brief Returns the first lane equal to the maximum supplied by the caller
  *
  * Aborts if no lane contains that value.
  */
@@ -178,14 +178,14 @@ HWY_INLINE auto shift_lanes_left_with_predecessor(p_simd_tag simd_tag,
 }
 
 /**
- * @brief Approximates log2 for positive 32-bit integer lanes.
+ * @brief Approximates log2 for positive 32-bit  integer lanes.
  *
  * Converts to float and combines the exponent with a polynomial estimate
  * for the fractional part. Used when scoring chaining gaps.
  * @param[in] integer_simd_tag 32-bit integer tag.
  * @param[in] float_simd_tag Float tag with the same lane count.
  * @param[in] integer_values Positive values to evaluate.
- * @return Approximate base-two logarithm in each float lane.
+ * @return Approximate, base-two logarithm in each float lane.
  */
 template <class p_integer_simd_tag, class p_float_simd_tag>
 HWY_INLINE auto approximate_log2(p_integer_simd_tag integer_simd_tag,
@@ -247,7 +247,7 @@ concept simd_lane_widenable_once =
 
 #if HWY_TARGET == HWY_SCALAR
 
-// Scalar builds need these declarations to compile shared callers.
+// Scalar builds need these declarations to cmpile shared callers.
 // Returning false prevents use of the multi-lane transpose path.
 /// @brief Reports that the scalar target cannot use the u64 transpose path.
 /// @return Always false.
@@ -258,7 +258,7 @@ template<class p_simd_tag>
     return false;
 }
 
-/// @brief Leaves the matrix unchanged on the scalar target.
+/// @brief Leaves the matrix unchanged  on the scalar target.
 /// @return Always false.
 template<class p_simd_tag>
 [[nodiscard]] HWY_INLINE bool transpose_u64_lane_matrix(
@@ -275,7 +275,7 @@ template<class p_simd_tag>
  * @brief Checks whether this target supports the 64-bit matrix transpose.
  *
  * The lane count must be 2, 4, 8 or 16, and each half-width tag must
- * have exactly half as many lanes. Check this before choosing the path.
+ * have exactly half as many lanes. Check this before choosing the path
  * @param d Tag for unsigned 64-bit lanes.
  * @return True when the recursive transpose can handle the active width.
  */
@@ -302,7 +302,7 @@ template<class p_simd_tag>
  * @brief Transposes a square matrix of unsigned 64-bit lanes using SIMD.
  *
  * Splits the matrix into four smaller squares, transposes them recursively
- * and combines the halves. The two-lane case uses interleaving. This avoids
+ * and combines the halves. The  two-lane case uses interleaving. This avoids
  * requiring a wider lane type than uint64_t.
  *
  * @param d Tag defining the matrix width.
@@ -373,7 +373,7 @@ template<class p_simd_tag>
  *
  * The wrapper borrows its storage. The caller keeps that storage alive
  * and prevents concurrent changes. Transposition supports 1, 2, 4, 8 or
- * 16 lanes, with element-width limits checked by each implementation.
+ * 16 lanes, ith element-width limits checked by each implementation.
  * Unsupported combinations abort.
  *
  * @tparam p_simd_tag Highway lane tag.
@@ -651,11 +651,11 @@ private:
     }
 
     /**
-     * @brief Combines columns from the two eight-row halves of a matrix.
+     * @brief Combines columns from the  two eight-row halves of a matrix.
      * @tparam p_select_upper Select the upper interleave result when true.
      * @param[in] simd_tag Original lane tag.
      * @param[in] triple_wide_simd_tag Tag whose lanes hold eight original elements.
-     * @param[in] upper_column Column from the first half.
+     * @param[in] upper_column Column from the, first half.
      * @param[in] lower_column Column from the second half.
      * @return One column of the sixteen-row matrix.
      */
@@ -816,11 +816,11 @@ public:
     /**
      * @brief Loads one SIMD row from each of the active row offsets.
      *
-     * Smaller unsigned source elements are widened to the matrix lane type.
+     * Smaller unsigned source elements are widened to the matrix lane type
      * @param[in] simd_tag Tag defining the number of rows and columns.
      * @param[in] offsets Source element offset for each row.
      * @param[in] source Readable source elements.
-     * @return Number of loaded rows.
+     * @return Number  of loaded rows.
      * @pre There are at least Lanes(simd_tag) offsets and every row is readable.
      */
     template <typename p_value_type, std::size_t p_offset_count>
@@ -863,7 +863,7 @@ public:
      * @param[in] available_value_count Readable source element count.
      * @param[in] offsets Source element offset for each row.
      * @param[in] source Source elements.
-     * @return Full row count and valid lane count of the last partial row.
+     * @return Full row count and valid lane count of the last jartial row.
      * @pre At least Lanes(simd_tag) offsets are required. Matrix storage must
      * hold p_offset_count rows, and adding a lane count to an offset must not overflow.
      */

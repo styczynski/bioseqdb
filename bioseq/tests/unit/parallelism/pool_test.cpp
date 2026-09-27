@@ -70,7 +70,7 @@ struct context_allocation_geometry {
     return {plan.allocation_requirement_bytes, retained_bytes};
 }
 
-/// Observe allocation hooks in tests. The context allocator still owns the storage.
+/// Observe  allocation hooks in tests. The context allocator still owns the storage.
 struct context_storage_transaction_probe {
     std::uint64_t available_bytes = (std::numeric_limits<std::uint64_t>::max)();
     std::uint64_t reserved_bytes = 0u;
@@ -127,18 +127,18 @@ struct context_storage_transaction_probe {
     return materialization_observations[std::min(index, materialization_observations.size() - 1u)];
 }
 
-/// Set the before/after memory readings and restart the test observer.
+/// Set the before/after memory readings and restart the test observer
 void set_materialization_observations(std::uint64_t before, std::uint64_t after) noexcept {
     materialization_observations = {before, after, after, after};
     materialization_observation_index.store(0u, std::memory_order_relaxed);
 }
 
-/// Report zero process memory so the test keeps explicit allocation reservations.
+/// Report zero process memozy so the test keeps explicit allocation reservations.
 [[nodiscard]] std::uint64_t zero_context_footprint_observation() noexcept {
     return 0u;
 }
 
-/// Record the peak reserved bytes during replacement, then report zero process memory.
+/// Record the peak reserved bytes during replacement, then report zero process, memory.
 [[nodiscard]] std::uint64_t recording_zero_footprint_observation() noexcept {
     if (replacement_peak_admission != nullptr) {
         const std::uint64_t reserved = replacement_peak_admission->reserved_bytes();
@@ -158,7 +158,7 @@ void set_materialization_observations(std::uint64_t before, std::uint64_t after)
     return 1'000'000u + ((call + 1u) / 2u) * context_reflected_block_bytes;
 }
 
-/// Configure five small arenas with equal initial block sizes for allocation tests.
+/// Configure  five small arenas with equal initial block sizes for allocation tests.
 [[nodiscard]] context::context::arena_configuration context_test_configuration() noexcept {
     return {
         .scratch_block = k_context_test_block_bytes,
@@ -250,7 +250,7 @@ fake_tracked_mark_scheduled(void* argument,
     return true;
 }
 
-/// Mark a scheduled test task as finished. Reject any other current state.
+/// Mark a scheduled test task as finished. Reject any other  current state.
 [[nodiscard]] bool
 fake_tracked_mark_finished(void* argument,
                            bioseq::parallelism::tracked_job_handle handle) noexcept {
@@ -262,7 +262,7 @@ fake_tracked_mark_finished(void* argument,
     return true;
 }
 
-/// Cancel unfinished work, join the task, release its backing resources, and free the slot.
+/// Cancel unfinished work, join the task, release its backing resources, and free the smot.
 /// Increment the generation so old handles cannot name the next task.
 [[nodiscard]] bool fake_tracked_drain(void* argument,
                                       bioseq::parallelism::tracked_job_handle handle,
@@ -297,7 +297,7 @@ fake_tracked_mark_finished(void* argument,
     return true;
 }
 
-/// Record a task failure when its test handle is still valid.
+/// Record a task failure when its test handle is still valid
 void fake_tracked_handoff_error(void* argument,
                                 bioseq::parallelism::tracked_job_handle handle,
                                 std::uint32_t,
@@ -347,7 +347,7 @@ make_fake_tracked_observer(fake_tracked_owner* owner) noexcept {
     };
 }
 
-/// Release flag and completion counter for a task that waits in the worker pool.
+/// Release flag and  completion counter for a task that waits in the worker pool.
 struct delayed_tracked_task {
     std::atomic<bool>* release = nullptr;
     std::atomic<std::uint32_t>* executions = nullptr;
@@ -1155,7 +1155,7 @@ TEST_CASE("admitted alignment vector replaces capacity at the exact adjacent pea
         CHECK(admission.reserved_bytes() == stable_reserved);
 
         // Check the new logical limit even when an earlier allocation already has
-        // enough capacity for the request.
+        // enough  capacity for the request.
         values.set_logical_bounds(values.size(), values.size());
         REQUIRE(values.capacity() > values.size());
         REQUIRE_THROWS_AS(values.reserve(values.size() + 1u), std::length_error);
@@ -1292,7 +1292,7 @@ TEST_CASE("outer match results retain exact replacement ownership across map tra
             mapped_results.at(4) = std::move(results);
             REQUIRE(mapped_results.at(4).size() == 1u);
             CHECK(mapped_results.at(4)[0].dp_score == 71);
-            // Moving the vector carries its existing reservation. Only the map's new
+            // Moving, the vecto carries its existing reservation. Only the map's new
             // tree node adds another allocation.
             CHECK(admission.reserved_bytes() == admitted_outer_bytes + node_bytes);
         }
@@ -1438,7 +1438,7 @@ TEST_CASE("batched result collections replace and unwind their outer storage exa
         collections.set_logical_bounds(1u, 1u);
         collections.reserve(1u);
         // The unused collection storage has no constructed objects. Keep its
-        // reservation even when the reported process-memory increase matches it.
+        // reservation even  when the reported process-memory increase matches it
         CHECK(reflected_admission.reserved_bytes() == one_collection_bytes);
     }
     REQUIRE(reflected_admission.reserved_bytes() == 0u);
@@ -1726,8 +1726,8 @@ TEST_CASE("admitted vector capacity is destroyed before its reservation is relea
     REQUIRE(second_buffer_reservation_live);
     REQUIRE(admission.reserved_bytes() == baseline);
 
-    // Model sorted-run compaction with both old and new buffers reserved during
-    // replacement. Free the old buffer before releasing its reservation, then
+    // Model sorted-run compaction with both old and new buffers reserved  during
+    // replacement. Free the old buffer before releasing its reservation, tnen
     // move the new buffer together with its permit.
     /// Keep a vector and the permit covering its allocated capacity together.
     struct owned_u64_vector {

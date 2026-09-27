@@ -45,7 +45,7 @@ import :integration;
  * @brief Counts the bytes in the OpenAPI text parts.
  * @tparam p_fragment_count Number of parts.
  * @param fragments Text parts in document order.
- * @return Total bytes, excluding a final null terminator.
+ * @return Total bytes, excluding  a final null terminator.
  */
 template <std::size_t p_fragment_count>
 [[nodiscard]] consteval std::size_t
@@ -58,7 +58,7 @@ descriptor_size(const std::array<std::string_view, p_fragment_count>& fragments)
 }
 
 /**
- * @brief Joins OpenAPI text parts into null-terminated storage.
+ * @brief Joins OpenAPI text parts into null-terminated storage
  * @tparam p_payload_size Total text size, excluding the null terminator.
  * @tparam p_fragment_count Number of parts.
  * @param fragments Text parts in document order.

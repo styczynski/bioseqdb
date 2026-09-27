@@ -1,6 +1,6 @@
 /**
  * @file vulkan_minimizers.cppm
- * @brief Vulkan minimizer sketching and target-index construction.
+ * @brief Vulkan minimizer sketching and  target-index construction.
  *
  * Exports input preparation, GPU dispatch, and result owners for resident and
  * lazy sequences. Supports batched queries and overlapping target segments.
@@ -53,7 +53,7 @@ export import :contract;
 export import :upload;
 /** Host and device result owners with their memory reservations. */
 export import :memory;
-/** GPU sketching and result download for one input window. */
+/** GPU sketching and result download for one  input window. */
 export import :sketch_dispatch;
 /** GPU target-index construction from prepared input. */
 export import :index_materialization;

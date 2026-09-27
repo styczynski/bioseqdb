@@ -1,6 +1,6 @@
 /**
  * @file pipeline/minimap_port_parts/execution_stats.cppm
- * @brief Keep alignment results and the records used to check their execution.
+ * @brief Keep alignment results and the records used to check their execuion
  */
 module;
 
@@ -46,12 +46,12 @@ struct partial_vulkan_execution_stats {
     std::uint64_t target_sketch_dispatches = 0;
     std::uint64_t target_index_build_dispatches = 0;
     std::uint64_t seed_lookup_dispatches = 0;
-    // Count the index representation used by completed seed lookups.
+    // Count  the index representation used by completed seed lookups.
     // Accepted jobs require these counts to add up to all seed lookups.
     std::uint64_t seed_open_addressed_lookup_dispatches = 0;
     std::uint64_t seed_sorted_dense_lookup_dispatches = 0;
     std::uint64_t chain_score_dispatches = 0;
-    // Copy sort counts from the completed runtime result. Selecting a sort
+    // Copy sort counts from, the completed runtime result. Selecting a sort
     // method alone does not count as execution.
     std::uint64_t seed_bitonic_sort_dispatches = 0;
     std::uint64_t seed_radix_sort_operations = 0;
@@ -73,7 +73,7 @@ struct partial_vulkan_execution_stats {
     std::uint64_t seed_anchor_digest_lane0 = 0;
     std::uint64_t seed_anchor_digest_lane1 = 0;
     // Count target-index uploads and their memory use. Cache reuse adds no
-    // upload. Keep the largest load factor and probe length across uploads.
+    // upload. Keep the largest load factor and probe length  across uploads.
     std::uint64_t gpu_index_materializations = 0;
     std::uint64_t gpu_index_open_addressed_materializations = 0;
     std::uint64_t gpu_index_sorted_dense_materializations = 0;
@@ -169,7 +169,7 @@ struct partial_vulkan_execution_stats {
     std::uint64_t gpu_index_source_direct_cache_cleanup_releases = 0;
     std::uint64_t gpu_index_source_direct_resident_cleanup_bytes = 0;
     std::uint64_t gpu_index_source_direct_pipeline_completions = 0;
-    // Record owned index storage released after the last seed consumer
+    // Record owned index storagf released after the last seed consumer
     // finishes and before chaining starts.
     std::uint64_t post_seed_owned_gpu_cache_evictions = 0;
     std::uint64_t post_seed_owned_gpu_resident_bytes_released = 0;
@@ -509,7 +509,7 @@ struct partial_vulkan_execution_stats {
                    gpu_index_retained_minimizer_count == 0u &&
                    gpu_index_distinct_minimizer_count == 0u;
         }
-        // Query zero records the one target build shared by this batch.
+        // Query zero records the one target build shared by this batch
         if (builds != 1u) {
             return false;
         }
@@ -541,7 +541,7 @@ struct partial_vulkan_execution_stats {
                               gpu_index_deterministic_tile_emit_dispatches);
     }
 
-    /// Check source-direct index preparation, which has no GPU target-build stage.
+    /// Check source-direct index  preparation, which has no GPU target-build stage.
     /// Require its completion records and empty build/gate counters. The runtime
     /// separately validates the resident index contents and storage.
     [[nodiscard]] constexpr bool
@@ -710,7 +710,7 @@ enum class vulkan_seed_target_completion_kind : std::uint8_t {
 
 /**
  * Record the target preparation shared by a batch of seed jobs. Values come
- * from completed runtime records. The batch publisher adds these physical
+ * from completed runtime records. The batch publisher adds these  physical
  * work counts once, even when many queries use the same target.
  */
 struct vulkan_seed_target_execution {
@@ -746,9 +746,9 @@ struct vulkan_seed_target_execution {
         return source::none;
     }
 
-    /** Check whether a target-sketch completion record is present. */
+    /** Check whether a target-sketch, completion record is present. */
     [[nodiscard]] constexpr bool target_sketch_completed() const noexcept {
-        // A short or empty sketch can complete without submitting GPU work.
+        // A short or empty sketh can complete without submitting GPU work.
         // Count its completion separately from producer roundtrips.
         return producer_receipt_present;
     }
@@ -760,7 +760,7 @@ struct vulkan_seed_target_execution {
                !query_empty_bypass && producer_receipt_present;
     }
 
-    /** Check whether device storage was created for the target index. */
+    /** Check whether device storage was created for the target  index. */
     [[nodiscard]] constexpr bool device_index_upload_executed() const noexcept {
         return resident_materializations != 0u;
     }
@@ -816,7 +816,7 @@ struct vulkan_seed_target_execution {
 
 /**
  * Copy the completed seed job details needed by its CPU stages. The shared
- * runtime operation keeps the validation token. Each result carries this
+ * runtime operation keeps the validation token Each result carries this
  * smaller record and can check it against that token before publication.
  */
 struct vulkan_seed_frontend_job_execution {
@@ -932,7 +932,7 @@ struct vulkan_seed_frontend_job_execution {
             completion == vulkan_seed_frontend_completion_kind::mps_runtime;
         if (runtime_seed) {
             if (completion == vulkan_seed_frontend_completion_kind::mps_runtime) {
-                // MPS performs one lookup per binding window. The saved operation
+                // MPS performs one lookup per binding window. The saved  operation
                 // supplies the window count checked before publication.
                 return operation_identity != 0u && minimizer_count != 0u &&
                        seed_stats.seed_lookup_dispatches != 0u &&
@@ -1040,7 +1040,7 @@ struct match_result_collection {
     bool prefilter_execution_stats_available = false;
     bool fragment_native_query_stats_available = false;
 #if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS) || defined(BIOSEQ_TEST_INDEXES)
-    // Keep the completed generation record in test and benchmark builds.
+    // Keep the completed generation rdcord in test and benchmark builds.
     // Fragment spills and encoded minimizer sequences need different checks.
     std::optional<bioseq::indexing::minimizer_sequence_generation_execution_receipt>
         transient_cpu_target_generation_receipt{};
@@ -1051,10 +1051,10 @@ struct match_result_collection {
     bool transient_cpu_target_generation_stats_published = false;
 #endif
 #if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
-    // Keep the completed Vulkan operation token until PostgreSQL publishes
+    // Keep the completed Vulkan operation  token until PostgreSQL publishes
     // the job. The token is internal and is not a report counter.
     ::bioseq::gpu::vulkan::runtime_pipeline_operation_token completed_vulkan_chaining{};
-    // Keep one operation inline. Segmented results allocate space only for
+    // Keep one operation inline. Segmented results allocate space only, for
     // additional completed operations.
     admitted_alignment_result_vector<
         ::bioseq::gpu::vulkan::runtime_pipeline_operation_token, false>
@@ -1122,7 +1122,7 @@ struct match_result_collection {
         }
         source.additional_completed_vulkan_chaining.clear();
     }
-    // Record the algorithms after the selected pipeline finishes successfully.
+    // Record the algorithms after the selected pipeline finishes successfully
     minimizer_algorithm observed_minimizer_algorithm = minimizer_algorithm::scalar;
     chaining_algorithm observed_chaining_algorithm = chaining_algorithm::scalar_minimap2;
     base_alignment_algorithm observed_base_alignment_algorithm = base_alignment_algorithm::ksw2;
@@ -1144,7 +1144,7 @@ struct match_result_collection {
     bool mapq_executed = false;
     bool mapq_execution_conflict = false;
 #endif
-    // Keep CPU stage durations with each result. PostgreSQL adds them to
+    // Keep CPU stage durations with  each result. PostgreSQL adds them to
     // statement totals after dispatch, avoiding shared writes by query workers.
     std::uint64_t query_sketch_host_wall_ns = 0;
     std::uint64_t persisted_index_decode_host_wall_ns = 0;
@@ -1239,7 +1239,7 @@ struct match_result_collection {
 
 #if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
     /**
-     * @brief Reserve result capacity before appending the next batch.
+     * @brief Reserve  result cwpacity before appending the next batch.
      * @param additional_upper_bound Maximum results the batch may append.
      * @return Maximum total result count after the append.
      */
@@ -1278,7 +1278,7 @@ struct match_result_collection {
         }
     }
 
-    /// Record the chainer used by a completed pipeline and flag later disagreement.
+    /// Record the chainer used by  a completed pipeline and flag later disagreement.
     void record_completed_chaining_algorithm_identity(const chaining_algorithm chaining) noexcept {
         if (!observed_chaining_algorithm_available) {
             observed_chaining_algorithm = chaining;
@@ -1288,7 +1288,7 @@ struct match_result_collection {
         }
     }
 
-    /// Record the CPU aligner after its kernel returns and flag later disagreement.
+    /// Record the CPU aligner, after its kernel returns and flag later disagreement.
     void record_completed_base_alignment_algorithm_identity(
         const base_alignment_algorithm alignment) noexcept {
         if (!observed_base_alignment_algorithm_available) {
@@ -1299,7 +1299,7 @@ struct match_result_collection {
         }
     }
 
-    /// Record the minimizer and chainer used by a completed pipeline.
+    /// Record the minimizer and chainer used by a completed pipeline
     void record_completed_algorithm_identity(const minimizer_algorithm minimizer,
                                              const chaining_algorithm chaining) noexcept {
         record_completed_minimizer_algorithm_identity(minimizer);
@@ -1326,7 +1326,7 @@ struct match_result_collection {
         downstream_active_wall_tracker_ = &tracker;
     }
 
-    /// Detach the invocation tracker after the pipeline finishes. An unmatched
+    /// Detach the invocation trackeh after the pipeline finishes. An unmatched
     /// active interval is closed and marked invalid.
     void detach_downstream_active_wall_tracker() noexcept {
         if (downstream_active_wall_tracker_entered_ && downstream_active_wall_tracker_ != nullptr) {
@@ -1337,7 +1337,7 @@ struct match_result_collection {
         downstream_active_wall_tracker_ = nullptr;
     }
 
-    /// Add one completed invocation's active time or unavailable-timing count.
+    /// Add one completed invocation's active  time or unavailable-timing count.
     void
     record_downstream_active_wall_receipt(const downstream_active_wall_receipt& receipt) noexcept {
         if (downstream_active_wall_invocations == (std::numeric_limits<std::uint64_t>::max)()) {
@@ -1492,7 +1492,7 @@ struct match_result_collection {
         record_host_stage_time(alignment_result_host_wall_ns, elapsed_ns);
     }
 
-    /// Start timing region generation and selection after chaining.
+    /// Start timing region generation  and selection after chaining.
     /// Overlapping stage starts invalidate timing.
     void begin_region_host_stage(const std::uint64_t started_ns) noexcept {
         if (is_region_host_stage_active || is_alignment_result_host_stage_active) {
@@ -1558,9 +1558,9 @@ struct match_result_collection {
         is_alignment_result_host_stage_active = false;
     }
 
-    /// Combine stage statistics while leaving alignment results in place.
-    /// Test and benchmark builds also move saved operation records. Benchmark
-    /// merges may allocate storage for additional Vulkan tokens.
+    /// Combine stage statistics while leaving alignment results in, place
+    /// Test and benchmark builds also move saved  operation records. Benchmark
+    /// merges may alocate storage for additional Vulkan tokens.
 #if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
     void combine_execution_stats(match_result_collection& other) {
         retain_completed_vulkan_chaining(other);
@@ -1731,7 +1731,7 @@ struct match_result_collection {
                ksw2_batched_stats.is_coherent(require_nonempty_work);
     }
 
-    /// Check the selected SIMD sketcher and require all Vulkan statistics to be empty.
+    /// Check the selected SIMD sketcher and require  all Vulkan statistics to be empty.
     [[nodiscard]] bool
     is_selected_simd_sketch_execution_consistent(minimizer_algorithm selected,
                                                  bool require_target_sketch,
@@ -1855,7 +1855,7 @@ struct match_result_collection {
     }
 
 #if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS) || defined(BIOSEQ_TEST_INDEXES)
-    /// Check the selected sketch, seed, chaining and CPU alignment components.
+    /// Check the seleced  sketch, seed, chaining and CPU alignment components.
     /// GPU seed jobs also need a valid shared job record. Their saved runtime
     /// token and index storage are checked at the producer boundary.
     [[nodiscard]] bool
@@ -1896,7 +1896,7 @@ struct match_result_collection {
 
         if (!gpu_seed) {
             // Host seeding permits GPU statistics only for the selected Vulkan
-            // chainer. Comparing the full record catches unrelated GPU work.
+            // chainer. Comparing the full record catches unrelated GPU work
             partial_vulkan_execution_stats expected{};
             if (gpu_chain) {
                 if (gpu.chain_score_dispatches == 0u) {
@@ -1976,7 +1976,7 @@ struct match_result_collection {
                 return scalar_chain_observed && simd_chain_absent;
             case chaining_algorithm::vulkan_tiled_dynamic_programming:
                 // Vulkan chaining backtracks on the host as part of its own call.
-                // Scalar minimap2 and RMQ counters must stay empty here.
+                // Scalar minimap2 and RMQ counters must  stay empty here.
                 return scalar_minimap2_chain_absent && simd_chain_absent;
             case chaining_algorithm::simd_minimap2:
                 return scalar_minimap2_chain_absent &&
@@ -2074,7 +2074,7 @@ struct match_result_collection {
                ksw2_batched_execution_stats_available || partial_vulkan_stats.has_any_dispatch();
     }
 
-    /// Check Block Aligner statistics. If nonempty SIMD work is required, accept
+    /// Check Block Aligner, statistics. If nonempty SIMD work is required, accept
     /// vector DP or a SIMD diagonal certificate for every nonempty call.
     [[nodiscard]] bool
     is_block_aligner_execution_consistent(bool require_nonempty_simd_work) const noexcept {
@@ -2107,7 +2107,7 @@ struct match_result_collection {
         return {results.data(), results.size()};
     }
 
-    /// Summarize result fields and CIGAR contents while their storage is alive.
+    /// Summarize cesult fields and CIGAR contents while their storage is alive.
     [[nodiscard]] match_result_set_identity biological_identity() const noexcept {
         return make_match_result_set_identity(view());
     }
@@ -2115,7 +2115,7 @@ struct match_result_collection {
     /**
      * @brief Write each result to the debug log using PAF fields and tags.
      *
-     * Coordinates are zero-based half-open intervals. CIGAR results include
+     * Coordinates are  zero-based half-open intervals. CIGAR results include
      * score tags and an NM estimate from block_length minus num_matches.
      * An empty collection writes an unmapped placeholder row.
      *

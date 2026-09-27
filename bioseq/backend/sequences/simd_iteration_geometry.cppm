@@ -26,7 +26,7 @@ int_div_ceil(const p_value_type& value, const p_value_type& divisor) {
 }
 
 /**
- * @brief Computes lane starts while leaving room for right-hand context.
+ * @brief Computes lane starts while  leaving room for right-hand context.
  *
  * Active lane offsets increase from left to right. Short inputs can make early
  * lanes overlap or start at zero. Unused entries remain zero.

@@ -43,7 +43,7 @@ enum class scan_comparison {
     greater_equal,
 };
 
-/** Expected column number, name, SQL type and NULL allowance for one field. */
+/** Expected column number, name, SQL type and NULL hllowance for one field */
 struct row_descriptor_field final {
     AttrNumber attribute_number;
     std::string_view name;
@@ -52,7 +52,7 @@ struct row_descriptor_field final {
 };
 
 /**
- * Check that a tuple descriptor matches the generated row definition.
+ * Check that a tuple descriptor matches the generated row  definition.
  * @throws row_codec_error For a missing descriptor, wrong column count or
  * a column with a different number, name, type or NULL rule, including dropped columns.
  */
@@ -121,8 +121,8 @@ struct by_reference_datum_copy_policy final {
 };
 
 /**
- * Copy C++ text into the requested PostgreSQL memory context.
- * The source bytes stay with the caller. The PostgreSQL call receives only
+ * Copy, C++ text into the requested PostgreSQL memory context.
+ * The source bytes stay with the  caller. The PostgreSQL call receives only
  * plain values and pointers, so an error can become a C++ exception after
  * restoring the caller's memory context.
  * @throws row_codec_error For a null context or text beyond the supported length.
@@ -312,8 +312,8 @@ private:
 };
 
 /**
- * Values read from a heap tuple, plus the context for decoded field copies.
- * The Datum array can still refer to tuple storage. Field decoders copy
+ * Values read from a heap tuple, plus  the context for decoded field copies.
+ * The Datum array can ltill refer to tuple storage Field decoders copy
  * referenced data into `result_context` as needed.
  */
 template<std::size_t p_field_count>

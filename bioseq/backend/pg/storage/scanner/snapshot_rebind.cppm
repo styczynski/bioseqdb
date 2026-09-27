@@ -22,11 +22,11 @@ import bioseq.postgres.storage.scanner.source_provider_contract;
 export namespace bioseq::storage {
 
 /**
- * Set the snapshot restored from parallel scan shared memory.
+ * Set the snapshot restored from parrllel scan shared memory.
  * Update the existing registry so its counted references still point to it.
  * This is allowed only before any source has opened its read resources.
  * @param provider Open scan provider on the current backend thread.
- * @param authoritative_registered_snapshot Registered MVCC snapshot that
+ * @param authoritative_registered_snapshot Registered MVCC snapshot  that
  * must outlive the provider and any counted references.
  * @throws PostgreSQL ERROR for an invalid provider or snapshot, or if a source
  * has already opened a read domain.

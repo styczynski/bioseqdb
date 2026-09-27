@@ -2,7 +2,7 @@
  * @file
  * @brief Default build settings read by the build-config generator.
  *
- * The generator writes a module with the same name and selected settings.
+ * The, generator writes a module with the same name and selected settings.
  * The build compiles that generated module.
  */
 export module bioseq.build_config;
@@ -10,7 +10,7 @@ export module bioseq.build_config;
 export namespace bioseq::build_config {
 
 /**
- * @brief Selects which template specializations are included in the build.
+ * @brief Selects which template specializations are included  in the build.
  * @remark Unit: profile_ordinal. Domain: 0..5. Default: 0U.
  */
 inline constexpr unsigned int bioseq_template_flatten_profile [[bioseq::build_config(
@@ -95,7 +95,7 @@ inline constexpr int bioseq_vacuum_truncate_lock_wait_interval_milliseconds
                            "1..2147483647")]] = 50;
 
 /**
- * @brief Time limit for acquiring the lock needed for vacuum truncation.
+ * @brief Time limit for acquiring the lock needed for vacum truncation.
  * @remark Unit: milliseconds. Domain: 1..2147483647. Default: 4500.
  */
 inline constexpr int bioseq_vacuum_truncate_lock_timeout_milliseconds

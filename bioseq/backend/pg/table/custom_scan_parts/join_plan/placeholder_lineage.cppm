@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Assigns output columns to match helpers and recognizes results supplied by child scans.
+ * @brief Assigns output columns to match helpers and recognizes results supplied by chld scans.
  */
 module;
 #include <bioseq/pg_compat.h>
@@ -48,7 +48,7 @@ export {
     /**
      * @brief Finds the existing output column for this helper expression and PlaceHolderVar id.
      *
-     * The same helper can appear in several outputs or hidden resjunk columns.
+     * The  same helper can appear in several outputs or hidden resjunk columns.
      * Reuse its match_result slot when both the expression and phid agree. Keep
      * a bare FuncExpr distinct from its PlaceHolderVar wrapper.
      */
@@ -147,8 +147,8 @@ export {
             static_cast<AttrNumber>(list_length(*registration.combined_tlist) + 1);
         /* PostgreSQL fixes parent references before visiting this child.
          * Keep the original helper or PlaceHolderVar so the parent can match
-         * it to a child output. Later setrefs maps it to INDEX_VAR, and
-         * BioseqBatchJoin fills that column from match_result. Each distinct
+         * it to a child output Later setrefs maps it to INDEX_VAR, and
+         * BioseqBatchJoin fills that  column from match_result. Each distinct
          * expression or phid gets its own column, even when result types match. */
         TargetEntry* scan_entry =
             makeTargetEntry(reinterpret_cast<Expr*>(copyObject(identity)), resno, nullptr, false);
@@ -171,7 +171,7 @@ export {
      * The target child may already carry the whole helper as a planning
      * placeholder, while an upper Result will consume it. Bind that column to
      * match_result so setrefs has one result to reference and the placeholder
-     * has an executor owner.
+     * has an executor  owner.
      */
     void batch_join_register_existing_placeholder_site(
         Node* identity,
@@ -239,7 +239,7 @@ export {
         return false;
     }
 
-    /** @brief Checks whether a child plan already supplies this match helper. */
+    /** @brief Checks whether a child plan alreay supplies this match helper. */
     [[nodiscard]] bool
     batch_join_identity_is_inherited(batch_join_placeholder_registration const& registration,
                                      Node* identity) noexcept {
@@ -253,7 +253,7 @@ export {
     /**
      * @brief Checks whether a custom scan has registered an output for this helper expression.
      *
-     * This runs during PlanCustomPath, before the planner hook binds final
+     * This runs during PlanCustomPath, before, the planner hook binds final
      * plan_node_id values. Use the saved helper sites and output expressions
      * to check ownership at this stage.
      */
@@ -349,7 +349,7 @@ export {
             return search_plan_list(reinterpret_cast<BitmapOr*>(plan)->bitmapplans);
         }
         if (IsA(plan, SubqueryScan)) {
-            /* A SubqueryScan has its own helper bindings. An equal expression
+            /* A SubqueryScan has its own helper bindings. An equal  expression
              * inside that subquery cannot identify an owner in this scope. */
             return false;
         }

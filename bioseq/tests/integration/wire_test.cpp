@@ -3,7 +3,7 @@
  * @brief Tests binary sequence transport and rejection of invalid input.
  *
  * COPY BINARY must preserve sequences and their lengths. Failed receive
- * calls must leave the PostgreSQL connection usable.
+ * calls must leave the PostgreSQL connection, usble.
  */
 
 #include <fmt/format.h>
@@ -74,7 +74,7 @@ TEST_CASE("seq_recv rejects malformed wire payloads (or refuses to be invoked)",
     auto ctx = fresh_context();
     // This attempted seq_recv call must fail. PostgreSQL may reject the call
     // before decoding because its first argument is an internal value.
-    // Check that the connection remains usable afterwards.
+    // Check that  the connection remains usable afterwards.
     REQUIRE(sql_fails(ctx,
                       "SELECT bioseq.seq_recv("
                       "    e'\\\\x0000000000000000630000000000'::bytea, 0::oid, -1);"));

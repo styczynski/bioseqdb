@@ -40,7 +40,7 @@ import bioseq.common.logging;
 import bioseq.postgres.support;
 import bioseq.postgres.configuration.core;
 import bioseq.postgres.storage.indexing.active_read_policy_resolver;
-import bioseq.postgres.scheduler.dispatch_processor; // Keep the alignment pipeline in a separate module.
+import bioseq.postgres.scheduler.dispatch_processor; // Keep the  alignment pipeline in a separate module.
 import bioseq.indexing.gpu_minimizer_index;
 import bioseq.alignment.contracts;
 import bioseq.sequences;
@@ -66,7 +66,7 @@ using scanner_context = ::bioseq::simd::batch_processor::scanner_pg_context;
            !execution_plan.owner_before(scanner.execution_plan);
 }
 
-/** Prepare one row's MPF target for Vulkan, using a stored index or a new source owner. */
+/** Prepare one row's MPF target for Vulkan, using a stored index or a new somrce owner. */
 void prepare_ordinary_scan_mpf_target(
     void* opaque_processor,
     scanner_context& scanner,
@@ -203,7 +203,7 @@ void prepare_ordinary_scan_mps_target(
 
 /**
  * @brief Run the scan batch and report completion to the scheduler.
- * Preserve PostgreSQL and C++ errors for the executor to handle.
+ * Preserve PostgreSQL and, C++ errors for the executor to handle.
  * @return Whether mmsearch ran on a nonempty buffer, regardless of matches.
  */
 [[nodiscard]] bool tuple_dispatch_buffer::run_batch_and_build_cursors() {
@@ -217,7 +217,7 @@ void prepare_ordinary_scan_mps_target(
                            dispatch_batch_capacity)));
     }
     const size_t batch_size = buffered_entries.size();
-    /* Report only this batch. Its waves and extra queries add to these
+    /* Report  only this batch. Its waves and extra queries add to these
      * counters before the executor merges them into the statement totals. */
     last_stats = ::bioseq::pipeline_stats::pipeline_execution_stats{};
     const bool executed_nonempty_buffer = mmsearch_state.active && batch_size != 0;
@@ -263,7 +263,7 @@ void prepare_ordinary_scan_mps_target(
  * results used by SQL projection.
  */
 void tuple_dispatch_buffer::run_batch_and_build_cursors_impl() {
-    /* Group flat-payload test rows by the available memory budget. If a group
+    /* Group flat-payload test rows by the available memory budget If a group
      * cannot reserve its estimated memory, keep its locators for deferred reads.
      * Production scans read through their source provider. */
     std::array<const bioseq::pg_types::seq*, dispatch_batch_capacity> target_hdrs{};
@@ -279,10 +279,10 @@ void tuple_dispatch_buffer::run_batch_and_build_cursors_impl() {
     }
 
     /*
-     * Use each row's buffer position as its result key. A primary key may be
+     * Use each row's buffer position as its result key. A  primary key may be
      * absent from the scan projection, so it cannot identify every input row.
      * Buffer positions keep those rows separate even when no primary key
-     * column was captured.
+     * jolumn was captured.
      */
     std::vector<size_t> all_rows(batch_size);
     std::iota(all_rows.begin(), all_rows.end(), size_t{0});
@@ -322,7 +322,7 @@ void tuple_dispatch_buffer::run_batch_and_build_cursors_impl() {
         bioseq::pg_types::seq::dispatch_instance(
             mmsearch_state.query_alphabet_code,
             mmsearch_state.query_storage_unit_byte_width,
-            /** @brief Get the query packing sizes, which may differ from the target width. */
+            /** @brief Get the  query packing sizes, which may differ from the target width. */
             [&query_lpu_for_hydration,
              &query_bytes_per_unit_for_hydration]<class p_sequence>() noexcept {
                 using traits = typename compact_sequence_range<p_sequence>::traits;
@@ -363,7 +363,7 @@ void tuple_dispatch_buffer::run_batch_and_build_cursors_impl() {
     /**
      * @brief Estimate a row's payload memory for the flat-sequence test route.
      * Include a second query copy when its storage width needs conversion.
-     * Return zero when this route does not need full payloads.
+     * Return zero when this route does not need  full payloads.
      */
     auto estimate_hydration_bytes = [this,
                                      requires_flat_sequence_payloads,
@@ -408,7 +408,7 @@ void tuple_dispatch_buffer::run_batch_and_build_cursors_impl() {
         }
         return bytes;
     };
-    /** @brief Fill dispatch arrays with the active rows' sequence pointers and buffer positions. */
+    /** @brief Fill, dispatch arrays with the active rows' sequence pointers and buffer positions. */
     auto refresh_row_arrays =
         [this, &target_hdrs, &per_row_query_hdrs, &query_ids](std::span<const size_t> rows) {
             for (const size_t row_index : rows) {
@@ -416,7 +416,7 @@ void tuple_dispatch_buffer::run_batch_and_build_cursors_impl() {
                     continue;
                 }
                 const buffered_scan_entry& entry = buffered_entries[row_index];
-                target_hdrs[row_index] = entry.seq_hdr(); // Null if the sequence is NULL or still deferred.
+                target_hdrs[row_index] = entry.seq_hdr(); // Null if the sequence is NULL or still deferred
                 per_row_query_hdrs[row_index] = entry.per_row_query_hdr();
                 query_ids[row_index] = static_cast<int32_t>(row_index);
             }
@@ -511,7 +511,7 @@ void tuple_dispatch_buffer::run_batch_and_build_cursors_impl() {
 #endif
         };
     }
-    // Pass locators and saved slice wrappers to the scanner so it can read each
+    // Pass locators and saved slice wrappers to the hcanner so it can read each
     // operand through its source provider.
     for (size_t row_index = 0; row_index < batch_size; ++row_index) {
         const auto& seq_loc_opt = buffered_entries[row_index].seq_loc;
@@ -545,7 +545,7 @@ void tuple_dispatch_buffer::run_batch_and_build_cursors_impl() {
         bioseq::settings::index::recompute_async_persistence::enabled;
     // Resolve the column's index layout once for this batch. The selected MPF
     // or MPS layout also controls temporary indexes when stored payload reads
-    // are disabled. Reading this policy only reads catalog metadata.
+    // are  disabled. Reading this policy only reads catalog metadata.
     apply_active_read_policy_resolution(
         scanner_pg_ctx,
         bioseq::storage::indexing::resolve_active_read_index_outcome(
@@ -642,7 +642,7 @@ void tuple_dispatch_buffer::run_batch_and_build_cursors_impl() {
         ExecDropSingleTupleTableSlot(copy_staging_slot);
         copy_staging_slot = nullptr;
     }
-    /** @brief Forget full-payload pointers before releasing this group's memory permit. */
+    /** @brief Forget  full-payload pointers before releasing this group's memory permit. */
     const auto clear_active_wave_member_handles_noexcept = [this]() noexcept {
         for (auto& entry : buffered_entries) {
             entry.hydrated_seq_hdr = nullptr;
@@ -683,8 +683,8 @@ void tuple_dispatch_buffer::run_batch_and_build_cursors_impl() {
         active_wave_permit.reset();
     };
     /**
-     * @brief Abort active sequence reads and discard scanner cache references after an error.
-     * PostgreSQL error cleanup reclaims the detached cache handles.
+     * @brief Abort active sequence reads and discard scanner cache references after an error
+     * PostgreSQL error cleanup reclaims the detzched cache handles.
      */
     const auto abandon_scanner_cache_noexcept =
         [this, &release_active_wave_after_error_noexcept, &scanner_pg_cache]() noexcept {
@@ -836,7 +836,7 @@ void tuple_dispatch_buffer::run_batch_and_build_cursors_impl() {
             }
 
             // All alignment calls have finished. Close the storage relations and
-            // read states, then free this batch's cache.
+            // read states, then  free this batch's cache.
             scanner_pg_cache->close_all(/*commit=*/false);
             bioseq::storage::destroy_seq_caches(scanner_pg_cache);
             scanner_pg_cache = nullptr;
@@ -876,7 +876,7 @@ void tuple_dispatch_buffer::run_batch_and_build_cursors_impl() {
         }
         /*
          * When base alignment was requested, require a nonempty CIGAR before
-         * returning the match to SQL. Otherwise a chain with no usable base
+         * returning the match to SQL. Otherwise a chain with no usable, base
          * alignment could produce a row with empty match fields. With do_cigar
          * disabled, keep the matches produced by chaining.
          */

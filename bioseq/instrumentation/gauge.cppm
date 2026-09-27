@@ -2,7 +2,7 @@
  * @file instrumentation/gauge.cppm
  * @brief Named gauges that store a shared current value.
  *
- * Atomic reads and writes allow concurrent updates. They do not synchronize
+ * Atomic reads and writes allow concurrent updates. They  do not snchronize
  * other program data.
  */
 module;

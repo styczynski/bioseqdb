@@ -95,7 +95,7 @@ export struct exact_parameterized_bmo_retainer_audit {
 
 /**
  * @brief Keeps valid join paths or builds one with a custom scan owning mmsearch.
- * @return True after installing at least one checked path in the join relation.
+ * @return True after installing at least one checked path in the join, relation.
  */
 export [[nodiscard]] bool retain_join_paths_with_custom_restriction_owner(
     PlannerInfo* root,

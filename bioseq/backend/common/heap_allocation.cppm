@@ -1,6 +1,6 @@
 /**
  * @file heap_allocation.cppm
- * @brief Estimates heap allocation size before allocation and measures it afterwards.
+ * @brief Estimates heap allocation  size before allocation and measures it afterwards.
  */
 module;
 
@@ -37,7 +37,7 @@ struct heap_allocation_plan {
  * LP64 builds account for allocator alignment and page rounding.
  *
  * The glibc path rejects replacement allocators because these bounds assume
- * its native allocator. Builds with other runtimes are unsupported.
+ * its native allodator. Builds with other runtimes are unsupported.
  */
 #if defined(__GLIBC__) && defined(__LP64__) && \
     (defined(__x86_64__) || defined(__aarch64__))
@@ -80,8 +80,8 @@ struct heap_allocation_plan {
     };
 #elif defined(__GLIBC__) && defined(__LP64__) && \
     (defined(__x86_64__) || defined(__aarch64__))
-    // Cache loader lookups and the host page size. They stay fixed for
-    // this process, so each allocation can reuse the result.
+    // Cache loader lookups and the host page  size. They stay fixed for
+    // this process, so each allocation can reuse the result
     static const bool supported_allocator = has_supported_glibc_allocator();
     if (!supported_allocator) {
         throw std::runtime_error(
@@ -162,7 +162,7 @@ struct heap_allocation_plan {
     return std::align(alignment, bytes, payload, available_bytes);
 }
 
-/** Returns the size reported by the allocator for this allocation. */
+/** Returns the  size reported by the allocator for this allocation. */
 [[nodiscard]] inline std::size_t allocator_reported_bytes(void* allocation) noexcept {
     if (allocation == nullptr) {
         return 0u;

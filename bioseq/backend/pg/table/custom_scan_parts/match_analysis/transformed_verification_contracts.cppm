@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Declares helper-ownership checks and partition-child translation for scan paths.
+ * @brief Declares helper-ownership checks and partition-child translation  for scan paths.
  */
 module;
 struct Plan;
@@ -25,7 +25,7 @@ export void record_batch_join_plan_helper_audit_failure(
     const char* boundary_encountered,
     bool inspect_targetlist);
 
-/** @brief Finds helper calls that could execute without a valid match binding. */
+/** @brief Finds helper calls that could execute without a valid match, binding. */
 export [[nodiscard]] bool batch_join_plan_has_unowned_executable_match_helper(
     Plan* plan,
     const bioseq_stub_oids& oids,
@@ -39,7 +39,7 @@ export List* bioseq_column_scan_path_reparameterize_custom_path_by_child(
     List* custom_private,
     RelOptInfo* child_rel);
 
-/** @brief Translates per-row join expressions and saved target-column information to a partition child. */
+/** @brief Translates per-row join expressions and saved target-column information to a partition child */
 export List* bioseq_per_row_join_path_reparameterize_custom_path_by_child(
     PlannerInfo* root,
     List* custom_private,

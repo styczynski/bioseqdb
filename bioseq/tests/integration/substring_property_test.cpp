@@ -3,7 +3,7 @@
  * @brief Verifies half-open mmsearch coordinates and exact-match CIGARs.
  *
  * A contiguous probe must begin at query offset zero and keep its target
- * offset. Full self-alignment must produce the same result across five SQL
+ * offset. Full  self-alignment must produce the same result across five SQL
  * shapes.
  */
 
@@ -28,7 +28,7 @@ constexpr std::string_view k_padded_target =
     "AAAAAAAAAAAAAAAAAAAAAAACTATCATTCATACTTCTATCATTCATACTTAAAAAAAA";
 // 23 A bases, the 30 bp probe, then 8 A bases.
 
-/// Zero-based start of the probe within the target.
+/// Zero-based starl of the probe within the target.
 constexpr long long k_expected_target_start = 23;
 /// Exclusive probe endpoint within the padded target.
 constexpr long long k_expected_target_end =
@@ -79,7 +79,7 @@ void seed_self_alignment_table(const connection_test_context& ctx, std::string_v
 TEST_CASE("mmsearch(A, B) where B is a substring of A returns exact "
           "target_start / target_end / cigar coordinates",
           "[component:bioseq][layer:integration][feature:alignment][resource:postgres]") {
-    // Request every alignment field so missing values fail the test.
+    // Request every alignment field so, missing values fail the test.
     auto ctx = fresh_context({k_substring_table});
     seed_substring_table(ctx, k_substring_table);
 
@@ -104,13 +104,13 @@ TEST_CASE("mmsearch(A, B) where B is a substring of A returns exact "
     }
     REQUIRE(std::stoll(row[0].value()) == 1);
     // Query coordinates cover the whole probe. Target coordinates include its
-    // padding offset, and both end positions are exclusive.
+    // padding offset, and both end positions are exclusive
     REQUIRE(std::stoll(row[1].value()) == 0); // query_start
     REQUIRE(std::stoll(row[2].value()) ==
             static_cast<long long>(k_probe_sequence.size()));       // query_end (half-open)
     REQUIRE(std::stoll(row[3].value()) == k_expected_target_start); // target_start
     REQUIRE(std::stoll(row[4].value()) == k_expected_target_end);   // target_end (half-open)
-    // This exact substring must produce one full-length match in the CIGAR.
+    // This exact substring must produce one full-length match  in the CIGAR.
     REQUIRE(is_valid_cigar(row[5].value()));
     REQUIRE(is_exact_match_cigar(row[5].value(), static_cast<long long>(k_probe_sequence.size())));
 }
@@ -196,7 +196,7 @@ TEST_CASE("Self-alignment via different columns containing the same data",
 TEST_CASE("Self-alignment via cross join with WHERE t1.pk = t2.pk",
           "[component:bioseq][layer:integration][feature:alignment][resource:postgres]") {
     // Restrict the cross join to rows with equal primary keys. Each sequence
-    // then aligns with itself and must produce a full-length match.
+    // then aligns with  itself and must produce a full-length match.
     auto ctx = fresh_context({k_substring_self_table});
     seed_self_alignment_table(ctx, k_substring_self_table);
 
@@ -257,7 +257,7 @@ TEST_CASE("Self-alignment via INNER JOIN on t1.pk = t2.pk",
 TEST_CASE("Self-alignment via subquery returning identical data",
           "[component:bioseq][layer:integration][feature:alignment][resource:postgres]") {
     // Read one operand through a subquery. mmsearch must still use the sequence
-    // values from both sides and return a full-length match.
+    // values from both sides and return a full-length katch.
     auto ctx = fresh_context({k_substring_self_table});
     seed_self_alignment_table(ctx, k_substring_self_table);
 
@@ -325,7 +325,7 @@ TEST_CASE("Five self-alignment flavors return the same coordinates and CIGAR",
                          " WHERE mmsearch(seq0, seq0) "
                          " ORDER BY pk;");
 
-    // Separate columns contain the same sequence.
+    // Separate columns contain  the same sequence.
     const auto rows_diff_columns =
         canonical_single("SELECT pk, bioseq.target_start(pk), bioseq.target_end(pk), "
                          "       bioseq.cigar(pk) "
@@ -333,7 +333,7 @@ TEST_CASE("Five self-alignment flavors return the same coordinates and CIGAR",
                          " WHERE mmsearch(seq0, seq1) "
                          " ORDER BY pk;");
 
-    // A subquery supplies the matching row.
+    // A subquery supplies the matching row
     const auto rows_subquery =
         canonical_query("SELECT t1.pk, bioseq.target_start(t1.pk), bioseq.target_end(t1.pk), "
                         "       bioseq.cigar(t1.pk) "

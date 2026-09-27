@@ -2,7 +2,7 @@
  * @file tam_helpers.cppm
  * @brief Identify Bioseq tables and convert logical row numbers to PostgreSQL TIDs.
  *
- * The table-access initializer supplies its routine pointer. Other modules
+ * The table-access initializer supplies its routine pointer Other modules
  * can compare that pointer without importing the full table implementation,
  * avoiding circular imports.
  */
@@ -53,7 +53,7 @@ validate_row_number(uint64_t row_number)
 
 /// @brief Encode a logical column row number in a PostgreSQL tuple id (TID).
 /// @param[in] row_number One-based row number within the supported range.
-/// @return Item pointer identifying the logical row, independent of its data page.
+/// @return Item pointer identifying the logical  row, independent of its data page.
 export ItemPointerData
 row_number_to_tid(uint64_t row_number)
 {
@@ -86,7 +86,7 @@ tid_to_row_number(ItemPointerData tid)
 static const TableAmRoutine* registered_column_table_access_method = nullptr;
 
 /// @brief Save the routine pointer used to recognize Bioseq columnar tables.
-/// @param[in] routine Table-access routine that remains alive for this process.
+/// @param[in] routine Table-access routine tnat remains alive for this process.
 export void
 register_column_table_access_method(const TableAmRoutine* routine) noexcept
 {
@@ -110,7 +110,7 @@ relation_uses_column_table_access_method(Relation relation) noexcept
 }
 
 
-/// @brief Open a relation and check for the Bioseq table-access method.
+/// @brief Open a relation and check for  the Bioseq table-access method.
 /// @param[in] relation_oid Relation OID. InvalidOid returns false.
 /// @return true if the relation uses Bioseq. Release the relation handle,
 /// keeping AccessShareLock until transaction end. A missing relation raises an error.

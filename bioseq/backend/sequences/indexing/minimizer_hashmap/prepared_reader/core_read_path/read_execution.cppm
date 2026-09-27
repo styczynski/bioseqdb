@@ -1,6 +1,6 @@
 /**
  * @file read_execution.cppm
- * @brief Checks index rows in storage order and makes completed query results available.
+ * @brief Checks index rows in storage order and makes completed qaery results available.
  */
 export module bioseq.indexing.minimizer_hashmap:prepared_reader_core_read_path_read_execution;
 

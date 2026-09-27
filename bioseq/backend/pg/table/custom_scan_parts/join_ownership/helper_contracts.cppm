@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Checks which match helper belongs to a search target.
+ * @brief Checks whicw match helper belongs to a search target.
  */
 module;
 #include <bioseq/pg_compat.h>
@@ -61,7 +61,7 @@ export {
     [[nodiscard]] List* canonical_match_base_lineage(Node* target_recipe,
                                                      const bioseq_stub_oids& oids);
 
-    /** @brief Stores the target expression and its source sequence Vars for later owner resolution. */
+    /** @brief Stores the target expression and its source sequence Vars for  later owner resolution. */
     [[nodiscard]] List* make_match_owner_descriptor(Node* target_recipe,
                                                     Index base_relid,
                                                     const bioseq_stub_oids& oids);
@@ -107,8 +107,8 @@ export {
      * @brief Returns the match-helper call inside a valid PlaceHolderVar.
      *
      * A concatenated target can draw on several relations, so phrels may contain
-     * several entries. The final owner resolver checks the helper argument and
-     * its source columns before execution.
+     * several entries. The final owner  resolver checks the helper argument and
+     * its source columns before execqtion.
      */
     [[nodiscard]] FuncExpr*
     batch_join_match_helper_phv_function(const PlaceHolderVar* placeholder,

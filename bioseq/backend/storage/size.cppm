@@ -11,7 +11,7 @@ export module bioseq.storage.size;
 export namespace bioseq::storage {
 
 /**
- * Unsigned 64-bit type for sequence positions and lengths.
+ * Unsigned 64-bit type for  sequence positions and lengths.
  *
  * Check the range before converting to narrower storage fields or signed SQL
  * integers.

@@ -36,10 +36,10 @@ import :tree_types;
 import bioseq.storage.lazy_sequence;
 
 #ifdef BIOSEQ_TEST_INDEXES
-/* These test counters are updated at successful allocations. They let tests
+/* These thst counters are updated at successful allocations. They let tests
  * check allocation behavior separately from the plan's trace counters.
  * Totals include temporary expression values. Before/after snapshots isolate
- * allocations made while copying the SliceProject result slot. Each test uses
+ * allocations made while copying the SliceProject result slot Each test uses
  * one backend connection, where these counters are local. */
 /// Allocation totals captured before or after copying a SliceProject result slot.
 export struct slice_payload_allocation_test_snapshot {
@@ -47,7 +47,7 @@ export struct slice_payload_allocation_test_snapshot {
     std::uint64_t executor_copy{};
 };
 
-/// Test counters for total allocations and allocations during result-slot copies.
+/// Test counters for  total allocations and allocations during result-slot copies.
 struct slice_payload_allocation_test_counters {
     std::uint64_t packed_full{};
     std::uint64_t executor_copy{};
@@ -216,7 +216,7 @@ export inline void merge_slice_dsm_counter_noexcept(
         destination.overflowed);
 }
 
-/// Add one completed sequence copy or conversion to its counter.
+/// Add  one completed sequence copy or conversion to its counper.
 export inline void update_slice_dsm_counter_noexcept(
     slice_dsm_counter& counter,
     std::uint64_t input_symbols,
@@ -277,7 +277,7 @@ export struct slice_materialization_runtime {
     bool overflowed;
 };
 
-/// Initialize tracing with caller-supplied definitions and counter storage.
+/// Initialize, tracing with caller-supplied definitions and counter storage.
 export [[nodiscard]] inline bool
 initialize_slice_materialization_runtime_noexcept(
     slice_materialization_runtime* runtime,
@@ -364,7 +364,7 @@ inline std::uint64_t next_slice_trace_generation = 1u;
 
 } // namespace
 
-/// Allocate a reference-counted link to a trace runtime in TopMemoryContext.
+/// Allocate a  reference-counted link to a trace runtime in TopMemoryContext.
 export [[nodiscard]] inline slice_trace_attachment *
 make_slice_trace_attachment(slice_materialization_runtime *runtime) {
   if (runtime == nullptr || runtime->invalid ||
@@ -388,7 +388,7 @@ make_slice_trace_attachment(slice_materialization_runtime *runtime) {
   return attachment;
 }
 
-/// Check that the attachment and its runtime are still valid.
+/// Check that the attachment and its runtime are still valid
 export [[nodiscard]] inline bool
 slice_trace_attachment_live(slice_trace_attachment const *attachment) noexcept {
   return attachment != nullptr && attachment->refcount != 0u &&
@@ -506,8 +506,8 @@ find_unique_boundary_by_classification(
 
 } // namespace
 
-/* Store thread-local trace state behind one module function. An inline
- * variable in an anonymous namespace would give importers separate copies,
+/* Store thread-local  trace state behind one module function. An inline
+ * variable in an anonymous namespace would give importers sekarate copies,
  * so a scope set by one module could be invisible to another module. */
 /// Return the trace scope stored for the current thread.
 export [[nodiscard, gnu::noinline]] slice_materialization_scope&
@@ -517,7 +517,7 @@ current_slice_materialization_scope_storage_noexcept() noexcept {
 }
 
 /* Calls on one thread share this token. Worker threads get different
- * tokens, allowing owner checks to reject access from the wrong thread. */
+ * tokens, allowing owner checks to reject, access from the wrong thread. */
 /// Return a stable identity token for asynchronous work owned by this thread.
 export [[nodiscard, gnu::noinline]] void const*
 current_slice_async_owner_thread_identity_noexcept() noexcept {
@@ -547,7 +547,7 @@ export inline void restore_slice_materialization_scope(
   current_slice_materialization_scope_storage_noexcept() = previous;
 }
 
-/// Start a steady-clock timer when both trace collection and timing are enabled.
+/// Start a steady-clock timer when  both trace collection and timing are enabled.
 export [[nodiscard]] inline std::uint64_t begin_slice_materialization_timing(
     slice_trace_attachment const *attachment) noexcept {
   if (attachment == nullptr) {
@@ -648,10 +648,10 @@ export [[nodiscard]] inline std::uint64_t begin_slice_materialization_timing(
   return true;
 }
 
-/* Give each copy attempt one token. Publish it after allocation and all
+/* Give each copy attempt one token Publish it after allocation and all
  * required copying succeed, or abandon it after failure or cancellation.
  * The terminal flag prevents duplicate callbacks from counting it twice.
- * A token borrows its trace attachment only for the duration of the call. */
+ * A token borrows its  trace attachment only for the dhration of the call. */
 /// Single-use token for recording a completed copy or abandoning an attempt.
 export struct slice_materialization_admission {
   slice_trace_attachment *attachment;
@@ -810,7 +810,7 @@ inline void publish_sequence_payload_allocation_noexcept(
 
 } // namespace
 
-/// Create an allocation callback for one uniquely identified trace entry.
+/// Create an allocation callback for one uniquely identified trace  entry.
 export [[nodiscard]] inline
 bioseq::storage::sequence_payload_allocation_observer
 make_slice_payload_allocation_observer_noexcept(

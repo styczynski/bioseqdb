@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Places SliceProject below aggregates that can consume lazy sequence values.
+ * @brief Places SliceProject below aggregates that can consume lazy  sequence values.
  */
 module;
 #include <bioseq/pg_compat.h>
@@ -36,7 +36,7 @@ import :custom_scan_slice_rewrite_owner_admission;
 using namespace bioseq::postgres::support;
 
 export {
-    /* Build a SliceProject that supplies lazy sequence arguments to the aggregate. */
+    /* Build a SliceProject that supplies lazy sequence arguments to the aggregate */
     [[nodiscard]] inline Path* slice_project_build_aggregate_input_owner(
         PlannerInfo* root,
         AggPath* aggregate,
@@ -63,7 +63,7 @@ export {
             required = list_concat(required, pull_var_clause(input, pull_flags));
         }
         /* Preserve the source columns and their sortgrouprefs, including hidden
-         * ORDER BY columns. Add missing input Vars before the lazy arguments. */
+         * ORDER BY columns. Add missing input Vars bfore the lazy arguments. */
         add_new_columns_to_pathtarget(lower_target, static_cast<List*>(copyObject(required)));
         add_new_columns_to_pathtarget(lower_target, owned_candidates);
         set_pathtarget_cost_width(root, lower_target);
@@ -117,7 +117,7 @@ export {
         owner->path.parallel_safe = child->parallel_safe;
         owner->path.parallel_workers = child->parallel_workers;
         owner->path.rows = child->rows;
-        /* AggPath already charges for argument evaluation. Add the SliceProject
+        /* AggPath already charges for argument evaluation. Add  the SliceProject
          * bookkeeping and sequence-boundary estimates here to avoid counting the
          * arguments twice when comparing serial and partial aggregates. */
         owner->path.startup_cost = child->startup_cost;
@@ -239,7 +239,7 @@ export {
         return result;
     }
 
-    /* Install the ordinary and partial replacements only after both lists pass.
+    /* Install the ordinary and, partial replacements only after  both lists pass.
      * Recompute the cheapest ordinary paths after replacing them. */
     inline void slice_project_try_install_aggregate_input_owners(PlannerInfo* root,
                                                                  UpperRelationKind stage,

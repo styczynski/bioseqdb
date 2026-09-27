@@ -71,7 +71,7 @@ struct symbol_counts_index {
                 return chunk_no;
             });
     }
-    /** @brief Clears the stored symbol counts and builds them again from the sequence. */
+    /** @brief Clears the stored symbol counts and builds them  again from the sequence. */
     template <sequence_alphabet p_alphabet>
     static void rebuild(
             p_storage& storage,
@@ -82,7 +82,7 @@ struct symbol_counts_index {
 
     /**
      * @brief Reads the stored count for one numeric symbol rank.
-     * @return The count, or std::nullopt when the index is absent.
+     * @return The count, or std::nullopt when the index is absent
      * Reports a storage error for a malformed array or an out-of-range rank.
      */
     static std::optional<std::int64_t> read_count(

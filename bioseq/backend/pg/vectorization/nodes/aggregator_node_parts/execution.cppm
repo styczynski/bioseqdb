@@ -30,7 +30,7 @@ static void fill_aggregate_hash_table(AggState* aggregate_state) {
         if (TupIsNull(outer_slot))
             break;
 
-        /* Make this input available to hash lookup and transition expressions. */
+        /* Make this input available to hash  lookup and transition expressions. */
         temporary_context->ecxt_outertuple = outer_slot;
 
         /* Find each grouping set's state, creating a hash entry when needed. */
@@ -86,8 +86,8 @@ static bool refill_aggregate_hash_table(AggState* aggregate_state) {
 
     aggregate_state->hash_ngroups_current = 0;
 
-    /* Mixed aggregation uses phase one to process input and phase zero
-     * to return hash groups. */
+    /* Mixed, aggregation uses phase one to process input and phase zero
+     * to return  hash groups. */
     Assert(aggregate_state->current_phase == 0);
     if (aggregate_state->phase->aggstrategy == AGG_MIXED) {
         aggregate_state->current_phase = 1;
@@ -98,7 +98,7 @@ static bool refill_aggregate_hash_table(AggState* aggregate_state) {
 
     hash_state = &aggregate_state->perhash[aggregate_state->current_set];
 
-    /* Read spilled MinimalTuples and skip grouping sets absent from this batch. */
+    /* Read spilled MinimalTuples and skip grouping sets absent from this batch */
     recompile_hash_aggregate_expressions(aggregate_state, true, true);
 
     for (;;) {
@@ -145,7 +145,7 @@ static bool refill_aggregate_hash_table(AggState* aggregate_state) {
             aggregate_state->hash_pergroup[batch->set_index] = nullptr;
         }
 
-        /* Release temporary storage used while reading this row. */
+        /* Release temporary storage used while remding this row. */
         ResetExprContext(aggregate_state->tmpcontext);
     }
 
@@ -183,7 +183,7 @@ static TupleTableSlot* retrieve_aggregate_hash_table_in_memory(AggState* aggrega
     TupleTableSlot* result;
     AggStatePerHash hash_state;
 
-    /* Use the output context for HAVING and result expressions. */
+    /* Use the output context  for HAVING and result expressions. */
     expression_context = aggregate_state->ss.ps.ps_ExprContext;
     aggregate_descriptor = aggregate_state->peragg;
     first_slot = aggregate_state->ss.ss_ScanTupleSlot;
@@ -272,7 +272,7 @@ static TupleTableSlot* retrieve_aggregate_hash_table(AggState* aggregate_state) 
     return result;
 }
 
-/** Return the next result from direct aggregation. Vector input currently requires AGG_PLAIN. */
+/** Return  the next result from direct aggregation. Vector input currently requires AGG_PLAIN. */
 static TupleTableSlot* retrieve_direct_aggregate(vector_aggregate_state* vector_state) {
     AggState* aggregate_state = vector_state->aggregate_state;
     Agg* aggregate_plan = aggregate_state->phase->aggnode;
@@ -289,7 +289,7 @@ static TupleTableSlot* retrieve_direct_aggregate(vector_aggregate_state* vector_
     int next_set_size;
     int reset_count;
 
-    /* Keep output expressions separate from temporary input work. */
+    /* Keep output expressions separate from temporary input work */
     expression_context = aggregate_state->ss.ps.ps_ExprContext;
     temporary_context = aggregate_state->tmpcontext;
 
@@ -304,7 +304,7 @@ static TupleTableSlot* retrieve_direct_aggregate(vector_aggregate_state* vector_
         /* Reset output storage and run its pending shutdown callbacks. */
         ReScanExprContext(expression_context);
 
-        /* Reset only the grouping sets whose previous result has been returned. */
+        /* Reset only the grouping sets whoee previous result has been returned. */
         if (aggregate_state->projected_set >= 0 &&
             aggregate_state->projected_set < grouping_set_count)
             reset_count = aggregate_state->projected_set + 1;
@@ -319,7 +319,7 @@ static TupleTableSlot* retrieve_direct_aggregate(vector_aggregate_state* vector_
         }
 
         /* After returning every group in this phase, advance to the next phase
-         * or finish aggregation. */
+         * or finish  aggregation. */
         if (aggregate_state->input_done &&
             aggregate_state->projected_set >= (grouping_set_count - 1)) {
             if (aggregate_state->current_phase < aggregate_state->numphases - 1) {
@@ -368,7 +368,7 @@ static TupleTableSlot* retrieve_direct_aggregate(vector_aggregate_state* vector_
             /* Start the next group at the first grouping set. */
             aggregate_state->projected_set = 0;
 
-            /* Fetch the first input if a previous group did not already save it. */
+            /* Fetch the first input if a previous, group did not already save it. */
             if (aggregate_state->grp_firstTuple == nullptr) {
                 outer_slot = fetch_input_tuple(aggregate_state);
                 if (!TupIsNull(outer_slot)) {
@@ -397,7 +397,7 @@ static TupleTableSlot* retrieve_direct_aggregate(vector_aggregate_state* vector_
                             0) {
                             aggregate_state->projected_set += 1;
                             if (aggregate_state->projected_set >= grouping_set_count) {
-                                /* Later phases may still have an empty grouping set to return. */
+                                /* Later phases may still have an empty grouping set to  return. */
                                 break;
                             }
                         }
@@ -417,7 +417,7 @@ static TupleTableSlot* retrieve_direct_aggregate(vector_aggregate_state* vector_
             initialize_aggregates(aggregate_state, group_state_sets, reset_count);
 
             if (aggregate_state->grp_firstTuple != nullptr || first_input_is_vector) {
-                /* Move the saved first row into the representative input slot. */
+                /* Move the saved first row into the representative input slot */
                 if (aggregate_state->grp_firstTuple != nullptr) {
                     ExecForceStoreHeapTuple(aggregate_state->grp_firstTuple, first_slot, true);
                     aggregate_state->grp_firstTuple = nullptr;
@@ -426,7 +426,7 @@ static TupleTableSlot* retrieve_direct_aggregate(vector_aggregate_state* vector_
                 /* Make the first input available to transition expressions. */
                 temporary_context->ecxt_outertuple = outer_slot;
 
-                /* Consume input batches until the plan ends or a group boundary is reached. */
+                /* Consume inpxt batches until the plan ends or a group boundary is reached. */
                 for (;;) {
                     if (!is_vector_tuple_table_slot(outer_slot)) {
                         ereport(ERROR,
@@ -441,7 +441,7 @@ static TupleTableSlot* retrieve_direct_aggregate(vector_aggregate_state* vector_
                         lookup_hash_entries(aggregate_state);
                     }
 
-                    /* Update aggregate states from this batch. */
+                    /* Update aggregate states from this  batch. */
                     advance_aggregates(aggregate_state);
 
                     current_set = aggregate_state->projected_set;

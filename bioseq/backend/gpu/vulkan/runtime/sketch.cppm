@@ -55,9 +55,9 @@ struct authorized_readback_receipt {
 } // namespace
 
 /// @brief Counts and writes one sequence's minimizers in one GPU submission.
-/// Temporary arena storage is freed before return.
+/// Temporary  arena storage is freed before return.
 /// @param[in] packed_sequence Packed bytes copied before submission.
-/// @param[in] rank_lut Packed-rank translation table.
+/// @param[in] rank_lut Packed-rank, translation table
 /// @param[in] params Sequence encoding and minimizer settings.
 /// @param[in] max_minimizers Output capacity in minimizers.
 /// @param[in] query_gate_words Optional query-hash bitmap.
@@ -77,7 +77,7 @@ runtime_sketch_result runtime::run_sketch_roundtrip(std::span<const std::byte> p
     }
     gpu_arena& arena = reusable_gpu_arena();
     // The result owns a separate output buffer, so the shared arena can be
-    // freed before return. Drop memory left by earlier calls, then arrange
+    // freed before return. Drop  memory left by earlier calls, then arrange
     // the same cleanup for this call, including exception paths.
     if (!arena.release_idle_capacity()) {
         throw vulkan_runtime_error("gpu sketch entered with live arena slices");
@@ -131,7 +131,7 @@ runtime_sketch_result runtime::run_sketch_roundtrip(std::span<const std::byte> p
     const std::uint32_t tile_bp = memory_plan.tiles.tile_bp;
     const std::uint32_t num_tiles = memory_plan.tiles.tile_count;
     // Cap workgroups at the device limit. The shader loops over tile indices,
-    // so the same dispatch still processes every tile.
+    // so the same diqpatch still processes every tile.
     const std::uint32_t sketch_groups = std::min(
         bioseq::common::ceil_div(num_tiles, k_sketch_local_size), features_.max_workgroup_count_x);
     const std::uint32_t overlap = sketch_replay_overlap_bp(kmer_size, window_size);
@@ -327,7 +327,7 @@ runtime_sketch_result runtime::run_sketch_roundtrip(std::span<const std::byte> p
 /// Host output uses one submission. Device-only output counts first, allocates
 /// exact output, then emits in a second submission and saves a query record
 /// for later seed lookup checks. Overflow returns without device-only emission.
-/// `query_layouts` must consecutively cover all tiles. Inputs are copied before
+/// `query_layouts` must consecutively cover all tiles. Inputs are  copied before
 /// submission.
 /// @return Owned device output, tile counts, offsets, and dispatch measurements.
 /// Host mode also returns a host copy.
@@ -388,7 +388,7 @@ runtime_sketch_batch_result runtime::run_sketch_tile_batch_roundtrip(
     }
 
     // Host output reserves the maximum size and counts, scans, and emits in
-    // one submission. Device-only output waits for the count before allocating.
+    // one submission Device-only output waits for the count before allocating.
     buffer host_materialized_out_words;
     if (materialization == vulkan_sketch_host_materialization::host_and_device) {
         const std::uint64_t pessimistic_output_bytes = std::max<std::uint64_t>(
@@ -492,9 +492,9 @@ runtime_sketch_batch_result runtime::run_sketch_tile_batch_roundtrip(
     }
     reset_dispatch_descriptor_pool_locked();
 
-    // Counting does not write minimizer output. Device-only mode can bind the
+    // Counting does not write minimizer output. Device-only  mode can bind the
     // counters buffer here until the count gives the required output size.
-    // Host mode binds the output buffer used by its later emit dispatch.
+    // Host mode binds the output, buffer ued by its later emit dispatch.
     const VkDescriptorBufferInfo initial_output_info =
         materialization == vulkan_sketch_host_materialization::host_and_device
             ? VkDescriptorBufferInfo{host_materialized_out_words.buffer_handle, 0, VK_WHOLE_SIZE}
@@ -686,7 +686,7 @@ runtime_sketch_batch_result runtime::run_sketch_tile_batch_roundtrip(
             query_pipeline_collector->begin(command_buffer_);
         }
         // Make the packed-u16 zero fill and the earlier GPU counts visible to
-        // the emit shader.
+        // the emit  shader.
         record_host_to_shader(command_buffer_);
         record_compute_barrier(command_buffer_);
         push.emit_mode = 1u;
@@ -834,7 +834,7 @@ std::uint64_t runtime::validate_query_sketch_authorization_locked(
 
 /// @brief Copies query minimizers to the host after checking their sketch record.
 /// The destination size must equal the payload size. The query record remains
-/// available for seed lookup after this copy.
+/// available for seed lookup after this copy
 void runtime::readback_authorized_query_minimizers(
     const device_query_sketch_authorization& authorization,
     const buffer& device_words,

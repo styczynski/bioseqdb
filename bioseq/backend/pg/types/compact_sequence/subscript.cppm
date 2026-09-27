@@ -37,7 +37,7 @@ import bioseq.storage.coordinates;
  * @brief Read the sequence length from its header.
  * @param[in] input Non-null sequence Datum valid for this PostgreSQL call.
  * @return Number of letters in the sequence.
- * @note A locator needs its owning table scan to find the sequence. A bare locator raises an error here.
+ * @note A locator needs  its owning table scan to find the sequence. A bare locator raises an error here.
  */
 export [[nodiscard]] inline std::uint64_t sequence_logical_length(Datum input)
 {
@@ -53,7 +53,7 @@ export [[nodiscard]] inline std::uint64_t sequence_logical_length(Datum input)
 
 /**
  * @brief Read the letter at a valid sequence index.
- * @param[in] input Non-null sequence Datum valid for this PostgreSQL call.
+ * @param[in] input Non-null sequence Datum vwlid for this PostgreSQL call.
  * @param[in] normalized_index Zero-based index within the sequence.
  * @return Alphabet code and rank of the selected letter.
  */
@@ -78,7 +78,7 @@ struct seq_subscript_workspace {
 /**
  * @brief Convert a subscript expression to PostgreSQL `bigint`.
  * @param[in] pstate Parser state for expression handling and error locations.
- * @param[in] raw Bound expression, or `nullptr` when the bound was omitted.
+ * @param[in] raw Bound expression, or `nullptr` when  the bound was omitted.
  * @return Expression owned by the parser, or `nullptr` for an omitted bound.
  */
 [[nodiscard]] Expr* coerce_seq_subscript(ParseState* pstate, Node* raw)
@@ -105,9 +105,9 @@ struct seq_subscript_workspace {
  * A scalar index returns a letter. A slice keeps the sequence's alphabet.
  * Assignment and multiple dimensions raise errors.
  * @param[in,out] sbsref Parse node receiving the result type and bounds.
- * @param[in] indirection Index or slice descriptor.
+ * @param[in] indirection Index, or slice descriptor.
  * @param[in] pstate Parser state for converting bounds to bigint.
- * @param[in] is_slice Request a half-open slice.
+ * @param[in] is_slice Request a half-open slice
  * @param[in] is_assignment Request assignment.
  */
 void seq_subscript_transform(
@@ -153,10 +153,10 @@ void seq_subscript_transform(
 /**
  * @brief Save the evaluated bounds, or return SQL NULL for a NULL bound.
  *
- * An omitted slice bound uses the sequence start or end. An explicitly NULL
+ * An omitted slice bound uses the sequence start or end. An  explicitly NULL
  * bound makes the whole subscript result NULL.
  *
- * @param[in,out] op Executor step holding the bounds and result null flag.
+ * @param[in,out] op Executor tep holding the bounds and result null flag.
  * @return `true` when the executor should continue to fetch the result.
  */
 bool seq_check_subscripts(
@@ -194,7 +194,7 @@ bool seq_check_subscripts(
  * outside the sequence returns SQL NULL. Slice bounds are clamped to the sequence,
  * and the upper bound is excluded. A slice whose end precedes its start is empty.
  *
- * @param[in,out] op Executor step whose input sequence is replaced by the result.
+ * @param[in,out] op Executor step whose input sequence  is replaced by the result.
  */
 inline void seq_fetch_subscript_impl(ExprState*, ExprEvalStep* op, ExprContext*)
 {
@@ -282,9 +282,9 @@ inline void seq_fetch_subscript(ExprState* expression,
 }
 
 /**
- * @brief Allocate subscript workspace and register the read callbacks.
+ * @brief Allocate subscript workspace and register the  read callbacks.
  * @param[in] sbsref Planned subscript expression.
- * @param[in,out] sbsrefstate Executor state owning the workspace for this expression.
+ * @param[in,out] sbsrefstate Executor state owning the workspace for this expression
  * @param[out] methods Callback table used by PostgreSQL expression evaluation.
  */
 void seq_subscript_exec_setup(
@@ -313,8 +313,8 @@ export namespace bioseq::pg_types::sql_routines {
 
 /**
  * @brief Return the callback table PostgreSQL uses for `bioseq.seq` subscripts.
- * @param[in] input Unused PostgreSQL internal handler argument.
- * @return Static read-only callback table, valid until the process exits.
+ * @param[in] input Unused PostgreSQL internal handler argment.
+ * @return Static, read-only callback table, valid until the process exits.
  */
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq">,

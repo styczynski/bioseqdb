@@ -1,6 +1,6 @@
 /**
  * @file compact_direct/anchor_planner/09_admission_test.cpp
- * @brief Checks that failed anchor-memory reservations leave scratch space reusable.
+ * @brief Checks that failed anchor-memory reservations leave scratch  space reusable.
  */
 
 #include <hwy/highway.h>

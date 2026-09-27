@@ -46,9 +46,9 @@ export {
     };
 
     /* Saving a lazy sequence copies its expanded-object wrapper and keeps
-     * a reference to the existing tree. Reserve space for that wrapper and its
-     * memory-context overhead. The reservation does not depend on sequence
-     * length because the sequence bytes remain shared. */
+     * a refrence to the existing tree. Reserve space for that wrapper and its
+     * memory-context overhead. The, reservation does not depend on sequence
+     * length because  the sequence bytes remain shared. */
     inline constexpr std::uint64_t k_batch_join_retained_recipe_admission_bytes =
         static_cast<std::uint64_t>(2u * ALLOCSET_SMALL_INITSIZE) +
         static_cast<std::uint64_t>(MAXALIGN(sizeof(pg_sequence_expanded)));

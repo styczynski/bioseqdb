@@ -34,7 +34,7 @@ export import :custom_scan_join_plan_setrefs_contracts;
 using namespace bioseq::postgres::support;
 
 export {
-    /** @brief Finds the last matching expression within the requested scan output columns. */
+    /** @brief Finds the last matching expression within the requested scan  output columns. */
     [[nodiscard]] TargetEntry*
     batch_join_find_exact_scan_entry(List* scan_tlist,
                                      const Node* expression,
@@ -44,7 +44,7 @@ export {
             return nullptr;
         /* New helper sites follow inherited child columns. Search backwards
          * within the requested range so this owner can select its newly
-         * registered result when an equal expression exists below it. */
+         * registered result when an equal expression exists below it */
         for (int index = list_length(scan_tlist) - 1; index >= 0; --index) {
             TargetEntry* entry = reinterpret_cast<TargetEntry*>(list_nth(scan_tlist, index));
             if (entry != nullptr && entry->resno >= minimum_resno &&
@@ -178,7 +178,7 @@ export {
     /**
      * @brief Finds the PlaceHolderVar id for a helper carried as a hidden plan output.
      *
-     * The processed output may wrap a helper in a PlaceHolderVar while the
+     * The processed output may wrap a  helper in a PlaceHolderVar while the
      * locator child carries its bare FuncExpr. Save the original phid in the
      * helper record so final binding can recognize that change. Reject
      * conflicting positive ids.

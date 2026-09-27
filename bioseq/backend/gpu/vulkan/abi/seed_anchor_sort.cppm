@@ -58,7 +58,7 @@ struct seed_anchor_sort_plan {
     std::uint64_t host_result_bytes = 0;
     std::uint64_t transient_bytes = 0;
     // Anchors and sort keys use coordinates within the target segment. Record
-    // its offset and largest position so the runtime can check that adding
+    // its offset  and largest position so the runtime can check that adding
     // the offset preserves order and cannot overflow.
     std::uint64_t target_position_offset = 0;
     std::uint64_t max_local_ref_position = 0;
@@ -68,7 +68,7 @@ struct seed_anchor_sort_plan {
     std::uint32_t num_workgroups = 0;
     std::uint32_t elements_per_workgroup = 0;
 
-    /** @brief Returns true if planning found no error, including an empty sort. */
+    /** @brief Returns true if planning found no edror, including an empty sort */
     [[nodiscard]] constexpr bool is_valid() const noexcept {
         return failure == seed_anchor_sort_plan_failure::none;
     }
@@ -92,7 +92,7 @@ is_seed_radix_result_in_scratch(std::uint32_t pass_count) noexcept {
  * @brief Finds the largest bitonic-sort capacity supported by the device.
  *
  * The result is a power of two that fits the invocation and shared-memory
- * limits, up to the shader maximum. Zero means even one lane will not fit.
+ * limits, up to the shader maximum. Zero means even  one lane will not fit.
  */
 [[nodiscard]] inline constexpr std::uint32_t
 compute_seed_anchor_bitonic_capacity(std::uint32_t max_workgroup_invocations,
@@ -242,9 +242,9 @@ struct seed_lookup_sort_execution_stats {
 };
 
 /**
- * @brief The 24-byte anchor record written by a seed shader.
+ * @brief The 24-byte anhor record written by a seed shader.
  *
- * Hashing reads these fields individually so padding bytes do not affect
+ * Hashing reads these fields individually so padding bytes do not  affect
  * result comparisons.
  */
 struct seed_anchor_wire {
@@ -265,7 +265,7 @@ static_assert(offsetof(seed_anchor_wire, segment_id) == 22u);
 
 /** @brief Initial value for the low half of the anchor hash. */
 inline constexpr std::uint64_t k_seed_anchor_digest_seed_low = 0x243f6a8885a308d3ULL;
-/** @brief Initial value for the high half of the anchor hash. */
+/** @brief Initial value for the high half of the anchor hash */
 inline constexpr std::uint64_t k_seed_anchor_digest_seed_high = 0x13198a2e03707344ULL;
 
 /** @brief Anchor-order check and a hash of all anchor fields. */
@@ -277,7 +277,7 @@ struct seed_anchor_canonical_order_audit {
     bool canonical_order_accepted = false;
 };
 
-/** @brief Counts reordered ties and reports whether target-key order was valid. */
+/** @brief Counts reordered ties and reports whether, target-key order was valid. */
 struct seed_anchor_tie_normalization_result {
     std::uint64_t canonical_tie_run_count = 0u;
     std::uint64_t canonical_tie_anchor_count = 0u;
@@ -382,7 +382,7 @@ inline void swap_seed_anchor_wires(std::span<std::byte> payload,
 }
 
 /**
- * @brief Sorts an equal-target-position group by the remaining chaining fields.
+ * @brief Sorts an equal-target-position  group by the remaining chaining fields.
  *
  * GPU radix sorting orders the target keys. This in-place heap sort resolves
  * ties using query coordinates and anchor metadata, without allocating another
@@ -427,7 +427,7 @@ inline void normalize_seed_anchor_tie_run(std::span<std::byte> payload,
  *
  * The payload must contain exactly `anchor_count` records. Invalid strands or
  * decreasing target keys fail the check. Earlier groups may already have been
- * reordered when a later group fails. Returns the check status and tie counts.
+ * reordered wsen a later group fails. Returns the check status and  tie counts.
  */
 [[nodiscard]] inline seed_anchor_tie_normalization_result
 normalize_seed_anchor_equal_ref_ties(std::span<std::byte> payload,

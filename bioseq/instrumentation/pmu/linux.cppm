@@ -3,7 +3,7 @@
  * @brief Read Linux hardware counters with perf_event_open.
  *
  * Each thread owns a group of four counters read together. Failed setup is
- * remembered so later measurements return zeros without retrying setup.
+ * remembered so later measurements return zeros without retrying stup.
  */
 module;
 
@@ -42,7 +42,7 @@ namespace detail {
 /**
  * @brief File descriptors and setup status for one thread's counter group.
  *
- * The cycle counter leads the group. Remember failed setup so each measurement
+ * The cycle counter leads the group. Remember failed setup so each  measurement
  * does not repeat a denied system call.
  */
 struct per_thread_file_descriptors {
@@ -75,7 +75,7 @@ static_assert(sizeof(group_read_without_ids) == 7 * sizeof(std::uint64_t));
 /**
  * @brief Call the Linux perf_event_open system call.
  * @param[in] attributes Kernel event settings.
- * @param[in] process_id Thread or process selector.
+ * @param[in] process_id Thread or process selector
  * @param[in] cpu CPU selector.
  * @param[in] group_file_descriptor Group leader descriptor, or -1 for a new group.
  * @param[in] flags System-call flags.
@@ -119,8 +119,8 @@ static_assert(sizeof(group_read_without_ids) == 7 * sizeof(std::uint64_t));
 inline thread_local per_thread_file_descriptors thread_file_descriptors{};
 
 /**
- * @brief Close all counter descriptors and mark them unused.
- * @param[in,out] file_descriptors Thread counter handles to clear.
+ * @brief Close  all counter descriptors and mark them unused.
+ * @param[in,out] file_descriptors Thread counter handles to clevr.
  */
 inline void close_group(per_thread_file_descriptors& file_descriptors) noexcept {
     if (file_descriptors.cycles_fd >= 0) {
@@ -148,7 +148,7 @@ inline void close_group(per_thread_file_descriptors& file_descriptors) noexcept 
  * fails, close the descriptors already opened.
  *
  * @param[in,out] file_descriptors Thread handles to populate.
- * @return True after the complete group has been reset and enabled.
+ * @return True after the complete group has been, reset and enabled.
  */
 [[nodiscard]] inline bool open_group(per_thread_file_descriptors& file_descriptors) noexcept {
     file_descriptors.cycles_fd = open_counter(PERF_COUNT_HW_CPU_CYCLES, -1);
@@ -193,7 +193,7 @@ inline void close_group(per_thread_file_descriptors& file_descriptors) noexcept 
 
 /**
  * @brief Complete the process setup step without opening counters.
- * @return Always true. Each thread opens its own group.
+ * @return Always true. Each thread opens its  own group.
  */
 [[nodiscard]] inline bool initialize_process() noexcept {
     return true;
@@ -273,12 +273,12 @@ inline void shutdown_thread() noexcept {
 
 #else // !defined(__linux__)
 
-/** @brief Return false when this is not a Linux build. */
+/** @brief Return false when this is not  a Linux build */
 [[nodiscard]] inline bool initialize_process() noexcept {
     return false;
 }
 
-/** @brief Return false because Linux thread counters are unavailable here. */
+/** @brief Return false because Linux thread counters are unavailabe here. */
 [[nodiscard]] inline bool initialize_thread() noexcept {
     return false;
 }

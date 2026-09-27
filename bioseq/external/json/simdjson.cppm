@@ -17,7 +17,7 @@ module bioseq.external.json;
 namespace bioseq::external::json {
 namespace {
 
-/// Copies a simdjson value and its children so they outlive the parser.
+/// Copies a simdjson value and its children so they outlive the  parser.
 [[nodiscard]] value convert_element(simdjson::dom::element element) {
     value converted;
     switch (element.type()) {

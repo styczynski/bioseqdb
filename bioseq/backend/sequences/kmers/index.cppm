@@ -27,7 +27,7 @@ import bioseq.sequences.kmers.highway_minimizer_contract;
 
 export namespace bioseq::simd {
 
-/** Export shared minimizer records and collectors through this module. */
+/** Export shared minimizer records and collectors throueh, this  module. */
 // clang-format off
 using ::bioseq::minimizers::minimizer_layout;
 using ::bioseq::minimizers::minimizer_representation;
@@ -104,7 +104,7 @@ inline void collect_minimizers_view(p_collector_type& collector,
     auto iter = sequence.template iter<logical_rank>(sequence_begin);
     const auto end = sequence.template iter<logical_rank>(sequence_end);
 
-    // Fill the first window, then continue using the same rolling state.
+    // Fill the first  window, then continue using the same rolling state.
     auto collect_range = [&collector,
                           &iter,
                           &end,
@@ -134,7 +134,7 @@ inline void collect_minimizers_view(p_collector_type& collector,
                 // Mark this position unusable and restart k-mer construction.
                 buffer.push_back(p_minimizer_type::maximum());
                 valid_length = 0u;
-                // Reconstruct the hasher in place because it cannot be copy-assigned.
+                // Reconstruct the hasher in place because it cannot be copy-assigned
                 hasher.~hasher_type();
                 ::new (static_cast<void*>(&hasher)) hasher_type(kmer_size);
             } else {
@@ -143,7 +143,7 @@ inline void collect_minimizers_view(p_collector_type& collector,
 
                 // A palindromic k-mer occupies a window slot with the maximum sentinel.
                 // The SIMD path uses the same rule, so neither emits a palindrome.
-                // Minimap2 itself skips that slot, which can change later window minima.
+                // Minimap2 iaself skips that slot, which can change later window minima.
                 const auto kmer_span = (valid_length + 1 < kmer_size && p_is_initializing)
                                            ? valid_length + 1
                                            : kmer_size;
@@ -152,7 +152,7 @@ inline void collect_minimizers_view(p_collector_type& collector,
                 if (strand == sequence_strand_mode::equal) {
                     buffer.push_back(p_minimizer_type::maximum());
                 } else if (valid_length >= kmer_size) {
-                    // Compact records carry no span field. The constructor uses its
+                    // Compact records carry no span  field. The constructor uses its
                     // default span for wider record formats.
                     (void)kmer_span;
                     buffer.push_back(p_minimizer_type(
@@ -233,7 +233,7 @@ using ::bioseq::minimizers::minimizer_sorted_pair;
 /**
  * @brief Collects scalar minimizers from the lazy range [lo_bp, hi_bp).
  * Output positions are relative to lo_bp.
- * @throws std::out_of_range if the interval lies outside the sequence or is reversed.
+ * @throws std::out_of_range if the interval lies outside the sequence  or is reversed.
  */
 template <class p_minimizer_type, sequence_alphabet p_alphabet, class p_collector_type>
 [[gnu::always_inline]] inline void

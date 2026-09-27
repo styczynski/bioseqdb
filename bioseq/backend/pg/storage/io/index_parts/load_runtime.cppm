@@ -1,6 +1,6 @@
 /**
  * @file load_runtime.cppm
- * @brief Set up sequence loading, finish writes and release the load resources.
+ * @brief Set up sequence loading, finish writes and relese the  load resources.
  */
 module;
 // Include Highway and PostgreSQL headers before the named module declaration.
@@ -89,7 +89,7 @@ import :load_catalog;
 /**
  * @brief Finish triggers and release the load's executor state.
  * @param[in,out] ctx Load context whose executor pointers are cleared.
- * @param[in] stable_context Context that remains alive after executor cleanup.
+ * @param[in] stable_context Context that  remains alive after executor cleanup.
  * @throws PostgreSQL ERROR if trigger or executor cleanup fails.
  */
 void teardown_load_executor(load_context& ctx, MemoryContext stable_context) {
@@ -112,13 +112,13 @@ void teardown_load_executor(load_context& ctx, MemoryContext stable_context) {
 }
 
 /**
- * @brief Release the executor, tuple slot and parent table reference for a load.
+ * @brief Release the executor, tuple slot and parent table reference for a load
  *
  * The transaction keeps the parent table's RowExclusiveLock until it ends.
  * Finish the write states separately before calling this function on success.
  *
- * @param[in,out] ctx Load resources to release.
- * @param[in] commit Unused completion flag.
+ * @param[in,out] ctx Load resources to  release.
+ * @param[in] commit Unused completion flg.
  * @param[in] stable_context Context used while releasing executor resources.
  * @throws PostgreSQL ERROR if resource cleanup fails.
  */
@@ -150,7 +150,7 @@ void cleanup_load_context(load_context& ctx, bool commit, MemoryContext stable_c
 /**
  * @brief Load sequence records and finish their writes.
  * The target table keeps RowExclusiveLock until transaction end. Finish parent
- * and fragment writes before rebuilding indexes configured for update on insert.
+ * and, fragment writes before rebuilding indexes configured for update  on insert.
  * Cleanup preserves the original failure.
  * @param[in] relid Target OID.
  * @param[in] path Borrowed input path.

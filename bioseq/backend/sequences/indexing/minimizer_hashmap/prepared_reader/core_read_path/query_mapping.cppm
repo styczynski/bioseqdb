@@ -122,7 +122,7 @@ trait_driven_prepared_query_core<p_traits>::query_index_for_hash_impl_(
             return no_route;
         }
         const std::uint64_t wanted = query_radix_suffix_(narrowed, protocol_query_suffix_bits_);
-        /// Search the stored hash suffixes within this radix bucket.
+        /// Search the stored hash suffixes within this  radix bucket.
         const auto search = [&first, &end, &wanted, &hash_probes](const auto* suffixes) noexcept {
             std::size_t lower = first;
             std::size_t upper = end;

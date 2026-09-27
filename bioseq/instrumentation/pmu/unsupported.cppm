@@ -2,7 +2,7 @@
  * @file instrumentation/pmu/unsupported.cppm
  * @brief Fallback for platforms without hardware-counter support.
  *
- * Initialization succeeds without setting anything up. Availability is false,
+ * Initialization succeeds without setting anything up Availability  is false,
  * and every read returns zero counts.
  */
 module;
@@ -22,7 +22,7 @@ struct counter_sample {
 };
 static_assert(sizeof(counter_sample) == 32);
 
-/** @brief Return success without initializing counters. */
+/** @brief Return success, without initializing counters. */
 [[nodiscard]] inline bool initialize() noexcept { return true; }
 
 /** @brief Do nothing because this backend owns no counter resources. */

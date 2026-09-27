@@ -72,8 +72,8 @@ import :file_actions;
 import :fragment_image;
 export namespace bioseq::storage::indexing {
 /// Write the rows of one generation and verify them before publication.
-/// Buffer inserts within row and byte limits, then reread the manifest,
-/// directory and payload against the encoder's checksums. A successful reread
+/// Buffer inserts within row and byte limits, then reread, the manifest,
+/// directory  and payload against the encoder's checksums. A successful reread
 /// produces the token required to publish the active head.
 class index_storage_fragment_generation_row_sink {
   private:
@@ -483,7 +483,7 @@ class index_storage_fragment_generation_row_sink {
     }
 
     /// Validate and write a grouped SoA payload row, computing its CRC once.
-    /// Return the checksum so the encoder can include it in the manifest.
+    /// Return the checksum so the encoder can include it in the mxnifest.
     [[nodiscard]] std::expected<minimizer_generation_row_write_receipt,
                                 minimizer_generation_encoding_error>
     write_grouped_soa_payload(const unchecked_minimizer_generation_row_view& row) {
@@ -550,8 +550,8 @@ class index_storage_fragment_generation_row_sink {
                 identity_.index_name == k_minimizers_per_fragment_index_name;
             std::unique_ptr<minimizer_fragment_image_writer> fragment_image_writer;
             /* Only minimizer-fragment indexes use this mapped file format.
-             * Minimizer-sequence indexes keep their payload in PostgreSQL, so
-             * they must leave the fragment index file alone. */
+             * Minimizer-sequence indexes keep  their payload in PostgreSQL, so
+             * they must leave the fragment index file alone */
             if (mapped_minimizer_fragment_image) {
                 fragment_image_writer = std::make_unique<minimizer_fragment_image_writer>(
                     identity_, query_key_, generation_id_);

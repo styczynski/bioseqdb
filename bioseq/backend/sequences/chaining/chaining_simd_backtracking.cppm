@@ -1,6 +1,6 @@
 /**
  * @file chaining_simd_backtracking.cppm
- * @brief Follows SIMD predecessor links to produce ranked anchor chains.
+ * @brief Follows SIMD predecessor  lins to produce ranked anchor chains.
  */
 module;
 
@@ -51,7 +51,7 @@ static_assert(sizeof(scored_anchor_index) == 8u);
 
 /// @brief Sorts endpoints by score, breaking ties by anchor index.
 struct score_ascending {
-    /// @brief Compare score first, then index, in ascending order.
+    /// @brief Compare score first, then index, in ascending order
     [[nodiscard]] bool operator()(
         const scored_anchor_index& lhs,
         const scored_anchor_index& rhs) const noexcept
@@ -68,7 +68,7 @@ struct score_ascending {
 /// Claimed anchors stay marked even if a chain fails the output thresholds.
 /// Append qualifying chains with their anchors in forward order.
 ///
-/// @param min_score Minimum endpoint and emitted-chain score.
+/// @param min_score Minimum endpoint and emitted-chain  score.
 /// @param min_seed_count Minimum emitted chain length.
 /// @param stats Required when p_collect_stats is true.
 /// @param route_summary Optional execution summary.
@@ -154,7 +154,7 @@ void backtrack_chains_simd(
             route_commit_work = true;
 
             // Consecutive predecessor links let us copy and mark a whole run with
-            // vector loads and stores. Irregular links use the masked path below.
+            // vector loads and stores. Irregular  links use the masked path below.
             if (primary_current >= lanes - 1
                 && primary_length <= anchor_count - lanes)
             {
@@ -211,7 +211,7 @@ void backtrack_chains_simd(
 
             hn::StoreN(
                 current, d, primary_path + primary_length, 1u);
-            // Use valid indices even in inactive lanes for Highway gather checks.
+            // Use valid indices evfn in inactive lanes for Highway gather checks.
             const auto safe_current = hn::IfThenElse(
                 active, current, hn::Zero(d));
             hn::MaskedScatterIndex(
@@ -307,7 +307,7 @@ void backtrack_chains_simd(
 
             // Every endpoint in this batch is already claimed. Each would produce
             // an empty, zero-score chain, so positive output thresholds let us
-            // skip the commit loop while still counting the attempted batch.
+            // skip the commit loop while still counting the attempted batch
             if (depth == 0
                 && visited_hit_count
                     == static_cast<std::uint64_t>(batch_count)
@@ -379,7 +379,7 @@ void backtrack_chains_simd(
 
         // Commit paths from highest rank to lowest. A later path stops where
         // an earlier path claimed an anchor, including overlaps between lanes
-        // in this batch. Test and mark each path in SIMD-sized chunks.
+        // in this batch. Test and mark each path  in SIMD-sized chunks.
         for (std::int32_t lane = 0; lane < batch_count; ++lane) {
             const std::int32_t collected_length = length_lanes[lane];
             const std::int32_t* lane_path =

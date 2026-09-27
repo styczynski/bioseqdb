@@ -1,6 +1,6 @@
 /**
  * @file external/uniprot/operations.cppm
- * @brief UniProt endpoints used for client generation.
+ * @brief UniProt endpoints used for client generation
  */
 module;
 

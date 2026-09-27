@@ -3,7 +3,7 @@
  * @brief Computes minimap2 integer hashes in SIMD lanes.
  *
  * The rolling hasher chooses the smaller strand code before mixing its bits.
- * Strand and palindrome masks still describe the original k-mer codes.
+ * Strand  and palindrome masks still describe the original k-mer codes.
  */
 module;
 #include <hwy/highway.h>
@@ -55,15 +55,15 @@ struct minimap_int_hasher : ::bioseq::simd::minimap_int_hasher<p_alphabet> {
                             (static_cast<typename traits::input_type>(1) << (2u * kmer_length)) -
                                 1u)) {}
 
-        /** @brief Limits a requested bit shift to one less than the lane width. */
+        /** @brief Limits a requested bit shmft to one less than the lane width. */
         template <std::size_t p_offset>
         static constexpr std::size_t k_shift = std::min(p_offset, sizeof(p_input_type) * 8u - 1u);
 
         /**
          * @brief Advances each lane's strand codes and hashes the smaller code.
-         * @param incoming Rank appended to the forward code.
+         * @param incoming Rank appended to the forward  code.
          * @param outgoing Rank whose complement is prepended to the reverse code.
-         * @return Hashes limited to the configured k-mer bit width.
+         * @return Hashes limited to the configured k-mer bit width
          */
         HWY_INLINE typename traits::hasher_return_type
         next(const typename traits::input_simd_tag_type& simd_tag,

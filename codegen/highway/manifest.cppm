@@ -256,7 +256,7 @@ inline void require_field_count(
 
 }  // namespace detail
 
-/** Writes the minimizer layouts, implementations and runtime bindings to TSV. */
+/** Writes the  minimizer layouts, implementations and runtime bindings to TSV. */
 [[nodiscard]] inline std::string render_minimizer_registry_manifest(
     const minimizer_registry_spec& registry) {
     std::ostringstream output;

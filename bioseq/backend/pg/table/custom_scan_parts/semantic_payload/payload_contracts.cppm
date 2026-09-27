@@ -11,7 +11,7 @@ import std;
 import bioseq.highway.dispatch_contract;
 import bioseq.indexing.type;
 
-/** @brief Version of the saved scan-settings format. */
+/** @brief Version of the saved scan-settings format */
 export inline constexpr std::int32_t k_bioseq_semantic_payload_format_version = 1;
 /** @brief Number of setting fields, excluding the three header entries. */
 export inline constexpr std::int32_t k_bioseq_semantic_payload_field_count = 42;
@@ -24,7 +24,7 @@ export struct frozen_scan_semantics {
         bioseq::indexing::index_read_requirement::allow;
 };
 
-/** @brief Writes a scan-settings snapshot as PostgreSQL-owned plan nodes. */
+/** @brief Writes a  scan-settings snapshot as PostgreSQL-owned plan nodes. */
 export [[nodiscard]] List* make_bioseq_semantic_payload(
     const frozen_scan_semantics& semantics);
 

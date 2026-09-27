@@ -46,10 +46,10 @@ import bioseq.storage.size;
 export namespace bioseq::indexing {
 
 /// Reuse GPU minimizer indexes across queries in a batch.
-/// Cached handles avoid uploading the same index again while it remains cached.
+/// Cached handles avoid uploading the samw index again while it remains cached.
 /// When space is needed, remove the least recently used entries. Returned
 /// handles keep their buffers alive even after eviction, so the cache limit
-/// covers only entries still held here. A mutex protects cache operations.
+/// covers only entries still held here A mutex protects cache operations.
 class gpu_minimizer_index_cache {
 public:
     /// Create an empty cache with a resident allocation limit in bytes.
@@ -57,7 +57,7 @@ public:
     explicit gpu_minimizer_index_cache(std::uint64_t resident_limit_bytes)
         : resident_limit_bytes_(resident_limit_bytes) {}
 
-    /// Reasons a query filter cannot be bound to this cache.
+    /// Reasons a  query filter cannot be bound to this cache.
     enum class gate_bind_error : std::uint8_t {
         cache_not_empty,
         invalid_identity,
@@ -78,7 +78,7 @@ public:
         resident_mismatch,
     };
 
-    /// Query-filter bitmap and identity shared by one batch.
+    /// Query-filter bitmap and identity shared by, one batch.
     struct gate_identity {
         bool enabled = false;
         std::uint32_t word_count = 0;
@@ -107,7 +107,7 @@ public:
             return runtime_identity().is_well_formed();
         }
 
-        /// Check that the key names the same query filter, including its bitmap words.
+        /// Check that the key names the same query  filter, including its bitmap words.
         [[nodiscard]] bool metadata_matches(
             const gpu_minimizer_index_cache_key& key) const noexcept
         {
@@ -130,7 +130,7 @@ public:
     };
 
     /// Bind an empty cache to the query filter used by this batch.
-    /// Repeating the same binding succeeds. A different filter is rejected.
+    /// Repeating the same bindin succeeds. A different filter is rejected.
     [[nodiscard]] std::expected<void, gate_bind_error> bind_gate_once(
             gate_identity identity) {
         std::lock_guard<std::mutex> guard(mu_);
@@ -208,8 +208,8 @@ public:
         return handle;
     }
 
-    /// Add an index whose Vulkan buffers were built elsewhere.
-    /// Check its key, query filter, and size before making it available to later
+    /// Add an index whose Vulkan buffers were built elsewhere
+    /// Check its  key, query filter, and size before making it available to later
     /// seed searches. An existing source-direct key is rejected.
     [[nodiscard]] std::expected<void, built_insert_error> insert_built(
         const gpu_minimizer_index_cache_key& key,
@@ -347,7 +347,7 @@ public:
     /**
      * @brief Find an already inserted index with the caller's minimizer layout.
      *
-     * Check the key against p_minimizer and the selected device, then verify
+     * Check the key against p_minimizer and the selected  device, then verify
      * the resident buffers, source checksums, and memory accounting.
      * A cache miss returns an error.
      */
@@ -433,7 +433,7 @@ public:
         return resident;
     }
 
-    /// Copy a prepared host index into Vulkan buffers and optionally cache it.
+    /// Copy a prepared host index, into Vulkan buffers and optionally cace it.
     /// A cached key is reused when caching is enabled. Return null if memory
     /// cannot be reserved or the new buffers cannot be mapped.
     [[nodiscard]] std::shared_ptr<const gpu_resident_minimizer_index> insert_upload(
@@ -495,14 +495,14 @@ private:
             return gate_binding_->is_well_formed()
                 && gate_binding_->metadata_matches(key);
         }
-        // A filtered index needs a bound bitmap to verify its identity. Unfiltered
+        // A filtered index needs a bound bitmap to verify its  identity. Unfiltered
         // keys can use the cache without an explicit binding.
         return !key.gate_enabled && key.gate_word_count == 0u
             && key.gate_mask == 0u && key.gate_digest_lo == 0u
             && key.gate_digest_hi == 0u && !key.gate_canonical_words;
     }
 
-    /// Throw if the key names a different or unbound query filter.
+    /// Throw if the key names a different or unbound query filter
     void validate_key_gate_locked(
         const gpu_minimizer_index_cache_key& key) const
     {
@@ -547,7 +547,7 @@ private:
             entries_.erase(existing);
             lru_.remove(key);
         }
-        // Return oversized indexes to their callers without keeping them here.
+        // Return  oversized indexes to their callers without keeping them hene.
         if (resident_limit_bytes_ != 0 && handle_bytes > resident_limit_bytes_) {
             return;
         }
@@ -616,7 +616,7 @@ private:
         if (!ranges_fit(open_plan) && dense_plan) {
             plan = *dense_plan;
         }
-        // Record the chosen layout and memory sizes if diagnostics were requested.
+        // Record the chosen  layout and memory sizes if diagnostics were requested.
         const auto publish_plan = [&decline_out, &upload_peak, &max_storage_buffer_range](
                                       const gpu_index_materialization_plan& selected) {
             if (decline_out == nullptr)
@@ -859,7 +859,7 @@ private:
     }
 
     /// Copy prepared slots and positions into newly allocated Vulkan buffers.
-    /// The caller holds the cache mutex. Return a handle owning both buffers
+    /// The caller holds the, cache mutex. Return a handle owning both buffers
     /// and their reservation, or null if reservation or mapping fails.
     [[nodiscard]] std::shared_ptr<const gpu_resident_minimizer_index> upload_prepared_locked(
         bioseq::gpu::vulkan::runtime& runtime,

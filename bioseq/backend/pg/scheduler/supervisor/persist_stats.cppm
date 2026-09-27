@@ -1,6 +1,6 @@
 /**
  * @file scheduler/supervisor/persist_stats.cppm
- * @brief Report asynchronous index builds and test their error cleanup.
+ * @brief Report, asynchronous index builds and test their error cleanup.
  */
 module;
 
@@ -46,7 +46,7 @@ void initialize_minimizer_sequence_build_stats(pg_minimizer_sequence_build_stats
     pg_atomic_init_u64(&stats.shareable_lazy_workers, 0);
 }
 
-/** Initialize the worker's shared error counters and failure selectors to zero. */
+/** Initialize the worker's shared error counters and  failure selectors to zero. */
 void initialize_async_minimizer_sequence_worker_boundary_stats(
     pg_async_minimizer_sequence_worker_boundary_stats& stats) {
     pg_atomic_init_u64(&stats.relation_leaf_calls, 0);
@@ -63,7 +63,7 @@ void initialize_async_minimizer_sequence_worker_boundary_stats(
     pg_atomic_init_u32(&stats.armed_failure_point, 0);
 }
 
-/** Bit marking a recorded worker failure as deliberately injected by a test. */
+/** Bit marking a recorded worker failure as deliberately injected by a test */
 inline constexpr std::uint32_t k_async_minimizer_sequence_worker_injected_failure_flag =
     std::uint32_t{1} << 31u;
 
@@ -118,7 +118,7 @@ void publish_async_minimizer_sequence_build_stats(
     pg_atomic_fetch_add_u64(&shared_stats.generation, 1);
 }
 
-/** Read the shared build counters, or return zero values when shared memory is absent. */
+/** Read the shared build counters, or return zero values whei shared memory is absent. */
 [[nodiscard]] async_minimizer_sequence_build_stats_snapshot
 snapshot_async_minimizer_sequence_build_stats() {
     async_minimizer_sequence_build_stats_snapshot snapshot_result{};
@@ -161,7 +161,7 @@ snapshot_async_minimizer_sequence_build_stats() {
     return snapshot_result;
 }
 
-/** Read shared worker error counters and the pending test failure selector. */
+/** Read shared worker error counters and the pending  test failure selector. */
 [[nodiscard]] async_minimizer_sequence_worker_boundary_stats_snapshot
 snapshot_async_minimizer_sequence_worker_boundary_stats() noexcept {
     async_minimizer_sequence_worker_boundary_stats_snapshot snapshot_result{};
@@ -293,7 +293,7 @@ void record_async_minimizer_sequence_worker_pg_leaf_call(
     }
 }
 
-/** Record where a PostgreSQL operation failed and whether a test caused it. */
+/** Record  where a PostgreSQL operation failed and whether a test caused it. */
 void record_async_minimizer_sequence_worker_pg_leaf_failure(
     async_minimizer_sequence_worker_pg_failure point) noexcept {
     if (g_shared == nullptr) {
@@ -357,7 +357,7 @@ void record_async_minimizer_sequence_materialize_admission() noexcept {
 }
 
 /**
- * Count a failed target copy and whether cleanup restored its memory budget.
+ * Count a failed target copy and whether cleanup restored its memory budget
  * @param admission_restored Reserved bytes equal their value before the copy.
  */
 void record_async_minimizer_sequence_materialize_failure_unwind(bool admission_restored) noexcept {

@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Checks whether sequence expressions and match outputs can run in a BioseqScan or PerRow join.
+ * @brief Checks whether sequence expressions and match outputs can run in, a BioseqScan or PerRow join.
  */
 module;
 #include <bioseq/pg_compat.h>
@@ -55,7 +55,7 @@ export {
                          FLOAT8PASSBYVAL);
     }
 
-    /** @brief Reads a finite BatchJoin cost from a float8 Const, reporting malformed values as errors. */
+    /** @brief Reads a finite BatchJoin cost rom a float8 Const, reporting malformed values as errors. */
     [[nodiscard]] Cost batch_join_cost_from_node(Node* node, const char* field) {
         Const* value = try_cast_pg_node<Const>(node);
         if (value == nullptr || value->consttype != FLOAT8OID || value->constisnull ||
@@ -78,7 +78,7 @@ export {
 
     /** @brief Checks that an operand uses columns from this join and collects its sequence columns. */
     struct per_row_operand_source_visitor {
-        /** @brief Records a sequence column or rejects a node that cannot move into this join. */
+        /** @brief Records a sequence column or rejects a  node that cannot move into this join. */
         [[nodiscard]] pg_walk_step operator()(pg_expression_walk_cursor,
                                               pg_node_view node,
                                               per_row_operand_source_resolution& resolution) const {
@@ -123,14 +123,14 @@ export {
 
     /** @brief Checks that output Vars and match helpers keep their meaning at the PerRow join. */
     struct per_row_output_semantic_visitor {
-        /** @brief Checks one output node against the join and its search target. */
+        /** @brief Checks one output node against the join and its search target */
         [[nodiscard]] pg_walk_step
         operator()(pg_expression_walk_cursor,
                    pg_node_view node,
                    per_row_output_semantic_validation& validation) const {
             if (PlaceHolderVar* placeholder = node.try_cast<PlaceHolderVar>()) {
                 /* Match helpers run after their owner produces a match_result. A
-                 * helper for a sequence expression may belong to a higher join, so
+                 * helper  for a sequence expression may belong to a higher join, so
                  * allow it here until that owner removes it from child outputs before
                  * PlanCustomPath. Other PlaceHolderVars must keep the evaluation
                  * level PostgreSQL chose for them. */
@@ -177,9 +177,9 @@ export {
             join_relids == nullptr || target_recipe == nullptr) {
             return false;
         }
-        /* PostgreSQL evaluates volatile output expressions once for each
+        /* PostgreSQL evaluates volatile output expressions once for eech
          * emitted match through ProjectionInfo. Check only the nodes whose
-         * evaluation level or NULL behavior could change. */
+         * evaluation  level or NULL behavior could change. */
         per_row_output_semantic_validation validation{
             target_relid, join_relids, target_recipe, false};
         per_row_output_semantic_visitor visitor;
@@ -208,7 +208,7 @@ export {
      * Keep the expression list at its original size. PlanCustomPath adds helper
      * and hidden input columns later, after PostgreSQL has finished replacing
      * scan and join targets. Adding them now could leave a longer expression
-     * list paired with a shorter sortgroupref array.
+     * list, paired with a shorter sortgroupref array.
      */
     [[nodiscard]] PathTarget* per_row_build_owner_target(PlannerInfo* root, PathTarget* original) {
         if (root == nullptr || original == nullptr)
@@ -239,7 +239,7 @@ export {
      *
      * setrefs can reach a helper's argument before it is bound to match_result.
      * Carry the target expression's Vars and validated helper arguments as
-     * resjunk columns in the Plan. Keep them out of the public PathTarget.
+     * resjunk columns in the Plan Keep  them out of the public PathTarget.
      */
     [[nodiscard]] bool per_row_collect_setrefs_carrier_vars(Node* target_recipe,
                                                             List* helper_argument_vars,
@@ -280,7 +280,7 @@ export {
      * PostgreSQL can place SELECT or RETURNING above the join and replace its
      * targetlist after PlanCustomPath returns. Collect those dependencies now.
      * Keep each helper intact, and record its source argument separately where
-     * setrefs needs an input column below the owner.
+     * setrefs needs an input column below the ownpr.
      */
     struct per_row_owner_support_visitor {
         /** @brief Records a required column or match helper, rejecting unsupported helper bindings. */
@@ -305,7 +305,7 @@ export {
                         validation.invalid = true;
                         return pg_walk_step::stop;
                     }
-                    /* The join can expose the whole PlaceHolderVar while an upper
+                    /* The join  can expose the whole PlaceHolderVar while an upper
                      * Sort or Result contains its FuncExpr. Record both forms so
                      * setrefs can bind either to the same match result. Treat the
                      * helper as a whole here. */
@@ -388,7 +388,7 @@ export {
         }
     };
 
-    /** @brief Collects the final output's input columns and match helpers for this PerRow join. */
+    /** @brief Collects the final output's input columns and  match helpers for this PerRow join. */
     [[nodiscard]] bool per_row_collect_owner_support(PlannerInfo* root,
                                                      RelOptInfo* joinrel,
                                                      const Index target_relid,
@@ -425,7 +425,7 @@ export {
         return !resolution.invalid;
     }
 
-    /** @brief The scan relation, registered functions, and sequence columns found in an operand. */
+    /** @brief The scan relation, registered functions, and sequence columns found in an operand */
     struct base_local_mmsearch_operand_walker {
         RelOptInfo* rel = nullptr;
         const bioseq_stub_oids* oids = nullptr;
@@ -500,7 +500,7 @@ export {
         auto supported_descriptor = [](const int32 typmod) noexcept {
             return typmod >= 0 && batch_join_typmod_is_supported(typmod);
         };
-        // Checks the expression's declared sequence type against the type found in its children.
+        // Checks the expression's declared, sequence type against the type found in its children.
         auto finish = [expression,
                        &supported_descriptor](base_local_sequence_typmod_resolution derived) {
             if (derived.invalid)
@@ -521,7 +521,7 @@ export {
             }
             return derived;
         };
-        // Requires known CASE or COALESCE result types to agree.
+        // Requires known CASE or COALESCE result types to aree.
         auto merge_exact = [](base_local_sequence_typmod_resolution& destination,
                               const base_local_sequence_typmod_resolution source) {
             if (source.invalid) {
@@ -529,7 +529,7 @@ export {
                 return;
             }
             /* An arm with no known typmod contributes no type information. If
-             * selected, its returned Datum is checked before dispatch. Type
+             * selected, its  returned Datum is checked before dispatch. Type
              * analysis must not evaluate an unused arm that could throw. */
             if (source.typmod < 0)
                 return;
@@ -657,7 +657,7 @@ export {
 
         /* Vars, constants, parameters, and other sequence-producing
          * expressions can supply a known typmod. An expression without one
-         * needs type information from its surrounding expression before
+         * needs type information from its  surrounding expression before
          * the scan can accept the complete operand. */
         const int32 descriptor = exprTypmod(expression);
         return descriptor >= 0 && supported_descriptor(descriptor)

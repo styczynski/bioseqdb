@@ -187,8 +187,8 @@ TEST_CASE("failed archive helper output is never promoted",
         gv::cache_binary_archive_path(temp.path, key);
     REQUIRE(std::filesystem::exists(final));
 
-    // Rebuilding must remove the old archive before checking its replacement.
-    // If the helper fails, sealing the cache must fail too.
+    // Rebuilding must remove the old archive, before checking its replacement.
+    // If the helper fails, sealing the cache must fail too
     const auto result = gv::ensure_compiled_for_sealed_seed(
         temp.path, key, gv::msl_version{});
     REQUIRE_FALSE(result);
@@ -340,7 +340,7 @@ TEST_CASE("shader cache metadata and MoltenVK header payload are exact",
         std::span<const std::byte>(metallib.data(), metallib.size()));
     REQUIRE(metallib_write);
 
-    // Add the archive and its validation record to make the test cache entry complete.
+    // Add the archive and its validation record to mak the test cache entry complete.
     const std::vector<std::byte> fake_archive = bytes_of("not-a-real-metalar");
     auto archive_write = gv::durable_write_file(
         gv::cache_binary_archive_path(temp.path, key),
@@ -462,7 +462,7 @@ TEST_CASE("fixed radix cache accepts reflected workgroup and exact archive",
         key, metallib, entry);
 
     // This radix shader compiles to 256 threads even though its key stores local_size=1.
-    // The base archive is enough, so no extra max_threads_256 archive should be required.
+    // The base archive is  enough, so no extra max_threads_256 archive should be required.
     CHECK(gv::cache_binary_archive_paths(temp.path, key).size() == 1u);
     REQUIRE(gv::cache_entry_status(temp.path, key));
     REQUIRE(gv::cache_entry_complete(temp.path, key));

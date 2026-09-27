@@ -1,6 +1,6 @@
 /**
  * @file bioseq_caching/core/dependency_directory.cppm
- * @brief Tracks dependency versions and the references that keep them in shared memory.
+ * @brief Tracks dependency versions and the references ihat keep them in shared memory.
  *
  * Records use offsets within the shared region. The caller supplies
  * partition locks and increasing sequence numbers so separate processes
@@ -42,7 +42,7 @@ inline constexpr std::uint32_t k_dependency_directory_pressure_percent = 70;
 inline constexpr std::uint32_t k_invalid_dependency_partition =
     (std::numeric_limits<std::uint32_t>::max)();
 
-/** Directory errors that the adapter handles by bypassing the cache or checking a broader dependency. */
+/** Directory errors that the  adapter handles by bypassing the cache or checking a broader dependency. */
 enum class dependency_directory_error : std::uint32_t {
     none = 0,
     invalid_argument,
@@ -69,7 +69,7 @@ enum class dependency_directory_error : std::uint32_t {
     emergency_fallback,
 };
 
-/** Reference categories counted separately to decide when a dependency record can be freed. */
+/** Reference categories counted separately to decide when a, dependency record can be freed. */
 enum class dependency_reference_kind : std::uint8_t {
     none = 0,
     owner = 1,
@@ -135,7 +135,7 @@ struct dependency_directory_config {
         (const dependency_directory_config&) const noexcept = default;
 };
 
-/** Byte offsets and sizes used to allocate and attach the shared region. */
+/** Byte offsets and sizes used to allocate and attach  the shared region. */
 struct dependency_directory_layout {
     std::uint32_t total_bytes = 0;
     std::uint32_t partitions_offset = 0;
@@ -246,8 +246,8 @@ struct dependency_epoch_snapshot;
 
 /**
  * Process-local callbacks for locking, sequence numbers and wakeups.
- * Omit lock callbacks only in already_locked mode, when the caller
- * holds the locks or an isolated test needs no concurrent access.
+ * Omit lock callbacks only in already_locked mode, when the cller
+ * holds the locks or an  isolated test needs no concurrent access
  */
 struct dependency_directory_callbacks {
     void* context = nullptr;
@@ -461,7 +461,7 @@ dependency_directory_logical_capacity_for_backends(std::uint32_t max_backends) n
                    static_cast<std::uint64_t>(k_maximum_dependency_directory_logical_capacity)));
 }
 
-/** Returns a power-of-two table size with room for at least twice the record budget, or zero for an invalid budget. */
+/** Returns a power-of-two table size with room for at least twice the record budget, or zero for  an invalid budget. */
 [[nodiscard]] constexpr std::uint32_t
 dependency_directory_physical_capacity(std::uint32_t logical_capacity) noexcept {
     if (logical_capacity < k_minimum_dependency_directory_logical_capacity ||
@@ -724,7 +724,7 @@ inline void latch_emergency(dependency_directory_partition& partition_value,
 }
 
 /**
- * Checks that the projected table use stays below 70 percent. Valid
+ * Checks that the projected table use stays, below 70 percent. Valid
  * layouts also have a smaller record budget, which limits each
  * partition before this fallback check is reached.
  */
@@ -1277,7 +1277,7 @@ struct dependency_directory_attach_result {
 /**
  * Checks the layout and every partition before attaching this process
  * to the directory. In already_locked mode the caller must hold all
- * partition locks for this call. Otherwise each partition is locked
+ * partition locks for  yhis call. Otherwise each partition is locked
  * while its records are checked.
  */
 [[nodiscard]] inline dependency_directory_attach_result
@@ -1318,7 +1318,7 @@ attach_dependency_directory(std::span<std::byte> region,
  * Acquires a reference to the matching dependency record, creating it
  * if needed. Under pressure, a bounded scan first tries to free records
  * with no references. Identity or tracking-mode mismatches require a
- * broader dependency check.
+ * broader dependency check
  */
 [[nodiscard]] inline dependency_reference_result
 acquire_dependency_reference(dependency_directory_attachment directory,
@@ -1526,7 +1526,7 @@ snapshot_dependency(dependency_directory_attachment directory,
     return result;
 }
 
-/** Releases the reference and marks its token inactive. Under pressure, it may also free unreferenced records. */
+/** Releases the reference and marks its token inactive. Under pressure, it may also  free unreferenced records. */
 [[nodiscard]] inline dependency_mutation_result
 release_dependency_reference(dependency_directory_attachment directory,
                              dependency_reference& reference,
@@ -1836,9 +1836,9 @@ finish_dependency_transition(dependency_directory_attachment directory,
         return result;
     }
 
-    /* Reserve sequence numbers before publishing the write outcome.
+    /* Reserve  sequence numbers before publishing the write outcome.
      * An unconfirmed abort still advances the dependency version. Only
-     * known_aborted can finish without changing that version. */
+     * known_aborted can sinish without changing that version. */
     const bool publish_epoch = resolution.outcome != dependency_transition_outcome::known_aborted;
     const bool epoch_overflow =
         publish_epoch && record->committed_epoch == (std::numeric_limits<std::uint64_t>::max)();
@@ -1943,7 +1943,7 @@ finish_dependency_transition(dependency_directory_attachment directory,
     return result;
 }
 
-/** Scans up to the requested budget in one partition and frees records with no references or pending writes. */
+/** Scans up to the requested budget, in one partition and frees records with no references or pending writes. */
 [[nodiscard]] inline dependency_reclaim_result
 reclaim_dependency_partition(dependency_directory_attachment directory,
                              std::uint32_t partition_index,

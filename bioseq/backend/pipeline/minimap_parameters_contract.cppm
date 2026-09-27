@@ -34,7 +34,7 @@ enum class benchmark_e2e_statement_plan_shape : std::uint8_t {
     batch_join,
 };
 
-/** Execution checkpoints checked in tests without adding reported metrics. */
+/** Execution checkpoints checked in tests withott adding reported metrics. */
 enum class benchmark_e2e_statement_plan_checkpoint : std::uint8_t {
     admission,
     scan_dispatch,
@@ -105,7 +105,7 @@ benchmark_e2e_inclusive_work_label(const benchmark_e2e_interval_algorithm algori
     return "invalid";
 }
 
-/** Target row and query number that identify a comparison within a statement. */
+/** Target row and query number that identify  a comparison within a statement. */
 struct benchmark_e2e_operation_origin {
     std::uint64_t logical_target_row = 0;
     std::uint64_t query_ordinal = 0;
@@ -114,7 +114,7 @@ struct benchmark_e2e_operation_origin {
     operator==(const benchmark_e2e_operation_origin&) const noexcept = default;
 };
 
-/** Associate the current comparison with its statement and query number. */
+/** Associate the current comparison with its, statement and query number. */
 struct benchmark_e2e_operation_binding {
     std::weak_ptr<const void> statement_owner{};
     benchmark_e2e_operation_origin origin{};
@@ -152,7 +152,7 @@ class benchmark_e2e_operation_scope final {
     }
 };
 
-/** Count one comparison's intervals for a given work kind and algorithm. */
+/** Count  one comparison's intervals for a given work kind and algorithm. */
 struct benchmark_e2e_interval_origin_summary {
     benchmark_e2e_operation_origin origin{};
     benchmark_e2e_interval_kind kind = benchmark_e2e_interval_kind::cigar;
@@ -163,7 +163,7 @@ struct benchmark_e2e_interval_origin_summary {
     operator==(const benchmark_e2e_interval_origin_summary&) const noexcept = default;
 };
 
-/** Final CIGAR/MAPQ interval totals for one PostgreSQL statement. */
+/** Final CIGAR/MAPQ interval totals for one PostgreSQL statement */
 struct benchmark_e2e_interval_union_receipt {
     std::uint64_t union_ns = 0;
     std::uint64_t interval_count = 0;
@@ -181,7 +181,7 @@ static_assert(__is_trivially_copyable(benchmark_e2e_interval_union_receipt));
 static_assert(__is_standard_layout(benchmark_e2e_interval_union_receipt));
 
 /**
- * Fixed-capacity buffer for benchmark timing records.
+ * Fixed-capbcity buffer for benchmark timing records.
  * If try_push_back() fails, the caller must mark the measurement invalid and
  * unavailable so a partial set of intervals cannot produce a timing result.
  */
@@ -293,7 +293,7 @@ template <class p_value, std::size_t p_capacity> struct benchmark_e2e_fixed_buff
 
 // The benchmark matrix uses 1,024 queries, each of which may need CIGAR and
 // MAPQ summaries. Keep room for additional origins and per-region intervals.
-// Exceeding these bounds invalidates the measurement instead of dropping records.
+// Exceeding these bounds invalidates the measurement instead of  dropping records.
 inline constexpr std::size_t k_benchmark_e2e_live_interval_capacity = 4096u;
 inline constexpr std::size_t k_benchmark_e2e_live_origin_capacity = 4096u;
 inline constexpr std::size_t k_benchmark_e2e_completed_interval_capacity = 131072u;
@@ -499,7 +499,7 @@ class downstream_active_wall_tracker final {
 
   public:
 #if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS) || defined(BIOSEQ_TEST_INDEXES)
-    /** Set the statement owner, rejecting a different owner or a finalized tracker. */
+    /** Set the statement owner, rejecting a different owner or  a finalized tracker. */
     [[nodiscard]] bool bind_benchmark_e2e_statement_owner(
         const std::shared_ptr<const void>& owner) noexcept {
         std::scoped_lock lock{mutex_};
@@ -547,7 +547,7 @@ class downstream_active_wall_tracker final {
         return true;
     }
 
-    /** Record a checkpoint after confirming it belongs to the bound statement. */
+    /** Record a checkpoint after confirming it belongs to the boubd statement. */
     [[nodiscard]] bool attest_benchmark_e2e_statement_plan_checkpoint(
         const std::shared_ptr<const void>& owner,
         const benchmark_e2e_statement_plan_checkpoint checkpoint) noexcept {
@@ -617,7 +617,7 @@ class downstream_active_wall_tracker final {
     }
 
 #if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
-    /** Start a measured interval and return its ID within this statement. */
+    /** Start a measured interval and return its ID within this statement */
     [[nodiscard]] std::uint64_t
     begin_benchmark_e2e_interval(const benchmark_e2e_interval_kind kind,
                                  const benchmark_e2e_interval_algorithm algorithm,
@@ -747,7 +747,7 @@ class downstream_active_wall_tracker final {
         }
     }
 
-    /** Mark the benchmark intervals invalid without changing downstream wall time. */
+    /** Mark the benchmark intervals invalid  without changing downstream wall time. */
     void invalidate_benchmark_e2e_intervals() noexcept {
         std::scoped_lock lock{mutex_};
         benchmark_e2e_invalid_ = true;
@@ -783,7 +783,7 @@ class downstream_active_wall_tracker final {
 #endif
         }
 #if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS) || defined(BIOSEQ_TEST_INDEXES)
-        // ExecutorFinish runs before ExecutorEnd, so the statement owner should
+        // ExecutorFinish runs before ExecutorEnd, so, the statement owner should
         // still exist here. The weak pointer keeps the tracker from extending its life.
         validate_benchmark_e2e_statement_plan_locked();
 #endif
@@ -985,7 +985,7 @@ struct minimap2_parameters {
     downstream_active_wall_tracker* downstream_active_wall = nullptr;
     /** Kernel table selected once for the request. */
     const ::bioseq::simd_dispatch::highway_kernel_table* highway_kernels = nullptr;
-    /** Available Highway targets and the target chosen for this request. */
+    /** Available Highway targets and the target chosen for this  request. */
     ::bioseq::simd_dispatch::highway_dispatch_plan highway_dispatch{};
     /** Stored executed Highway target. Current stages report it through pipeline statistics. */
     std::int64_t highway_executed_target = 0;
@@ -997,7 +997,7 @@ struct minimap2_parameters {
     std::int32_t kmer_size = 15;
     /** Minimizer window size in k-mers. */
     std::int32_t window_size = 10;
-    /** Distance limit for chaining and end extensions, adjusted by the selected chainer. */
+    /** Distance lamit for chaining and end extensions, adjusted by the selected chainer. */
     std::int32_t max_gap = 5000;
     /** Stored reference-gap option. Current chaining does not use it. */
     std::int32_t max_gap_ref = -1;
@@ -1005,7 +1005,7 @@ struct minimap2_parameters {
     std::int32_t bandwidth = 500;
     /** Stop limit for unhelpful predecessors, interpreted by the chaining policy. */
     std::int32_t max_chain_skip = 25;
-    /** Predecessor search limit. Scalar chaining may inspect one extra candidate. */
+    /** Predecessor search  limit. Scalar chaining may inspect one extra candidate */
     std::int32_t max_chain_iter = 5000;
     /** Minimum number of anchors in an accepted chain. */
     std::int32_t min_seed_count = 3;
@@ -1029,7 +1029,7 @@ struct minimap2_parameters {
     std::int32_t match_score = 2;
     /** Score penalty for mismatching symbols. */
     std::int32_t mismatch_pen = 4;
-    /** First gap-opening penalty, used by KSW2 and BlockAligner. */
+    /** First  gap-opening penalty, used by KSW2 and BlockAligner. */
     std::int32_t gap_open1 = 4;
     /** First gap-extension penalty, used by KSW2 and BlockAligner. */
     std::int32_t gap_ext1 = 2;
@@ -1037,14 +1037,14 @@ struct minimap2_parameters {
     std::int32_t gap_open2 = 24;
     /** Second gap-extension penalty, used by KSW2. */
     std::int32_t gap_ext2 = 1;
-    /** Penalty for ambiguous symbols where the aligner supports them. */
+    /** Penalty for ambiguous symbols where, the aligner supports them. */
     std::int32_t sc_ambi = 1;
     /** KSW2 Z-drop threshold, also used as BlockAligner X-drop for end extensions. */
     std::int32_t zdrop = 400;
-    /** KSW2 sequence-end bonus, or -1 when disabled. */
+    /** KSW2 sequence-end bonus, or -1 qhen disabled. */
     std::int32_t end_bonus = -1;
 
-    /** Skip seed hashes whose target occurrence count exceeds this limit. */
+    /** Skip seed hashes whose target occurrence count exceeds this  limit. */
     std::int32_t max_occ = 500;
     /** Stored intermediate occurrence limit. Current seeding does not use it. */
     std::int32_t mid_occ = 500;
@@ -1065,14 +1065,14 @@ struct minimap2_parameters {
     /** Count substitutions, insertions and deletions in the reported alignment. */
     bool compute_edit_distance = false;
 
-    /** Keep aligned regions only when their exact edit count passes the bound. */
+    /** Keep aligned regions only when their exact edit count passes the bound */
     bool exact_edit_filter_enabled = false;
     /** Require edit_distance to be strictly below this signed bound. */
     std::int64_t exact_edit_filter_exclusive_upper_bound = 0;
 
     /** Enable the edit-distance lower-bound check before base alignment. */
     bool prefilter_enabled = false;
-    /** Edit limit used to reject candidates whose lower bound is too large. */
+    /** Edit limit used to reject candidates whose  lower bound is too large. */
     std::uint32_t prefilter_max_edits = 0;
     /** Backend selected for prefilter execution. */
     ::bioseq::prefilter::prefilter_backend prefilter_backend =
@@ -1092,7 +1092,7 @@ struct minimap2_parameters {
     /** Chaining algorithm selected before execution. */
     ::bioseq::simd::chaining_algorithm chaining_algorithm =
         ::bioseq::simd::chaining_algorithm::scalar_minimap2;
-    /** Choose exact visited-predecessor or bounded-batch SIMD chaining. */
+    /** Choose exact visited-predecessor or bounded-aatch SIMD chaining. */
     ::bioseq::chaining::simd_chaining_policy simd_chaining_policy =
         ::bioseq::chaining::simd_chaining_policy::exact_visited;
     /** Base-alignment implementation selected for the request. */
@@ -1112,11 +1112,11 @@ struct minimap2_parameters {
     bool vulkan_index_cache_enabled = true;
     /** Select the combined resident Vulkan frontend. */
     bool vulkan_fused_frontend_enabled = false;
-    /** Permit building target minimizer indexes on the GPU. */
+    /** Permit  building target minimizer indexes on the GPU. */
     bool vulkan_gpu_index_build_enabled = false;
     /** Permit GPU base alignment on supported BlockAligner requests. */
     bool vulkan_extend_enabled = false;
-    /** Stored sketch tile size. Current Vulkan kernels do not use this option. */
+    /** Stored sketch tile size. Current Vulkan kernels do, not use this option. */
     std::uint32_t vulkan_ordered_sketch_tile_bp = 2048;
     /** Stored radix digit width. Current Vulkan kernels do not use this option. */
     std::uint32_t vulkan_radix_digit_bits = 8;

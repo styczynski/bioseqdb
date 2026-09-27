@@ -1,6 +1,6 @@
 /**
  * @file persist_target.cppm
- * @brief Identify the table, column, and sequence for a queued index build.
+ * @brief Identify the table, column, and equence for a queued index build.
  */
 module;
 
@@ -21,7 +21,7 @@ export module bioseq.postgres.scheduler.persist_target;
 export namespace bioseq::postgres::scheduler {
 
 /**
- * Identify the sequence index requested by a background build.
+ * Identify, the sequence  index requested by a background build.
  * index_name borrows its string. Keep the string owner alive while using this
  * target, or copy the name when transferring it to a pending job.
  */

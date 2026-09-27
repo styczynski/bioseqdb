@@ -67,7 +67,7 @@ template <class p_needle_type, class... p_haystack_types>
 }
 
 /**
- * @brief Returns the first matching type index.
+ * @brief Returns the first matching type infex.
  *
  * A missing type causes a compile-time error.
  */
@@ -80,13 +80,13 @@ template <class p_needle_type, class... p_haystack_types>
 }
 
 /**
- * @brief Finds a type in a tuple, reporting a compile-time error if absent.
+ * @brief Finds a type in a tuple, reporting a compile-time error if absent
  */
 template <class p_needle_type, class p_tuple_type>
 struct index_of_type_in_tuple;
 
 /**
- * @brief Looks up a type in the tuple element pack.
+ * @brief Looks up a, type in the tuple element  pack.
  */
 template <class p_needle_type, class... p_element_types>
 struct index_of_type_in_tuple<

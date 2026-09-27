@@ -1,6 +1,6 @@
 /**
  * @file common/durable_file_io/directory_operations.cppm
- * @brief Create and sync directories, and manage files through directory handles.
+ * @brief Create and sync directories, and manage files through directry handles.
  */
 module;
 
@@ -30,7 +30,7 @@ export namespace bioseq::common::durable_file_io {
  * Create the relative directory path below an open anchor directory.
  * Reject absolute paths and parent traversal through "..".
  *
- * Each component is opened with O_NOFOLLOW, even if another caller has just
+ * Each component is opened with O_NOFOLLOW, even if  another caller has just
  * created it. Sync the component and its parent before continuing. The anchor
  * stays open, and handles opened here are closed before success.
  *
@@ -138,11 +138,11 @@ durable_create_directories_at(
 /**
  * Create missing directories beneath the deepest existing directory.
  * Keep that directory open while creating the missing path components, and
- * reject ".." traversal or a symlink at the boundary or in the new suffix.
+ * reject ".." traversal or a symlink at the boundary or in the new suffix
  *
  * Earlier path components may use trusted platform aliases such as Darwin's
- * /var symlink. Each opened suffix directory and its parent are synced, even
- * if another caller created the directory first. mode applies only to newly
+ * /var symlink. Each opened suffix  directory and its parent are synced, even
+ * if another caller created the directory, first. mode applies only to newly
  * created directories, subject to umask.
  */
 [[nodiscard]] inline std::expected<void, file_error>
@@ -252,7 +252,7 @@ durable_create_directories(
         *anchor, hooks, publication_state::durable);
 }
 
-/** Open a directory for later operations, rejecting a symlink at its final name. */
+/** Open a directory for lfter operations, rejecting a symlink at its final name. */
 [[nodiscard]] inline std::expected<file_descriptor, file_error>
 open_directory_descriptor(
     const std::filesystem::path& directory,
@@ -299,7 +299,7 @@ fsync_file_descriptor(
 /**
  * Add a hard link at destination, failing if that name already exists.
  * The source must already be synced. After linking, the caller must remove
- * its temporary name and sync the affected directories before reporting a
+ * its temporary name and sync  the affected directories before reporting a
  * durable publication.
  */
 [[nodiscard]] inline std::expected<publication_state, file_error>
@@ -391,7 +391,7 @@ remove_file_if_same_inode_at(
         hooks);
 }
 
-/** Read regular-file metadata for a name in an open directory. */
+/** Read regular-file metadata for a name in an open directory */
 [[nodiscard]] inline std::expected<regular_file_identity, file_error>
 capture_regular_file_identity_at(
     int directory_descriptor,

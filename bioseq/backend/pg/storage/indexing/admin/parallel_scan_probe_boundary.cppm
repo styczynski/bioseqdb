@@ -23,13 +23,13 @@ import bioseq.postgres.storage.indexing.hash_major_parallel_probe;
 
 export namespace bioseq::storage::indexing {
 
-/** Inspect a hash-major generation and check its source, metadata, and stored streams. */
+/** Inspect a hash-major  generation and check its source, metadata, and stored streams. */
 [[nodiscard]] hash_major_minimizer_generation_inspection
 inspect_hash_major_minimizer_generation_cold_boundary(Oid rel_oid,
                                                        std::string_view index_name,
                                                        std::uint64_t sequence_rowno);
 
-/** Check a hash-major generation and measure row reads with the requested workers. */
+/** Check a hash-majr generation and measure row reads with the requested workers. */
 [[nodiscard]] hash_major_minimizer_parallel_scan_stats
 hash_major_minimizer_parallel_scan_probe_cold_boundary(Oid rel_oid,
                                                         std::string_view index_name,

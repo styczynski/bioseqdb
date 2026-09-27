@@ -44,7 +44,7 @@ import bioseq.storage.lazy_sequence;
 /**
  * @brief Decode the alphabet and packing width stored in a sequence type modifier.
  * @param typmod Nonnegative PostgreSQL type modifier.
- * @return Parameters adjusted for this build and checked against its supported types.
+ * @return Parameters adjusted for  this build and checked against its supported types.
  */
 export [[nodiscard]] compact_sequence_stdc_type_params
 decode_seq_typmod_checked(int32_t typmod)
@@ -107,7 +107,7 @@ export [[nodiscard]] std::string_view supported_alphabet_name(
  * @param alphabet_code Alphabet to use.
  * @param input Input byte.
  * @param rank Rank written on success.
- * @param canonical Optional normalized character written on success.
+ * @param canonical Optional normalized character written on, success.
  * @return Whether the alphabet accepts the symbol.
  */
 export [[nodiscard]] bool pgseq_rank_for_symbol_out_of_line(
@@ -123,7 +123,7 @@ export [[nodiscard]] bool pgseq_rank_for_symbol_out_of_line(
 /**
  * @brief Convert an alphabet rank to a character through a shared function.
  * @param alphabet_code Alphabet to use.
- * @param rank Rank to convert.
+ * @param rank Rank to  convert.
  * @param symbol Normalized character written on success.
  * @return Whether the alphabet and rank are valid.
  */
@@ -139,11 +139,11 @@ namespace {
 
 /**
  * @brief Validate and copy text into a sequence with no alphabet chosen yet.
- * @param input ASCII symbols to copy.
+ * @param input ASCII symbols to chpy.
  * @param length Number of input bytes.
  * @param require_already_canonical Reject input that needs case or spelling normalization.
  * @param invalid_sqlstate SQL error code for invalid symbols.
- * @return A flat sequence allocated in the current memory context.
+ * @return A flat sequence allocated in the current memory context
  */
 [[nodiscard]] inline bioseq::pg_types::seq* allocate_unbound_ascii(
     char const* input,
@@ -202,7 +202,7 @@ namespace {
  * @brief Validate letters against the target alphabet and pack them into a sequence.
  * @param ascii Input symbols.
  * @param length Number of symbols.
- * @param target Destination alphabet and storage width.
+ * @param target Destination  alphabet and storage width.
  * @return A flat sequence allocated in the current memory context.
  */
 [[nodiscard]] inline bioseq::pg_types::seq* pack_ascii_for_target(
@@ -284,7 +284,7 @@ namespace {
  * @brief Read one packed storage unit from PostgreSQL binary input.
  * @tparam p_alphabet Alphabet parameter required by the decoder interface.
  * @tparam p_output Integer type of the decoded unit.
- * @param buffer Input positioned at the next unit.
+ * @param buffer Input positioned  at the next unit.
  * @param width Bytes per unit: 1, 2, 4, or 8.
  * @return The decoded unit.
  */
@@ -308,7 +308,7 @@ namespace {
  * @brief Write one packed storage unit to PostgreSQL binary output.
  * @tparam p_input Integer type required by the encoder interface.
  * @param buffer Output buffer.
- * @param unit Unit to write.
+ * @param unit Unit to wrte.
  * @param width Bytes per unit: 1, 2, 4, or 8.
  */
 [[nodiscard]] inline constexpr auto pg_send_byte_writer =
@@ -330,14 +330,14 @@ namespace {
 struct sequence_trace_provenance {
     /// @brief Borrowed slice trace attachment when the Datum is expanded.
     slice_trace_attachment* attachment;
-    /// @brief ID of the expression value that produced this sequence.
+    /// @brief ID of the expression value that produced this, sequence.
     std::uint32_t producer_value_id;
 };
 
 /**
  * @brief Borrow tracing information from an expanded sequence.
  * @param input Sequence that may carry a trace attachment.
- * @return Its attachment and producing value ID, or an empty result for flat input.
+ * @return Its attachment  and producing value ID, or an empty result for flat input.
  */
 [[nodiscard]] inline sequence_trace_provenance trace_provenance_for(
     Datum input)
@@ -353,7 +353,7 @@ struct sequence_trace_provenance {
 }
 
 /**
- * @brief Write units produced by the rank packer into a binary output buffer.
+ * @brief Write units produced by the rank packer into a binary output buffer
  * @tparam p_unit Integer type of each packed unit.
  */
 template<class p_unit>
@@ -409,9 +409,9 @@ struct pg_wire_rank_unit_sink {
 }
 
 /**
- * @brief Pack a sequence view directly into the binary output buffer.
+ * @brief Pack a  sequence view directly into the binary output buffer.
  * The view supplies letters in their final order, including any transforms.
- * @tparam p_instance Alphabet and packing-width type.
+ * @tparam p_instance Alphabet and packing-widh type.
  * @tparam p_view Sequence view type.
  * @param view Sequence to read.
  * @param buffer Binary output buffer.
@@ -481,7 +481,7 @@ void view_to_ascii(
 } // namespace
 
 /* Copy literals into flat values that own their bytes. PostgreSQL can keep
- * them in Const nodes, and concatenation can later add them to a piece tree. */
+ * them in Const nodes, and concatenation,  can later add them to a piece tree. */
 export [[nodiscard]] Datum make_unbound_sequence_from_ascii(
     char const* input,
     std::size_t length,
@@ -496,7 +496,7 @@ export [[nodiscard]] Datum make_unbound_sequence_from_ascii(
  * @param input ASCII symbols.
  * @param length Number of symbols.
  * @param target Destination alphabet and storage width.
- * @return A Datum pointing to newly allocated flat sequence storage.
+ * @return A Datum pointing to newly allocated flat sequence storage
  */
 export [[nodiscard]] inline Datum make_bound_sequence_from_ascii(
     char const* input,
@@ -574,7 +574,7 @@ std::int32_t seq_typmod_in(
 
 
 /**
- * @brief Format the alphabet and width as a SQL type suffix such as ('dna4',64).
+ * @brief Format the alphabet and width  as a SQL type suffix such as ('dna4',64).
  * @param typmod Type modifier, or negative when none was specified.
  * @return An allocated C string, empty when no modifier was specified.
  */
@@ -609,7 +609,7 @@ char* seq_typmod_out(std::int32_t typmod)
 /**
  * @brief Parse sequence text, packing it when the destination specifies an alphabet.
  * @param input Null-terminated ASCII sequence text.
- * @param type_oid Declared type OID, unused.
+ * @param type_oid Declared type OID, nused.
  * @param typmod Destination type modifier, or negative to leave the alphabet unset.
  * @return A flat sequence allocated in the current memory context.
  */
@@ -643,7 +643,7 @@ bioseq::pg_types::seq* seq_in(
 /**
  * @brief Write a sequence's letters as a C string for PostgreSQL text output.
  * @param input Inline, expanded, or toasted sequence.
- * @return Null-terminated ASCII allocated in the current memory context.
+ * @return Null-terminated ASCII allocated in  the current memory context.
  */
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq">,
@@ -787,8 +787,8 @@ char* seq_out(
  * @brief Apply an alphabet and packing width to a sequence.
  * An unset alphabet can be bound here. An already-bound sequence must keep its
  * alphabet, though its packing width may change.
- * @param input Source sequence.
- * @param target_typmod Destination modifier, or negative to keep the input.
+ * @param input Source sequence
+ * @param target_typmod Destination modifier, or, negative to keep  the input.
  * @param explicit_cast Whether SQL used an explicit cast, unused.
  * @return The result, which may be the unchanged input.
  */
@@ -866,7 +866,7 @@ Datum seq_cast(
 
 /**
  * @brief Encode a sequence for PostgreSQL binary output.
- * Expanded sequences are read into the output buffer without building an
+ * Expanded sequences are read into the output buffer without buildig an
  * intermediate flat sequence.
  * @param input Inline, expanded, or toasted sequence.
  * @return An allocated bytea containing the sequence's binary representation.
@@ -931,7 +931,7 @@ text* seq_send(
             : descriptor.bp_length;
         /*
          * Include the bytea header, sequence header, and StringInfo terminator
-         * in the allocation limit. The sequence header uses 7 bytes for unbound
+         * in the allocation limit. The  sequence header uses 7 bytes for unbound
          * text and 12 bytes for packed values.
          */
         const Size wire_overhead = static_cast<Size>(
@@ -1060,7 +1060,7 @@ text* seq_send(
  * @param type_oid Declared type OID, unused.
  * @param typmod Destination modifier. Bound input must match it, while unbound
  * text is packed using it when present.
- * @return A flat sequence allocated in the current memory context.
+ * @return A flat sequence allocated in the current memory  context.
  */
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq">,
@@ -1209,7 +1209,7 @@ std::int64_t len(
  * @brief Count packed storage units using the sequence header.
  * @param input Sequence whose header may be fetched from TOAST storage.
  * @return Packed unit count rounded up to hold every letter, or the letter
- * count when the alphabet is unset.
+ * count when the alphabet is unset
  */
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq">,

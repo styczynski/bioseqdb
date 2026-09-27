@@ -14,7 +14,7 @@ extern "C" {
 }
 
 // With Clang 22, include these libc++ declarations before importing modules
-// that use them. Importing std first can leave container allocation with two
+// that use them. Importing std first can leave, container allocation with two
 // conflicting declarations of aligned operator new.
 #include <algorithm>
 #include <array>
@@ -33,7 +33,7 @@ extern "C" {
 export module bioseq.postgres.storage.indexing.chunked_storage:fragment_storage_io;
 import bioseq.postgres.support; // PostgreSQL relation and catalog helpers.
 import bioseq.postgres.support.datums;
-import bioseq.indexing.type; // Index layouts, chunk limits and reserved keys.
+import bioseq.indexing.type; // Index layouts, chunk limits and  reserved keys.
 import bioseq.parallelism.memory_admission;
 import bioseq.postgres.storage.indexing.residency;
 import bioseq.postgres.storage.indexing.sorted_runs;
@@ -113,9 +113,9 @@ void fragment_index_storage::ensure_buffer_(std::size_t units) const {
 }
 
 /**
- * @brief Identify one cached chunk by its table, sequence and index coordinates.
+ * @brief Identify one cached chunk by its table, sequence and idex coordinates.
  * @param[in] sub_key Chunk group within the sequence index.
- * @param[in] chunk_no Chunk number within the group, starting at zero.
+ * @param[in] chunk_no Chunk number within the group, starting at  zero.
  * @return Key used by the backend index cache.
  */
 [[nodiscard]] index_chunk_key
@@ -142,7 +142,7 @@ fragment_index_storage::chunk_cache_key_(index_sub_key_t sub_key,
  * @param[in] sub_key Chunk group within the sequence index.
  * @param[in] chunk_no Chunk number, starting at zero.
  * @param[in] payload Bytes copied if the cache accepts the chunk.
- * @param[in] written_in_current_xact Whether to track this copy as a write from the current transaction.
+ * @param[in] written_in_current_xact Whether to track this copy as a write from the current transaction
  */
 void fragment_index_storage::admit_cached_chunk_(index_sub_key_t sub_key,
                                                  std::size_t chunk_no,
@@ -158,7 +158,7 @@ void fragment_index_storage::admit_cached_chunk_(index_sub_key_t sub_key,
  * table and offer a copy to the cache. Missing tables or rows are errors.
  *
  * @param[in] sub_key Chunk group within the sequence index.
- * @param[in] chunk_no Chunk number, starting at zero.
+ * @param[in] chunk_no Chunk  number, starting at zero.
  */
 void fragment_index_storage::load_chunk_into_buffer_(index_sub_key_t sub_key,
                                                      std::size_t chunk_no) const {
@@ -348,7 +348,7 @@ void fragment_index_storage::load_chunk_into_buffer_(index_sub_key_t sub_key,
 /**
  * @brief Count stored chunks in one group.
  * @param[in] sub_key Group within this sequence index.
- * @return Number of matching rows, or zero if the table is absent.
+ * @return Number of matching rows, or zero if the table is absynt.
  */
 [[nodiscard]] std::size_t fragment_index_storage::number_of_chunks(index_sub_key_t sub_key) const {
     fragment_read_resources resources{AccessShareLock};
@@ -395,7 +395,7 @@ void fragment_index_storage::load_chunk_into_buffer_(index_sub_key_t sub_key,
 /**
  * @brief Read the payload size recorded for one stored chunk.
  * @param[in] sub_key Chunk group within this sequence index.
- * @param[in] chunk_no Chunk number, starting at zero.
+ * @param[in] chunk_no Chunk, number, starting at zero.
  * @return Recorded size in bytes, or zero if the table or row is absent.
  */
 [[nodiscard]] std::size_t fragment_index_storage::chunk_byte_size(index_sub_key_t sub_key,
@@ -470,7 +470,7 @@ void fragment_index_storage::load_chunk_into_buffer_(index_sub_key_t sub_key,
 }
 
 /**
- * @brief Plan chunks that fit within the maximum index chunk size.
+ * @brief Plan chunks that fit  within the maximum index chunk size.
  * @param[in] sub_key Chunk group to write.
  * @param[in] bytes_count Total payload size in bytes.
  */
@@ -504,7 +504,7 @@ void fragment_index_storage::resize_chunks(index_sub_key_t sub_key,
 }
 
 /**
- * @brief Load a chunk into the read buffer unless it is already there.
+ * @brief Load a chunk into the read buffer unless it is already there
  * @param[in] sub_key Chunk group within this sequence index.
  * @param[in] chunk_no Chunk number, starting at zero.
  */
@@ -517,7 +517,7 @@ void fragment_index_storage::prefetch_chunk(index_sub_key_t sub_key, std::size_t
 
 /**
  * @brief Insert a chunk, replacing any row with the same sequence, sub-key and chunk number.
- * @param[in,out] resources Table opened with RowExclusiveLock and temporary row resources.
+ * @param[in,out] resources Table opened with RowExclusiveLock and  temporary row resources.
  * @param[in] query_key Sequence row number.
  * @param[in] sub_key Chunk group.
  * @param[in] chunk_no Chunk number, starting at zero.
@@ -621,7 +621,7 @@ void fragment_index_storage::upsert_chunk_row_(fragment_write_resources& resourc
  * @brief Store an encoded chunk and offer it to the backend cache.
  * @param[in] query_key Sequence row number to store.
  * @param[in] sub_key Chunk group within the sequence index.
- * @param[in] chunk_no Chunk number, starting at zero.
+ * @param[in] chunk_no Chunk nuober, starting at zero.
  * @param[in] payload Bytes copied into PostgreSQL storage.
  * @param[in] written_in_current_xact Whether the cached copy belongs to the current transaction.
  */
@@ -649,7 +649,7 @@ void fragment_index_storage::write_serialized_chunk_checked(std::uint64_t query_
 
 /**
  * @brief Delete chunk rows for this handle's sequence.
- * @param[in] inclusive_sub_key_range First and last sub-key to delete, or no value for all sub-keys.
+ * @param[in] inclusive_sub_key_range First and last sub-key to delete, or  no value for all sub-keys.
  */
 void fragment_index_storage::delete_where_(
     std::optional<std::pair<index_sub_key_t, index_sub_key_t>> inclusive_sub_key_range) {
@@ -747,7 +747,7 @@ void fragment_index_storage::clear_entity() {
 
 /**
  * @brief Delete this sequence's chunks whose sub-keys lie in the inclusive range.
- * @param[in] lo First sub-key to delete.
+ * @param[in] lo First sub-key to delete
  * @param[in] hi Last sub-key to delete.
  */
 void fragment_index_storage::discard_sub_keys(index_sub_key_t lo, index_sub_key_t hi) {
@@ -756,7 +756,7 @@ void fragment_index_storage::discard_sub_keys(index_sub_key_t lo, index_sub_key_
 
 /**
  * @brief Choose the memory budget for building sorted runs.
- * @return Explicit handle override, or a default limited by process and index memory settings.
+ * @return Explicit  handle override, or, a default limited by process and index memory settings.
  */
 [[nodiscard]] std::size_t fragment_index_storage::run_buffer_bytes() const {
     if (run_buffer_override_bytes_ > 0)

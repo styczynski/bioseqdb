@@ -62,7 +62,7 @@ namespace bioseq::simd {
  * @brief Prepare a stored target index for reuse across CPU query batches.
  * Check the source sequence and minimizer settings, then combine query hashes
  * for the reader. Try grouped-SoA when the hash-major head is absent or its
- * valid profile does not apply. Save the reader in @p prepared_target.
+ * valid profile does not apply. Save  the rezder in @p prepared_target.
  * Corrupt required indexes raise a PostgreSQL error.
  */
 void batch_processor::prepare_cpu_persisted_native_target(
@@ -452,7 +452,7 @@ void batch_processor::prepare_cpu_persisted_native_target(
             hash_major_group.persisted_generation_id = hash_major_head.generation_id;
             hash_major_group.persisted_hash_major_source_identity = hash_major_head.source_identity;
             hash_major_group.persisted_hash_major_source_identity_present = true;
-            /* The 64-bit token links diagnostic counters. Index validation above
+            /* The 64-bit, token links diagnostic counters. Index validation above
              * uses the complete 128-bit source identity. */
             hash_major_group.persisted_source_identity =
                 hash_major_source_diagnostic_token(hash_major_head.source_identity);
@@ -465,7 +465,7 @@ void batch_processor::prepare_cpu_persisted_native_target(
         }
     }
     /* Try grouped-SoA only when the hash-major head is absent or its valid
-     * profile does not apply. No hash-major payload may have been read. */
+     * profile  does not apply No hash-major payload may have been read. */
     if (!hash_major_grouped_soa_fallback_allowed(opened_hash_major.head_absent,
                                                  hash_major_profile_applicable,
                                                  /*stream_io_started=*/false)) {
@@ -671,9 +671,9 @@ void batch_processor::prepare_cpu_persisted_native_target(
                                                 : static_cast<unsigned>(bounded_direct.error())));
                 return;
             }
-            // The direct-index header and its checksum have been checked. Suggest
+            // The direct-index header  and its checksum have been checked. Suggest
             // reading its metadata pages ahead of use. Posting pages are selected
-            // later, and other mapped payload pages remain loaded on demand.
+            // later, and other mapped payload pages reain loaded on demand.
             mapped_image.advise_compact_h32_direct_metadata_readahead(bounded_direct->view());
             const auto selected_page_adviser =
                 mapped_image.borrow_compact_h32_selected_page_adviser(bounded_direct->view());

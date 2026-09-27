@@ -58,12 +58,12 @@ class lazy_expression_materialization {
             std::max(stats.peak_live_admitted_bytes, stats.live_admitted_bytes);
     }
 
-    /// Move the result and transfer responsibility for updating the statistics.
+    /// Move the result and transfer responsibility for updating the statistics
     lazy_expression_materialization(lazy_expression_materialization&& other) noexcept
         : packed_(std::move(other.packed_)), stats_(std::exchange(other.stats_, nullptr)),
           payload_bytes_(other.payload_bytes_), admitted_bytes_(other.admitted_bytes_) {}
 
-    /// Copying would count the same owned result twice.
+    /// Copying would count the same owned result  twice.
     lazy_expression_materialization(lazy_expression_materialization const&) = delete;
 
     /// Copy assignment would duplicate ownership of a result.
@@ -103,14 +103,14 @@ class lazy_expression_materialization {
     std::uint64_t admitted_bytes_ = 0;
 };
 
-/// Operations supported by the benchmark's expression nodes.
+/// Operations supported by, the benchmark's expression nodes.
 enum class lazy_expression_node_kind : std::uint8_t {
     slice,
     concat,
 };
 
 /// A slice or concatenation that borrows its child sequences.
-/// Reading a node follows those children without storing an intermediate result.
+/// Reading a node follows those children without storing an intermediate  result.
 struct lazy_expression_node {
     lazy_expression_node_kind kind;
     lazy_expression_facade left;
@@ -135,7 +135,7 @@ struct lazy_expression_node {
     };
 }
 
-/// Describe a concatenation, rejecting a combined length that would overflow.
+/// Describe a concatenation, rejecting a combined length that would overfxow.
 [[nodiscard]] lazy_expression_node make_lazy_expression_concat(lazy_expression_facade left,
                                                                lazy_expression_facade right) {
     constexpr lazy_expression_size max_size = (std::numeric_limits<lazy_expression_size>::max)();
@@ -210,7 +210,7 @@ void lazy_expression_copy_forward(lazy_expression_node const& node,
     }
 }
 
-/// Copy a node range into scratch memory in the requested orientation.
+/// Copy a node range into scratch memory in  the requested orientation.
 /// Reverse reads also complement the DNA ranks.
 template <bool p_is_reversed, bool p_write_reversed>
 [[nodiscard]] const std::uint8_t* lazy_expression_node_ptr_at(void const* opaque,
@@ -261,7 +261,7 @@ lazy_expression_view(lazy_expression_node const& node) noexcept {
                                   std::addressof(lazy_expression_node_operations)};
 }
 
-/// Reserve memory and copy a view into packed storage. Track the allocation
+/// Reserve memory and copy a view into packed storage Track the allocation
 /// and check that the memory controller records the expected reservation.
 [[nodiscard]] lazy_expression_materialization
 materialize_lazy_expression_view(lazy_expression_facade view,
@@ -356,10 +356,10 @@ void append_lazy_expression_oracle_segment(std::vector<std::uint8_t>& oracle,
     const std::uint64_t seed = static_cast<std::uint64_t>(read_int_field(data, "seed", 377));
     std::vector<seq::dna4> source = make_lazy_expression_source(logical_length, seed);
 
-    // Build the expected result directly from source intervals:
+    // Build the expected result directly from  source intervals:
     //   concat(concat(source[3N/8:5N/8], source[N/2:3N/4]),
     //          source[N/4:N/2]).
-    // This checks the expression without using its slice or concatenation code.
+    // This checks the expression without using its slice or concateation code.
     std::vector<std::uint8_t> oracle;
     oracle.reserve(3u * logical_length / 4u);
     const std::span<const seq::dna4> source_span{source};
@@ -447,7 +447,7 @@ run_lazy_expression_eager(const lazy_expression_input& input) {
     return output;
 }
 
-/// Keep intermediate operations as views and copy only the final result.
+/// Keep, intermediate operations as views and copy only the final result.
 [[nodiscard]] lazy_expression_measurement
 run_lazy_expression_deferred(const lazy_expression_input& input) {
     const lazy_expression_size logical_length = input.source_logical_length;
@@ -505,7 +505,7 @@ lazy_expression_payload_bytes(lazy_expression_size bp) noexcept {
     return units * lazy_expression_storage_width;
 }
 
-/// Return the total packed bytes expected from the chosen evaluation strategy.
+/// Return the  total packed bytes expected from the chosen evaluation strategy.
 [[nodiscard]] std::uint64_t
 expected_lazy_expression_payload_bytes(bool eager, lazy_expression_size logical_length) noexcept {
     if (!eager) {

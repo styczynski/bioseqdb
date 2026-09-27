@@ -1,6 +1,6 @@
 /**
  * @file admin/scheme_untagged_fragment_guard.cppm
- * @brief Reject bounded ntHash writes when the index format cannot record the hash scheme.
+ * @brief Reject bounded ntHash writes when the index format cannot record the hash scheme
  */
 module;
 
@@ -25,7 +25,7 @@ import bioseq.sequences.kmers.highway_minimizer_contract;
 
 export namespace bioseq::storage::indexing {
 
-/** Reject bounded ntHash storage that cannot distinguish its hashes from Exact minimizers. */
+/** Reject bounded ntHash storage that cannot  distinguish its hashes from Exact minimizers. */
 [[noreturn]] inline void reject_bounded_nthash_for_scheme_untagged_fragment_storage(
     bioseq::minimizers::minimizer_sketch_backend backend, std::string_view operation) {
     if (backend != bioseq::minimizers::minimizer_sketch_backend::bounded_nthash_simd) {

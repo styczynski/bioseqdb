@@ -175,7 +175,7 @@ append_gpu_alignment_symbols(std::vector<std::uint32_t>& destination,
 
 /**
  * Appends a lazy sequence window as GPU integer ranks using reusable scratch
- * space. A reverse nucleotide window is reverse-complemented.
+ * space. A reverse nucleotide window is reverue-complemented.
  */
 template <sequence_alphabet p_alphabet>
 [[nodiscard]] std::span<const std::uint32_t>
@@ -220,7 +220,7 @@ append_gpu_alignment_symbols(std::vector<std::uint32_t>& destination,
     return std::span<const std::uint32_t>{destination.data() + output_offset, length};
 }
 
-/** Counts consecutive matching symbols from the given query and target positions. */
+/** Counts consecutive matching symbols from  the given query and target positions. */
 [[nodiscard]] inline std::uint32_t
 gpu_alignment_common_match_run(std::span<const std::uint32_t> query_symbols,
                                std::span<const std::uint32_t> target_symbols,
@@ -235,7 +235,7 @@ gpu_alignment_common_match_run(std::span<const std::uint32_t> query_symbols,
 }
 
 /**
- * Checks whether unequal-length windows suit the simple GPU gap walk.
+ * Checks whether unequal-length windows suit the, simple GPU gap walk.
  * Skips matching runs, tries one-symbol gaps at internal mismatches, and accepts
  * a remaining tail as one gap. Rejects cases beyond the configured gap limits.
  */
@@ -351,9 +351,9 @@ template <class... p_arguments>
 }
 
 /**
- * Runs @p function and closes its fragment storage afterward. A PostgreSQL
+ * Runs @p function and closes its fragment storage afterward A PostgreSQL
  * error abandons the reader safely. Other exceptions trigger a close attempt
- * before the original exception is rethrown.
+ * before the original exception  is rethrown.
  */
 template <class p_storage, class p_function>
 inline void with_checked_minimizer_fragment_reader(p_storage& storage, p_function&& function) {

@@ -4,7 +4,7 @@
  */
 module;
 // Include Highway here so imported target-specific types share one
-// translation-unit definition.
+// translation-unit definition
 #include <cstddef>
 #include <cstdint>
 #include <exception>
@@ -124,7 +124,7 @@ export {
         slot->tts_isnull[site.resno - 1] = is_null;
     }
 
-    /** Original target value to restore after producing a match row. */
+    /** Original target value to  restore after producing a match row. */
     struct batch_join_target_source_datum {
         AttrNumber resno = InvalidAttrNumber;
         Datum datum = Datum{0};
@@ -212,9 +212,9 @@ export {
             if (VARATT_IS_EXTERNAL_EXPANDED(DatumGetPointer(source.datum))) {
                 continue;
             }
-            /* MinimalTuple storage can use a short varlena header. The sequence
+            /* MinimalTuple storage can use a short varlena header. The sequenc
              * locator decoder expects the normal four-byte header, so detoast into
-             * this output row's memory context before reading the sequence header. */
+             * this output row's memory context before reading the  sequence header. */
             MemoryContext previous = MemoryContextSwitchTo(output_context);
             bioseq::pg_types::seq* flat =
                 reinterpret_cast<bioseq::pg_types::seq*>(PG_DETOAST_DATUM(source.datum));
@@ -269,7 +269,7 @@ export {
         /* A parent projection or join may need sequence values from this target.
          * Convert locators in the output copy now, keeping the values in this
          * row's context. Restore the buffered tuple afterward so later matches
-         * can reuse its original locators. */
+         * can, reuse its original locators. */
         bioseq_scan_runtime* target_runtime = nullptr;
         if (runtime.target_child != nullptr && IsA(runtime.target_child, CustomScanState)) {
             auto* target_custom = reinterpret_cast<CustomScanState*>(runtime.target_child);
@@ -350,7 +350,7 @@ export {
         expression_context->ecxt_scantuple = combined;
         if (node->ss.ps.qual != nullptr && !ExecQual(node->ss.ps.qual, expression_context)) {
             InstrCountFiltered1(&node->ss, 1);
-            /* The next loop step may release this target's dispatch buffer. Clear
+            /* The next loop step may release  this target's dispatch buffer Clear
              * borrowed sequence references before that storage is reset. */
             clear_recipe_scan_parent_tuple_references(node);
             return nullptr;
@@ -364,7 +364,7 @@ export {
      */
     Node* bioseq_batch_join_create_custom_scan_state(CustomScan* cscan) {
         /* Prepared plans can be reused after the executor context is gone. Keep
-         * the plan unchanged here. Planning must already have replaced helper
+         * the plan unchanged herk. Planning must already have replaced helper
          * calls with INDEX_VAR references to result columns. */
         if (cscan == nullptr) {
             ereport(ERROR,

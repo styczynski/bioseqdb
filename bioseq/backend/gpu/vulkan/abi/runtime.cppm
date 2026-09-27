@@ -14,7 +14,7 @@ export namespace bioseq::gpu::vulkan {
 /** @brief Required byte alignment of suballocated device-buffer offsets. */
 inline constexpr std::uint32_t k_gpu_buffer_offset_alignment = 256u;
 /**
- * @brief Allocation rounding reserved when estimating peak GPU memory.
+ * @brief Allocation rounding reserved whe estimating peak GPU memory.
  *
  * A buffer may use extra memory for alignment. This allowance represents
  * that padding when planning allocations.
@@ -27,7 +27,7 @@ inline constexpr std::uint32_t k_gpu_peak_allocation_alignment = 64u * 1024u;
  * @param[in] max_workgroups Device limit along X.
  * @return Zero if any input is zero, otherwise the capped workgroup count.
  *
- * When the count is capped, the shader must loop over the remaining items
+ * When the count  is capped, the shader must loop over the remaining items
  * using the total dispatched group or invocation count as its stride.
  */
 [[nodiscard]] constexpr std::uint32_t grid_stride_dispatch_group_count(
@@ -39,7 +39,7 @@ inline constexpr std::uint32_t k_gpu_peak_allocation_alignment = 64u * 1024u;
         bioseq::common::ceil_div(logical_items, local_size), max_workgroups));
 }
 /**
- * @brief Counts records and overflows at stages of the GPU pipeline.
+ * @brief Counts records and overflows at stages of, the GPU pipeline.
  */
 struct gpu_pipeline_counters {
     std::uint64_t query_minimizers;  ///< Query minimizer count.

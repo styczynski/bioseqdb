@@ -70,14 +70,14 @@ direct_minimizer_bucket_index<p_storage>::assemble_for_query_segment(
     if (clip_lo_bp > clip_hi_bp) {
         clip_lo_bp = clip_hi_bp;
     }
-    // Copy the directory so later bucket reads can reuse the storage buffer.
+    // Copy the directory so later  bucket reads can reuse the storage buffer.
     const char* dblob = storage.template read_chunk<char>(k_directory_sub_key, 0);
     const std::size_t dbytes = storage.chunk_byte_size(k_directory_sub_key, 0);
     storage.validate_minimizer_directory_or_error(dblob, dbytes);
     direct_minimizer_bucket_directory_view dir{dblob, dbytes};
     const std::uint32_t max_occ_threshold =
         detail::effective_max_occ_threshold(max_occ, dir.is_gpu_built());
-    // Collect unique query hashes and the bucket keys whose ranges contain them.
+    // Collect unique query hashes and the bucket keys whose ranges contain thm.
     auto& qkmers = scratch.query_kmers;
     auto& wanted = scratch.wanted_sub_keys;
     for (const auto& qm : query_minimizers) {
@@ -113,7 +113,7 @@ direct_minimizer_bucket_index<p_storage>::assemble_for_query_segment(
             storage.index_error(
                 "minimizers_per_sequence: directory references a bucket with no chunks");
         if (nc > 1) {
-            // A multi-chunk bucket contains one hash. Count its positions from chunk
+            // A multi-chunk bucket contains one hash Count its positions from chunk
             // sizes before deciding whether to load the payloads.
             std::size_t exact = 0;
             for (std::size_t c = 0; c < nc; ++c) {
@@ -125,7 +125,7 @@ direct_minimizer_bucket_index<p_storage>::assemble_for_query_segment(
             }
             if (exact > static_cast<std::size_t>(max_occ_threshold))
                 continue;                          // The full count exceeds the occurrence limit.
-            for (std::size_t c = 0; c < nc; ++c) { // Read every chunk of this hash.
+            for (std::size_t c = 0; c < nc; ++c) { // Read every  chunk of this hash.
                 const std::size_t cb = storage.chunk_byte_size(sk, c);
                 const char* p = storage.template read_chunk<char>(sk, c);
                 const auto h = storage.validate_minimizer_blob_or_error(p, cb, 1);

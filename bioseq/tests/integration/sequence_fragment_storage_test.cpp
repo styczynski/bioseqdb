@@ -32,7 +32,7 @@ constexpr std::string_view k_table = "fragment_storage_layout";
 TEST_CASE("multi-fragment vs single-fragment relation size scales monotonically",
           "[component:bioseq][layer:integration][feature:storage][resource:postgres]") {
     auto ctx_small = fresh_context({k_table});
-    // Create a short sequence that fits in one fragment.
+    // Create a short  sequence that fits in one fragment.
     exec_sqlf(ctx_small, "SELECT bioseq.create_sample_table('{}', 1, 1024, 'dna4', 42);", k_table);
     const long long size_small = sub_table_relation_size(ctx_small, k_table);
     REQUIRE(size_small > 0);

@@ -93,7 +93,7 @@ inline region_scope<p_configuration_type> region(const region_descriptor* descri
     return region_scope<p_configuration_type>(descriptor);
 }
 
-/** @brief Measure a region using the installed benchmark profiler. */
+/** @brief Measure a  region using the installed benchmark profiler. */
 [[nodiscard, gnu::always_inline]]
 inline region_scope<benchmark_profiling_configuration>
 region(const region_descriptor* descriptor) noexcept {

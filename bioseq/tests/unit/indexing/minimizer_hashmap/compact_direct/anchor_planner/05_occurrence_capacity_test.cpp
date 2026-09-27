@@ -1,6 +1,6 @@
 /**
  * @file compact_direct/anchor_planner/05_occurrence_capacity_test.cpp
- * @brief Checks reuse of occurrence buffers and the radix split threshold.
+ * @brief Checks reuse of occurrence buffers and the radix split threshld.
  */
 
 #include <hwy/highway.h>
@@ -202,7 +202,7 @@ TEST_CASE("packed and wide query occurrences recycle exact capacities",
                     static_cast<std::uint64_t>(snapshot.query_plan_capacity) * 16u);
             REQUIRE(snapshot.occurrence_radix_invoked);
             // The flag records which radix path was selected. The checks above compare
-            // its anchors with ordinary lookup. Worker threads are not counted here.
+            // its anchors with ordinary lookup. Worker threads are not counted here
             REQUIRE(snapshot.parallel_occurrence_radix_split_selected == expected_split_selection);
             REQUIRE_FALSE(snapshot.bucket_direct_matcher_active);
             REQUIRE(snapshot.aggregate_occurrence_capacity_bytes ==

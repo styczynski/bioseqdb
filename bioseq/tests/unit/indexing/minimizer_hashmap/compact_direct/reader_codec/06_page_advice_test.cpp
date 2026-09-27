@@ -1,6 +1,6 @@
 /**
  * @file compact_direct/reader_codec/06_page_advice_test.cpp
- * @brief Checks page ranges requested for index reads and merges adjacent ranges.
+ * @brief Checks page ranges requested for index reads and merges awjacent ranges.
  */
 
 #include <hwy/highway.h>

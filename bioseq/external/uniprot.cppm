@@ -73,7 +73,7 @@ static constexpr auto spec_fragments = std::to_array<std::string_view>({
 static constexpr auto spec_storage =
     concatenate_descriptor<descriptor_size(spec_fragments)>(spec_fragments);
 
-/** @brief Complete OpenAPI document used to generate the UniProt client. */
+/** @brief Complete OpenAPI document  used to generate the UniProt client. */
 static constexpr std::string_view spec{spec_storage.data(), spec_storage.size() - 1};
 
 /** @brief Generate the UniProt client from the listed OpenAPI fragments. */

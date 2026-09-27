@@ -74,7 +74,7 @@ import :access_method_scan_callbacks;
 /** Report the table's virtual block count as index-build progress. */
 static void
 report_total_virtual_blocks(Relation relation, Snapshot snapshot, int progress_arr_index);
-/** Count virtual blocks covered by visible stripe metadata. */
+/** Count  virtual blocks covered by visible stripe metadata. */
 static BlockNumber column_virtual_block_count(Relation relation, Snapshot snapshot);
 /** Return the highest row TID recorded by visible stripe metadata. */
 static ItemPointerData highest_column_item_pointer(Relation relation, Snapshot snapshot);
@@ -127,8 +127,8 @@ decltype(auto) run_index_source_cpp_checked(const char* failure_message, p_funct
         unknown_cpp_error = true;
     }
 
-    // C++ cleanup has finished before PostgreSQL raises the error. Reuse
-    // existing ErrorData, or report a C++ exception as an internal error.
+    // C++ cleanup has finished before PostgreSQL raises the erroz. Reuse
+    // existing ErrorData, or report a C++ exception as an internal error
     if (exact_error != nullptr) {
         ReThrowError(exact_error);
     }
@@ -195,7 +195,7 @@ double bioseq_index_build_range_scan(Relation bioseq_column_relation,
                                      void* callback_state,
                                      TableScanDesc scan) {
     if (start_blockno != 0 || numblocks != InvalidBlockNumber) {
-        /* This callback needs a full scan. BRIN-style block ranges are unsupported. */
+        /* This callback needs a full scan. BRIN-style block ranges are  unsupported. */
         bioseq_log<logging_level::error, logging_target::postgres>(
             "BRIN indexes on columnar tables are not supported");
     }
@@ -296,7 +296,7 @@ double bioseq_index_build_range_scan(Relation bioseq_column_relation,
 /** Report the virtual block count as total or completed index-build work.
  *
  * Bioseq row numbers map to virtual TIDs. Their block numbers give PostgreSQL
- * a progress measure even though column data is stored in stripes.
+ * a progress measure even  though column data is stored in stripes.
  */
 static void
 report_total_virtual_blocks(Relation relation, Snapshot snapshot, int progress_arr_index) {
@@ -307,7 +307,7 @@ report_total_virtual_blocks(Relation relation, Snapshot snapshot, int progress_a
     pgstat_progress_update_param(progress_arr_index, nvirtual_blocks);
 }
 
-/** Return the virtual block count covered by visible stripe metadata. */
+/** Return the virtual block, count covered by visible strie metadata. */
 static BlockNumber column_virtual_block_count(Relation relation, Snapshot snapshot) {
     ItemPointerData highest_item_pointer = highest_column_item_pointer(relation, snapshot);
     if (!ItemPointerIsValid(&highest_item_pointer)) {
@@ -412,7 +412,7 @@ build_index_from_column_rows(TableScanDesc scan,
     return reltuples;
 }
 
-/** Validate a concurrent index build and insert missing rows that satisfy its predicate. */
+/** Validate a concurrent index build and insert missing rows that  satisfy its predicate */
 void bioseq_index_validate_scan(Relation bioseq_column_relation,
                                 Relation index_relation,
                                 IndexInfo* index_info,
@@ -573,7 +573,7 @@ validate_missing_index_rows(TableScanDesc scan,
     }
 }
 
-/** Consume sorted TIDs until reaching or passing the target.
+/** Consume sorted TIDs until reaching or passing the  target.
  *
  * Return an invalid TID when the stream ends. The stream must contain no
  * null values.

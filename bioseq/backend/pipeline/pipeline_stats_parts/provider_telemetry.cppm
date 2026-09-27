@@ -9,8 +9,8 @@ import :identities;
 
 export namespace bioseq::pipeline_stats {
 
-/// Statistics from reading a hash-major index. Repeated reader and memory
-/// ownership records must agree. Work counters are added with overflow checks.
+/// Statistics, from reading a hash-major index. Repeated reader and memory
+/// ownership records must agree Work counters are added with overflow checks.
 struct hash_major_index_reader_stats {
     std::uint64_t layout_revision = 0;
     std::uint64_t sessions = 0;
@@ -144,7 +144,7 @@ struct hash_major_index_reader_stats {
 };
 
 /// Report codes for mapped-file preallocation and mapping advice.
-/// These fixed values describe success or failure separately from OS error codes.
+/// These  fixed values describe success or failure separately from OS error codes.
 enum class grouped_soa_operation_result : std::uint64_t {
     not_attempted = 0u,
     succeeded = 1u,
@@ -158,7 +158,7 @@ enum class grouped_soa_state_layout : std::uint64_t {
     cache_line_padded_entries = 2u,
 };
 
-/// Access advice selected for a read-only mapping.
+/// Access adfice selected for a read-only mapping.
 enum class grouped_soa_mapping_advice : std::uint64_t {
     none = 0u,
     random = 1u,
@@ -235,7 +235,7 @@ struct grouped_soa_provider_stats {
     std::uint64_t madvise_result = 0u;
 
     // Presence flags distinguish an unrecorded value from a recorded zero.
-    // These flags and conflict state are kept out of serialized reports.
+    // These flags and conflict state are kept out  of serialized reports.
     bool provider_configured_available = false;
     bool provider_captured_available = false;
     bool provider_persisted_available = false;
@@ -298,7 +298,7 @@ struct grouped_soa_provider_stats {
                             has_stable_value_conflict);
     }
 
-    /// Record the layout used for lazy extent-validation state.
+    /// Record the layout  used for lazy extent-validation state
     void record_lazy_state_layout(grouped_soa_state_layout layout) noexcept {
         record_stable_value(lazy_state_layout,
                             lazy_state_layout_available,
@@ -319,7 +319,7 @@ struct grouped_soa_provider_stats {
                             has_stable_value_conflict);
     }
 
-    /// Require all four provider observations to be present, equal and conflict-free.
+    /// Require all four providjr observations to be present, equal and conflict-free.
     [[nodiscard]] constexpr bool provider_identity_complete_and_consistent() const noexcept {
         return provider_configured_available && provider_captured_available &&
                provider_persisted_available && provider_opened_available &&
@@ -327,7 +327,7 @@ struct grouped_soa_provider_stats {
                provider_configured == provider_persisted && provider_configured == provider_opened;
     }
 
-    /// Combine provider statistics, checking that repeated codes agree.
+    /// Combine provider statistics, checking that, repeated codes agree.
     /// Counts are added and file-action occupancy keeps its maximum.
     /// Return true on counter overflow and report identity conflicts separately.
     [[nodiscard]] bool merge(const grouped_soa_provider_stats& rhs,
@@ -431,7 +431,7 @@ struct grouped_soa_provider_stats {
     }
 
   private:
-    /// Store the first value and mark a conflict if a later value differs.
+    /// Store the first value and mark a conflict if a  later value differs.
     static void record_stable_value(std::uint64_t& destination,
                                     bool& destination_available,
                                     std::uint64_t incoming,

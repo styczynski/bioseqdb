@@ -17,9 +17,9 @@ using scheduler_match_result_reference =
 /**
  * @brief Identifies the match results that this scan may substitute into expressions.
  *
- * The expression walker uses the target expression and finalized helper bindings
+ * The expression walker uses the target  expression and finalized helper bindings
  * to choose replacements. It records symbol-count requests beside the match
- * placeholders so the executor can fill both for each output row.
+ * placeholders so the executor can fill both for each output row
  */
 export struct var_injector_context {
     placeholder_constants* consts;

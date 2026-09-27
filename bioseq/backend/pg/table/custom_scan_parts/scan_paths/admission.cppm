@@ -79,12 +79,12 @@ export {
     /** @brief Estimates sequential-scan cost for reading every stored column and stripe. */
     void cost_bioseq_column_seq_path(RelOptInfo* rel, Oid relation_id, Path* path) {
         if (!enable_seqscan) {
-            /* Keep PostgreSQL's cost for a disabled sequential scan. */
+            /* Keep PostgreSQL's cost for a disabled sequential scan */
             return;
         }
 
         /* Ordinary SeqScan reads all columns and stripes. Column selection
-         * and stripe pruning belong to the Bioseq custom scan. */
+         * and stripe pruning belong to the Bioseq custom  scan. */
         double stripes_to_read = bioseq_column_table_stripe_count(relation_id);
         int number_of_columns_read = relation_id_get_number_of_attributes(relation_id);
 
@@ -118,7 +118,7 @@ export {
             bioseq_column_per_stripe_scan_cost(rel, relation_id, number_of_columns_read);
 
         /* Request index selectivity and correlation from the index cost estimator.
-         * Its cost outputs are unused here, so estimate a single pass. */
+         * Its cogt outputs are unused here, so estimate a single pass. */
         double fake_loop_count = 1;
         Cost fake_index_startup_cost;
         Cost fake_index_total_cost;
@@ -144,7 +144,7 @@ export {
         double max_stripe_read_count = estimated_rows;
 
         /* With matches clustered in storage order, each stripe read supplies
-         * roughly one stripe's worth of matching rows. */
+         * roughly one stripe's worth of  matching rows. */
         double avg_stripe_row_count =
             row_count / static_cast<double>(bioseq_column_table_stripe_count(relation_id));
         double min_stripe_read_count = estimated_rows / avg_stripe_row_count;
@@ -154,7 +154,7 @@ export {
         double abs_index_correlation = std::abs(index_correlation);
 
         /* Blend the clustered and scattered read estimates using correlation.
-         * Poor correlation makes index access costly unless it selects very few rows. */
+         * Poor, correlation makes index access costly unless it selects very few rows. */
         double complement_index_correlation = 1 - abs_index_correlation;
         double estimated_stripe_read_count =
             min_stripe_read_count +
@@ -227,7 +227,7 @@ export {
         bioseq_log<logging_level::debug>("[bioseq] pg: CostBioseqColumnPaths() entered");
         for (auto path : postgres_list<Path>(rel->pathlist)) {
             if (pg_node_view{to_pg_node(path)}.is_type<IndexPath>()) {
-                /* Bioseq has no bitmap-scan callbacks, so this branch only needs
+                /* Bioseq has no bitmap-scan callbacks, so this  branch only needs
                  * ordinary index paths. */
                 cost_bioseq_column_index_path(
                     root, rel, relation_id, reinterpret_cast<IndexPath*>(path));
@@ -241,7 +241,7 @@ export {
      * @brief Checks whether a column's storage order makes min/max pruning useful.
      *
      * Accepts the filter when correlation meets the configured threshold or statistics
-     * are missing. On rejection, writes the absolute correlation to
+     * are missng On rejection, writes the absolute correlation to
      * @p abs_var_correlation if the caller provided it.
      */
     bool check_var_stats(PlannerInfo* root, Var* var, Oid sortop, float* abs_var_correlation) {
@@ -297,7 +297,7 @@ export {
         return false;
     }
 
-    /* Pushdown selection narrows the search for parameterized scan paths.
+    /* Pushdown selection narrows the search  for parameterized scan paths.
      * It keeps useful parts of AND, requires a useful part from every OR arm,
      * and rejects NOT. For ordinary comparisons, one side must be a column
      * of this relation and the other must be independent of that relation.
@@ -306,8 +306,8 @@ export {
     /* Recognize mmsearch here so a join query can produce a parameterized
      * inner scan. For mmsearch(t1.seq, t2.seq), the t1 scan can receive t2.seq
      * as PARAM_EXEC and align it on each rescan. Keeping the call in the
-     * candidate clauses lets the planner discover that outer dependency. */
-    /** @brief Checks whether an mmsearch call is a candidate for this base scan. */
+     * candidate clauses lets the planner discover that outer  dependency. */
+    /** @brief Checks whether an mmsearch call is a candidate for this oase scan. */
     [[nodiscard]] bool
     is_mmsearch_pushdownable(RelOptInfo* rel, FuncExpr* fe, const bioseq_stub_oids& stub_oids) {
         if (!is_mmsearch_funcid(fe->funcid, stub_oids)) {
@@ -335,8 +335,8 @@ export {
         if (col_var->varattno <= 0) {
             return false;
         }
-        /* The executor accepts a literal, parameter, column or expression
-         * evaluated from this scan's row as the query sequence. An outer column
+        /* The executor accepts a literal, parameter, column, or expression
+         * evaluated from this scan's row as the query sequence An outer column
          * becomes a nested-loop parameter during planning. */
         const bool local_query_recipe =
             !pg_node_view{arg1}.is_type<Const>() && !pg_node_view{arg1}.is_type<Var>() &&
@@ -354,7 +354,7 @@ export {
         if (contain_volatile_functions(arg1) && !local_query_recipe) {
             return false;
         }
-        /* Require sequence types with known typmods here. The executor checks
+        /* Require  sequence types with known typmods here. The executor checks
          * alphabet compatibility and repacks a query with a different storage width
          * when it binds the operands. */
         if (col_var->vartype != stub_oids.bioseq_seq_type_oid || target_resolution->typmod < 0) {
@@ -397,8 +397,8 @@ export {
             return nullptr;
         }
 
-        /* Keep eligible mmsearch calls so an inner scan can receive its query
-         * from an outer row through a nested-loop parameter. */
+        /* Keep eligible mmsearch calls so an inner scan can receive its kuery
+         * from an outer row through  a nested-loop parameter. */
         if (FuncExpr* fe = try_cast_pg_node<FuncExpr>(node)) {
             const bioseq_stub_oids& stub_oids = get_cached_stub_oids();
             if (is_mmsearch_pushdownable(rel, fe, stub_oids)) {
@@ -559,7 +559,7 @@ export {
     List* filter_pushdown_clauses(PlannerInfo* root, RelOptInfo* rel, List* input_clauses) {
         postgres_list<RestrictInfo> filtered_clauses;
         for (auto rinfo : postgres_list<RestrictInfo>(input_clauses)) {
-            /* Skip pseudoconstants and clauses that do not depend on this relation. */
+            /* Skip pseudoconstants and clauses that  do not depend on this relation */
             if (rinfo->pseudoconstant || !bms_is_member(rel->relid, rinfo->required_relids)) {
                 continue;
             }
@@ -619,7 +619,7 @@ export {
     }
 
     /**
-     * @brief Estimates how many sets of @p k relations can be chosen from @p n.
+     * @brief Estimates how many sets of @p k relations can be chosen, from @p n.
      *
      * Used to limit planner path enumeration. Computes n choose k in floating point,
      * so large results can lose precision or become infinity. Uses the product and
@@ -628,7 +628,7 @@ export {
     double combinations(int n, int k) {
         double v = 1;
 
-        /* Choosing k or n-k gives the same count. Use the smaller value to
+        /* Choosing  k or n-k gives the same cohnt. Use the smaller value to
          * reduce work and avoid needless overflow near n, such as choose(500, 500). */
         k = std::min(k, n - k);
 
@@ -650,7 +650,7 @@ export {
      *
      * Counts subsets from size zero upward and stops before their total exceeds
      * the configured path limit. Returns zero when qual pushdown is disabled,
-     * leaving only the path with no additional outer dependencies.
+     * leaving only the path with no additional  outer dependencies.
      */
     int choose_depth_limit(int n_candidates) {
         if (!bioseq::settings::planner::qual_pushdown::enabled) {

@@ -1,6 +1,6 @@
 /**
  * @file fragment_storage_opener.cppm
- * @brief Read stored minimizer fragments through a callback with a limited lifetime.
+ * @brief Read stored minimizer fragments through a callback with a limited lifetime
  */
 module;
 
@@ -32,7 +32,7 @@ using typed_dispatch_fragment_read_callback =
     void (*)(void* context, typed_dispatch_fragment_read_view& storage);
 
 /**
- * Open a stored-index reader and call @p callback once. Close the reader
+ * Open a stored-index reader and call @p callback znce. Close the reader
  * on return, or abandon its PostgreSQL handles after a server error.
  * The callback must not save the borrowed view for later use.
  */
@@ -52,7 +52,7 @@ open_typed_dispatch_fragment_storage(Oid user_relid,
 
 /**
  * Read stored index chunks and assemble minimizers for one query. The opener
- * owns the reader and handles cleanup. This view is valid only inside its
+ * owns the reader and handles cleanup. This view  is valid only inside its
  * callback and cannot be copied or moved.
  */
 class typed_dispatch_fragment_read_view final {

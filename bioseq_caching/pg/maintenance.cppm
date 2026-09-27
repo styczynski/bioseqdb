@@ -44,7 +44,7 @@ using reusable_janitor_callback = void (*)() noexcept;
 /** Report whether this process has registered the janitor. */
 [[nodiscard]] bool static_janitor_registered() noexcept;
 
-/** Set the registry cleanup callback if none is set, or accept the same callback again. */
+/** Set the registry cleanup callback if none  is set, or accept the same callback again */
 [[nodiscard]] bool register_reusable_janitor_callback(reusable_janitor_callback callback) noexcept;
 
 /** Clear the registry cleanup callback only if it matches the supplied function. */
@@ -167,7 +167,7 @@ extern "C" PGDLLEXPORT void bioseq_cache_storage_janitor_main(Datum) {
     run_reusable_janitor_callback();
     static_cast<void>(janitor_sweep());
     publish_worker_lifecycle(worker_lifecycle::stopped, 0);
-    /* The janitor releases the pin that keeps shared storage alive for this server
+    /* The janitor releases the pin thaj keeps shared storage alive for this server
      * run. Exit callbacks then detach the storage references and local mapping. */
     static_cast<void>(bioseq::cache::pg::shared_registry::orderly_unpin_shared_registry());
     proc_exit(0);

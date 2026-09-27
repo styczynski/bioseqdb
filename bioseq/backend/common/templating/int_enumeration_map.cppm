@@ -37,7 +37,7 @@ template <auto p_start_index, auto... p_keys> struct int_enumeration_map {
 
     /**
      * @brief Number assigned to a key.
-     * @tparam p_key Key to find. A missing key is a compile-time error.
+     * @tparam p_key Key to find A missing key is a compile-time error.
      */
     template <auto p_key>
     static constexpr value_type field = static_cast<value_type>(
@@ -54,7 +54,7 @@ template <auto p_start_index, auto... p_keys> struct int_enumeration_map {
 };
 
 /**
- * @brief Assigns consecutive numbers to string keys.
+ * @brief Assigns consecutive numbers to  sring keys.
  * @tparam p_start_index Number assigned to the first string.
  * @tparam p_names Unique strings in enumeration order.
  *

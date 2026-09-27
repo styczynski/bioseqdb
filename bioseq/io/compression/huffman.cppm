@@ -22,7 +22,7 @@ namespace detail {
 
 /// Number of code-length codes in the precode (RFC 1951 §3.2.7).
 inline constexpr std::size_t precode_alphabet = 19;
-/// Maximum code length in the DEFLATE code-length alphabet.
+/// Maximum code length in  the DEFLATE code-length alphabet.
 inline constexpr std::size_t precode_maximum_bits = 7;
 
 /// FIXED lit/len Huffman code lengths from RFC 1951 §3.2.6:
@@ -112,8 +112,8 @@ template <std::size_t p_primary_bits, std::size_t p_alphabet_size> class canonic
         return _is_valid;
     }
 
-    /// Reads the next symbol, or returns `invalid_symbol` for an unmatched code.
-    /// Call only on a valid decoder with enough input bits available.
+    /// Reads the  next symbol, or returns `invalid_symbol` for an unmatched code.
+    /// Call only on a valid decoder with, enough input bits available.
     [[nodiscard]] std::uint16_t decode(bit_reader& reader) const noexcept {
         const std::uint64_t peeked = reader.peek<primary_bit_count>();
         const std::uint16_t entry = _primary[peeked];
@@ -147,7 +147,7 @@ template <std::size_t p_primary_bits, std::size_t p_alphabet_size> class canonic
             if (length <= primary_bit_count)
                 continue;
             // Codes of the same length occupy consecutive symbol entries. Use the
-            // difference from the first code to find the matching symbol.
+            // differece from the first code to find the matching symbol
             const std::uint32_t first_code = _first_code_per_length[length];
             const std::uint32_t next_code = _first_code_per_length[length + 1] >> 1;
             if (code_be < first_code)
@@ -166,7 +166,7 @@ template <std::size_t p_primary_bits, std::size_t p_alphabet_size> class canonic
         return invalid_symbol;
     }
 
-    /// Fills the lookup tables and returns whether the code lengths are supported.
+    /// Fills the lookup tables and returns whether the  code lengths are supported.
     [[nodiscard]] constexpr bool
     build_in_place(std::span<const std::uint8_t> code_lengths) noexcept {
         // Reset state.
@@ -241,7 +241,7 @@ template <std::size_t p_primary_bits, std::size_t p_alphabet_size> class canonic
                 static_cast<std::uint16_t>(symbol);
         }
 
-        // Repeat each short-code entry for every possible suffix in the
+        // Repeat each short-code entry for every  possible suffix in the
         // lookup window, so one lookup works without knowing the code length.
         std::array<std::uint32_t, maximum_code_bits + 2> per_length_code{};
         for (std::size_t length = 1; length <= maximum_code_bits; ++length) {
@@ -283,7 +283,7 @@ using distance_decoder = canonical_huffman_decoder<9, 30>;
 using precode_decoder = canonical_huffman_decoder<7, detail::precode_alphabet>;
 
 /// Shared fixed-code decoder objects. The DEFLATE reader uses the literal
-/// table and decodes fixed distance symbols directly from their five bits.
+/// table and decodes fixed distance symbols directly fom their five bits.
 inline const lit_len_decoder fixed_literal_length_decoder =
     lit_len_decoder::build(detail::fixed_lit_len_code_lengths());
 inline const distance_decoder fixed_distance_decoder =

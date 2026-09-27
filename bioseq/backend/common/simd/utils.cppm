@@ -20,12 +20,12 @@ HWY_BEFORE_NAMESPACE();
 namespace bioseq::simd::HWY_NAMESPACE {
 namespace hn = hwy::HWY_NAMESPACE;
 
-/// @brief Makes the shared compile-time index loop available in this SIMD namespace.
+/// @brief Makes the shared compile-time index, loop available in this SIMD namespace.
 using ::bioseq::common::templating::for_each_index;
 
 /**
- * @brief Copies the active SIMD lanes into a C++ vector in lane order.
- * @param[in] simd_tag Highway descriptor giving the active lane count.
+ * @brief Copies the active SIMD lanes into a C++ vector in lane order
+ * @param[in] simd_tag Highway descriptor giving the active lne count.
  * @param[in] vector Vector to copy.
  * @tparam p_value_type Scalar lane type.
  */

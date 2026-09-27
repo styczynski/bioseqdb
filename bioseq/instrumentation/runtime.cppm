@@ -16,7 +16,7 @@ import bioseq.instrumentation.profiler_state;
 
 namespace bioseq::instrumentation::detail {
 
-/// Process-wide switch checked when region and loop scopes begin.
+/// Process-wide switch checked when region and loop scopes begin
 inline std::atomic<bool> runtime_enabled_flag{true};
 
 }  // namespace bioseq::instrumentation::detail

@@ -59,7 +59,7 @@ size_t Find(D d, T value, const T* HWY_RESTRICT in, size_t count) {
     HWY_DASSERT(0 != remaining && remaining < N);
     const Mask<D> mask = FirstN(d, remaining);
     const Vec<D> v = MaskedLoad(mask, d, in + i);
-    // Ignore padding lanes when looking for a match.
+    // Ignore padding lanes when looking for a match
     const intptr_t pos = FindFirstTrue(d, And(Eq(broadcasted, v), mask));
     if (pos >= 0) return i + static_cast<size_t>(pos);
 #endif  // HWY_MEM_OPS_MIGHT_FAULT

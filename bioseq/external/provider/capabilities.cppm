@@ -16,10 +16,10 @@ export module bioseq.external.provider.capabilities;
 
 import bioseq.external.provider.base;
 
-/// Provider features and statistics used during planning and retrieval.
+/// Provider features and statistics used during planning and retrieval
 export namespace bioseq::external::provider {
 
-// Planning and transfer statistics.
+// Planning and trasfer  statistics.
 /// Counts and completeness reported by one provider session.
 struct provider_statistics {
     std::uint64_t requests{};
@@ -141,7 +141,7 @@ struct owning_provider_capability_snapshot {
         return total;
     }
 
-    /// Borrow provider-level data, leaving the domain list empty.
+    /// Borrow provider-level data, leaving the domain  list empty.
     /// Domain details remain in the owning snapshot's domains member.
     [[nodiscard]] provider_capability_snapshot make_view() const noexcept {
         return provider_capability_snapshot{

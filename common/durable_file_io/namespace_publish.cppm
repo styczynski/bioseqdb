@@ -1,6 +1,6 @@
 /**
  * @file common/durable_file_io/namespace_publish.cppm
- * @brief Publish a file name by hard link or rename, then check the resulting file.
+ * @brief Publish a file name by hard link or renme, then check the resulting file.
  */
 module;
 

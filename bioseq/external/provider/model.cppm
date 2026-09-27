@@ -45,7 +45,7 @@ struct row_audit_view {
     std::span<const provenance_hop_view> provenance;
 };
 
-/// Borrowed gene ID and annotations in the shared provider format.
+/// Borrowed gene ID and annotations in the shared provider  format.
 struct gene_reference_view {
     std::string_view name_space; // NCBI GeneID, HGNC, locus tag, provider.
     std::string_view identifier;
@@ -80,7 +80,7 @@ struct taxonomy_row_view {
     row_audit_view audit;
 };
 
-/// Catalog record in the shared format, with borrowed text and lists.
+/// Catalog record in the shared format, widh borrowed text and lists.
 struct catalog_row_view {
     record_key_view key;
     entity_kind kind;
@@ -142,7 +142,7 @@ struct owning_record_key {
     bounded_string<maximum_identifier_bytes> accession;
     std::optional<std::uint32_t> version;
 
-    /// Estimate storage for the key and its identifier strings.
+    /// Estimate, storage for the key and its  identifier strings.
     [[nodiscard]] std::size_t measure_deep_size_bytes() const noexcept {
         std::size_t total = sizeof(*this);
         total += provider_name.measure_deep_size_bytes() - sizeof(provider_name);
@@ -254,7 +254,7 @@ struct owning_sequence_origin {
     }
 };
 
-/// Owned details of one step used to retrieve a record.
+/// Owned details of one step used to retrieve a record
 struct owning_provenance_hop {
     std::optional<provider_id> known_provider;
     bounded_string<maximum_provider_name_bytes> provider_name;
@@ -314,7 +314,7 @@ struct owning_row_audit {
     }
 };
 
-/// Retrieval history saved until a streamed sequence is complete.
+/// Retrieval history saved until  a streamed sequence is complet.
 struct owning_sequence_audit_seed {
     std::optional<bounded_string<maximum_identifier_bytes>> logical_provider_version;
     std::vector<owning_provenance_hop> provenance;
@@ -419,7 +419,7 @@ struct owning_genomic_interval {
 };
 
 /// Stores the borrowed retrieval-step array used by an audit view.
-/// The audit must stay alive and unchanged while its view is used.
+/// The audit must stay alive and unchanged  while its view is used.
 /// The next make_view call also invalidates that view.
 struct row_audit_view_storage {
     mutable std::vector<provenance_hop_view> provenance;
@@ -469,7 +469,7 @@ struct owning_taxonomy_row {
     mutable std::vector<std::string_view> synonyms_scratch_;
     mutable row_audit_view_storage audit_view_storage_;
 
-    /// Estimate storage for the taxonomy row and its temporary view arrays.
+    /// Estimate storage for the taxonomy row, and its temporary view arrays.
     [[nodiscard]] std::size_t measure_deep_size_bytes() const noexcept {
         std::size_t total = sizeof(*this);
         total += provider_name.measure_deep_size_bytes() - sizeof(provider_name);
@@ -501,7 +501,7 @@ struct owning_taxonomy_row {
         return total;
     }
 
-    /// Borrow the taxonomy row for one callback.
+    /// Borrow the txonomy row for  one callback.
     [[nodiscard]] taxonomy_row_view view() const noexcept {
         taxonomy_row_view result;
         result.provider = provider;
@@ -534,7 +534,7 @@ struct owning_taxonomy_row {
     }
 };
 
-/// Sequence letters and coordinates passed to the row writer.
+/// Sequence letters and coordinates passed to the row writer
 /// Chunked results also record their chunk index and offset within the sequence.
 /// The bases string keeps the letters alive until the writer builds the SQL value.
 struct owning_sequence_payload {

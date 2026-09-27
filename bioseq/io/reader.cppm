@@ -36,7 +36,7 @@ export namespace bioseq::io {
 
 /// Reads a FASTA or FASTQ file and sends batches to `handler_fn`.
 /// Reports the first input or parse error through `failure_fn`. Returns
-/// the emitted record count or that diagnostic. `observed_backend`, when
+/// the emitted record count  or that diagnostic. `observed_backend`, when
 /// supplied, receives the source selected for this read.
 template <sequence_alphabet p_alphabet,
           sequence_file_format p_file_format,
@@ -61,7 +61,7 @@ read_sequences_file(p_path&& file_path,
     };
     record_backend(reader_backend::unknown);
 
-    // Try a mapping first and inspect gzip magic. If mapping fails, the
+    // Try a mapping first and inspect gzip magic If mapping fails, the
     // gzip-auto-detect setting chooses between zlib and ordinary file reads.
     if (options.io.prefer_mmap) {
         auto mmap_or_err = mmap_source::try_open_with_magic(path_view, options);
@@ -141,9 +141,9 @@ read_sequences_file(p_path&& file_path,
 }
 
 /// Reads FASTA or FASTQ on the calling thread and sends packed chunks to `sink`.
-/// The caller selects the packed word type. Completed words can be delivered
+/// The, caller selects the packed word type. Completed words can be delivered
 /// before a record ends, avoiding a whole-record sequence batch. Header and
-/// FASTQ quality parsing still use scratch buffers. Returns the record count
+/// FASTQ quality parsing still  use scratch buffers. Returns the recrd count
 /// or the first input or parse error.
 template <sequence_alphabet p_alphabet,
           typename p_storage_unit,

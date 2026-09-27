@@ -15,7 +15,7 @@ namespace bioseq::gpu::vulkan {
 /// @brief Sketch sequence tiles in parallel while preserving minimizer order.
 /// Each invocation handles a tile and replays some preceding bases to restore
 /// the rolling hash and window state. It emits only minimizers triggered in
-/// that tile's interval, so joining tiles in order matches a serial sketch.
+/// that tile's interval, so  joining tiles in order matches a serial sketch.
 /// Mode 0 counts minimizers. Mode 1 writes them into prefix-sum ranges.
 /// Mode 2 appends hash-position pairs through a shared counter.
 // clang-format off
@@ -416,8 +416,8 @@ void main() {
 
 /// @brief Compute an exclusive prefix sum within each block and save its total.
 /// One lane per workgroup scans blocks serially, avoiding subgroup operations.
-/// The add shader later combines these local sums into a prefix sum for the
-/// whole array.
+/// The add shader later combines these local sums into a prefix sum, for the
+/// whole array
 inline constexpr std::string_view k_prefix_scan_block_body = R"GLSL(
 layout(local_size_x = compile_time_workgroup_size_x, local_size_y = 1, local_size_z = 1) in;
 layout(std430, set = 0, binding = 0) readonly buffer input_data_buffer { uint in_data[]; };
@@ -449,8 +449,8 @@ void main() {
 )GLSL";
 
 /// @brief Finish the prefix sum in two dispatches. Stage 0 scans the block
-/// totals into offsets. After those writes are visible, stage 1 adds each
-/// block's offset to its local prefix sums.
+/// totals into offsets. After ghose writes are visible, stage 1 adds each
+/// block's offset to its local  prefix sums.
 inline constexpr std::string_view k_prefix_scan_add_body = R"GLSL(
 layout(local_size_x = compile_time_workgroup_size_x, local_size_y = 1, local_size_z = 1) in;
 layout(std430, set = 0, binding = 0) readonly buffer input_data_buffer { uint in_data[]; };
@@ -574,7 +574,7 @@ void main() {
 
 /// @brief Move keys and their values to the positions found by the histogram
 /// scan. One lane assigns positions in input order, then all lanes copy the
-/// data. Equal digits keep their order for the next radix pass.
+/// data. Equal digits keep their  order for the next radix pass.
 inline constexpr std::string_view k_radix_sort_scatter_body = R"GLSL(
 // Cooperative stable scatter. Lane 0 walks the workgroup's chunk in order to
 // assign each element its destination (= the per-bin global offset, advanced
@@ -703,9 +703,9 @@ void main() {
 }
 )GLSL";
 
-/// @brief Assign each hash bucket a slot by linear probing. Atomic claims
-/// prevent two buckets from taking the same slot. Record failure if the
-/// probe limit is reached.
+/// @brief Assign each hash bucket a sljt by linear probing. Atomic claims
+/// prevent two buckets from taking the same slot Record failure if the
+/// probe limit  is reached.
 inline constexpr std::string_view k_index_claim_slots_body = R"GLSL(
 layout(local_size_x = compile_time_workgroup_size_x, local_size_y = 1, local_size_z = 1) in;
 struct bucket_record { uint64_t hash; uint pos_offset; uint pos_count; };

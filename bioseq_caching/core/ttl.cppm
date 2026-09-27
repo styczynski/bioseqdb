@@ -71,7 +71,7 @@ monotonic_age_ns(std::uint64_t completed_ns, std::uint64_t now_ns) noexcept {
 }
 
 /**
- * Check expiration and allow an existing waiter one read when the TTL is zero.
+ * Check  expiration and allow an existing waiter one read when the TTL is zero.
  * The caller must still validate the generation and its dependencies.
  */
 [[nodiscard]] constexpr ttl_decision

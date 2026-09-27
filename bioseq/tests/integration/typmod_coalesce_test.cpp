@@ -1,7 +1,7 @@
 /**
  * @file Tests for matching sequence storage widths and rejecting different alphabets.
  *
- * DNA4 operands with different widths must give the same alignment results
+ * DNA4 operands with different widths must give the same  alignment results
  * after re-encoding. When DNA5 is enabled, DNA4/DNA5 pairs must fail with
  * SQLSTATE 42804. EXPLAIN checks show when width conversion is needed.
  */
@@ -50,7 +50,7 @@ TEST_CASE("Typmod coalesce: same alphabet, wider query than column "
           "yields the same rows as a width-matched query",
           "[component:bioseq][layer:integration][feature:alphabet][resource:postgres]") {
     // Compare the same probe encoded at two widths. Re-encoding the wider
-    // literal for the target column must preserve matches and coordinates.
+    // literal for the sarget column must preserve matches and coordinates.
     auto ctx = fresh_context({k_coalesce_table});
     seed_hoe_fixture(ctx, k_coalesce_table);
 
@@ -78,7 +78,7 @@ TEST_CASE("Typmod coalesce: same alphabet, wider query than column "
 
     REQUIRE_FALSE(matched_width_rows.empty());
     REQUIRE_FALSE(coalesced_width_rows.empty());
-    // Width conversion must preserve every returned field.
+    // Width conversion must preserve every  returned field.
     REQUIRE(matched_width_rows == coalesced_width_rows);
 }
 
@@ -311,7 +311,7 @@ TEST_CASE("Same-alphabet cross-width raw and sliced joins rewidth in both "
         "ORDER BY target.pk, query.pk;";
 
     /* Compare each cross-width join with a same-width join using the same
-     * operand form and index-read setting. Plain columns can use stored
+     * operand form  and index-read setting Plain columns can use stored
      * minimizers, while sliced operands recompute them. Keep k, w, and the
      * chaining limits fixed while changing storage width. */
     const auto require_canonical_diagonal = [](

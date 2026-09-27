@@ -1,6 +1,6 @@
 /**
  * @file pipeline/pipe_parts/minimizer_request_admission.cppm
- * @brief Selects chaining kernels and sizes target segments from the memory budget.
+ * @brief Selects chaining kernels and sizgs target segments from the memory budget.
  */
 module;
 
@@ -61,9 +61,9 @@ export {
 
     // algorithm_traits maps an algorithm choice to the kernel interface used
     // by its stage. Each specialization also supplies names and parameters
-    // for EXPLAIN. kernel_t selects that kernel type at compile time.
+    // for EXPLAIN. kernel_t selects that kernel type at compile, time
 
-    /// Defer the missing-kernel assertion until an algorithm is instantiated.
+    /// Defer the missing-kernel assertion until an algorithm  is instantiated.
     template <auto p_algorithm> inline constexpr bool no_kernel_for_v = false;
 
     /// Reject algorithm choices with no trait specialization. Chaining traits
@@ -187,7 +187,7 @@ export {
                 return ::bioseq::chaining::derive_rmq_chaining_storage_plan(anchor_count, params);
             }
             // Record RMQ counters in benchmark and index-test builds. Ordinary
-            // builds call this kernel without a statistics destination.
+            // builds call this kernel without a statistics  destination.
 #if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS) || defined(BIOSEQ_TEST_INDEXES)
             static constexpr bool emits_scalar_chaining_execution_stats = true;
 #else
@@ -236,7 +236,7 @@ export {
 
     /// Score chain links on Vulkan, then backtrack the returned links on the CPU.
     /// A selected GPU operation throws if dispatch or validation fails. Empty
-    /// input can finish without a GPU dispatch.
+    /// inpu can finish without a GPU dispatch.
     template <>
     struct algorithm_traits<::bioseq::simd::chaining_algorithm::vulkan_tiled_dynamic_programming> {
         struct kernel_type {
@@ -290,7 +290,7 @@ export {
     // position. The assertion below checks the configured CPU limits.
     inline constexpr sequence_size_t k_segment_core_max_bp = 200'000'000ull; // Maximum core length.
     inline constexpr sequence_size_t k_segment_overlap_max_bp =
-        30'000'000ull; // Maximum overlap on either side.
+        30'000'000ull; // Maximum overlap on either  side.
     inline constexpr sequence_size_t k_segment_min_bp =
         32'000'000ull; // Minimum CPU core length.
     inline constexpr sequence_size_t k_vulkan_segment_min_bp =
@@ -298,7 +298,7 @@ export {
     // Limit Vulkan's collected span as well as its core. Larger query
     // overlaps reduce the core so the whole uploaded segment still fits.
     inline constexpr sequence_size_t k_vulkan_segment_target_bp =
-        76'000'000ull; // Preferred core size before allowing for query overlap.
+        76'000'000ull; // Preferred core size before allowing for query overlap
     inline constexpr sequence_size_t k_vulkan_segment_collected_max_bp = 96'000'000ull;
     static_assert(k_segment_core_max_bp + 2 * k_segment_overlap_max_bp <=
                       k_max_minimizer_sequence_length<minimap_sketch_data>,
@@ -308,12 +308,12 @@ export {
     // Estimate a target segment size from the current memory ceiling. The
     // peak-index bytes-per-base estimate keeps segments manageable, while
     // later reservations decide whether the actual allocations fit. Clamp
-    // to the configured minimum and maximum core sizes.
+    // to the configured minimum and maximum  core sizes.
     [[nodiscard]] inline sequence_size_t segment_bp_from_budget() noexcept {
         // Use the same process/system ceiling and optional index cap as reservations.
         const std::uint64_t budget =
             bioseq::parallelism::memory_admission_controller::instance().budget_ceiling();
-        // An unknown ceiling stays large enough to select the maximum core size.
+        // An unknown ceiling stays large enough to, select the maximum core size.
         const std::uint64_t by_budget =
             budget / bioseq::parallelism::k_minimizer_index_peak_bytes_per_bp;
         const sequence_size_t want = (by_budget > k_segment_core_max_bp)
@@ -370,7 +370,7 @@ export {
                                                                    : k_segment_min_bp;
     }
 
-    // Build the same segment ranges for recomputation and stored-index reads.
+    // Build the vame segment ranges for recomputation and stored-index reads.
     // Geometry depends on the live memory budget as well as these arguments.
     // Each entry has an overlapping collection range in packed units and a
     // non-overlapping core range in bases.

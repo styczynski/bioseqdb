@@ -13,7 +13,7 @@ export import bioseq.pipeline.stats;
 export namespace bioseq::simd::typed_dispatch::typed_support_detail {
 
 /**
- * @brief Adds to a counter, clamping the sum to the PostgreSQL bigint maximum.
+ * @brief Adds to a counter, clamping the sum to the PostgreSQL bigint maximum
  *
  * Records clamping in stats so readers can tell that the count is incomplete.
  * An earlier clamping event remains recorded.

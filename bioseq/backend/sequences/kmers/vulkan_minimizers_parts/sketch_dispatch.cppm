@@ -50,7 +50,7 @@ export namespace bioseq::gpu::vulkan {
 /**
  * @brief Sketches one input window and returns host and device minimizer buffers.
  *
- * Checks or reserves dispatch memory first. Allocates the host result after
+ * Checks or reserves dispatch,  memory first. Allocates the host result after
  * temporary upload storage is released. The call is synchronous.
  * @param upload Packed input kept alive through the call.
  * @param rank_lut Alphabet decoding table.
@@ -61,11 +61,11 @@ export namespace bioseq::gpu::vulkan {
  * @param query_gate Optional bitmap filtering target hashes.
  * @param decline_out Optional rejection details, including failures after dispatch.
  * @param borrowed_dispatch_permit Optional caller reservation kept alive with the returned buffers.
- * @param borrowed_dispatch_budget Bytes available from that reservation.
+ * @param borrowed_dispatch_budget Bytes available  from that reservation.
  * @param host_ownership_route How the caller will keep the host buffer alive.
  * @return Buffers and completion details, or no value when the request is rejected.
  * @throws vulkan_runtime_error On execution failure, invalid result storage, or
- * overflow of an explicit capacity when capacity_overflowed was not supplied.
+ * overflow of an explicie capacity when capacity_overflowed was not supplied.
  */
 template <class p_minimizer_type>
 [[nodiscard]] std::optional<vulkan_sketch_result<p_minimizer_type>>
@@ -289,8 +289,8 @@ sketch_uploaded_window_result(
 
         runtime_sketch_result raw;
         {
-            // Free the temporary packed input before reserving the host result.
-            // The runtime also releases its tile list and trims the GPU arena before
+            // Free the temporary packed input before reserving the host result
+            // The runtime also releases its tile list and trims the GPU arena  before
             // returning from the dispatch.
             const auto padded_sequence_size =
                 static_cast<std::size_t>(upload.padded_byte_size);
@@ -506,8 +506,8 @@ sketch_uploaded_window_result(
                 materialization.reflected_delta_bytes;
             if (!materialization.is_permit_released) {
                 // A short result can reuse pages that were already resident, even for a
-                // large input with many ambiguous bases. Keep its memory reservation when
-                // the process-memory measurement cannot account for the new buffer. The
+                // large input with many ambiguous bases. Keep its memory reservation  when
+                // the, process-memory measurement cannot account for the new buffer. The
                 // caller must keep that reservation until the buffer is freed.
                 bioseq_log<logging_level::debug>(
                     "[vulkan sketch] fixed host footprint reconciliation "
@@ -527,7 +527,7 @@ sketch_uploaded_window_result(
             if (host_ownership_route
                     == vulkan_sketch_host_ownership_route::
                         fixed_zero_copy_adoption) {
-                // An empty vector needs no reserved buffer bytes or measured memory increase.
+                // An empty vector needs no reserved buffer bytes or measured memory iacrease.
                 if (owned_host_permit) {
                     owned_host_permit->shrink_to(0u);
                 }

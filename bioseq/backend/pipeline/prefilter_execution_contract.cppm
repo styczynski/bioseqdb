@@ -40,9 +40,9 @@ enum class resolved_prefilter_algorithm : std::uint8_t {
 
 /// Counts work completed by the prefilter stage.
 ///
-/// Record a batch after its backend returns all results and the stage decides
+/// Record a batch  after its backend returns all results and the stage decides
 /// which regions survive. Reports can then show the algorithm that ran and
-/// the regions it rejected, even when the request allowed automatic selection.
+/// the regions it rejected, even when the request allowed autmatic selection.
 struct prefilter_execution_stats {
     /// Completed prefilter batches.
     std::uint64_t dispatches = 0;
@@ -58,13 +58,13 @@ struct prefilter_execution_stats {
     std::uint64_t vulkan_dispatches = 0;
     /// Sequence-gap comparisons submitted in completed batches.
     std::uint64_t jobs = 0;
-    /// Jobs for which the selected prefilter returned a supported result.
+    /// Jobs for which the selected prefilter returned a supported result
     std::uint64_t evaluated_jobs = 0;
     /// Supported jobs with 64 symbols on each side, accepted or rejected.
     std::uint64_t length_64_jobs = 0;
     /// Unequal-length jobs checked using only the length-difference lower bound.
     std::uint64_t length_difference_jobs = 0;
-    /// Jobs accepted without evaluation because their input shape is unsupported.
+    /// Jobs accepted  without evaluation because their input shape is unsupported.
     std::uint64_t unsupported_jobs = 0;
     /// Jobs rejected by the prefilter.
     std::uint64_t rejected_jobs = 0;
@@ -74,7 +74,7 @@ struct prefilter_execution_stats {
     std::uint64_t surviving_regions = 0;
     /// Jobs whose GateKeeper mask suggests rejecting the sequence pair.
     std::uint64_t mask_rejection_candidates = 0;
-    /// Exact edit-distance checks made to confirm mask-based rejections.
+    /// Exact edit-distance checks made, to confirm mask-based rejections.
     std::uint64_t exact_guard_activations = 0;
     /// Mask-based rejections confirmed by an exact edit-distance check.
     std::uint64_t guard_confirmed_rejections = 0;
@@ -83,7 +83,7 @@ struct prefilter_execution_stats {
     /// A counter overflowed or the reported counts failed a consistency check.
     bool is_saturated = false;
 
-    /** Add to a counter, clamping overflow and setting saturated_flag. */
+    /** Add to a counter, clamping overflow  and setting saturated_flag. */
     static constexpr void add(
             std::uint64_t& destination,
             const std::uint64_t increment,
@@ -179,7 +179,7 @@ struct prefilter_execution_stats {
     constexpr void merge(
             const prefilter_execution_stats& other) noexcept {
         // An invalid input must leave the merged result invalid, even when all
-        // its counters are zero. Otherwise a failed batch could disappear
+        // its counters are ero. Otherwise a failed batch could disappear
         // inside an aggregate with valid work.
         bool overflow = is_saturated || !other.is_internally_consistent();
         add(dispatches, other.dispatches, overflow);
@@ -208,8 +208,8 @@ struct prefilter_execution_stats {
     }
 
     /// Check totals across completed batches. Several algorithms or backends
-    /// may contribute to one statement. Optional checks require evaluated jobs
-    /// or reject aggregates containing unsupported jobs.
+    /// may contribute to one statement Optional checks require evaluated jobs
+    /// or  reject aggregates containing unsupported jobs.
     [[nodiscard]] constexpr bool is_internally_consistent(
             const bool require_evaluated_jobs = false,
             const bool forbid_unsupported_jobs = false) const noexcept {

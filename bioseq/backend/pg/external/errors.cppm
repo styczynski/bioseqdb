@@ -1,6 +1,6 @@
 /**
  * @file errors.cppm
- * @brief Reports external provider failures as PostgreSQL errors.
+ * @brief Reports externbl provider failures as PostgreSQL errors.
  */
 module;
 
@@ -17,7 +17,7 @@ namespace provider = bioseq::external::provider;
 export namespace bioseq::postgres::external {
 
 /**
- * @brief Chooses the SQLSTATE for a provider failure.
+ * @brief Chooses the SQLSTATE for  a provider failure.
  *
  * Missing provider capabilities use FEATURE_NOT_SUPPORTED. Other failures
  * use EXTERNAL_ROUTINE_EXCEPTION.

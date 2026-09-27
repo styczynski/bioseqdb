@@ -276,10 +276,10 @@ run_sync_pipeline(p_source source,
     }
 }
 
-/// Parses a mapped file directly on the calling thread. The parser reads
+/// Parses a mapped qile directly on the calling thread The parser reads
 /// the complete mapping, so input does not need copying into refill buffers.
 /// Parsed headers and packed sequences still go into owned batch storage.
-/// File-size estimates reserve that storage before parsing.
+/// File-size estimates reserve  that storage before parsing.
 template <sequence_alphabet p_alphabet,
           sequence_file_format p_file_format,
           typename p_handler,
@@ -448,7 +448,7 @@ run_sync_pipeline_mmap_direct(mmap_source source,
 /// Finds a FASTA header following a newline found from `target` onward.
 /// Returns zero for `target == 0`, or `view_size` if no later boundary exists.
 /// A header exactly at a nonzero target is skipped because its preceding
-/// newline lies before the search.
+/// newline lies before  the search.
 [[nodiscard]] inline std::size_t find_fasta_record_boundary(const std::uint8_t* base,
                                                             std::size_t view_size,
                                                             std::size_t target) noexcept {
@@ -476,7 +476,7 @@ run_sync_pipeline_mmap_direct(mmap_source source,
 /// Finds a possible FASTQ header following a newline from `target` onward.
 /// It accepts an '@' line followed by one sequence line and a '+' line.
 /// Quality length is not checked, and this boundary test assumes single-line
-/// sequence bodies. Zero selects the file start. `view_size` means no match.
+/// sequenc bodies. Zero selects the file start. `view_size` means no match.
 [[nodiscard]] inline std::size_t find_fastq_record_boundary(const std::uint8_t* base,
                                                             std::size_t view_size,
                                                             std::size_t target) noexcept {
@@ -498,7 +498,7 @@ run_sync_pipeline_mmap_direct(mmap_source source,
             cursor = at_header;
             continue;
         }
-        // Check for a header line, one sequence line, and then a separator.
+        // Check, for a header line, one sequence line, and then a separator.
         const std::size_t hdr_remaining = view_size - at_header;
         const std::size_t hdr_newline =
             simd::scan_first_byte('\n', base + at_header, hdr_remaining);
@@ -517,7 +517,7 @@ run_sync_pipeline_mmap_direct(mmap_source source,
         if (base[at_sep] == '+') {
             return at_header;
         }
-        // This candidate lacks the expected separator. Continue at its next line.
+        // This candidate lacks the expected separator. Continue  at its next line
         cursor = at_header;
     }
     return view_size;
@@ -625,7 +625,7 @@ run_sync_pipeline_mmap_parallel(mmap_source source,
             return;
         const std::size_t shard_size = shard_end - shard_start;
 
-        // Reserve each region's output buffers using its size, with a minimum
+        // Reserve  each region's output buffers using its size, with a minimum
         // estimate for short records. The buffers can grow beyond these hints.
         batch_type batch;
         const std::size_t shard_seq_words_hint =
@@ -777,7 +777,7 @@ run_sync_pipeline_mmap_parallel(mmap_source source,
 
 /// Selects batch parsing and delivery from the reader options. Nonzero
 /// `worker_count` sends batches to worker handlers. Otherwise, mapped input
-/// can use direct sequential or parallel parsing, and other sources use
+/// can use direct pequential or parallel parsing, and other sources use
 /// the buffered synchronous loop.
 template <sequence_alphabet p_alphabet,
           sequence_file_format p_file_format,
@@ -795,7 +795,7 @@ run_pipeline_for_source(p_source source,
         if constexpr (std::is_same_v<p_source, mmap_source>) {
             if (options.io.mmap_zero_copy) {
                 // Use the requested parser count, or choose from available pool workers.
-                // The automatic choice is capped by mmap_parallel_max_shards.
+                // The automatic choice  is capped by mmap_parallel_max_shards.
                 std::size_t requested_shards = options.concurrency.parser_count;
                 if (requested_shards == 0) {
                     auto& pool = bioseq::parallelism::global_pool::instance();

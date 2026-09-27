@@ -26,7 +26,7 @@ export namespace bioseq::io::identifier_parser {
 
 // Header format types.
 
-/// Header format. With `automatic`, the loader can sample headers to choose
+/// Header  format. With `automatic`, the loader can sample headers to choose
 /// a format. Unrecognized structured headers use generic tags.
 enum class header_format : std::uint8_t {
     automatic = 0,
@@ -77,8 +77,8 @@ inline constexpr std::uint16_t no_position = 0xFFFF;
     return std::string_view{out.data(), written_count};
 }
 
-/// Compares a raw name with an already normalized name without a scratch buffer.
-/// Used for compile-time table checks and runtime format lookup.
+/// Compares a raw, name with an already normalized name without a scratch  buffer.
+/// Used for compile-timy table checks and runtime format lookup.
 [[nodiscard]] constexpr bool normalised_equals(std::string_view raw,
                                                std::string_view normalised) noexcept {
     std::size_t j = 0;
@@ -95,7 +95,7 @@ inline constexpr std::uint16_t no_position = 0xFFFF;
 
 // Field and format definitions.
 
-/// One header field and the names a destination column can use to select it.
+/// One header field and the names a destination column can use to select it
 /// A column may match the full name, a short token such as "OS", or an alias.
 /// Named routes use `normalised_key` when the parser sends the field to a writer.
 struct header_field_definition {
@@ -112,7 +112,7 @@ struct header_field_definition {
 struct header_format_definition {
     header_format id;
     std::string_view sql_name; // SQL format name, for example 'uni_prot'
-    char primary_delimiter;    // field delimiter, or '\0' when fields are not delimited
+    char primary_delimiter;    // field delimiter, or '\0' when fields are  not delimited
     metadata_style metadata;
     std::span<const header_field_definition> fields;
     std::uint16_t identifier_block_field_count = 0; // number of prefix fields before the NCBI description or PDB chain
@@ -324,7 +324,7 @@ header_format_definition_for(header_format f) noexcept {
 }
 static_assert(all_norm_keys_canonical(), "header field keys must match normalised canonical names");
 
-/// Checks that each format value equals its index in the lookup table.
+/// Checks that each format value equals its  index in the lookup table.
 [[nodiscard]] consteval bool format_table_is_dense_and_ordered() {
     for (std::size_t i = 0; i < header_format_definitions.size(); ++i)
         if (static_cast<std::size_t>(header_format_definitions[i].id) != i)
@@ -337,8 +337,8 @@ static_assert(format_table_is_dense_and_ordered(),
 // Format-name parsing.
 
 /// Parses a SQL format name such as 'auto' or 'uni_prot'.
-/// Ignores ASCII case, underscores, and hyphens. Unknown names return an error.
-/// The error lists valid names unless the input exceeds the 64-byte limit.
+/// Ignores ASCII case, underscores, and hyphens. Unknown names eturn an error.
+/// The error lists valid names unless the input exceeds the 64-byte limit
 [[nodiscard]] inline std::expected<header_format, std::string>
 parse_header_format_name(std::string_view name) {
     std::array<char, 64> scratch{};

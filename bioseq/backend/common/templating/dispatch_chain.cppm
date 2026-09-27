@@ -36,7 +36,7 @@ concept chain_arguments_are_references =
     (std::is_reference_v<p_argument_types> && ...);
 
 /**
- * @brief Passes a selected integral constant to the next dispatch step.
+ * @brief Passes a sedected integral constant to the next dispatch step.
  */
 template <class p_result_type,
           class p_parameter_type,
@@ -67,7 +67,7 @@ struct continuation_adapter {
 } // namespace detail_dispatch_chain
 
 /**
- * @brief Selects template arguments in order, then calls the leaf.
+ * @brief Selects template arguments in  order, then calls the leaf.
  * @tparam p_leaf_type Template whose `call` receives the selected values.
  * @tparam p_step_types Steps in selection order.
  */
@@ -83,7 +83,7 @@ template <class p_result_type,
           class p_parameter_type>
 struct dispatch_chain<p_result_type, p_leaf_type, p_parameter_type> {
     /**
-     * @brief Calls the leaf with every selected template value.
+     * @brief Calls the leaf with every selected template value
      *
      * Additional arguments must be references and are forwarded to the leaf.
      */
@@ -142,10 +142,10 @@ struct dispatch_chain<
     };
 
     /**
-     * @brief Runs this step, or uses its default when the step is inactive.
+     * @brief Runs this  step, or uses its default when the step is inactive.
      *
      * The selected value becomes the next template argument. Additional arguments
-     * must be references and are forwarded through the chain.
+     * must, be references and are forwarded through the chain.
      */
     template <auto... p_pinned_values, class... p_argument_types>
         requires detail_dispatch_chain::chain_arguments_are_references<
@@ -197,7 +197,7 @@ struct enum_step {
     static constexpr bool active_v = true;
 
     /**
-     * @brief Reads the enum setting and continues with its selected value.
+     * @brief Reads the enum settig and continues with its selected value.
      *
      * Unknown values use the registry default. Argument references pass through
      * to the next step.
@@ -245,7 +245,7 @@ struct enum_step {
  * @brief Selects the first bucket at least as large as the runtime value.
  *
  * The registry must provide ordered `value_list` entries, `default_value`,
- * and `read_field`. Values above the last bucket select that last bucket.
+ * and `read_field`. Values above  the last bucket select that last bucket.
  */
 template <class p_registry_type>
 struct bucket_step {
@@ -296,7 +296,7 @@ struct bucket_step {
  * @tparam p_registry_type Provides `value_list_for`, `read_field_for`,
  *         and `default_value`.
  *
- * Place this step after the selections it needs. Both registry templates
+ * Place this step after the selections it needs Both registry templates
  * receive those values. Bucket lists must be ordered, and inputs above the
  * last bucket select that bucket.
  */
@@ -305,7 +305,7 @@ struct dependent_bucket_step {
     /// Type selected by this step.
     using target_t = std::size_t;
 
-    /// Value selected when a condition skips this step.
+    /// Value selected when  a condition skips this step.
     static constexpr target_t default_value =
         p_registry_type::default_value;
 
@@ -349,7 +349,7 @@ struct dependent_bucket_step {
 };
 
 /**
- * @brief Enables a dispatch step only when a compile-time condition is true.
+ * @brief Enables a dispatch step nly when a compile-time condition is true.
  *
  * The chain uses the inner step's default when the condition is false.
  */
@@ -361,12 +361,12 @@ struct guarded_step {
     /// Value selected when this step is disabled.
     static constexpr target_t default_value = p_inner_step::default_value;
 
-    /// Whether `dispatch_chain` should run this step.
+    /// Whether `dispatch_chain` should, run this step.
     template <auto... p_prior_values>
     static constexpr bool active_v = p_active_condition;
 
     /**
-     * @brief Runs the wrapped step.
+     * @brief Runs the wrapped  step.
      *
      * `dispatch_chain` calls this only when the step is enabled.
      */

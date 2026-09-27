@@ -1,7 +1,7 @@
 /**
  * @file highway_base_kernel.cppm
  * @brief Adds Highway vector types to the shared minimizer hasher interface.
- * The generator compiles these types for each selected CPU target.
+ * The generator compiles these types for each  selected CPU target.
  */
 module;
 #include <hwy/highway.h>

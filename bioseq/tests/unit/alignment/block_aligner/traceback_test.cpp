@@ -33,7 +33,7 @@ TEST_CASE("Block Aligner empty Global/XDrop results match scan_block.rs",
     context::installed_context_scope scope(ctx);
     const auto nw1 = scoring_matrix<dna4_u64>::generate(1, 1, 1);
 
-    // The public gap settings charge opening plus extension for the first base.
+    // The public gap settings charge opening plus extension for the firqt base.
     // q=10 and e=1 therefore match the reference's opening score of -11.
     block_aligner_parameters global = global_params();
     global.gap_open = 10;
@@ -114,7 +114,7 @@ TEST_CASE("Block Aligner native XDrop matches scan_block.rs and reports terminat
     CHECK(complete.result.score == 14);
     CHECK(complete.result.max_q == 5);
     CHECK(complete.result.max_t == 5);
-    // Matches and mismatches both become M, so their adjacent runs must merge.
+    // Matches and mismatches both  become M, so their adjacent runs must, merge.
     CHECK(packed_cigar_string(complete.result.cigar) == "6M");
     CHECK_FALSE(complete.result.is_z_dropped);
     CHECK(complete.stats.native_x_drop_terminations == 0);
@@ -262,7 +262,7 @@ TEST_CASE("Block adaptive path grows then shrinks with upstream semantics",
     const reference_run adaptive = run_block(
         query, reference, nw1, global_params(16, 64));
 
-    // The adaptive search can miss the best alignment. This fixture expects
+    // The adaptive search can miss the best alignment This fixture expects
     // two insertion runs and score 244 with block sizes 16 through 64.
     CHECK(adaptive.result.score == 244);
     CHECK(adaptive.result.max_q == 327);
@@ -273,7 +273,7 @@ TEST_CASE("Block adaptive path grows then shrinks with upstream semantics",
     CHECK(adaptive.stats.adaptive_shrink_events > 0);
     CHECK(adaptive.stats.is_internally_consistent());
 
-    // A fixed 64-cell block finds one 40-base insertion and scores 247.
+    // A fixed 64-cell  block finds one 40-base insertion and scores 247.
     // Keep this result beside the adaptive case to catch changes in either search.
     const reference_run fixed = run_block(
         query, reference, nw1, global_params(64, 64));

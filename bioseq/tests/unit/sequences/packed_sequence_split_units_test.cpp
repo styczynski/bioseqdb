@@ -48,7 +48,7 @@ void check_split(std::size_t bp_size, std::size_t records_of_units) {
         const bool is_last = (r + 1 == triples.size());
         ASSERT(pad == (is_last ? seq.padding() : std::size_t{0}),
                fmt::format("record {} pad {} (is_last={})", r, pad, is_last), pad);
-        // Every record before the last must contain the requested number of units.
+        // Every record before the last  must contain the requested number of units.
         if (!is_last) {
             ASSERT(cnt == records_of_units,
                    fmt::format("interior record {} unit count {} != {}", r, cnt,

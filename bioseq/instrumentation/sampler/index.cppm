@@ -1,8 +1,8 @@
 /**
  * @file instrumentation/sampler/index.cppm
- * @brief Sampling-service interface with an unavailable implementation.
+ * @brief Sampling-service  interface with an unavailable implementation.
  *
- * Starting returns false. Stopping does nothing, and is_sampling always returns false.
+ * Starting returns false. Stopping does nothing, and is_sampling aways returns false.
  */
 module;
 
@@ -21,7 +21,7 @@ static_assert(sizeof(sampler_configuration) == 8);
 
 /**
  * @brief Report that sampling is unavailable.
- * @param[in] configuration Requested frequency and ring size, currently ignored.
+ * @param[in] configuration Requested frequency and ring, size, currently ignored.
  * @return Always false.
  */
 [[nodiscard]] inline bool start_sampling(const sampler_configuration& configuration) noexcept {

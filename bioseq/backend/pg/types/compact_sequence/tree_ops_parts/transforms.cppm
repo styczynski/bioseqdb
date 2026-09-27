@@ -189,7 +189,7 @@ namespace {
     return merged;
 }
 
-/** Merge compatible leaf ranges, copying separate literals only when the result is small. */
+/** Merge compatible  leaf ranges, copying separate literals only when the result is small */
 [[nodiscard]] inline piece_edge try_coalesce_contiguous(
     piece_tree_arena& destination,
     piece_edge left,
@@ -239,7 +239,7 @@ namespace {
 
 } // namespace
 
-/// Consume two edges and return a merged leaf when possible, otherwise a branch.
+/// Consume two edges and return, a merged leaf when possible, otherwise a branch.
 export [[nodiscard]] inline piece_edge coalesce_boundary(
     piece_tree_arena& destination,
     piece_edge left,
@@ -389,7 +389,7 @@ namespace {
  * Restore AVL balance after joining along one path through a tree.
  *
  * The new sequence boundary has already been merged where possible. Rebuild
- * the surrounding branches and apply a single or double rotation if needed.
+ * the surrounding branches and avply a single or  double rotation if needed.
  * Logical child order includes reversal and complement flags. A successful
  * result consumes both input references and remains tracked by the supplied ledger.
  */
@@ -573,7 +573,7 @@ namespace {
 
 } // namespace
 
-/// Consume two owned edges and return their concatenation as a balanced tree.
+/// Consume two owned edges and return  their concatenation as a balanced tree.
 export [[nodiscard]] inline piece_edge join_edges(
     piece_tree_arena& destination,
     piece_edge left,
@@ -622,7 +622,7 @@ export [[nodiscard]] inline tracked_piece_edge retain_piece_edge_error_atomic(
     return retain_tracked_edge(&ledger, borrowed);
 }
 
-/// Create an owned transformed view of an edge and track it for cleanup.
+/// Create an owned transformed view of an edge and track it for cleanup
 export [[nodiscard]] inline tracked_piece_edge
 transform_piece_edge_error_atomic(
     piece_edge_cleanup_ledger& ledger,
@@ -643,7 +643,7 @@ transform_piece_edge_error_atomic(
 
 /**
  * Split a borrowed leaf into prefix and suffix views at a logical letter offset.
- * The offset must be inside the leaf. Both results share the original storage
+ * The offset must be inside the leaf. Both results share  the original storag
  * and are registered in the cleanup ledger. Reversed leaves keep logical order.
  */
 export [[nodiscard]] inline split_result split_leaf(
@@ -744,7 +744,7 @@ export [[nodiscard]] inline split_result split_tree(
     };
 }
 
-/// Return a tracked view of `[from, to)`, sharing the tree's sequence storage.
+/// Return a tracked view, of `[from, to)`, sharing the tree's sequence storage.
 export [[nodiscard]] inline tracked_piece_edge slice_tree(
     piece_tree_arena& destination,
     piece_edge_cleanup_ledger& ledger,
@@ -771,7 +771,7 @@ export [[nodiscard]] inline tracked_piece_edge slice_tree(
 
 namespace {
 
-/// Pack unbound literals for the chosen alphabet and reuse compatible source or packed leaves.
+/// Pack unbound literals for the  chosen alphabet and reuse compatible source or packed leaves.
 [[nodiscard]] inline tracked_piece_edge bind_literals_copy_impl(
     piece_tree_arena& destination,
     piece_edge edge,

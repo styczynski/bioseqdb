@@ -135,7 +135,7 @@ TEST_CASE("letter validation hook walks nested queries without reentry",
     REQUIRE(query_scalar_int(ctx, "SELECT 1;") == 1);
     const auto simple_after = query_scalar_int(
         ctx, "SELECT bioseq_internal.letter_hook_chain_calls();");
-    // The probe SELECT and the second counter query each call the hook once.
+    // The  probe SELECT and the second counter query each call the hook once.
     // A delta of two checks that the installed hook runs once per statement.
     REQUIRE(simple_after - simple_before == 2);
 
@@ -200,7 +200,7 @@ TEST_CASE("letter typmods resolve literals and validate physical alphabets",
     REQUIRE(mismatched_typmod.contains(
         "cannot relabel bioseq.letter to a different alphabet"));
 #else
-    // The opt0 build supports only dna4. Asking for dna5 must report that
+    // The opt0 build supports only dna4. Asking for dna5 must, report that
     // the alphabet is unavailable.
     const auto unavailable_dna5 = sql_error(
         ctx, "SELECT 'A'::bioseq.letter('dna5');");
@@ -220,7 +220,7 @@ TEST_CASE("letter typmods resolve literals and validate physical alphabets",
         "bioseq.letter input requires an alphabet typmod"));
 
     // A letter literal needs an alphabet before it can be stored. A value
-    // already created with dna4 remains valid in a typmodless column.
+    // already created with dna4 remains valid in a typmodless column
     exec_sql(ctx,
         "CREATE TABLE sequence_slicing_typmodless_letter "
         " (value bioseq.letter);");
@@ -437,7 +437,7 @@ TEST_CASE("sliced source concatenations survive INSERT boundaries",
             == "1");
     }
 
-    /* Use another table to check both EXPLAIN ANALYZE for the INSERT and the
+    /* Use another  table to check both EXPLAIN ANALYZE for the INSERT and the
      * row it stores. */
     const auto concat_insert_plan = explain_text(
         ctx,
@@ -551,7 +551,7 @@ TEST_CASE("sliced source concatenations survive INSERT boundaries",
             "Producer Value") == "3");
     }
 
-    /* Direct SQL calls to seq_cast remain separate sources. Only the cast
+    /* Direct SQL calls to seq_cast rmain separate sources. Only the cast
      * expression PostgreSQL inserts for assignment can be folded into a slice. */
     const std::array<std::string_view, 3> explicit_cast_sql{
         "SELECT bioseq.seq_cast(s[500000:500064], 3, false) "

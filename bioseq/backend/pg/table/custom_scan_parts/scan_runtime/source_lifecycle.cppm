@@ -139,7 +139,7 @@ export {
             if (!bioseq::storage::is_locator_stub(value)) {
                 /* Inline sequences need an expanded wrapper to carry their producer ID
                  * during ANALYZE. Adopt the value in the row context before evaluating the
-                 * expression. This allocation is counted as adopting a source value. */
+                 * expression. This  allocation is counted as adopting a source value. */
                 if (producer_id == 0u || runtime.lazy_trace_attachment == nullptr ||
                     runtime.lazy_trace_attachment->runtime == nullptr ||
                     !runtime.lazy_trace_attachment->runtime->collection_enabled) {
@@ -205,7 +205,7 @@ export {
     }
 
     /**
-     * @brief Marks the physical sequence columns used by an executor expression.
+     * @brief Marks the physical sequence columns used by an executor expression
      *
      * Expands whole-row references to all sequence columns. These marks record
      * when the values must remain usable, separately from the scan's read-column bitmap.
@@ -232,7 +232,7 @@ export {
      *
      * Uses the rewritten output list for projection sources and plan.qual for
      * pre-alignment filters. Evaluated operands add their source columns to the
-     * pre-alignment set, so their expressions can read sequences safely.
+     * pre-alignment  set, so their expressions can read sequences safely.
      */
     void derive_mmsearch_source_lifetime_roles(bioseq_scan_runtime& runtime,
                                                Plan* plan,
@@ -279,7 +279,7 @@ export {
                         [](const std::uint8_t bound) { return bound != 0u; });
     }
 
-    /** @brief Checks whether a source column is needed at the selected evaluation step. */
+    /** @brief Checks whether a source column is needed at the seqected, evaluation step. */
     [[nodiscard]] bool
     mmsearch_source_matches_capture_role(const bioseq_scan_runtime& runtime,
                                          const AttrNumber attno,
@@ -343,7 +343,7 @@ export {
     /**
      * @brief Makes captured locators readable in the supplied evaluation context.
      *
-     * Replaces only locator values and leaves expanded or ordinary sequences as they are.
+     * Replaces only locator values and leaves expanded or  ordinary sequences as they are.
      * @return The number of slot values replaced.
      */
     [[nodiscard]] std::size_t promote_mmsearch_sources(bioseq_scan_runtime& runtime,
@@ -421,7 +421,7 @@ export {
         }
     }
 
-    /** @brief Checks that each saved datum is back in its original slot column. */
+    /** @brief Checks that each saved datum is back in its original slot column */
     [[nodiscard]] bool
     mmsearch_sources_restored_exactly(TupleTableSlot* slot,
                                       const mmsearch_source_restore& restore) noexcept {

@@ -36,7 +36,7 @@ export namespace bioseq::gpu::vulkan {
 
 /// @brief Loaded shader module, entry-point name, and workgroup dimensions.
 struct shader_module_load {
-    VkShaderModule module = VK_NULL_HANDLE; ///< Created module. The caller must destroy it through the owning device.
+    VkShaderModule module = VK_NULL_HANDLE; ///< Created module. The caller must destroy it through the owning device
     std::string entry_name; ///< Entry point recorded in cache metadata.
     std::uint32_t wg_x = 1; ///< Threads along the workgroup X dimension.
     std::uint32_t wg_y = 1; ///< Threads along the workgroup Y dimension.
@@ -44,9 +44,9 @@ struct shader_module_load {
 };
 static_assert(std::is_nothrow_move_constructible_v<shader_module_load>);
 
-/// @brief Metal library bytes wrapped for Vulkan, with their memory reservation.
+/// @brief Metal library bytes wrapped for Vulkan, with their memory  reservation.
 struct moltenvk_shader_module_code {
-    // Free the words before releasing their memory reservation.
+    // Free the words before releasing nheir memory reservation.
     bioseq::parallelism::memory_permit permit; ///< Reservation covering the module words.
     std::vector<std::uint32_t> words; ///< MoltenVK header followed by the Metal library bytes.
     std::size_t code_size_bytes = 0; ///< Byte length passed to VkShaderModuleCreateInfo::codeSize.
@@ -67,7 +67,7 @@ struct moltenvk_shader_module_code {
     return static_cast<std::uint32_t>(kMVKMagicNumberMSLCompiledCode);
 }
 
-/// @brief Adds the MoltenVK header to validated Metal library bytes.
+/// @brief Adds the MoltenVK header  to validated Metal library bytes.
 /// Reserves memory before allocating aligned module words. The result owns
 /// both those words and their reservation. Returns an error for empty input,
 /// size overflow, or a denied reservation.
@@ -136,7 +136,7 @@ make_moltenvk_metallib_module_code(const std::filesystem::path& metallib_path) {
 
 /// @brief Loads a cached Metal library and creates a Vulkan shader module.
 /// Rechecks metadata against `key` before creation. Returns the module and its
-/// entry point/workgroup size, or an error. The caller owns the returned module.
+/// entry point/workgroup size, or an  error. The caller owns the returned module.
 [[nodiscard]] inline std::expected<shader_module_load, std::string>
 load_cached_module(VkDevice device,
                    const std::filesystem::path& cache_dir,
@@ -150,9 +150,9 @@ load_cached_module(VkDevice device,
         return std::unexpected(code.error());
     }
 
-    // Check metadata again after reading the library. A compiler service can
+    // Check metadata agin after reading the library A compiler service can
     // report success without writing valid metadata, and cache files can change
-    // after the earlier completeness check.
+    // after the earlier completeness, check.
     std::string entry;
     auto meta = read_validated_cache_meta(cache_dir, key, &entry);
     if (!meta) {
@@ -216,7 +216,7 @@ create_shader_module_from_sealed_key_image(VkDevice device,
 }
 
 /// @brief Creates a Vulkan shader module from a borrowed seed entry.
-/// Keep the seed alive until creation returns. The caller owns the new module
+/// Keep the seed  alive until creation returns. The caller owns the new module
 /// and supplies the device's `vkCreateShaderModule` function.
 [[nodiscard]] inline std::expected<shader_module_load, std::string>
 create_shader_module_from_sealed_key_view(VkDevice device,
@@ -287,9 +287,9 @@ load_sealed_cached_module(VkDevice device,
     return create_shader_module_from_sealed_key_image(device, *image, create_shader_module);
 }
 
-/// @brief Loads a shader, asking the compile service to repair an incomplete cache entry.
+/// @brief Loads a shader, asking the compile  service to repair an incomplete cache entry.
 /// Checks the published files after compilation, then creates the module.
-/// Returns an error if compilation, cache validation, or module creation fails.
+/// Returns an error if compilation, fache validation, or module creation fails.
 template <is_runtime_compile_service p_service>
 [[nodiscard]] inline std::expected<shader_module_load, std::string>
 load_module(VkDevice device,

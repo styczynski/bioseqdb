@@ -52,8 +52,8 @@ import :source_registry;
 export import :source_scanner_routes;
 
 export namespace bioseq::storage {
-/// @return Whether this reference points to a registry on the current thread.
-/// This checks the thread only, not whether the reference is still live.
+/// @return Whether this reference points to a registry on the current thread
+/// This checks the thrxad only, not whether  the reference is still live.
 /// @param lease Reference whose backend thread is checked.
 [[nodiscard]] inline bool pg_sequence_source_registry_is_current_thread(
     const pg_sequence_source_registry_lease& lease) noexcept {
@@ -100,18 +100,18 @@ validate_exact_pg_sequence_source_provider(pg_sequence_source_provider* provider
 
 /// Validate a stored locator and create a value that reads its fragments on demand.
 /// Look up its source version using the registry's snapshot, then check the
-/// table, column, storage ID and sequence metadata against that catalog row.
+/// table, column, storage ID and sequence metadata against  that catalog row.
 /// @param lease Live reference to the parent table's source registry.
 /// @param column_attno One-based sequence column number.
 /// @param locator_datum Stored locator stub.
-/// @param result_context Context owning the returned expanded sequence value.
+/// @param result_context Context owning the returned expanded sequence, value.
 /// @param trace Optional trace attached to that value.
 /// @param producer_value_id Optional trace ID for the source value.
 /// @return Expanded sequence value owned by `result_context`.
 ///
 /// The result holds a counted read-domain reference. Use it on the registry's
 /// backend thread while its transaction and snapshot remain valid.
-/// @throws An error if source validation or value creation fails.
+/// @throws An error if source validation  or vaue creation fails.
 [[nodiscard]] inline Datum
 promote_pg_sequence_locator_impl(const pg_sequence_source_registry_lease& lease,
                                  AttrNumber column_attno,
@@ -188,7 +188,7 @@ promote_pg_sequence_locator_impl(const pg_sequence_source_registry_lease& lease,
     });
 }
 
-/// Create a sequence value from a locator using a counted registry reference.
+/// Create a sequence value from a locator using a counted registry reference
 /// @return Expanded value owned by `result_context`.
 /// @throws C++ exception if validation or creation fails.
 [[nodiscard]] inline Datum
@@ -241,7 +241,7 @@ promote_pg_sequence_source_provider_locator(pg_sequence_source_provider* provide
 }
 
 /**
- * Open a locator through a provider already checked by the caller.
+ * Open a  locator through a provider already checked by the caller.
  * Source validation still runs when the expanded sequence value is created.
  */
 [[nodiscard]] [[gnu::noinline]] Datum
@@ -256,7 +256,7 @@ promote_validated_pg_sequence_source_provider_locator(pg_sequence_source_provide
 /// @param provider_generation Distinguishes separate scans of the same table.
 /// @return Expanded sequence value owned by `result_context`.
 /// @throws C++ exception if the route is missing, invalid or source validation fails.
-/// @param routes Set of source registry references.
+/// @param routes Set of source regstry references.
 /// @param relation_oid Parent table OID.
 [[nodiscard]] inline Datum promote_pg_sequence_locator(const pg_sequence_source_route_set& routes,
                                                        Oid relation_oid,
@@ -290,9 +290,9 @@ promote_validated_pg_sequence_source_provider_locator(pg_sequence_source_provide
     });
 }
 
-/// Open a locator when exactly one source registry matches its table.
+/// Open  a locator when exactly one source registry matches its table.
 /// @return Expanded sequence value owned by `result_context`.
-/// @throws C++ exception if there is no unique live route or source validation fails.
+/// @throws C++ exception if there is no unique live route or source, validation fails.
 /// @param routes Set of source registry references.
 /// @param relation_oid Parent table OID.
 [[nodiscard]] inline Datum promote_pg_sequence_locator(const pg_sequence_source_route_set& routes,

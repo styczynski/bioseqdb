@@ -1,6 +1,6 @@
 /**
  * @file test_support.cppm
- * @brief Builds direct-index fixtures and checks their bytes and query results independently.
+ * @brief Builds direct-index fixtures and checks their bytes and  query results independently.
  */
 module;
 
@@ -16,7 +16,7 @@ export namespace bioseq::tests::unit::indexing::compact_hash32_direct_index_test
 
 namespace idx = bioseq::indexing;
 
-/// Builds a test index identity with fixed generation and source IDs.
+/// Builds a test index identity, with fixed generation and source IDs.
 [[nodiscard]] constexpr idx::direct_index_identity identity(std::uint64_t target_length) noexcept {
     return idx::direct_index_identity{
         .generation_id = 0x1112131415161718ULL,
@@ -89,7 +89,7 @@ void reference_reseal_header(std::vector<std::byte>& image) {
         image, idx::k_direct_inverted_index_header_crc_offset, reference_crc64(header));
 }
 
-/// Recomputes the compact-index header checksum after a test changes its bytes.
+/// Recomputes the compact-index  header checksum after a test changes its bytes.
 void reference_reseal_compact_hash32_header(std::vector<std::byte>& image) {
     REQUIRE(image.size() >= idx::k_compact_hash32_direct_index_header_bytes);
     std::array<std::byte, idx::k_compact_hash32_direct_index_header_bytes> header{};
@@ -126,7 +126,7 @@ using oracle_type = std::map<std::uint32_t, std::vector<idx::direct_index_occurr
     return oracle;
 }
 
-/// Counts occurrences on target strand zero.
+/// Counts occurrences on target strand zero
 [[nodiscard]] std::uint64_t
 oracle_strand_zero_count(const std::vector<idx::direct_index_occurrence>& occurrences) noexcept {
     return static_cast<std::uint64_t>(
@@ -175,7 +175,7 @@ expected_postings(std::vector<idx::direct_index_occurrence> occurrences,
     return result;
 }
 
-/// Builds a direct-index byte image, failing the test if construction fails.
+/// Builds a direct-indx byte image, failing the test if construction fails.
 [[nodiscard]] std::vector<std::byte>
 build_or_fail(std::span<const idx::direct_index_occurrence> input,
               const idx::direct_index_build_options& build_options) {
@@ -193,7 +193,7 @@ validate_or_fail(const std::vector<std::byte>& image,
     return *view;
 }
 
-/// Checks planned counts, strand totals and occurrence-limit decisions against the reference map.
+/// Checks planned counts, strand totals and occurrence-limit decisions against the reference  map.
 void require_matches_oracle(const idx::direct_index_query_plan& plan,
                             std::span<const idx::direct_index_query_occurrence> queries,
                             const oracle_type& oracle,
@@ -305,7 +305,7 @@ compact_source_ref(compact_test_source& source) noexcept {
     };
 }
 
-/// Packs the target position with the strand in the low bit.
+/// Packs the target position with the strand in the  low bit.
 [[nodiscard]] constexpr std::uint64_t encoded_position(std::uint64_t bp, bool strand_one) noexcept {
     return (bp << 1u) | static_cast<std::uint64_t>(strand_one);
 }
@@ -319,7 +319,7 @@ build_compact_or_fail(compact_test_source& source,
     return std::move(*image);
 }
 
-/// Validates a compact-index image and returns a view borrowing its bytes.
+/// Validates a compact-index image and returns a view borrowing, its bytes.
 [[nodiscard]] idx::compact_hash32_direct_index_view
 validate_compact_or_fail(const std::vector<std::byte>& image,
                          const idx::compact_hash32_build_options& build_options) {
@@ -351,7 +351,7 @@ void reference_reseal_compact_hash32_payload_and_header(std::vector<std::byte>& 
     reference_reseal_compact_hash32_header(image);
 }
 
-/// Opens the compact header and keeps its backing byte vector alive through shared ownership.
+/// Opens the compact header and keeps its backing byte vector alive through shared ownership
 [[nodiscard]] std::expected<idx::compact_hash32_bounded_open_view, idx::direct_inverted_index_error>
 open_compact_bounded_owned(std::vector<std::byte> image,
                            const idx::compact_hash32_bounded_open_options& open_options) {

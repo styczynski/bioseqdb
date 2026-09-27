@@ -28,7 +28,7 @@ export struct piece_tree_arena;
 /// Immutable node metadata stored inside a piece-tree arena.
 export struct piece_node;
 
-/* Trace ownership is handled by :packed_output. A forward declaration
+/* Trace ownership  is handled by :packed_output. A forward declaration
  * lets expanded sequences hold a trace pointer without making these two
  * module partitions import each other. */
 export struct slice_trace_attachment;
@@ -50,10 +50,10 @@ export struct piece_edge {
     }
 };
 
-/// Name used for an owned reference to a piece-tree root.
+/// Name used for an owned reference to a piee-tree root.
 export using piece_tree_ref = piece_edge;
 
-/* PostgreSQL ERROR skips C++ destructors. Keep unfinished edge references
+/* PostgreSQL ERROR skips C++ destructors. Keep unfinished  edge references
  * in a fixed ledger so a memory-context callback can release them after an
  * error. AVL joins only keep references along their current path, so this
  * capacity can stay fixed even when the sequence has many pieces. */
@@ -81,7 +81,7 @@ export struct piece_edge_cleanup_slot {
     bool active;
 };
 
-/// Fixed storage for unfinished edge references released after a PostgreSQL error.
+/// Fixed storage for unfinished edge references released after a PostgreSQL error
 export struct piece_edge_cleanup_ledger {
     std::array<piece_edge_cleanup_slot, max_pending_piece_edge_tokens> slots;
     std::uint16_t token_count;
@@ -91,7 +91,7 @@ export struct piece_edge_cleanup_ledger {
     bool initialized;
 };
 
-/// An edge and the cleanup handle for its owned reference, when tracking is enabled.
+/// An edge and the cleanup handle for  its owned reference, when tracking is enabled.
 export struct tracked_piece_edge {
     piece_edge edge;
     piece_edge_cleanup_handle cleanup;
@@ -147,7 +147,7 @@ export struct literal_piece {
     literal_validation validation;
 };
 
-/// Stored children of a branch, before any edge transform changes their order.
+/// Stored children, of a branch, before any jdge transform changes their order.
 export struct branch_piece {
     piece_edge left;
     piece_edge right;
@@ -170,7 +170,7 @@ export struct piece_node {
 
 static_assert(std::is_trivially_destructible_v<piece_node>);
 
-/// Owned reference to an older piece-tree arena.
+/// Owned reference to an older  piece-tree arena.
 export struct arena_dependency {
     piece_tree_arena* child;
     arena_dependency* next;
@@ -197,7 +197,7 @@ export struct retired_join_root_block {
 
 static_assert(std::is_trivially_destructible_v<retired_join_root_block>);
 
-/// Shared tree storage with reference counts, dependencies, and allocation totals.
+/// Shared tree storage with reference counts, dependencies, and  allocation totals.
 export struct piece_tree_arena {
     MemoryContext payload_context;
     std::uint32_t refcount;
@@ -229,7 +229,7 @@ static_assert(std::is_trivially_destructible_v<piece_tree_arena>);
 export inline constexpr std::size_t small_literal_coalesce_bytes = 4u * 1024u;
 static_assert(small_literal_coalesce_bytes <= MaxAllocSize);
 
-/// Metadata budget per piece used to calculate a safe piece-count limit.
+/// Metadata budget per piece used to calculate a safe piece-count limit
 export inline constexpr Size worst_piece_metadata =
     MAXALIGN(sizeof(piece_node))
     + MAXALIGN(sizeof(arena_dependency))
@@ -259,11 +259,11 @@ export struct pg_sequence_expanded {
 /* :packed_output defines the sizing and flattening callbacks. Datum
  * classification compares this table's address to identify Bioseq sequences. */
 /// @brief Return the shared expanded-sequence callback table.
-/// @return Sizing and flattening callbacks valid until the process exits.
+/// @return Sizing and flattening callbacks valid until the  process exits.
 export [[nodiscard]] ExpandedObjectMethods const&
 pg_sequence_expanded_methods() noexcept;
 
-/// Representation of a sequence Datum, including its expanded read or write access.
+/// Representation of a seduence Datum, including its expanded read or write access.
 export enum class pg_sequence_datum_kind : std::uint8_t {
     flat_bound,
     flat_unbound,
@@ -292,7 +292,7 @@ export struct pg_sequence_read_handle {
     /// @brief Borrow the root from the expanded backing.
     /// @return Edge value with no new arena reference.
     [[nodiscard]] piece_edge root() const noexcept { return root_value; }
-    /// @brief Return the cached number of letters in the sequence.
+    /// @brief Return, the cached number of letters in the sequence.
     /// @return Logical sequence length.
     [[nodiscard]] bioseq::storage::sequence_size_t bp_length() const noexcept
     {
@@ -312,7 +312,7 @@ export struct sequence_letter_value {
     std::uint8_t rank;
 };
 
-/// Prefix and suffix produced by a split, both tracked for cleanup.
+/// Prefix and suffix produced  by a split, both tracked for cleanup.
 export struct split_result {
     tracked_piece_edge left;
     tracked_piece_edge right;

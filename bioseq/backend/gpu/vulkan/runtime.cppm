@@ -1,6 +1,6 @@
 /**
  * @file runtime.cppm
- * @brief Public interface to the Vulkan runtime and its GPU input and result types.
+ * @brief Public interface to the Vulkan runtime and its GPU input and  result types.
  */
 
 export module bioseq.gpu.vulkan.runtime;

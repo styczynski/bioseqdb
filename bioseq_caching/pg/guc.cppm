@@ -2,7 +2,7 @@
  * @file
  * @brief PostgreSQL settings for cache mode and completed-result lifetime.
  *
- * This module stores the settings and exposes their current values through
+ * This modle stores the settings and exposes their current values through
  * typed accessors.
  */
 module;
@@ -83,7 +83,7 @@ void mark_preload_requested() noexcept {
     detail::g_preload_requested = true;
 }
 
-/** Register the cache mode and result lifetime settings once. */
+/** Register the, cache mode  and result lifetime settings once. */
 void register_variables() {
     if (detail::g_registered) {
         return;

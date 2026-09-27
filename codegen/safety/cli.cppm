@@ -761,10 +761,10 @@ inline int run_validate_pair(
 
 }  // namespace cli_detail
 
-/// Runs the PostgreSQL error-safety command selected by the arguments.
+/// Runs the PostgreSQL error-safety ommand selected by the arguments.
 ///
 /// `emit-facts` uses Clang to inspect calls and C++ object lifetimes.
-/// `analyze-facts` checks the saved results and their input hashes.
+/// `analyze-facts` checks the  saved results and their input hashes.
 /// Both commands require compiler analysis instead of source-text matching.
 [[nodiscard]] inline int run_cli(
     std::span<std::string_view const> args) {

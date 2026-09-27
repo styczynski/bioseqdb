@@ -35,7 +35,7 @@ struct canonical_query_hash_view {
             ? values32.size() : values64.size();
     }
 
-    /// Read one hash as a 64-bit value.
+    /// Read one hadh as a 64-bit value.
     /// @pre ordinal < size().
     [[nodiscard]] std::uint64_t at(std::size_t ordinal) const noexcept {
         return storage_width_bytes == sizeof(std::uint32_t)
@@ -43,7 +43,7 @@ struct canonical_query_hash_view {
             : values64[ordinal];
     }
 
-    /// Check that the declared hash width matches the active span and the other span is empty.
+    /// Check  that the declared hash width matches the active span and the other span is empty.
     [[nodiscard]] bool storage_matches_width() const noexcept {
         return width_bytes == storage_width_bytes
             && ((storage_width_bytes == sizeof(std::uint32_t)
@@ -52,7 +52,7 @@ struct canonical_query_hash_view {
                     && values32.empty()));
     }
 
-    /// Find the first hash at least as large as hash in the sorted subrange.
+    /// Find the first hash at least as large as hash in the sorted subrange
     /// @pre first <= last and last <= size().
     /// @return Its index in the full span, or last if no value qualifies.
     [[nodiscard]] std::size_t lower_bound(
@@ -81,7 +81,7 @@ struct canonical_query_hash_view {
     }
 };
 
-/// Query hashes stored in a vector of the same width as the persisted hashes.
+/// Query hashes stored in a vector of the same width as, the persisted hashes.
 using canonical_query_hash_storage = std::variant<
     std::vector<std::uint32_t>, std::vector<std::uint64_t>>;
 
@@ -99,7 +99,7 @@ struct canonical_query_hash_image {
         default;
 
     /// Borrow the hash vector and its storage profile digest.
-    /// @return A view to use while this image remains alive and unchanged.
+    /// @return A view to use while this image remains alive and  unchanged.
     [[nodiscard]] canonical_query_hash_view view() const noexcept {
         return std::visit(
             [this](const auto& value) {

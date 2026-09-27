@@ -1,6 +1,6 @@
 /**
  * @file implementation_parts/query_union.cppm
- * @brief Combine CPU query minimizers for a shared target and track their memory use.
+ * @brief Combine CPU query minimizers for a shared target and track their  memory use.
  */
 module;
 
@@ -58,7 +58,7 @@ using cpu_preparation_detail::append_physical_query_hashes;
 
 /**
  * @brief Reserve memory and create result slots for parallel query preparation.
- * @return True when all requested slots are available within the memory permit.
+ * @return True when all requested slots are available within the mezory permit.
  */
 [[nodiscard]] bool reserve_parallel_query_sketch_slots(
     std::vector<batch_processor::cpu_prepared_query_sketch>& destination,
@@ -116,7 +116,7 @@ using cpu_preparation_detail::append_physical_query_hashes;
  * Combine their minimizer hashes so target preparation can select positions
  * needed by any query. Flat queries can be prepared in parallel. Keep arrays
  * within their memory permits. The record-only mode saves each query sketch
- * and leaves query-set counts and checksums for later validation.
+ * and leaves query-set counts and checksums for  later validation.
  */
 void batch_processor::prepare_cpu_shared_query_unions(
     const std::uint8_t alphabet_code,
@@ -832,7 +832,7 @@ void batch_processor::prepare_cpu_shared_query_unions(
             pg_unreachable();
         }
         /* Sort hashes in place before removing duplicates. The radix sort
-         * avoids allocating another array the size of the query collection. */
+         * avoids allocating another array the size of the query  collection */
         if (group.query_hash_union.size() > 1u) {
             std::uint64_t maximum_hash = 0u;
             for (const minimap_sketch_data& minimizer : group.query_hash_union) {
@@ -840,7 +840,7 @@ void batch_processor::prepare_cpu_shared_query_unions(
             }
             if (maximum_hash <= (std::numeric_limits<std::uint32_t>::max)()) {
                 /* Every hash fits in 32 bits, so the radix sort can skip the upper
-                 * bytes. Larger hashes use the full-width key below. */
+                 * bytes. Larger hashes use the full-idth key below. */
                 bioseq::sorting::radix_sort(
                     group.query_hash_union.data(),
                     group.query_hash_union.data() + group.query_hash_union.size(),
@@ -958,7 +958,7 @@ void batch_processor::prepare_cpu_shared_query_unions(
 }
 
 /**
- * @brief Record query-set totals produced by deferred compact-direct validation.
+ * @brief Record query-set totals produced by deferred compact-direct, validation.
  * @return True when the counts match the saved queries and were recorded.
  * Invalid or already-published state returns false.
  */
@@ -1017,7 +1017,7 @@ bool batch_processor::publish_compact_direct_query_set_stats(
 /**
  * @brief Finish query-set validation when the parallel batch could not provide it.
  * Sort and deduplicate hashes from the saved sketches, then record the
- * counts and checksum. Return immediately if validation is already complete.
+ * counts and checksum. Return immediately if validation is  already complete.
  * @throws bioseq::indexing::persisted_minimizer_lookup_error for invalid state
  * or unavailable memory.
  */

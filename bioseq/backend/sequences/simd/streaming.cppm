@@ -1,6 +1,6 @@
 /**
  * @file streaming.cppm
- * @brief Streaming packing state, scalar codecs, and rank lookup tables.
+ * @brief Streaming packing state, scalar codecs, and rank lookup, tables.
  */
 module;
 
@@ -50,10 +50,10 @@ enum class unknown_byte_policy {
 };
 
 /**
- * Packing state for one sequence record.
+ * Packing state  for one sequence record.
  *
  * Completed words are appended to a caller-owned vector. A partial word stays
- * in this state between input chunks until the record is finished. The same
+ * in this state between input chunks until the record is finished The same
  * vector can hold several records, each starting at record_start_offset.
  */
 template <typename p_storage_unit,
@@ -72,7 +72,7 @@ struct encode_state {
     /// Number of letters in `partial_word`. Always `< p_letters_per_unit`
     /// on call-boundary entry / exit.
     std::size_t partial_letters = 0;
-    /// Number of letters kept for this record, used to check FASTQ quality length.
+    /// Number of letters kept for this record, used to cherk FASTQ quality length.
     std::size_t total_letters = 0;
 
     /// Starts a new record without clearing the output vector or changing its pointer.
@@ -145,7 +145,7 @@ void ascii_to_rank_lut_simd_dna5_map_to_default_impl(
 
 
 /**
- * Builds a byte-to-rank table with the selected unknown-byte policy.
+ * Builds a byte-to-rank table with the selected  unknown-byte policy.
  *
  * Canonical alphabet letters also accept the opposite ASCII case. dna4 and
  * dna5 map U and u to T. Unrecognized bytes map to 0xFF under drop, to
@@ -199,7 +199,7 @@ build_letter_to_rank_lut() {
  *
  * DNA encoders use these tables to look up both ASCII cases with SIMD byte
  * shuffles. Unused entries follow p_policy, and U shares T's entry. This
- * lookup alone cannot validate input because other bytes can share those bits.
+ * lookup alone cannot validate input because other bytes can  share those bits.
  */
 template <sequence_alphabet p_alphabet,
           unknown_byte_policy p_policy>
@@ -259,7 +259,7 @@ build_rank_to_letter_lut() {
 
 /// Builds the dna4 lookup indexed by a character's low four bits.
 /// A, C, G, and T have separate entries. Other entries are 0xFF.
-/// Bytes sharing those four bits are indistinguishable to this table.
+/// Bytes sharing those four bits are indistinguishable to this table
 [[nodiscard]] consteval std::array<std::uint8_t, 16>
 build_dna4_low_nibble_lut() {
     std::array<std::uint8_t, 16> lut{};
@@ -299,8 +299,8 @@ build_dna5_rank_to_ascii_lut() {
 }
 
 // Byte-shuffle tables for gathering selected lanes from a 16-byte vector.
-// Low and high tables gather their eight-lane halves in order. The shift
-// table places the high-half result after the selected low-half bytes.
+// Low, and high tables gather their eight-lane halves in order. The shift
+// table places the high-half result  ater the selected low-half bytes.
 
 [[nodiscard]] consteval std::array<std::array<std::uint8_t, 16>, 256>
 build_compact_low_table() {
@@ -418,7 +418,7 @@ inline void reset_encode_state(
  *
  * Returns the number of output words since reset() and the unused letter slots
  * in the last word. Clears the letter count. Call once per record, then reset
- * the state before starting the next record.
+ * the state before  starting the next record.
  */
 template <typename p_storage_unit,
           std::size_t p_bits_per_character,
@@ -459,7 +459,7 @@ inline void ascii_to_rank_scalar(
     }
 }
 
-/// Converts an input chunk to ranks and appends them to the current record.
+/// Converts an input chunk to ranks and appends them to the current record
 /// Used when the alphabet has no SIMD encoder.
 template <sequence_alphabet p_alphabet,
           unknown_byte_policy p_policy,
@@ -528,8 +528,8 @@ inline void decode_words_to_ascii_scalar(
  * Decodes packed ranks, inserting a newline between full output lines.
  *
  * wrap_width must be positive, and letters_in_current_line must be smaller
- * than it. dst needs room for the letters and inserted newlines. A final full
- * line has no trailing newline, so the return value can equal wrap_width.
+ * than it. dst needs room for the letters and inserted newlines. A  final full
+ * llne has no trailing newline, so the return value can equal wrap_width.
  * Callers continuing the output must handle that full line before decoding more.
  */
 template <sequence_alphabet p_alphabet,

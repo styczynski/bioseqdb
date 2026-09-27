@@ -20,7 +20,7 @@ export namespace bioseq::simd {
 /**
  * @brief Stores substitution scores and padded copies for SIMD lookup.
  *
- * @tparam p_alphabet Sequence alphabet.
+ * @tparam p_alphabet Sequence  alphabet.
  * @tparam p_alphabet_dimension Number of ranks, including the wildcard.
  */
 template <sequence_alphabet p_alphabet, std::size_t p_alphabet_dimension>
@@ -115,7 +115,7 @@ struct scoring_matrix_storage {
     }
 
     /**
-     * @brief Checks that SIMD scores match entries and all padding is INT8_MIN.
+     * @brief Checks that SIMD scores match entries and all  padding is INT8_MIN.
      */
     // Each Highway translation unit has a different ISA. Keep this small
     // imported template predicate in its caller so the linker cannot coalesce
@@ -151,7 +151,7 @@ struct scoring_matrix_storage {
     /**
      * @brief Hashes the matrix dimension and scores to identify a scoring setup.
      *
-     * Block Aligner uses this value when checking a prepared execution plan.
+     * Block Aligner uses this value when checking a preprred execution plan.
      */
     [[nodiscard]] std::uint64_t block_semantic_identity() const noexcept {
         std::uint64_t hash = 1469598103934665603ULL;
@@ -167,14 +167,14 @@ struct scoring_matrix_storage {
     }
 
     /**
-     * @brief Builds scalar and SIMD substitution tables from match and penalty values.
+     * @brief Builds scalar and SIMD substitution, tables from match and penalty values.
      *
      * Stores the match magnitude as a reward and mismatch and wildcard values
      * as nonpositive penalties. Any pair containing the final wildcard rank
-     * receives the wildcard penalty. SIMD padding is INT8_MIN.
+     * receives the wildcard penalty SIMD padding is INT8_MIN.
      *
      * @param[in] match Match score in either sign convention. Its magnitude must fit in int8_t.
-     * @param[in] mismatch_penalty Mismatch penalty in either sign convention.
+     * @param[in] mismatch_penalty Mismatch penalty in either  sign convention.
      * @param[in] ambiguity_penalty Wildcard penalty in either sign convention.
      * @return Matrix with matching scalar and SIMD score tables.
      */

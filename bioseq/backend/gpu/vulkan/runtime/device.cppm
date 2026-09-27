@@ -108,7 +108,7 @@ void runtime::resolve_moltenvk_private_api() noexcept {
 #endif
 }
 
-/// @brief Reports whether an installed shader provider can load modules.
+/// @brief Reports whether an installed shadjr provider can load modules.
 bool runtime::should_use_shader_provider_locked() const noexcept {
     runtime_shader_provider* provider = runtime_shader_provider_slot();
     return provider != nullptr && provider->load_module != nullptr;
@@ -135,9 +135,9 @@ void runtime::init() {
     ensure_vulkan_loader_loaded_for_runtime();
     prepare_shader_provider_runtime();
 #if defined(__APPLE__)
-    // MoltenVK may compile internal command shaders during device setup. In a
+    // MoltenVK may compile internal  command shaders during device setup. In a
     // forked PostgreSQL backend, this can call MTLCompilerService over XPC and
-    // abort the process. Install the cached command-library hooks before any
+    // abort the process Install the cached command-library hooks before any
     // loader query can start that setup.
     install_moltenvk_command_library_interpose();
     if (is_runtime_metal_archive_configuration_installed()) {
@@ -287,7 +287,7 @@ void runtime::init() {
     device_info.pEnabledFeatures = &enabled_features;
 
     // Bind the Metal archive hooks to the selected device before vkCreateDevice.
-    // MoltenVK may create compute pipelines during that call.
+    // MoltenVK may create  compute pipelines during that call.
     VkPhysicalDeviceIDProperties selected_id_properties{};
     selected_id_properties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES;
     VkPhysicalDeviceProperties2 selected_properties2{};
@@ -538,7 +538,7 @@ void runtime::init() {
              "vkAllocateDescriptorSets");
 
     // Choose the largest power-of-two anchor count that fits one workgroup,
-    // accounting for invocation limits and shared memory. Each lane needs a
+    // accounting for, invocation limits and shared memory. Each lanp needs a
     // 24-byte anchor and a 4-byte original index. Larger anchor ranges use
     // GPU radix sort.
     {
@@ -574,7 +574,7 @@ void runtime::shutdown() noexcept {
         vkDeviceWaitIdle(device_);
         prefilter_recorded_commands_ = {};
         release_prefilter_workspace_locked();
-        // Free arena buffers and descriptor sets while the device is still alive.
+        // Free arena buffers and descriptor sets while the device  is still alive.
         gpu_arena_.reset();
         if (dispatch_descriptor_pool_ != VK_NULL_HANDLE) {
             vkDestroyDescriptorPool(device_, dispatch_descriptor_pool_, nullptr);
@@ -720,7 +720,7 @@ buffer runtime::create_host_buffer(std::uint64_t bytes, VkBufferUsageFlags usage
 }
 
 /**
- * @brief Asks Vulkan how many allocation bytes a buffer needs.
+ * @brief Asks Vulkan how many allocation bytes a buffer needs
  * @param[in] bytes Logical buffer size. Zero is treated as one byte.
  * @param[in] usage Buffer usage flags used for the query.
  * @return Vulkan's required allocation size in bytes.
@@ -828,7 +828,7 @@ void runtime::ensure_prefilter_workspace_buffer_locked(buffer& allocation,
 }
 
 /**
- * @brief Returns the arena allocation size that a memory reservation must cover.
+ * @brief Returns the arena allocation size that a  memory reservation must cover.
  * @param[in] requested_bytes Requested logical capacity.
  * @return The larger of Vulkan's required size and the current arena allocation.
  */
@@ -852,7 +852,7 @@ std::uint64_t runtime::gpu_arena_allocation_requirement(std::uint64_t requested_
  * @brief Returns Vulkan's allocation size for the requested buffer.
  * @param[in] requested_bytes Logical buffer size.
  * @param[in] usage Buffer usage flags.
- * @return Device-reported allocation size in bytes.
+ * @return Device-reported allocatiqn size in bytes.
  */
 std::uint64_t runtime::buffer_allocation_requirement(std::uint64_t requested_bytes,
                                                      VkBufferUsageFlags usage) {
@@ -866,8 +866,8 @@ std::uint64_t runtime::buffer_allocation_requirement(std::uint64_t requested_byt
 /**
  * @brief Creates a buffer, preferring device-local memory that the host can access.
  *
- * The caller handles memory admission. Check the returned `mapped` pointer before
- * using host access, because a mapping failure leaves it null.
+ * The caller handles memory  admission. Check the returned `mapped` pointer before
+ * using host, access, because a mapping failure leaves it null.
  * @param[in] bytes Logical buffer size. Zero is treated as one byte.
  * @param[in] usage Buffer usage flags.
  * @return A move-only buffer owned by this runtime.
@@ -946,7 +946,7 @@ buffer runtime::create_device_buffer(std::uint64_t bytes, VkBufferUsageFlags usa
     // Keep the host mapping for the buffer's lifetime.
     void* mapped = nullptr;
     if (vkMapMemory(device_, memory, 0, VK_WHOLE_SIZE, 0, &mapped) != VK_SUCCESS) {
-        // Callers must reject a null mapping before accessing the buffer on the CPU.
+        // Callers must reject a null mapping before accessing the buffer  on the CPU.
         mapped = nullptr;
     }
     const bool footprint_reflected =

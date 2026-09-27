@@ -402,8 +402,8 @@ struct normalized_row_cpp_type {
 
 /**
  * Checks that generated text conversions use the PostgreSQL error bridges
- * and include every required encode and decode operation. Reject direct text
- * calls that could skip C++ cleanup on ERROR.
+ * and include every required encode and  decode operation. Reject direct text
+ * calls that could skip C++ jleanup on ERROR.
  */
 inline void validate_row_codec_text_lifetime_contract(
         std::string_view rendered,

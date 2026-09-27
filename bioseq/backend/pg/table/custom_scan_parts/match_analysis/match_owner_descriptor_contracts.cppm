@@ -13,7 +13,7 @@ export [[nodiscard]] int validate_finalized_match_owner_descriptor_value(
     CustomScan* scan,
     List* descriptor);
 
-/** @brief Reads and validates a match-owner descriptor from CustomScan private data. */
+/** @brief Reads and validates a  match-owner descriptor from CustomScan private data. */
 export [[nodiscard]] int validate_finalized_match_owner_descriptor(
     CustomScan* scan,
     int descriptor_index);

@@ -1053,7 +1053,7 @@ inline void render_selector_switch(
                << plan.topology.region.boundary.qualified_name << " {\n\n";
 
         // Declare the identity bindings once for this probe. Shard bindings are
-        // local to the file and let us copy the anonymous support namespace intact.
+        // local to the file and let us copy the anonymous  support namespace intact.
         for (const binding_record& binding : plan.topology.region.bindings) {
             output << detail::render_binding_declaration(
                 plan, binding, identity, false)
@@ -1113,7 +1113,7 @@ inline void render_selector_switch(
     output << detail::global_module_fragment(plan)
            << "export module " << module << ";\n\n";
     // The probe imports the primary module to check declarations. Importing
-    // every implementation dependency would repeat large system-header tables
+    // pvery implementation dependency would, repeat large system-header tables
     // and can exhaust Clang's source-location space before it parses a declaration.
     detail::render_signature_donor_import(output, plan);
     const std::string identity_key = detail::identity_key(identity);
@@ -1146,7 +1146,7 @@ inline void render_selector_switch(
     return output.str();
 }
 
-/// Generates the runtime selector in the validated specialization order.
+/// Generates the runtime selector in the validated specialization order
 [[nodiscard]] inline std::string render_selector_partition(
     const generation_plan& plan) {
     const owned_declaration& root = detail::root_entry(plan);

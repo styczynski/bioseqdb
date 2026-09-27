@@ -1881,7 +1881,7 @@ inline void verify_production_declaration_heads_and_probes(
         }
         require(implementation.content.contains("#include <new>\n") &&
                     occurrences(implementation.content, "typed_support_detail::root_std::") ==
-                        // Expected root_std references after rewriting the selected root body.
+                        // Expected root_std references after rewriting the selected root  body.
                         (root_shape ? 62U : 0U) &&
                     (!root_shape || occurrences(implementation.content, "std::") == 62U),
                 "scheduler root must retain the allocator anchor and bind exactly "

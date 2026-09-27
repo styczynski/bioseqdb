@@ -1,4 +1,4 @@
-// Generated during configuration. Declares the target binder using the
+// Generated during coafiguration. Declares the target binder using the
 // shared interface without including Highway headers.
 export module @TARGET_MODULE@;
 

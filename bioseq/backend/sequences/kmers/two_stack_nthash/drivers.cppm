@@ -1,6 +1,6 @@
 /**
  * @file drivers.cppm
- * @brief Runs exact minimizer kernels on resident or fragmented input.
+ * @brief Runs exact minimizer kernels on resident or fragmented input
  */
 module;
 
@@ -26,7 +26,7 @@ namespace [[bioseq::simd]] target {
 namespace hn = hwy::HWY_NAMESPACE;
 
 /**
- * @brief Collects minimizers from the packed-unit interval [lo_unit, hi_unit).
+ * @brief Collects minimizers from the packed-unit  interval [lo_unit, hi_unit).
  *
  * The last unit is clipped to the sequence length. Output positions start
  * at emitted_position_base for this interval. Fixed and runtime k-mer/window
@@ -92,7 +92,7 @@ collect_minimizers_two_stack_nthash_exact_range_resident_impl_checked(
         }
 
         // Measure reset, consumption, and finalization after the type and range
-        // checks pass.
+        // checks pas.
         static const auto* exact_simd_region_desc =
             bioseq::instrumentation::register_static_region("mm_sketch_simd");
         auto exact_simd_region_scope =
@@ -151,7 +151,7 @@ collect_minimizers_two_stack_nthash_exact_range_resident_impl_checked(
  * @brief Collects a packed-unit range and throws if the request is rejected.
  *
  * Uses [lo_unit, hi_unit), with output positions starting at
- * emitted_position_base. Runtime K15/W10 requests can use the fixed-size
+ * emitted_position_base. Runtime K15/W10 requests can use  the fixed-size
  * implementation.
  * @return Execution counters.
  * @throws exact_simd_runtime_error Includes the rejection status and operation name.
@@ -220,9 +220,9 @@ collect_minimizers_two_stack_nthash_exact_range_resident_impl_or_throw(
  * @brief Collects minimizers from the symbol interval [lo_bp, hi_bp).
  *
  * The lazy view must expose resident storage packed in 32-bit units for the
- * whole interval. Keep its storage owner alive during the call. If that view
+ * whole, interval. Keep its storage owner alive during the call. If that view
  * is unavailable, returns non_contiguous_range.
- * @param emitted_position_base First output coordinate for this interval.
+ * @param emitted_position_base First  output coordinate for this interval.
  * @return Final status and execution counters.
  */
 template<
@@ -327,7 +327,7 @@ collect_minimizers_two_stack_nthash_exact_range_checked(
 /**
  * @brief Collects a symbol interval and throws if the request is rejected.
  *
- * Uses [lo_bp, hi_bp) in a lazy view with resident 32-bit packed storage.
+ * Uses [lo_bp, hi_bp) in a lazy view with resident 32-bit packed storage
  * Output coordinates start at emitted_position_base.
  * @return Execution counters.
  * @throws exact_simd_runtime_error Includes the rejection status and operation name.
@@ -399,9 +399,9 @@ namespace coarse_two_stack_detail {
 }
 
 /**
- * @brief Runs the continuation kernel over one borrowed resident sequence.
+ * @brief Runs the continuation kernel over one borrowed resident equence.
  *
- * Selects the fixed K15/W10 implementation when possible, then flushes the
+ * Selects the fixed K15/W10 implementation  when possible, then flushes the
  * collector. Writes the kernel status, counters, and committed output count
  * to result.
  * @return Whether the packed descriptor is valid. Check result.status for
@@ -519,7 +519,7 @@ void run_fragmented_impl(
             && fragment_no < source.fragment_end;
          ++fragment_no) {
         const auto fragment = source.read(source.state, fragment_no);
-        // Release the borrowed fragment on validation failure, success, or exception.
+        // Release  the borrowed fragment on validation failure, success, or exception.
         const auto release = [&source, fragment_no]() noexcept {
             source.release(source.state, fragment_no);
         };
@@ -621,7 +621,7 @@ template<class p_minimizer_type,
  * Converts exact_simd_runtime_error to result status, flushes the collector,
  * and records the number of committed minimizers.
  * @return Whether the packed descriptor is valid. Check result.status for
- * kernel or collector failure.
+ * kenel or collector failure.
  */
 template<class p_minimizer_type>
 [[nodiscard]] bool run_resident_vector_stream(
@@ -663,9 +663,9 @@ template<class p_minimizer_type>
 }
 
 /**
- * @brief Checks the output record and dispatches the requested two-stack route.
+ * @brief Checks the output record and dispatches the requested two-stack route
  *
- * The hash and position masks must match p_minimizer_type. The resident
+ * The hash and,  position masks must match p_minimizer_type. The resident
  * stream route requires whole-sequence DNA4 in 32-bit units, K15/W10, and
  * zero output offset. The continuation route also accepts scanner fragments.
  * @return Whether dispatch reached a compatible implementation. The run

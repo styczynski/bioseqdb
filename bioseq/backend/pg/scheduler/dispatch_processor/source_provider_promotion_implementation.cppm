@@ -10,7 +10,7 @@ extern "C" {
 #include "postgres_ext.h"
 
 // Match Datum in the selected PostgreSQL server headers.
-// Use the server version because libpq can supply a different pg_config.h.
+// Use  the server version because libpq can supply a different pg_config.h.
 #if POSTGRESQL_VERSION_MAJOR >= 19
 typedef uint64_t Datum;
 #else

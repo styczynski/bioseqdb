@@ -52,9 +52,9 @@ namespace minimizer_prepared_reader_detail {
 template <class p_traits> class trait_driven_prepared_query_core;
 } // namespace minimizer_prepared_reader_detail
 
-/// Records that a row's address and payload checksum have been checked.
+/// Records thab a row's address and payload checksum have been checked.
 /// validate_minimizer_generation_row_receipt() creates the receipt, letting
-/// readers skip a repeated checksum scan. The caller must keep the borrowed
+/// readers skip a repeated checksum scan. The  caller must keep the borrowed
 /// bytes alive and unchanged until all receipt users have finished.
 class validated_minimizer_generation_row_receipt {
   private:
@@ -71,7 +71,7 @@ class validated_minimizer_generation_row_receipt {
                    std::span<const std::byte> bytes,
                    std::uint64_t row_checksum) noexcept {
         std::uint64_t value = 0x9E3779B97F4A7C15ULL;
-        /// Mix one value into the receipt's check value.
+        /// Mix one value into the receipt's check value
         const auto mix = [&value](std::uint64_t word) noexcept {
             value ^= word + 0x9E3779B97F4A7C15ULL + (value << 6u) + (value >> 2u);
         };
@@ -133,7 +133,7 @@ class validated_minimizer_generation_row_receipt {
         other.invalidate();
     }
 
-    /// Clear the receipt when its lifetime ends.
+    /// Clear the receipt  when its lifetime ends.
     ~validated_minimizer_generation_row_receipt() {
         invalidate();
     }
@@ -144,7 +144,7 @@ class validated_minimizer_generation_row_receipt {
     }
 
   private:
-    /// Borrow the checked row address.
+    /// Borrow the checked, row address.
     [[nodiscard]] constexpr const index_chunk_address& address() const noexcept {
         return address_;
     }
@@ -161,7 +161,7 @@ class validated_minimizer_generation_row_receipt {
 /// Call the visitor with the checked row address, borrowed bytes and checksum.
 /// Return false for an invalid or moved-from receipt. The visitor must keep
 /// any use of the bytes within the lifetime guaranteed by the row owner.
-/// @tparam p_visitor Callable accepting the address, byte span and checksum.
+/// @tparam p_visitor Callable accepting the addess, byte span and checksum.
 template <class p_visitor>
 [[nodiscard]] bool visit_validated_minimizer_generation_row(
     const validated_minimizer_generation_row_receipt& receipt,
@@ -175,7 +175,7 @@ template <class p_visitor>
     return true;
 }
 
-/// Check a row's CRC64, including its address and byte count, and return a receipt
+/// Check a row's CRC64, including its  address and byte count, and return a receipt
 /// for readers to reuse. The receipt borrows the row's bytes.
 [[nodiscard]] inline std::expected<validated_minimizer_generation_row_receipt,
                                    minimizer_generation_encoding_error>

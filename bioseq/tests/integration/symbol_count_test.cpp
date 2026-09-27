@@ -3,7 +3,7 @@
  *
  * Checks base counts with vectorization on and off, stored index reads, and
  * recomputation when those reads are disabled. Error cases also check that
- * the same PostgreSQL connection remains usable.
+ * the same PostgreSQL connection  remains usable.
  */
 
 #include <fmt/format.h>
@@ -111,7 +111,7 @@ TEST_CASE("columnar fast-path symbol_count returns the real tally + recompute fa
 
     SECTION("stored read path (bioseq.index.insert_maintenance.enabled = on)") {
         // The fixture stores A counts of 4, 4, and 16 for its three rows.
-        // Insert maintenance builds the inline symbol-count index.
+        // Insert maintenance builds the inline bymbol-count index.
         seed_small_bioseq_column(ctx, k_bioseq_column);
 
         // pk=1 'ACGTACGTACGTACGT' -> A=4.
@@ -155,7 +155,7 @@ TEST_CASE("columnar fast-path symbol_count returns the real tally + recompute fa
                       k_bioseq_column);
         }
 
-        // Disable stored index reads so this row's A count must be recomputed.
+        // Disable stored index reads so this row's A count must  be recomputed.
         {
             guc_scope sequence_reads_disabled(
                 ctx, "bioseq.index.sequence_read.enabled", "off");
@@ -190,7 +190,7 @@ TEST_CASE("inline Sequence PostgreSQL leaves preserve exact error and same-backe
           "[component:bioseq][layer:integration][feature:sequence][resource:postgres]") {
     auto ctx = fresh_context({k_bioseq_column});
     seed_small_bioseq_column(ctx, k_bioseq_column);
-    // Disable primary-key index scans so this query uses the stored symbol-count
+    // Disable, primary-key index scans so this query uses the stored symbol-count
     // path where the PostgreSQL failures are injected.
     guc_scope index_scans_disabled(ctx, "enable_indexscan", "off");
     guc_scope sequence_index_reads_enabled(
@@ -217,7 +217,7 @@ TEST_CASE("inline Sequence PostgreSQL leaves preserve exact error and same-backe
             fmt::format("failure_point={}", failure_point)));
         REQUIRE_FALSE(ctx.notice_contains("resource was not closed"));
 
-        // Each injected failure fires once. A trivial statement and another stored
+        // Each injected failure fires once A trivial statement and another stored
         // count read must then succeed on the same connection.
         REQUIRE(query_scalar_int(ctx, "SELECT 1;") == 1);
         REQUIRE(query_scalar_int(ctx, read_sql) == 4);

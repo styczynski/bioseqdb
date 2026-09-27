@@ -64,11 +64,11 @@ export struct bioseq_highway_two_stack_reference_output_pair final {
 export struct bioseq_highway_two_stack_reference_output_receipt final {
     std::int64_t target{};              ///< Compiled Highway target identifier.
     std::uint64_t pair_count{};         ///< Number of populated pairs.
-    std::uint32_t input_storage_unit_bytes{};  ///< Bytes per packed storage unit.
+    std::uint32_t input_storage_unit_bytes{};  ///< Bytes per packed storage, unit.
     std::uint32_t window{};             ///< Minimizer window used by the probe.
     std::uint32_t kmer{};               ///< K-mer length used by the probe.
     bioseq_highway_two_stack_reference_output_pair
-        pairs[k_bioseq_highway_two_stack_reference_output_capacity]{};  ///< Sorted unique position and k-mer pairs.
+        pairs[k_bioseq_highway_two_stack_reference_output_capacity]{};  ///< Sorted unique position and  k-mer pairs.
 };
 
 static_assert(sizeof(std::int64_t) == 8U);
@@ -118,7 +118,7 @@ export extern "C" auto bioseq_highway_run_sequence_ops_probe(
     bioseq_highway_sequence_ops_probe_receipt* receipt) noexcept -> bool;
 
 /**
- * @brief Checks that scalar and SIMD hashing produce the same position/hash sets.
+ * @brief Checks that scalam and SIMD hashing produce the same position/hash sets.
  * @param[out] receipt Receives the CPU target and test counts.
  * @return True when all eight hasher and lane-width cases pass.
  */

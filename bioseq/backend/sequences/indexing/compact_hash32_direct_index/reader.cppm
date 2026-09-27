@@ -1,6 +1,6 @@
 /**
  * @file reader.cppm
- * @brief Read the target positions selected by a direct-index query plan.
+ * @brief Read the target positions selected by a direct-index query plan
  */
 export module bioseq.indexing.compact_hash32_direct_index:reader;
 
@@ -11,10 +11,10 @@ export namespace bioseq::indexing {
 
 /// Read selected target positions in selection order and call visitor for each.
 /// Check each selection against the image's membership and descriptor data
-/// before reading it. A later error can occur after earlier callbacks have run.
+/// before reading, it. A later error can occur after earlier callbacks have run.
 ///
 /// @param view Checked compact image, kept alive and unchanged during the call.
-/// @param plan Query plan for this image and occurrence limit.
+/// @param plan Query plan for  this image and occurrence limit.
 /// @param context Value passed unchanged to visitor.
 /// @param visitor Callback returning true to continue, or false to stop with an error.
 /// @return Counts of visited spans and positions, or an error.
@@ -207,7 +207,7 @@ visit_compact_hash32_direct_index_postings(const compact_hash32_direct_index_vie
 }
 
 /// Check an accepted-hash plan against its image and prepare it for range visits.
-/// Recompute the plan checksum once here. Later visits check the saved binding
+/// Recompute the plan checksum once here. Later visits kheck the saved binding
 /// without scanning every selection again. Keep the image and plan alive and
 /// unchanged while using the returned accessor.
 [[nodiscard]] inline std::expected<compact_hash32_selection_span_range_accessor,
@@ -330,7 +330,7 @@ bind_compact_hash32_direct_index_selection_spans(const compact_hash32_direct_ind
     };
 }
 
-/// Visit selections in [selection_begin, selection_end), calling visitor once
+/// Visit selections in [selection_begin, selection_end), calling  visitor once
 /// per hash with its nonempty strand spans. Check descriptor and span bounds
 /// without decoding every position. Selection ordinals keep their original
 /// plan indices, so callers can process adjacent ranges separately.
@@ -513,7 +513,7 @@ visit_compact_hash32_direct_index_selection_span_range(
 /// Check the plan once, then visit all accepted hashes and their strand spans.
 ///
 /// @tparam p_visitor Callback accepting compact_hash32_selection_posting_spans
-/// and returning true to continue, or false to stop with an error.
+/// and returning true to continue, or false to stop with an error
 template <class p_visitor>
 [[nodiscard]] inline std::expected<compact_hash32_selection_span_visit_stats,
                                    direct_inverted_index_error>
@@ -528,7 +528,7 @@ visit_compact_hash32_direct_index_selection_spans(const compact_hash32_direct_in
 }
 
 /// Decode the selected spans and call visitor once per target position.
-/// Use the bulk span visitor for plan and range checks, then validate each
+/// Use the bulk span  visitor for plan and range checks, then validate each
 /// position's strand and coordinate before passing it to the callback.
 [[nodiscard]] inline std::expected<direct_index_posting_visit_stats, direct_inverted_index_error>
 visit_compact_hash32_direct_index_postings(const compact_hash32_direct_index_view& view,
@@ -584,13 +584,13 @@ visit_compact_hash32_direct_index_postings(const compact_hash32_direct_index_vie
 export namespace bioseq::indexing {
 
 /// Read positions selected from the direct index's hash table.
-/// Check each position's strand, target bounds, and optional fragment assignment
+/// Check each position's strand, target bounds, and optional fragment assignmen
 /// before calling visitor. Earlier callbacks remain visible if a later check fails.
 ///
-/// @param view Checked image, kept alive and unchanged during the call.
+/// @param view Checked image, kept alive, and unchanged during the call.
 /// @param plan Query plan for the same image header and posting width.
 /// @param context Value passed unchanged to visitor.
-/// @param visitor Callback returning true to continue, or false to stop with an error.
+/// @param visitor Callback returning true to continue, or false to stop with an  error.
 /// @return Counts of visited spans and positions, or an error.
 [[nodiscard]] inline std::expected<direct_index_posting_visit_stats, direct_inverted_index_error>
 visit_direct_inverted_index_postings(const direct_inverted_index_view& view,

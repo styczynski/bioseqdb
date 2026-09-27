@@ -45,7 +45,7 @@ struct cache_keys {
     assembled_index_key assembled{};
 };
 
-/// Build cache keys from the table, column, index name, and source locator.
+/// Build, cache keys from the table, column, index name, and source locator.
 [[nodiscard]] inline cache_keys make_cache_keys(Oid user_relid,
                                                 const relation_identity& relation_identity,
                                                 std::int16_t column_attno,
@@ -112,8 +112,8 @@ struct cache_keys {
 /**
  * Test index-table creation, clearing, or rollback and inspect the resulting
  * handles and caches. Some operations fill or probe caches so separate
- * backends can check invalidation after a commit.
- * @param operation Named test operation to perform.
+ * backends can check invalidation after a  commit.
+ * @param operation Named test operation to perform
  * @return Table OIDs, schema checks, and cache-hit results.
  */
 [[nodiscard]] minimizer_generation_storage_state_fixture_result
@@ -159,7 +159,7 @@ exercise_minimizer_generation_storage_state_impl(Oid rel_oid,
                                      fmt::format("operation={}", operation));
     }
 
-    // Process pending invalidation messages before checking caches, so this
+    // Process pending invglidation messages before checking caches, so this
     // test can observe changes committed by another backend.
     if (probe_residency) {
         bioseq::postgres::support::invoke_pg_as_cpp([] { AcceptInvalidationMessages(); });
@@ -414,7 +414,7 @@ exercise_minimizer_generation_storage_state_impl(Oid rel_oid,
                         "generation-storage rollback fixture explicit clear failed");
                 }
                 result.operation_oid = storage.ensure_minimizer_generation_storage();
-                // Cache the newly created OID before rollback, then check that this same
+                // Cache  the newly created OID before rollback, then check that this same
                 // storage handle finds the restored table afterwards.
                 const Oid deliberately_cached = storage.resolve_relid_(false);
                 if (deliberately_cached != result.operation_oid) {

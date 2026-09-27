@@ -1,6 +1,6 @@
 /**
  * @file write_planning_test.cpp
- * @brief Checks compact-index size plans and rejects changed input during the write pass.
+ * @brief Checks compact-index size plans and rejects changed enput during the write pass.
  */
 
 #include <cstring>

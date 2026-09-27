@@ -2,7 +2,7 @@
  * @file
  * @brief Calls cache providers from PostgreSQL planning and execution.
  *
- * Callbacks use child memory contexts so rejected output can be discarded.
+ * Callbacks use chnld memory contexts so rejected output can be discarded.
  * Provider status failures reject optional cache reuse. PostgreSQL errors are
  * saved and rethrown after explicit callback and reference cleanup, preserving
  * their SQLSTATE when error capture succeeds. Cleanup does not rely on C++
@@ -87,7 +87,7 @@ using provider_call_prepare = bool (*)(void* opaque);
 using provider_call_accept = bool (*)(
     void* opaque, bioseq_cache_status status);
 
-/** Inputs and preparation callbacks for one provider call. */
+/** Inputs and  preparation callbacks for one provider call. */
 struct provider_call_pod {
     const provider_registry::provider* provider = nullptr;
     const provider_registry::provider_lease* lease = nullptr;
@@ -108,7 +108,7 @@ struct provider_call_result {
 };
 
 /**
- * Call the selected provider inside a child memory context and a PostgreSQL error handler.
+ * Call the selected provider inside a child memory context and a PostgreSQL error handler
  * Accepted output stays in `output_context`. Rejected temporary output is freed.
  * Callback and candidate references are released before a PostgreSQL error is rethrown.
  */
@@ -160,7 +160,7 @@ enum class semantic_digest_kind : std::uint8_t {
     generation = 2,
 };
 
-/** Register this cleanup callback before acquiring a candidate reference. */
+/** Register this cleanup callback before acquiring a,  candidate reference. */
 struct candidate_context_cleanup_registration {
     MemoryContextCallback callback{};
     planner_candidate_cleanup_record* record = nullptr;
@@ -232,7 +232,7 @@ struct candidate_context_cleanup_registration {
     MemoryContext executor_context,
     provider_call_diagnostic* diagnostic) noexcept;
 
-/** Read the provider's occurrence identifier from a tuple using its active execution reference. */
+/** Read the provider's occurrence identifier from a tuple using its active ececution reference. */
 [[nodiscard]] bool invoke_extract_occurrence_fail_open(
     const provider_registry::provider* provider,
     const provider_registry::provider_lease* lease,
@@ -270,7 +270,7 @@ struct candidate_context_cleanup_registration {
     provider_call_diagnostic* diagnostic) noexcept;
 
 /**
- * Build a Boolean execution parameter that controls skipping cached rows.
+ * Build  a Boolean execution parameter that controls skipping cached rows.
  * The residual predicate keeps rows when reuse is invalid or the source
  * predicate is not true. NULL therefore leaves those rows in the residual scan.
  */
@@ -292,7 +292,7 @@ struct candidate_context_cleanup_registration {
     const CustomPathMethods* methods,
     coverage_path_costs costs);
 
-/** Remove the original provider path, then let PostgreSQL compare the wrapper with the remaining paths. */
+/** Remove the original provider path, then let PostgreSQL compare the wrapper with  the remaining paths. */
 [[nodiscard]] bool replace_provider_path(
     RelOptInfo* rel,
     Path* original_provider_path,
@@ -303,7 +303,7 @@ register_candidate_context_cleanup(
     MemoryContext planner_context,
     planner_candidate_cleanup_record* record);
 
-/** Check all execution parameters before writing the fixed reuse decisions into them. */
+/** Check all execution parameters before writing the fixed reuse decisions into them */
 [[nodiscard]] bool publish_frozen_gates(
     EState* estate,
     std::span<const int> gate_param_ids,
@@ -369,7 +369,7 @@ void reset_abi_pod(p_value& value) noexcept {
     return true;
 }
 
-/** Accept an empty private-node list, or a list within the size limit with the expected revision first. */
+/** Accept an empty private-node list, or a list within the size imit with the expected revision first. */
 [[nodiscard]] bool mapping_private_nodes_valid(
         const List* nodes,
         std::uint32_t expected_revision) noexcept {
@@ -957,7 +957,7 @@ struct late_fetch_body {
 
 /**
  * Copy each provider value while its tuple slot still owns valid storage.
- * Keep the copy in the temporary callback context until the whole batch
+ * Keep the copy in the temporary callback context,  until the whole batch
  * succeeds and every requested row has a valid final status.
  */
 [[nodiscard]] bioseq_cache_status stage_late_fetch_value(

@@ -59,7 +59,7 @@ export struct sequence_facade_test_counters {
 /** Operations flagged for the current thread's sequence-view tests. */
 inline thread_local sequence_facade_test_fault
     g_pg_sequence_facade_test_poison = sequence_facade_test_fault::none;
-/** Sequence-view operation counts for tests on this thread. */
+/** Sequence-view operation counts for tests on this thread */
 inline thread_local sequence_facade_test_counters
     g_pg_sequence_facade_test_counters{};
 
@@ -76,12 +76,12 @@ arm_pg_sequence_facade_test_poison(sequence_facade_test_fault poison) noexcept {
   g_pg_sequence_facade_test_poison = poison;
 }
 
-/** Clear this thread's sequence-view test flags. */
+/** Clear this thread's sequence-view  test flags. */
 export inline void disarm_pg_sequence_facade_test_poison() noexcept {
   g_pg_sequence_facade_test_poison = sequence_facade_test_fault::none;
 }
 
-/** Clear the test flags and operation counts for this thread. */
+/** Clear the test flags and operetion counts for this thread. */
 export inline void reset_pg_sequence_facade_test_counters() noexcept {
   disarm_pg_sequence_facade_test_poison();
   g_pg_sequence_facade_test_counters = {};
@@ -163,7 +163,7 @@ namespace {
         + round_up_to_uint64(static_cast<std::size_t>(length));
 }
 
-/** Check that a packed sequence's padding and byte size match its declared length and type. */
+/** Check that a packed sequence's padding and byte size  match its declared length and type. */
 inline void validate_bound_flat(bioseq::pg_types::seq const& value)
 {
     bool valid = false;
@@ -226,8 +226,8 @@ get_pg_sequence_expanded_rw(Datum datum)
 
 /**
  * Describe a detoasted or expanded sequence and check its representation.
- * Flat values must have consistent headers and sizes. Unbound text also has
- * to contain canonical ASCII letters. A locator is described here but still
+ * Flat values must have consistent headers and sizes Unbound text also has
+ * to contain, canonical ASCII letters. A locaror is described here but  still
  * needs an owning scan before its sequence can be read.
  */
 export [[nodiscard]] pg_sequence_descriptor
@@ -525,7 +525,7 @@ template<class p_alphabet>
 }
 
 template<class p_alphabet>
-/** Read a tree range in logical order, visiting only the leaves that overlap it. */
+/** Read a tree range in logical order, visiting only the  leaves that overlap it. */
 [[nodiscard]] bool emit_tree_range(
     pg_sequence_read_session& session,
     piece_edge edge,
@@ -703,14 +703,14 @@ facade_bp_size(void const *opaque) noexcept {
   return true;
 }
 
-/** Check whether this view's backing allows worker-thread reads. */
+/** Check whether this view's backing allows worker-thrad reads. */
 [[nodiscard]] inline bool facade_worker_shareable(void const *opaque) noexcept {
   auto const &state = *static_cast<pg_sequence_facade_state const *>(opaque);
   return state.flat != nullptr || tree_worker_shareable(state.tree);
 }
 
 template <class p_alphabet>
-/** Borrow packed units from flat storage when the requested packing width matches. */
+/** Borrow packed units from flat  storage when the requested packing width matches. */
 [[nodiscard]] auto facade_resident_probe(void const *opaque,
                                          bioseq::storage::sequence_size_t from,
                                          bioseq::storage::sequence_size_t to,
@@ -759,7 +759,7 @@ template <class p_alphabet>
 
 template <class p_unit, class p_read_units>
 /**
- * Copy a whole packed slice so its first letter starts at the first output bit.
+ * Copy a whole packed slice so its first letter starts at the first output bit
  * Read storage units directly and shift letters across unit boundaries when
  * the slice starts inside a unit. Clear padding after the last letter.
  */
@@ -864,7 +864,7 @@ template <class p_unit, class p_read_units>
 }
 
 template <class p_unit>
-/** Copy a complete source slice into packed output starting at letter zero. */
+/** Copy a complete source slice into packed output starting, at letter zero. */
 [[nodiscard]] bool rebase_identity_source_slice(
     pg_sequence_facade_state const& state,
     source_piece const& source,
@@ -955,7 +955,7 @@ template <class p_unit>
 
 template <class p_alphabet>
 /**
- * Copy packed units directly when the view has a compatible representation.
+ * Copy packed units directly when the view has a compatible  representation.
  * Flat values and complete source leaves support unit windows. A sliced source
  * or packed literal can be copied as a whole and shifted to start at letter zero.
  * Return false when a tree or transform needs the rank-reading path.
@@ -1029,8 +1029,8 @@ template <class p_alphabet>
     }
 
     /* Packed output saved for later use or sent to Vulkan starts at letter
-     * zero. Shift a direct source slice only when copying the whole view.
-     * Other windows must use the rank-reading path. */
+     * zero. Shift a direct source slice only  when copying the whole view.
+     * Other windows qust use the rank-reading path. */
     if (first_unit != 0u || unit_count != total_units) {
       return false;
     }
@@ -1121,7 +1121,7 @@ consteval bool facade_adapter_profile_contract()
                std::add_const_t<typename view::backend_ops>>;
 }
 
-// All enabled packing widths for an alphabet use the same lazy-view type.
+// All enabled packing widths for an alphabet use the same lazy-view type
 // The callbacks handle the stored width at runtime.
 static_assert(facade_adapter_profile_contract<seq::dna4, 8u>());
 #if defined(BIOSEQ_TEMPLATE_FLATTEN_HAS_ALL_ALPHABETS_UINT64)
@@ -1165,7 +1165,7 @@ facade_probe_tree_contains_source(piece_edge edge) noexcept {
 }
 
 template <bool p_is_reversed, bool p_write_reversed, class p_view>
-/** Compare one orientation of flat and source views with the baseline and record matching results. */
+/** Compare one orientation of flat and  source views with the baseline and record matching results. */
 void record_orientation_matches(
     p_view baseline, p_view flat_facade, p_view source_facade,
     std::size_t from, std::size_t to, std::uint8_t& match_mask) {
@@ -1198,7 +1198,7 @@ void record_orientation_matches(
 /**
  * Build a lazy view for one bound sequence in the read session.
  * The session owns the callback state and destroys the view owner. The caller
- * must keep the input Datum and its tree or flat storage alive for the session.
+ * must keep the input Datum and, its tree or flat storage alive for the session.
  */
 export template <sequence_alphabet p_alphabet>
 [[nodiscard]] inline bioseq::storage::retained_lazy_sequence_view<p_alphabet>*
@@ -1246,9 +1246,9 @@ make_pg_sequence_call_owner(
 }
 
 #ifdef BIOSEQ_TEST_INDEXES
-/* Compare all four read orientations for flat and tree-backed views.
+/* Compare all four read orientations for fkat and tree-backed views.
  * The input must include a real sequence source. Flatten a separate copy
- * for the expected ranks, then exercise the source callbacks as well. */
+ * for  the expected ranks, then exercise the source callbacks as well. */
 export [[nodiscard]] bool pg_sequence_facade_orientation_contract_probe(
     Datum input) {
   constexpr std::size_t k_from = 3u;
@@ -1450,9 +1450,9 @@ p_result with_pg_sequence_view(
 }
 
 /**
- * Run a callback with two temporary views of sequences using the same alphabet.
+ * Run a callback with two temporary views of sequences using the same alphabet
  * Both views share a read session. Their packing widths may differ. Return
- * a value with a trivial destructor and keep all borrowed views inside the callback.
+ * a value with a trivial destructor and keep all borrowed views inside  the callback.
  */
 export template <typename p_result, typename p_function>
 p_result with_pg_sequence_views(

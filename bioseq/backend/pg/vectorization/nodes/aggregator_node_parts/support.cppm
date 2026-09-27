@@ -10,7 +10,7 @@ extern "C" {
 #include <cstdint>
 
 /** Complete PostgreSQL's HashAggSpill type before the module declaration
- * so it has the same linkage as the declaration in execnodes.h. */
+ * so, it has the same linkage as the declaration in execnodes.h. */
 // NOLINTNEXTLINE(readability-identifier-naming) -- exact PostgreSQL ABI type name
 struct HashAggSpill {
     /** Number of spill partitions. */
@@ -65,7 +65,7 @@ export {
         AggState* aggregate_state;
     };
 
-    /** Extra space allowed for estimation error when choosing spill partitions. */
+    /** Extra space allowed for estimation error when choosing  spill partitions. */
     inline constexpr double hash_aggregate_partition_factor = 1.50;
     /** Preferred minimum partition count while enough unused hash bits remain. */
     inline constexpr int hash_aggregate_min_partitions = 4;
@@ -80,7 +80,7 @@ export {
     /** HyperLogLog precision used to estimate groups in a spill partition. */
     inline constexpr int hash_aggregate_hll_bit_width = 5;
 
-    /** Estimated allocator header bytes included for each hash-entry allocation. */
+    /** Estimated allocator header bytes inclued for each hash-entry allocation. */
     inline constexpr Size aggregate_chunk_header_bytes = 16;
 
 }

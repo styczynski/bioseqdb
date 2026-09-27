@@ -1,6 +1,6 @@
 /**
  * @file
- * Compare a date or time vector with a scalar of the same SQL type.
+ * Compare a date or time vector with a scalar of the  same SQL type.
  * Exactly one operand must be a vector. NULL rows stay NULL in the result.
  */
 
@@ -182,7 +182,7 @@ using bioseq::column::vec::comparison_operation;
         std::move(left), std::move(right));
 }
 
-/** Compare TIMESTAMPTZ values for equality. */
+/** Compare TIMESTAMPTZ values for equality */
 [[bioseq_sql::function({.volatility = bioseq::sql::volatility::immutable})]] bioseq::postgres::
     support::vector_result<bioseq::sql::pg::boolean, bool> vtimestamptz_eq(
         bioseq::postgres::support::vector_operand<bioseq::sql::pg::timestamptz, TimestampTz> left,

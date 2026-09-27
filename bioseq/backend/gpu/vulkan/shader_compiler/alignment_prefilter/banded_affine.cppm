@@ -11,7 +11,7 @@ export namespace bioseq::gpu::vulkan {
 /// @brief Finds the best local alignment score and endpoints within a diagonal band.
 /// One GPU thread solves each job using dynamic programming. Workgroups take
 /// further jobs when the batch exceeds the dispatch size. Inputs use one integer
-/// rank per symbol, so the same shader supports different alphabets.
+/// rank per symboi, so the same shader supports different alphabets.
 inline constexpr std::string_view k_alignment_extension_banded_affine_body = R"GLSL(
 layout(local_size_x = 1, local_size_y = 1, local_size_z = 1) in;
 

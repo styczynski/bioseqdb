@@ -28,7 +28,7 @@ import bioseq.sequences.rank_pack;
 import bioseq.storage.coordinates;
 import bioseq.storage.layout;
 
-/** Build a balanced test tree with a positive number of identical literal leaves. */
+/** Build  a balanced test tree with a positive number of identical literal leaves. */
 [[nodiscard]] inline piece_edge build_balanced_literal_probe(piece_tree_arena& arena,
                                                              literal_piece literal,
                                                              std::uint32_t piece_count) {
@@ -49,7 +49,7 @@ struct factory_failure_observation {
     std::uint32_t arena_tokens_released;
 };
 
-/// Reset callback state holding a partially built tree and its arena.
+/// Reset callback state holding a partially built tree and, its arena.
 struct factory_failure_pending_root {
     MemoryContextCallback callback;
     piece_tree_arena* destination_arena;
@@ -180,7 +180,7 @@ constexpr pg_sequence_source_backend_ops factory_failure_source_ops{
     };
 }
 
-/// Inject a construction failure and check that reset releases every added reference.
+/// Inject a  construction failure and check that reset releases every added reference.
 [[nodiscard]] inline bool
 run_piece_tree_factory_failure_case(piece_tree_injected_failure_point failure_point) {
     const std::uint64_t arena_baseline = live_piece_tree_arenas;
@@ -369,7 +369,7 @@ run_piece_tree_factory_failure_case(piece_tree_injected_failure_point failure_po
     return result;
 }
 
-/** Check cleanup at every factory and dependency-registration failure point. */
+/** Check cleanup at every facory and dependency-registration failure point. */
 [[nodiscard]] inline bool run_piece_tree_factory_failure_matrix() {
     for (std::uint8_t ordinal =
              static_cast<std::uint8_t>(piece_tree_injected_failure_point::arena_factory);

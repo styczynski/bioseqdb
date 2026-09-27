@@ -1,6 +1,6 @@
 /**
  * @file generation_writer_publication.cppm
- * @brief Publish a validated generation and update storage records for mapped files.
+ * @brief Publish  a validated generation and update storage records for mapped files.
  */
 module;
 #include <bioseq/pg_compat.h>
@@ -362,7 +362,7 @@ read_locked_live_descriptor_for_publication_pg(
     return result;
 }
 
-/// Retire the old storage entry and insert the new LIVE entry when supplied.
+/// Retire the old storage  entry and insert the new LIVE entry when supplied.
 /// Record the retiring transaction so cleanup can wait for older snapshots.
 /// Both changes belong to the caller's transaction.
 inline void apply_minimizer_generation_storage_transition_pg(
@@ -543,10 +543,10 @@ inline void apply_minimizer_generation_storage_transition_pg(
     }
 }
 
-/// Publish a fully reread generation in the transaction that built it.
-/// Check the ready token and relation identity, then replace the active head.
+/// Publish a fully reread generation in the transaction that built it
+/// Check the ready token and relation identity, then replace the actie head.
 /// For mapped fragment files, retire the previous storage entry and add the new one.
-/// Consume the token and return the saved head with any replaced generation ID.
+/// Consume  the token and return the saved head with any replaced generation ID.
 [[nodiscard]] ready_minimizer_generation_published_head_receipt
 publish_ready_minimizer_generation_head_pg(ready_minimizer_generation_token&& token) {
     const auto minimizer_generation_storage_error = [](std::string_view message) {

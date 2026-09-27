@@ -61,7 +61,7 @@ export {
     }
 
     /**
-     * @brief Finds one sequence typmod through supported slices, reversals, and concatenations.
+     * @brief Finds one  sequence typmod through supported slices, reversals, and concatenations.
      *
      * PostgreSQL can lose a function result's typmod, which identifies its alphabet
      * and storage width. Recover it from the sequence inputs only when their

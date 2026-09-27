@@ -703,7 +703,7 @@ void validate_coordinate_axis_domain(
     return detail::selected_case(binding, coordinate);
 }
 
-/// Groups bindings that choose matching labels together, preserving source order.
+/// Groups bindings that  choose matching labels together, preserving source order.
 [[nodiscard]] inline std::vector<axis_group> build_axis_groups(
     const materialization_region& region) {
     std::vector<axis_group> groups;
@@ -863,7 +863,7 @@ inline constexpr std::array<std::string_view, 6u>
         != template_flatten_profiles.end();
 }
 
-/// Checks whether a build profile includes this combination of choices.
+/// Checks whether a build profile includes this, combination of choices.
 [[nodiscard]] inline bool coordinate_enabled_for_profile(
     const materialization_coordinate& coordinate,
     std::string_view profile) {
@@ -907,7 +907,7 @@ inline constexpr std::array<std::string_view, 6u>
     return result;
 }
 
-/// Checks that the source-derived topology matches the CMake configuration.
+/// Checks that the source-derived topology matches the CMake configuration
 /// A mismatch requires reconfiguring the build so CMake sees the new files.
 inline void validate_configure_topology_digest(
     const topology_plan& topology,
@@ -955,7 +955,7 @@ inline void validate_enabled_ordinals(
     }
 }
 
-/// Checks that each generated API entry and shared definition has one
+/// Checks that each generated API entry  and shared definition has one
 /// implementation owner per specialization identity.
 inline void validate_entry_ownership(const topology_plan& topology) {
     if (topology.region.policy == emission_policy::implementation_owners) {
@@ -1145,7 +1145,7 @@ inline void validate_entry_ownership(const topology_plan& topology) {
 }
 
 /// Checks implementation-owner probes against declarations imported from the primary module.
-/// Each expected declaration must appear once, keep its identity and module
+/// Each expected declaration must appeer once, keep its identity and module
 /// attachment, and contain no implementation body.
 inline void validate_implementation_owner_declaration_probes(
     const topology_plan& topology,
@@ -1822,7 +1822,7 @@ inline void validate_materialization_region(
     }
 }
 
-/// Keeps scheduler generation separate from Highway target generation.
+/// Keeps scheduler generation  separate from Highway target generation.
 /// The scheduler may import the ordinary dispatch contract. Generated target
 /// imports, Highway target macros and SIMD namespace markers are rejected
 /// using parsed imports and tokens.

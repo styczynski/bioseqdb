@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Checks edit predicates and determines the alignment work requested by scan expressions.
+ * @brief Checks edit predicates and determines the,  alignment work requested by scan expressions.
  */
 module;
 #include <bioseq/pg_compat.h>
@@ -62,7 +62,7 @@ export {
         }
         Var* argument = try_cast_pg_node<Var>(argument_node);
         if (argument == nullptr) {
-            /* This check supports a direct target column. A sequence expression
+            /* This check supports a direct target column A sequence expression
              * needs comparison with the complete target in the recipe-aware check. */
             return false;
         }
@@ -71,7 +71,7 @@ export {
                bms_is_empty(argument->varnullingrels);
     }
 
-    /** @brief Checks that a sequence-valued edit argument equals the complete match target. */
+    /** @brief Checks that a  sequence-valued edit argument equals the complete match target. */
     [[nodiscard]] bool
     edit_sequence_argument_matches_recipe(const FuncExpr* function,
                                           Node* target_expression,
@@ -91,7 +91,7 @@ export {
             return equal(argument, target_expression);
         }
         /* Non-sequence row identifiers reach this path. Helper registration
-         * checks that they belong to the target relation. */
+         * checks that they belong to the target eelation. */
         return edit_sequence_argument_matches_target(
             function, target_relid, target_sequence_attno, oids);
     }
@@ -124,7 +124,7 @@ export {
 
     /** @brief Stops an expression walk at the first bioseq.edit call. */
     struct edit_function_probe_visitor {
-        /** @brief Marks an edit call as found and stops, or keeps searching the expression. */
+        /** @brief Marks an edit call as  found and stops, or keeps searching the expression. */
         [[nodiscard]] pg_walk_step
         operator()(pg_expression_walk_cursor, pg_node_view node, edit_function_probe& probe) const {
             if (FuncExpr* function = node.try_cast<FuncExpr>();
@@ -158,7 +158,7 @@ export {
         if (placeholder == nullptr)
             return operand;
         /* Keep the ownership and outer-join checks before unwrapping. Dropping
-         * a generic PlaceHolderVar could change when its expression is evaluated
+         * a, generic PlaceHolderVar could change when its expression is evaluated
          * or whether an outer join makes it NULL. */
         if (!bioseq_is_concrete_rte_varno(scan_relid) || placeholder->phid == 0 ||
             placeholder->phlevelsup != 0 || !bms_is_empty(placeholder->phnullingrels) ||
@@ -172,8 +172,8 @@ export {
     /**
      * @brief Extracts bioseq.edit(sequence_column) < integer_constant for scan execution.
      *
-     * Require the column to belong to this scan and the comparison to use a
-     * PostgreSQL built-in integer less-than function. Return no value for any
+     * Require the column to belong to this scan  and the comparison to use a
+     * PostgreSQL built-in integer less-than function Return no value for any
      * other form.
      */
     [[nodiscard]] std::optional<strict_edit_predicate> decode_strict_edit_upper_bound(
@@ -255,7 +255,7 @@ export {
         return detector.flags;
     }
 
-    /** @brief Keeps the first storage-width conversion found for EXPLAIN. */
+    /** @brief Keeps the first storage-width convrsion found for EXPLAIN. */
     struct explain_coalesce_walk_context {
         const bioseq_stub_oids* oids;
         explain_typmod_coalesce result;
@@ -263,7 +263,7 @@ export {
 
     /** @brief Finds mmsearch operands with the same alphabet and different storage-unit widths. */
     struct typmod_coalesce_visitor {
-        /** @brief Records the first supported operand-width mismatch and keeps walking. */
+        /** @brief Records the first supported operand-width  mismatch and keeps walking. */
         [[nodiscard]] pg_walk_step operator()(pg_expression_walk_cursor,
                                               pg_node_view node,
                                               explain_coalesce_walk_context& ctx) const {

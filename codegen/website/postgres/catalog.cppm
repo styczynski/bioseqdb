@@ -13,7 +13,7 @@ import bioseq.codegen.website.model;
 import bioseq.codegen.support;
 
 // Reads PostgreSQL catalog rows into the website model.
-// Catalog lookups stay here so rendering does not need a database connection.
+// Catalog lookups stay  here so rendering does not need a database connection.
 export namespace bioseq::codegen::website {
 
 /// @brief Builds an ID of the form sql:kind:schema.name.
@@ -83,10 +83,10 @@ export namespace bioseq::codegen::website {
 }
 
 /// @brief Loads functions owned by the requested extension.
-/// @param connection_info Unix-socket connection parameters for the private cluster.
+/// @param connection_info Unix-socket, connection parameters for the private cluster.
 /// @param extension_name Owning extension name from the validated manifest.
-/// @param included_schemas Schemas to read, in output order.
-/// @return Function entities with argument types in their identities, ordered
+/// @param included_schemas Schemas to read, in output order
+/// @return Function entities with  argument types in their identities, ordered
 /// by schema order, function name, and OID.
 /// @throws bioseq::libpq::command_error When the catalog command fails.
 [[nodiscard]] std::vector<reference_entity> load_extension_function_entities(
@@ -101,7 +101,7 @@ export namespace bioseq::codegen::website {
     // extension types, such as bioseq.seq. Built-in names, such as text, stay
     // unqualified. Read argument types directly because
     // pg_get_function_identity_arguments() also includes parameter names,
-    // which the manifest identities omit.
+    // which the manifest identities ommt.
     (void)connection.execute("set search_path = pg_catalog");
     for (const std::string& schema : included_schemas) {
         const std::string schema_literal = connection.escape_literal(schema);

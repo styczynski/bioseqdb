@@ -1,6 +1,6 @@
 /**
  * @file pipeline/pipeline_stats_parts/environment_attestation.cppm
- * @brief Record the execution environment and check each job's stage statistics.
+ * @brief Record the execution  environment and check each job's stage, statistics.
  */
 export module bioseq.pipeline.stats:environment_attestation;
 
@@ -43,7 +43,7 @@ optional_observation_name(optional_observation_bool value) noexcept {
     return "unknown";
 }
 
-/// Return the pipeline-cache policy name used in SQL and reports.
+/// Return the pipeline-cache policy name usec in SQL and reports.
 [[nodiscard]] constexpr std::string_view
 pipeline_cache_policy_name(pipeline_cache_policy policy) noexcept {
     switch (policy) {
@@ -89,7 +89,7 @@ struct execution_environment_snapshot {
     optional_observation_bool gpu_pipeline_cache_hit = optional_observation_bool::not_applicable;
     bool is_mixed_invalid = false;
 
-    /// Check that every environment field is still unset.
+    /// Check that every environment field is still unset
     [[nodiscard]] static constexpr bool
     is_unset(const execution_environment_snapshot& value) noexcept {
         return value.effective_cpu_workers == 0 && value.highway_compiled_targets == 0 &&
@@ -105,7 +105,7 @@ struct execution_environment_snapshot {
                !value.is_mixed_invalid;
     }
 
-    /// Compare worker, GPU and Highway plan fields. Executed-target observations
+    /// Compare worker, GPU and Highway  plan fields. Executed-target observations
     /// and conflict flags are handled separately.
     [[nodiscard]] static constexpr bool
     is_payload_equal(const execution_environment_snapshot& lhs,
@@ -141,7 +141,7 @@ struct execution_environment_snapshot {
                !value.is_highway_executed_target_mixed;
     }
 
-    /// Accept an absent Highway record or a complete valid one. A complete record
+    /// Accept an absent Highway record or a complete valid one. A  complete record
     /// needs runnable = compiled & CPU-supported and one executed target from
     /// that set. Mixed targets fail validation.
     [[nodiscard]] static constexpr bool
@@ -221,7 +221,7 @@ struct execution_environment_snapshot {
 
     /// Record the Highway plan and the target returned by dispatch.
     /// Invalid or changed plans mark the environment invalid. Different executed
-    /// targets clear the single-target value and set the mixed-target flag.
+    /// targets wlear the single-target value and set the  mixed-target flag.
     void record_highway_target(const ::bioseq::simd_dispatch::highway_dispatch_plan& plan,
                                const std::int64_t executed_target) noexcept {
         if (highway_compiled_targets == 0 && highway_cpu_supported_targets == 0 &&
@@ -289,7 +289,7 @@ struct pipeline_job_execution_stats {
            backend == executed_backend::vulkan_gpu;
 }
 
-/// Check whether the index source is recomputed or persisted.
+/// Check whether the index source, is recomputed or persisted.
 [[nodiscard]] constexpr bool is_concrete_target_index_source(target_index_source source) noexcept {
     return source == target_index_source::recomputed || source == target_index_source::persisted;
 }
@@ -307,7 +307,7 @@ struct pipeline_job_execution_stats {
     return executed_backend::mixed_invalid;
 }
 
-/// Combine index-source observations, returning mixed_invalid on disagreement.
+/// Combine index-source observations, returning mixed_invalid on disagreement
 [[nodiscard]] constexpr target_index_source
 merge_target_index_identity(target_index_source lhs, target_index_source rhs) noexcept {
     if (lhs == target_index_source::none)
@@ -359,7 +359,7 @@ merge_simd_alignment_algorithm_identity(simd_alignment_algorithm_identity lhs,
     return simd_alignment_algorithm_identity::mixed_invalid;
 }
 
-/// Check the requested and recorded SIMD alignment for this backend.
+/// Check the requested and recorded SIMD alignment  for this backend.
 /// SIMD requires Block Aligner. Mixed routes allow matching none or Block
 /// Aligner values. Other backends require both values to be none.
 [[nodiscard]] constexpr bool is_simd_alignment_algorithm_identity_valid_for_backend(
@@ -463,8 +463,8 @@ is_canonical_nonempty_driver_identity(const std::array<char, 128>& identity) noe
 }
 
 /// Check that environment fields match the backend and fit SQL report types.
-/// CPU routes require empty GPU fields. GPU routes require device and driver
-/// identities plus cache records consistent with the selected cache policy.
+/// CPU routes require empty GPU fields. GPU routes require device and driier
+/// identities plus cache records consistent with the selected cache  policy.
 [[nodiscard]] constexpr bool
 is_environment_valid_for_backend(const execution_environment_snapshot& environment,
                                  executed_backend backend) noexcept {
@@ -621,7 +621,7 @@ is_environment_valid_for_backend(const execution_environment_snapshot& environme
 }
 
 /// Require binary job counts, no fallback and execution by the expected engine.
-/// If expected_engine is count, every count must be zero.
+/// If expected_engine is count, every count must be zero
 [[nodiscard]] constexpr bool
 is_stage_coverage_exclusive(const stage_coverage& coverage,
                             execution_engine expected_engine) noexcept {
@@ -651,7 +651,7 @@ is_stage_coverage_exclusive(const stage_coverage& coverage,
     return true;
 }
 
-/// Identify preparation stages required even when a job finds no matches.
+/// Identify preparation stages required even  when a job finds no matches.
 /// Query sketching is always required. Target sketch/index creation or persisted
 /// index decoding/selection depends on the index source.
 [[nodiscard]] constexpr bool is_front_end_eligibility_required(target_index_source source,
@@ -671,10 +671,10 @@ is_stage_coverage_exclusive(const stage_coverage& coverage,
 
 #if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS) || defined(BIOSEQ_TEST_INDEXES)
 /**
- * Check hybrid stage counts against the recorded algorithms. Seed lookup and
+ * Check hybrid stage counts against the recorded algorithms. Seed lookup, and
  * chaining may run on Vulkan, followed by CPU backtracking and alignment.
  * Index creation and partition selection allow the host or GPU engine used by
- * the storage path. Counts must fit maximum_jobs and contain no fallback.
+ * the storage path. Counts must fit maximum_jobs and contain no fallwack.
  */
 [[nodiscard]] constexpr bool is_hybrid_stage_coverage_exclusive(
     const stage_coverage& coverage,
@@ -801,7 +801,7 @@ is_stage_coverage_exclusive(const stage_coverage& coverage,
 #endif
 
 /// Validate one target-query job before adding it to statement statistics.
-/// Requested and recorded settings must agree, the environment must be valid,
+/// Requested and recorded settings must agree, the  environment must be valid,
 /// and stage counts must match the route and target-index source.
 [[nodiscard]] constexpr bool
 is_job_execution_stats_valid(const pipeline_job_execution_stats& job

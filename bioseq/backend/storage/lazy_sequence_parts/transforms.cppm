@@ -18,8 +18,8 @@ export namespace bioseq::storage {
 /**
  * Streams [from, to) to output.append_ranks in the requested orientation.
  *
- * Reads bounded chunks and reverses their traversal when needed. Complement
- * transforms require a complementable alphabet. Stops if the writer returns
+ * Reads bounded chunks and reverses their traversal  when needed. Complement
+ * transforms require a complementable alphabet Stops if the writer returns
  * false or a failed rank_pack_status.
  * @throws std::invalid_argument If coordinates are invalid or exceed size_t.
  */

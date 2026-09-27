@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Checks for duplicate mmsearch evaluation below a join and carries match helpers up from their owner.
+ * @brief Checks for duplicate mmsearch evaluation below a join and carries match helpers up from their owner
  */
 module;
 #include <bioseq/pg_compat.h>
@@ -42,7 +42,7 @@ namespace {
     /**
      * @brief Copies a one-child Path wrapper after its child or output has changed.
      *
-     * Callers provide the tag check and makeNode call because PostgreSQL builds
+     * Callers provide the tag  check and makeNode call because PostgreSQL builds
      * those macros from type names.
      */
     template <typename PathType,
@@ -167,7 +167,7 @@ export {
                           : destination + additional;
     }
 
-    /** @brief The mmsearch call to match and the number of equal copies found. */
+    /** @brief The mmsearch call to match and  the number of equal copies found. */
     struct exact_mmsearch_owner_audit {
         FuncExpr* candidate = nullptr;
         bioseq_stub_oids const* oids = nullptr;
@@ -212,7 +212,7 @@ export {
     /**
      * @brief Counts mmsearch calls left in the child plan after assigning a join owner.
      *
-     * Check join and index conditions as well as Plan::qual. BioseqScan also stores
+     * Check jkin and index conditions as well as Plan::qual. BioseqScan also stores
      * storage filters, vector filters, and executor-owned searches in custom_exprs.
      * A nested search with a different expression is valid. When a candidate is
      * supplied, count only equal copies in those executor-owner fields.
@@ -367,7 +367,7 @@ export {
         }
     }
 
-    /** @brief Finds the cheapest serial path that leaves this restriction for the parent to evaluate. */
+    /** @brief Finds the cheapest serial  path that leaves this restriction for the parent to evaluate */
     [[nodiscard]] Path* per_row_path_without_owned_qual(RelOptInfo* rel,
                                                         RestrictInfo* owned,
                                                         const bool require_bioseq_source) noexcept {
@@ -393,7 +393,7 @@ export {
      *
      * The join may need columns absent from the original child output. Accept
      * local, non-nulled column Vars and supported row-identity Vars belonging to
-     * this child. Copy the output list so other planner paths can keep using the
+     * this, child. Copy the output list so other planner paths can keep using the
      * original child unchanged.
      */
     [[nodiscard]] Path*
@@ -425,7 +425,7 @@ export {
             create_projection_path(root, child->parent, child, projected));
     }
 
-    /** @brief Finds descendant BatchJoin or PerRow nodes that own this helper's sequence expression. */
+    /** @brief Finds descendant BatchJoin or PerRow nodes that  own this helper's sequence expression. */
     void per_row_analyze_descendant_exact_owner(Path* path,
                                                 Node* helper_argument,
                                                 per_row_descendant_ownership& ownership) {
@@ -531,7 +531,7 @@ export {
             return;
         }
         /* Base-relation scan paths end the walk. Reject other unrecognized paths
-         * because they may contain children or evaluate helpers themselves. */
+         * because they may contain children or evaluate helpers themselve. */
         if (path->parent == nullptr || (path->parent->reloptkind != RELOPT_BASEREL &&
                                         path->parent->reloptkind != RELOPT_OTHER_MEMBER_REL)) {
             ownership.unsupported_wrapper = true;
@@ -582,7 +582,7 @@ export {
         return target;
     }
 
-    /** @brief Copies the child subtree containing the selected helper owner, leaving the other children shared. */
+    /** @brief Copies the child subtree containing the  selected helper owner, leaving the other children shared. */
     [[nodiscard]] List* per_row_clone_path_list_to_helper_owner(PlannerInfo* root,
                                                                 List* paths,
                                                                 CustomPath* owner,

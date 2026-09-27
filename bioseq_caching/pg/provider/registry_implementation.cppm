@@ -4,7 +4,7 @@
  *
  * Provider descriptions and names are copied into fixed slots. Removal leaves
  * the slot unused for the rest of the process. Registration tokens and active
- * reference counts prevent removal by the wrong caller or during execution.
+ * reference counts prevent  removal by the wrong caller or during execution.
  */
 module;
 

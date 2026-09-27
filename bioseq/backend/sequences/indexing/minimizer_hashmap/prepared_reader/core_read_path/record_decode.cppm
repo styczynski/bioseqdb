@@ -1,6 +1,6 @@
 /**
  * @file record_decode.cppm
- * @brief Decodes checked index records and collects positions for prepared query hashes.
+ * @brief Decodes checked index records and collects positions for  prepared query hashes.
  */
 export module bioseq.indexing.minimizer_hashmap:prepared_reader_core_read_path_record_decode;
 
@@ -51,7 +51,7 @@ trait_driven_prepared_query_core<p_traits>::observe_control_extent(
         entry.control_element_count, sizeof(typename wire_ops::control_type));
     // Keep all control boundaries in each selected extent so position order can
     // be checked within every hash. Reserve enough memory for all query routes
-    // before decoding, then reduce their storage if few controls match.
+    // before decoding, then reduce their storage if few controls match
     const std::uint64_t retained_control_count =
         selected_index == no_route ? 0u : entry.control_element_count;
     const std::uint64_t retained_control_width =
@@ -73,10 +73,10 @@ trait_driven_prepared_query_core<p_traits>::observe_control_extent(
     const std::uint64_t additional = bioseq::common::saturating_add(transient, retained);
     const std::uint64_t transient_headroom = bioseq::common::saturating_mul(
         transient, bioseq::parallelism::k_vector_preallocation_headroom_factor);
-    /// Allow extra space for vector growth when controls are stored in a vector.
+    /// Allow extra space for vector growth  when controls are stored in a vector.
     const std::uint64_t retained_headroom = [&retained]() noexcept {
         if constexpr (p_traits::global_controls_then_positions) {
-            // The fixed arrays already have enough space reserved for their peak usage.
+            // The fixed arrays already, have enough space reserved for their peak usage.
             return retained;
         } else {
             return bioseq::common::saturating_mul(
@@ -178,7 +178,7 @@ trait_driven_prepared_query_core<p_traits>::observe_control_extent(
                 route_hash_probes += control_hash_probes;
                 const std::uint64_t begin = wire_ops::position_begin(control);
                 const std::uint64_t end = wire_ops::position_end(control);
-                // Check that consecutive controls cover consecutive position ranges.
+                // Check that consecltive controls cover consecutive position ranges.
                 // Keeping only each end offset is then enough to recover the ranges.
                 if (begin != expected_position_begin || end <= begin) {
                     return std::unexpected(minimizer_generation_encoding_error::control_range);
@@ -268,7 +268,7 @@ trait_driven_prepared_query_core<p_traits>::observe_control_extent(
                     selected.route_state.dense_routes.reset();
                     selected.route_state.uses_sparse = true;
                 }
-                // Update the reader's comparison counts once per extent to avoid writing
+                // Update  the reader's comparison counts once per extent to avoid writing
                 // them during each binary search.
                 add_memory_stats_(protocol_memory_stats_.query_route_control_lookups,
                                   static_cast<std::uint64_t>(decoded->size()));

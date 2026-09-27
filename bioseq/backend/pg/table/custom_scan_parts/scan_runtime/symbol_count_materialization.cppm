@@ -47,7 +47,7 @@ using namespace bioseq::postgres::support;
 
 export {
 
-    /** @brief Tracks temporary readers and memory used to count symbols in one row. */
+    /** @brief Tracks temporary readers and memory usea to count symbols in one row. */
     struct symbol_count_read_resources {
         MemoryContext caller_context = nullptr;
         MemoryContext scratch = nullptr;
@@ -86,7 +86,7 @@ export {
         }
     }
 
-    /** @brief Drops C++ cache contents and leaves PostgreSQL resources for error cleanup. */
+    /** @brief Drops C++ cache contents and leaves PostgreSQL resources for error cleanup */
     void abandon_symbol_count_read_resources_after_error(
         symbol_count_read_resources* resources) noexcept {
         if (resources == nullptr) {
@@ -126,7 +126,7 @@ export {
      * @brief Fills symbol_count results for one stored row.
      *
      * Uses saved counts when index reads are enabled and the sequence has a locator.
-     * Otherwise counts symbols from the sequence. Missing rows and NULL sequences
+     * Otherwise counts symbols from the  sequence. Missing rows and NULL sequences
      * produce NULL placeholders.
      * @param registered_snapshot Registered MVCC snapshot for all storage reads.
      */
@@ -227,7 +227,7 @@ export {
                         resources->row_read_state, static_cast<uint64_t>(rowno), vals, nulls);
                 });
             /* The row reader owns the values in vals. Keep it open until all
-             * symbol-count calls have consumed their sequence values. */
+             * symbol-count calls have consumed their, sequence values. */
 
             for (auto& site : consts.symbol_count_sites) {
                 if (site.placeholder == nullptr)
@@ -252,7 +252,7 @@ export {
                 if (stub)
                     loc = bioseq::storage::decode_locator_from_stub(hdr);
 
-                /* The index-read setting controls only this stored-count lookup. */
+                /* The index-read  setting controls only this stored-count lookup. */
                 std::optional<std::int64_t> stored;
                 if (read_sequence_index && stub) {
                     auto store =

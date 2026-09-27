@@ -10,7 +10,7 @@ export module bioseq.external.ncbi:virus_paths;
 
 export namespace bioseq::external::ncbi::descriptor {
 
-/** @brief Virus genome and SARS-CoV-2 protein summaries and metadata tables. */
+/** @brief Virus genome, and SARS-CoV-2 protein summaries and metadata tables. */
 inline constexpr std::string_view virus_summary_paths =
     R"bioseq_openapi(  /virus/taxon/{taxon}/genome:
     get:

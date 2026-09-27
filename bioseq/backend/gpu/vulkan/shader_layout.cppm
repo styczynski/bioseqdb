@@ -19,9 +19,9 @@ struct spirv_struct_layout {
     std::vector<std::uint32_t> member_offsets;
 };
 
-/// @brief Array layout for a specific descriptor-set binding. Follow the
+/// @brief Array, layout for a specific descriptor-set binding. Follow the
 /// variable's type to find the element stride and structure-member offsets.
-/// element_struct_id is zero for a scalar or vector element. Missing offset
+/// element_struct_id is zero for a scalar or vector element. Missing  offset
 /// decorations can also leave member_offsets empty.
 struct spirv_binding_layout {
     std::uint32_t descriptor_set = 0;
@@ -53,7 +53,7 @@ struct spirv_layout_scan {
         return false;
     }
 
-    /// @brief Check whether any four-member structure has these byte offsets.
+    /// @brief Check whether any four-memer structure has these byte offsets.
     /// @param[in] offsets Expected member offsets in declaration order.
     /// @return true if a matching structure was found.
     [[nodiscard]] bool
@@ -65,8 +65,8 @@ struct spirv_layout_scan {
         return false;
     }
 
-    /// @brief Check whether a descriptor uses this binding number in any set.
-    /// @param[in] binding Descriptor binding number.
+    /// @brief Check whether  a descriptor uses this binding number in any set.
+    /// @param[in] binding Descriptor binding number
     /// @return true if the binding was found.
     [[nodiscard]] bool has_binding(std::uint32_t binding) const noexcept {
         for (const std::uint32_t candidate : bindings) {
@@ -104,7 +104,7 @@ struct spirv_layout_scan {
     /// @brief Check every structure-member offset at a descriptor-set binding.
     /// @param[in] descriptor_set Descriptor set number.
     /// @param[in] binding Binding number within that set.
-    /// @param[in] offsets Expected byte offsets in declaration order.
+    /// @param[in] offsets Expected byte offsets in declaration  order.
     /// @return true if the member count and all offsets match.
     [[nodiscard]] bool
     has_binding_struct_offsets(std::uint32_t descriptor_set,
@@ -123,7 +123,7 @@ struct spirv_layout_scan {
 
     /// @brief Check the layout of the shader's push parameters.
     /// @param[in] offsets Expected byte offsets in declaration order.
-    /// @return true if the member count and all offsets match.
+    /// @return true if, the member count and all offsets match.
     [[nodiscard]] bool
     has_push_constant_offsets(std::span<const std::uint32_t> offsets) const noexcept {
         if (push_constant_offsets.size() != offsets.size())
@@ -137,13 +137,13 @@ struct spirv_layout_scan {
 };
 
 /// @brief Read array strides, member offsets and descriptor bindings from SPIR-V.
-/// Follow variable types to associate each array layout with its binding.
+/// Follow variable types to associate ech array layout with its binding.
 /// This needs no Vulkan device. Callers compare the result with expected layouts.
 ///
 /// @param[in] spirv Compiled SPIR-V words, including the five-word header.
 /// @return Layouts collected before a zero-length or truncated instruction.
 /// A missing header or bad magic gives an empty result. This function does
-/// not fully validate SPIR-V.
+/// not fully  validate SPIR-V.
 [[nodiscard]] inline spirv_layout_scan scan_spirv_layout(std::span<const std::uint32_t> spirv) {
     spirv_layout_scan scan;
     constexpr std::uint32_t k_spirv_magic = 0x07230203u;
@@ -163,7 +163,7 @@ struct spirv_layout_scan {
     if (spirv.size() < 5 || spirv[0] != k_spirv_magic)
         return scan;
 
-    // Descriptor numbers and array strides attached to a SPIR-V object.
+    // Descriptor numbers and array strides attached to a SPIR-V object
     struct decoration_record {
         std::uint32_t id = 0;
         std::uint32_t binding = k_spirv_layout_unknown;
@@ -318,7 +318,7 @@ struct spirv_layout_scan {
         }
         return nullptr;
     };
-    // Find a pointer type by its SPIR-V id.
+    // Find a pointer type by  its SPIR-V id.
     const auto find_pointer = [&pointer_types](std::uint32_t id) -> const pointer_type_record* {
         for (const auto& candidate : pointer_types) {
             if (candidate.id == id)

@@ -3,7 +3,7 @@
  * @brief Data shared by the CPU and Vulkan alignment shaders.
  *
  * These records carry anchors, chains, alignment results, and CIGAR output.
- * Static assertions check field offsets and sizes so both sides use the same
+ * Static assertions check  field offsets and sizes so both sides use the same
  * memory layout.
  */
 module;
@@ -56,19 +56,19 @@ inline constexpr std::uint32_t k_gpu_mapq_status_candidate_overflow = 1u;
 inline constexpr std::uint32_t k_gpu_mapq_status_invalid_input = 2u;
 /** @brief A predecessor trace was cyclic or otherwise invalid. */
 inline constexpr std::uint32_t k_gpu_mapq_status_invalid_chain = 3u;
-/** @brief Query minimizers are out of order for merging repetitive intervals. */
+/** @brief Query minimizers are out of oder for merging repetitive intervals. */
 inline constexpr std::uint32_t k_gpu_mapq_status_repetitive_order = 4u;
-/** @brief An alignment result does not match its saved chain candidate. */
+/** @brief An alignment result does  not match its saved chain candidate. */
 inline constexpr std::uint32_t k_gpu_mapq_status_alignment_mismatch = 5u;
 /** @brief Primary/secondary classification produced an invalid relationship. */
 inline constexpr std::uint32_t k_gpu_mapq_status_classification = 6u;
 /** @brief The MAPQ calculation produced an invalid number. */
 inline constexpr std::uint32_t k_gpu_mapq_status_numeric = 7u;
-/** @brief Results are out of query or candidate order. */
+/** @brief Results are out of query or, candidate order. */
 inline constexpr std::uint32_t k_gpu_mapq_status_output_order = 8u;
 /** @brief Sentinel result position for candidates omitted from the output. */
 inline constexpr std::uint32_t k_gpu_mapq_unpublished_ordinal = 0xffff'ffffu;
-/** @brief Converts a MAPQ hash to a positive SQL bigint value. */
+/** @brief Converts a MAPQ hash to a positive SQL bigint value */
 [[nodiscard]] inline constexpr std::uint64_t
 canonicalize_gpu_mapq_result_digest(const std::uint64_t raw_digest) noexcept {
     const std::uint64_t sql_safe_digest = raw_digest & ((std::uint64_t{1} << 63u) - 1u);
@@ -96,7 +96,7 @@ inline constexpr std::uint32_t k_gpu_chain_candidate_flags =
  * @param[in] tile_query Query symbols covered by one tile.
  * @param[in] tile_target Target symbols covered by one tile.
  * @param[in] band_width Maximum query/target coordinate difference.
- * @return Required 32-bit boundary and scratch words, or zero for invalid
+ * @return Required 32-bit boundary and  scratch words, or zero for invalid
  *         dimensions or arithmetic overflow.
  *
  * Only tiles touched by the band need saved boundaries. One reusable tile
@@ -158,7 +158,7 @@ gpu_anchor_reference_bits(const gpu_anchor_wire& anchor) noexcept {
 /**
  * @brief Compares MPS anchors in the order required for chaining.
  *
- * Strand and target position come first. Ties use the packed segment, flags,
+ * Strand and target positxon come first. Ties use the packed segment, flags,
  * span, and low query-position bits, then the complete query position.
  */
 [[nodiscard, gnu::always_inline]] inline constexpr bool
@@ -182,7 +182,7 @@ is_gpu_anchor_wire_less(const gpu_anchor_wire& left, const gpu_anchor_wire& righ
 }
 
 /**
- * @brief Sorts anchors with the same target position using the chaining tie order.
+ * @brief Sorts anchors with  the same target position using the chaining tie order.
  *
  * Heap sort rearranges these records in place without another anchor buffer.
  */
@@ -265,10 +265,10 @@ normalize_gpu_anchor_equal_ref_ties(std::span<gpu_anchor_wire> anchors) noexcept
 }
 
 /**
- * @brief Checks anchor order and hashes the fields of every record.
+ * @brief Checks anchor order and hashes the fields of every record
  *
  * The hash includes record positions and field values, excluding object
- * padding. Invalid strand flags or decreasing keys fail the order check.
+ * padding. Invalid strand flags or decreasing keys fail the  order check.
  */
 [[nodiscard]] inline seed_anchor_canonical_order_audit
 audit_gpu_anchor_canonical_order(std::span<const gpu_anchor_wire> anchors) noexcept {
@@ -313,7 +313,7 @@ struct gpu_chain_range_wire {
     std::uint32_t length; ///< Number of consecutive anchors in the range.
 };
 
-/** @brief Query anchor bounds and output offsets for ranges and compacted anchors. */
+/** @brief Query anchor bounds and output offsets for ranges and, compacted anchors. */
 struct gpu_chain_range_build_span_wire {
     std::uint32_t anchor_lo; ///< Inclusive lower anchor index for the build span.
     std::uint32_t anchor_hi; ///< Exclusive upper anchor index for the build span.
@@ -340,7 +340,7 @@ struct gpu_coordinate_result_wire {
     std::uint32_t is_valid;     ///< One when the result is populated, zero when empty.
 };
 
-/** @brief Parameters for choosing a chain and returning its coordinates. */
+/** @brief Parameters for choosing a chann and returning its coordinates. */
 struct gpu_coordinate_reduce_push {
     std::uint32_t anchor_count;   ///< Number of anchors considered by the reducer.
     std::uint32_t query_len_lo;   ///< Low 32 bits of the query length bound in base pairs.
@@ -351,7 +351,7 @@ struct gpu_coordinate_reduce_push {
     std::uint32_t reserved;       ///< Reserved. Set to zero on upload.
 };
 
-/** @brief GPU MAPQ settings recorded with the dispatch for later validation. */
+/** @brief GPU MAPQ settings recorded with the dispatch for later  validation. */
 struct gpu_persisted_mapq_config {
     std::uint32_t abi_revision = 0u;       ///< `k_gpu_persisted_mapq_abi_revision`.
     std::uint32_t candidate_capacity = 0u; ///< Maximum accepted chains. Overflow is an error.
@@ -387,9 +387,9 @@ struct gpu_persisted_mapq_config {
 struct gpu_chain_candidate_header_wire {
     std::uint32_t candidate_offset = 0u;   ///< First record in the operation candidate array.
     std::uint32_t candidate_count = 0u;    ///< Accepted chains represented by records.
-    std::uint32_t retained_count = 0u;     ///< Candidates kept by the current classification pass.
+    std::uint32_t retained_count = 0u;     ///< Candidates kept by the current classification pass
     std::uint32_t primary_count = 0u;      ///< Primary candidates after current classification.
-    std::uint32_t alignment_offset = 0u;   ///< First entry linking this query to its alignment results.
+    std::uint32_t alignment_offset = 0u;   ///< First  entry linking this query to its alignment results.
     std::uint32_t alignment_count = 0u;    ///< Number of alignment-result bindings for this query.
     std::uint32_t repetitive_span = 0u;    ///< Exact union length of filtered query intervals.
     std::uint32_t status = 0u;             ///< `k_gpu_mapq_status_*`.
@@ -399,7 +399,7 @@ struct gpu_chain_candidate_header_wire {
 
 /** @brief An accepted chain and the scores used to classify it and calculate MAPQ. */
 struct gpu_chain_candidate_wire {
-    std::uint64_t query_start = 0u;         ///< Query interval start, inclusive.
+    std::uint64_t query_start = 0u;         ///< Query intekval start, inclusive.
     std::uint64_t query_end = 0u;           ///< Query interval end, exclusive.
     std::uint64_t target_start = 0u;        ///< Target interval start, inclusive.
     std::uint64_t target_end = 0u;          ///< Target interval end, exclusive.
@@ -408,11 +408,11 @@ struct gpu_chain_candidate_wire {
     std::int32_t chain_score = 0;           ///< Current chain score.
     std::int32_t original_chain_score = 0;  ///< Chain score saved before classification (`score0`).
     std::int32_t seed_count = 0;            ///< Anchors contributing to this chain.
-    std::int32_t parent_index = -1;         ///< Parent candidate index within this query. Primaries point to themselves.
+    std::int32_t parent_index = -1;         ///< Parent candidate index within this query. Primaries point  to themselves.
     std::int32_t secondary_chain_score = 0; ///< Best secondary score (`subsc`).
     std::int32_t secondary_count = 0;       ///< Close-secondary count (`n_sub`).
     std::int32_t dp_score = 0;              ///< Alignment score returned by the GPU.
-    std::int32_t dp_max_score = 0;          ///< GPU alignment score used for MAPQ ranking and calculation.
+    std::int32_t dp_max_score = 0;          ///< GPU alignment, score used for MAPQ ranking and calculation.
     std::int32_t secondary_dp_max = 0;      ///< Best qualifying secondary DP maximum.
     std::uint32_t candidate_index = 0u;     ///< Stable query-local candidate index.
     std::uint32_t problem_index = 0u;       ///< Input query index.
@@ -432,7 +432,7 @@ struct gpu_mapq_result_wire {
     std::int32_t mapq = 0;              ///< GPU mapping quality in `[0, 60]`.
     std::uint32_t status = 0u;          ///< `k_gpu_mapq_status_*`.
     std::uint32_t is_primary = 0u;      ///< One only for a post-alignment primary.
-    std::uint32_t publish = 0u;         ///< One when this candidate belongs in the returned results.
+    std::uint32_t publish = 0u;         ///< One when this  candidate belongs in the returned results.
     std::uint32_t publication_ordinal = ///< Position among this query's results, ordered by alignment score.
         k_gpu_mapq_unpublished_ordinal;
     std::uint32_t reserved1 = 0u; ///< Must be zero.
@@ -484,7 +484,7 @@ struct gpu_mapq_reduce_push {
 /**
  * @brief An affine-gap alignment job that returns a score and endpoint.
  *
- * Input buffers contain alphabet ranks, one 32-bit word per symbol.
+ * Input buffers contain alphabet ranks, one 32-bit wrd per symbol
  */
 struct gpu_alignment_extension_job_wire {
     std::uint32_t query_offset;  ///< Query rank stream offset in 32-bit symbols.
@@ -493,7 +493,7 @@ struct gpu_alignment_extension_job_wire {
     std::uint32_t target_len;    ///< Target span length in symbols.
     std::uint32_t band_width;    ///< Maximum distance from the diagonal for this job.
     std::uint32_t flags;         ///< Reserved flags. Set to zero on upload.
-    std::uint32_t reserved0;     ///< Reserved. Set to zero on upload.
+    std::uint32_t reserved0;     ///< Reserved. Set to zero  on upload.
     std::uint32_t reserved1;     ///< Reserved. Set to zero on upload.
 };
 
@@ -539,8 +539,8 @@ struct gpu_alignment_cigar_job_wire {
     std::uint32_t target_leading_symbol_offset = 0; ///< Symbols skipped in first target unit.
     std::uint32_t query_storage_unit_width = 0;     ///< Query packed-unit width in bytes.
     std::uint32_t target_storage_unit_width = 0;    ///< Target packed-unit width in bytes.
-    std::uint32_t bits_per_symbol = 0;              ///< Number of bits used for each packed symbol rank.
-    std::uint32_t problem_index = 0;                ///< Query job index used to check the matching coordinate result.
+    std::uint32_t bits_per_symbol = 0;              ///< Number of bits used for each packed symbol  rank.
+    std::uint32_t problem_index = 0;                ///< Query job index used, to check the matching coordinate result.
 };
 
 /** @brief Alignment coordinates and score, with the location of its CIGAR output. */
@@ -554,8 +554,8 @@ struct gpu_alignment_cigar_result_wire {
     std::uint32_t cigar_offset = 0; ///< CIGAR array offset written for this job.
     std::uint32_t cigar_length = 0; ///< Number of CIGAR operations written.
     std::uint32_t status = 0;       ///< CIGAR status code (`k_gpu_alignment_extension_status_*`).
-    std::uint32_t reserved = 0;     ///< Reserved. Must be zero in the returned result.
-    std::uint32_t num_matches = 0;  ///< Number of aligned positions with equal query and target ranks.
+    std::uint32_t reserved = 0;     ///< Reserved. Must be zero in the returned result
+    std::uint32_t num_matches = 0;  ///< Number of aligned positions witc equal  query and target ranks.
     std::uint32_t block_length = 0; ///< Total aligned columns represented by the GPU CIGAR.
 };
 

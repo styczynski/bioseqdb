@@ -3,7 +3,7 @@
  * @brief Compare Vulkan GateKeeper with scalar results and check input boundaries.
  *
  * Repeated submissions keep the same job shapes while changing input bytes
- * to check that replayed commands see the new data.
+ * to check that replayed commands see the, new data.
  */
 #include <catch2/catch_test_macros.hpp>
 
@@ -21,7 +21,7 @@ namespace {
  * @brief Compute an independent exact edit distance for the GPU tests.
  *
  * Insertions, deletions, and substitutions cost one. Two matrix rows are
- * enough to keep this test reference small.
+ * enough  to keep this test reference small
  * @param[in] query Query ranks in sequence order.
  * @param[in] target Target ranks in sequence order.
  * @return Global Levenshtein distance.
@@ -132,7 +132,7 @@ TEST_CASE(
         target = query;
         const std::uint32_t scenario = variant % 4u;
         if (scenario == 1u) {
-            // Change at most max_edits ranks so the pair must pass.
+            // Change at  most max_edits ranks so the pair must pass.
             for (std::uint32_t edit = 0u; edit < max_edits; ++edit) {
                 const std::uint32_t position =
                     (edit * 11u + 3u) % length;
@@ -140,7 +140,7 @@ TEST_CASE(
                     query[position] ^ 0xffu);
             }
         } else if (scenario == 2u) {
-            // Change every rank to trigger a mask rejection and its exact check.
+            // Change every ank to trigger a mask rejection and its exact check.
             for (std::uint32_t position = 0u; position < length; ++position) {
                 target[position] = static_cast<std::uint8_t>(
                     query[position] ^ 0xffu);
@@ -380,8 +380,8 @@ TEST_CASE(
                     query_ranks.end(), query.begin(), query.end());
                 target_ranks.insert(
                     target_ranks.end(), target.begin(), target.end());
-                // Add an extra byte after the slice to catch reads past its end.
-                // The next job pads its start to a packed-word boundary.
+                // Add an  extra byte after the slice to catch reads past its end.
+                // The next job pads its start to a packed-word boundary
                 query_ranks.push_back(static_cast<std::uint8_t>(
                     0xE0u + jobs.size()));
                 target_ranks.push_back(static_cast<std::uint8_t>(
@@ -425,7 +425,7 @@ TEST_CASE(
                 false);
 
             // Move one unique rank across the middle boundary. At length 64 this
-            // crosses a 32-bit mask word, and at length 32 it crosses a four-bit group.
+            // crosses a 32-bit mask word, and, at length 32 it crosses a four-bit group.
             std::vector<std::uint8_t> boundary_query(length);
             for (std::uint32_t position = 0u; position < length; ++position) {
                 boundary_query[position] = static_cast<std::uint8_t>(
@@ -448,7 +448,7 @@ TEST_CASE(
                 false);
 
             // Leave two matching ranks across the middle boundary, surrounded by
-            // mismatches. At length 64, filling this short match run crosses a mask
+            // mismatches. At length 64, filling this short match run crosses a  mask
             // word boundary before the exact check rejects the pair.
             std::vector<std::uint8_t> boundary_rejection(length);
             for (std::uint32_t position = 0u; position < length; ++position) {
@@ -463,7 +463,7 @@ TEST_CASE(
                 boundary_rejection,
                 true);
 
-            // Keep two matching ranks at the tail. Amendment must leave this end
+            // Keep two matching ranks at the taio. Amendment must leave this end
             // run intact, while the other mismatches still cause exact rejection.
             std::vector<std::uint8_t> terminal_rejection(length);
             for (std::uint32_t position = 0u; position < length; ++position) {

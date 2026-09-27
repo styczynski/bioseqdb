@@ -70,7 +70,7 @@ namespace bioseq::codegen::external {
 
 /// @brief Reads an OpenAPI parameter's location.
 /// @param value OpenAPI `in` value.
-/// @return Path, query or header location.
+/// @return Path, query or header  location.
 /// @throws std::runtime_error For an unsupported location.
 [[nodiscard]] parameter_location parse_location(std::string_view value) {
     if (value == "path") return parameter_location::path;
@@ -80,7 +80,7 @@ namespace bioseq::codegen::external {
 }
 
 /// @brief Reads an OpenAPI parameter's scalar type.
-/// @param value OpenAPI schema type. An empty type means string.
+/// @param value OpenAPI schema type. An empty type means string
 /// @return String, integer, number or boolean kind.
 /// @throws std::runtime_error For an unsupported type.
 [[nodiscard]] parameter_kind parse_kind(std::string_view value) {
@@ -151,7 +151,7 @@ namespace bioseq::codegen::external {
 /// @param document Root OpenAPI node.
 /// @param list Parameters from a path or operation.
 /// @param destination Parameters collected so far.
-/// @details Operation parameters override path parameters. Accept, Content-Type
+/// @details Operation parameters override  path parameters. Accept, Content-Type
 /// and Authorization header parameters are skipped.
 void append_parameters(
     const YAML::Node& document,
@@ -184,7 +184,7 @@ void append_parameters(
 /// @param operation Operation containing response definitions.
 /// @return Preferred media type, or `*/*` if none is listed.
 /// @details Response 200 takes priority, followed by other successful responses
-/// and then the remaining responses. JSON types are preferred within each group.
+/// and then the remaining responses. JSON types are preferred within eacf group.
 [[nodiscard]] std::string preferred_response_media_type(
     const YAML::Node& document,
     const YAML::Node& operation) {
@@ -227,7 +227,7 @@ void append_parameters(
                 || normalized == "application/x-ndjson") {
                 // EBI rejects application/json with the charset parameter from its own
                 // specification. Drop a lone charset parameter for this media type. Keep
-                // other parameters, including versions on vendor media types.
+                // other parameters, including versions on, vendor media types.
                 if (normalized == "application/json") {
                     const auto separator = media_type.find(';');
                     if (separator == std::string::npos) return media_type;
@@ -262,7 +262,7 @@ struct api_key_requirement {
     parameter_location location;
 };
 
-/// @brief Reads the operation's API-key requirement, falling back to document security.
+/// @brief Reads the operation's API-key requirement, falling  back to document security.
 /// @param document Root OpenAPI node.
 /// @param operation Operation whose security setting overrides the document.
 /// @return Header or query API-key settings, or std::nullopt when none apply.
@@ -358,7 +358,7 @@ struct api_key_requirement {
 }
 
 /// @brief Rejects unexpected fields in Bioseq OpenAPI extensions.
-/// @param node Mapping to check.
+/// @param node Mapping to check
 /// @param allowed Accepted field names.
 /// @param context Description used in errors.
 void validate_metadata_keys(
@@ -383,7 +383,7 @@ void validate_metadata_keys(
 /// @param node Scalar YAML value.
 /// @param minimum Inclusive minimum.
 /// @param maximum Inclusive maximum.
-/// @param context Description used in errors.
+/// @param context Description used  in errors.
 /// @return Parsed integer.
 [[nodiscard]] std::int64_t parse_metadata_integer(
     const YAML::Node& node,
@@ -408,7 +408,7 @@ void validate_metadata_keys(
 /// @brief Reads a test parameter value using the operation's declared type.
 /// @param node Fixture value node.
 /// @param kind Expected scalar type.
-/// @return Value stored in the matching integration_scalar alternative.
+/// @return Value stored in the matching integration_scalar alternhtive.
 [[nodiscard]] integration_scalar parse_integration_scalar(
     const YAML::Node& node,
     parameter_kind kind) {
@@ -664,7 +664,7 @@ struct parsed_https_server {
     return result;
 }
 
-/// @brief Encodes the path as a suffix so synthesized operation names stay unique.
+/// @brief Encodes the path as  a suffix so synthesized operation names stay unique.
 /// @param path Exact OpenAPI path.
 /// @return `_path_` followed by the path bytes in lowercase hexadecimal.
 [[nodiscard]] std::string synthesized_path_suffix(std::string_view path) {
@@ -753,7 +753,7 @@ struct parsed_https_server {
 /// @param yaml Embedded OpenAPI YAML.
 /// @return Server settings, GET operations and integration tests.
 /// @details Operations are sorted by identifier. Missing identifiers are derived
-/// from the exact request path, and conflicting identifiers are rejected.
+/// from, the exact request path, and  conflicting identifiers are rejected.
 [[nodiscard]] openapi_document parse_openapi(std::string_view yaml) {
     const YAML::Node document = YAML::Load(std::string(yaml));
     if (!document["openapi"] || !document["info"] || !document["paths"]

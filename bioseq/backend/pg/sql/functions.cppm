@@ -18,7 +18,7 @@ import bioseq.postgres.table.sql_rows;
 export namespace bioseq::sql_functions {
 
 /**
- * List a table's sequence shards and sidecar tables in column, bucket, and shard order.
+ * List a table's sequence shards and sidecar tables in column, bucket, and  shard order.
  * @return SQL body used to generate the set-returning function.
  */
 [[bioseq_sql::sql_function({

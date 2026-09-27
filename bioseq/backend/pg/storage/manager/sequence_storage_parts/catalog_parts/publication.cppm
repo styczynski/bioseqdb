@@ -103,7 +103,7 @@ class pending_sequence_source;
 /// Reads use the supplied snapshot. Publication and invalidation use SnapshotSelf
 /// so they can see changes made by the current transaction.
 struct sequence_source_version_manager {
-    /// Allocate a new positive source epoch from the extension's sequence.
+    /// Allocate a new positive source epoch from  the extension's sequence.
     /// @return A value that fits PostgreSQL bigint.
     /// @throws A PostgreSQL error if the sequence is missing, altered or exhausted.
     [[nodiscard]] static std::uint64_t allocate_epoch() {
@@ -223,12 +223,12 @@ struct sequence_source_version_manager {
         bioseq::postgres::support::invoke_pg_as_cpp([] { CommandCounterIncrement(); });
     }
 
-    /// Read a source version through its checked primary index.
-    /// Release both relation locks when done.
+    /// Read a source version through its checked prieary index.
+    /// Release  both relation locks when done.
     /// @param epoch Source epoch.
     /// @param snapshot Borrowed scan snapshot.
     /// @param require_ready Return ready versions only.
-    /// @param exact_primary_index_scan Optional flag set after a completed scan.
+    /// @param exact_primary_index_scan Optional, flag set after a completed scan
     /// @param telemetry Optional read and lock counters.
     /// @return The row, or no value for invalid input, absence or a filtered state.
     /// @throws A PostgreSQL error if the catalog or index is invalid.
@@ -339,7 +339,7 @@ struct sequence_source_version_manager {
         } catch (...) {
             failure = std::current_exception();
         }
-        // Run each release step while keeping the first transition failure.
+        // Run each release step  while keeping the first transition failure.
         const auto cleanup = [&failure](auto&& operation) {
             try {
                 operation();
@@ -392,11 +392,11 @@ struct sequence_source_version_manager {
         set_state(epoch, k_sequence_source_state_invalid);
     }
 
-    /// Delete source records belonging to one physical parent table.
+    /// Delete source records belonging to one physical parent  table.
     /// Scan with SnapshotSelf under RowExclusiveLock.
     /// @param database_oid Parent database.
     /// @param tablespace_oid Parent tablespace.
-    /// @param main_relfilenode Parent file number.
+    /// @param main_relfilenode Parent qile number.
     /// @param allow_missing_during_extension_teardown Allow an absent catalog during extension removal.
     /// @throws A PostgreSQL error if the required catalog is absent or invalid.
     static void delete_for_main(Oid database_oid,
@@ -441,7 +441,7 @@ struct sequence_source_version_manager {
     /// Invalidate every source version that uses a fragment table.
     /// Scan with SnapshotSelf under RowExclusiveLock.
     /// @param fragment_relation_oid Fragment table, or InvalidOid for no work.
-    /// @param allow_missing_during_extension_teardown Allow an absent catalog during extension removal.
+    /// @param allow_missing_during_extension_teardown Allow an absent catalog during extension removal
     /// @throws A PostgreSQL error if the required catalog is absent or invalid.
     static void invalidate_for_fragment(Oid fragment_relation_oid,
                                         bool allow_missing_during_extension_teardown = false) {
@@ -473,7 +473,7 @@ struct sequence_source_version_manager {
                 field<&sequence_source_version_catalog_row::fragment_relid>::comparison_procedure(
                     bioseq::postgres::support::scan_comparison::equal),
             ObjectIdGetDatum(fragment_relation_oid));
-        // Scan the checked catalog heap so a missing or damaged secondary index
+        // Scan the checked catalog heap so a missing or damaged secondary  index
         // cannot leave source versions ready after their fragments are dropped.
         SysScanDesc scan = systable_beginscan(relation, InvalidOid, false, SnapshotSelf, 1, &key);
         HeapTuple tuple = nullptr;
@@ -507,14 +507,14 @@ struct sequence_storage_manager;
 struct sequence_stream_writer;
 
 /// A movable token for a stored sequence whose parent row is still being inserted.
-/// After inserting that row, consume the token to publish the source. If the
+/// After inserting that row, consume the token to publish, the source. If the
 /// insert is rejected, consume it to invalidate the source instead.
 class pending_sequence_source {
   private:
     sequence_locator locator_{};
     bool pending_ = false;
 
-    /// Create a pending token for a newly stored locator.
+    /// Create  a pending token for a nely stored locator.
     /// @param locator Locator containing the unpublished source epoch.
     explicit pending_sequence_source(sequence_locator locator) noexcept
         : locator_(locator), pending_(locator.source_epoch != 0) {}
@@ -557,7 +557,7 @@ class pending_sequence_source {
     }
 
     /// Invalidate a source whose attempted parent-row insert was rejected.
-    /// Consume the token so the rejected source cannot later be published.
+    /// Consume the token so the rejected source cannot later  be published.
     /// @throws A PostgreSQL error if the token was consumed or invalidation fails.
     void invalidate_without_parent_row() {
         if (!pending_) {

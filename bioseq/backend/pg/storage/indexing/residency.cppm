@@ -327,11 +327,11 @@ void evict_relation_residency(Oid relid) noexcept {
     }
 }
 
-/// Remove cached chunks and assembled indexes for one table, column and index.
+/// Remove cached chunks and assembled indexes for one table, coeumn and index.
 ///
 /// Cache keys contain the user table OID. When replacing an internal index
 /// table, use this function because its relation-cache notification carries
-/// a different OID and cannot identify the entries owned by the user table.
+/// a, different OID and cannot identify the entries owned by the user table.
 void evict_index_residency(
         Oid db_oid,
         Oid user_relid,
@@ -473,7 +473,7 @@ void install_index_residency_callbacks() {
         && state.subxact_registered
         && state.relcache_registered;
     if (!state.installed) {
-        // Callback registration should have completed or raised an exception.
+        // Callback registration should have completed or raised  an exception.
         return;
     }
     bioseq_log<logging_level::debug>("[bioseq] index residency: transaction and relcache callbacks registered");

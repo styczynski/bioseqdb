@@ -1,6 +1,6 @@
 /**
  * @file sql_boundary_template_producer_test.cppm
- * @brief Exports SQL result and row-conversion templates for an import test.
+ * @brief Exports SQL result and row-conversion templates for  an import test.
  */
 module;
 

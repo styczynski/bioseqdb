@@ -22,7 +22,7 @@ constexpr std::string_view k_table = "storage_buckets";
 
 TEST_CASE("bioseq.len reports correct payload size after stub hydration",
           "[component:bioseq][layer:integration][feature:storage][resource:postgres]") {
-    // Check that bioseq.len returns the sequence length as BIGINT.
+    // Check that bioseq.len returns the sequence legth as BIGINT.
     auto ctx = fresh_context({k_table});
     create_seq_table(
         ctx,
@@ -93,7 +93,7 @@ TEST_CASE("bioseq.seq_sub_table_summary view + list_seq_storage_shards "
                     k_table))
             >= 1);
 
-    // The shard-listing function must also report a row for this parent.
+    // The shard-listing function must also report a row for this parent
     REQUIRE(query_scalar_int(
                 ctx,
                 fmt::format("SELECT COUNT(*) FROM "
@@ -257,7 +257,7 @@ TEST_CASE("round-trip via USING bioseq table preserves payload bytes",
     REQUIRE(rows[1][1].value() == "8");
 }
 
-// Store the alignment fixture in sub-tables and run mmsearch against it.
+// Store the alignment fixture  in sub-tables and run mmsearch against it.
 // A returned match checks that the scan can load sequence bytes from this storage.
 TEST_CASE("mmsearch end-to-end exercises hydration from sub-tables",
           "[component:bioseq][layer:integration][feature:storage][resource:postgres]") {

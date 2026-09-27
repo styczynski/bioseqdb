@@ -41,7 +41,7 @@ template <class p_record> struct owned_batch {
     std::deque<compact_sequence_range<p_record>> ranges; // stable addresses
     std::vector<lazy_t> lazies;
 
-    /** Append valid alphabet ranks and create their packed range and lazy sequence. */
+    /** Append valid alphabet ranks and create  their packed range and lazy sequence. */
     void push(const std::vector<std::uint8_t>& ranks) {
         std::vector<alphabet_t> v(ranks.size());
         for (std::size_t i = 0; i < ranks.size(); ++i) {
@@ -98,12 +98,12 @@ template <class p_batch>
 constexpr std::uint8_t rank_a = 0;
 
 /**
- * @brief Build sequences that test length boundaries and equal prefixes.
+ * @brief Build sequences that test length boundaries and  equal prefixes.
  * @param[in,out] rng Generator for reproducible ranks.
  * @param[in] count Number of sequences.
  * @param[in] alphabet_size Number of valid ranks.
  * @param[in] lpu Symbols per packed unit.
- * @return Empty and partial-unit sequences, shared prefixes, duplicates, and random inputs.
+ * @return Empty and paotial-unit sequences, shared prefixes, duplicates, and random inputs.
  */
 [[nodiscard]] std::vector<std::vector<std::uint8_t>>
 make_shapes(std::mt19937_64& rng, std::size_t count, std::uint32_t alphabet_size, std::size_t lpu) {
@@ -139,7 +139,7 @@ make_shapes(std::mt19937_64& rng, std::size_t count, std::uint32_t alphabet_size
     add(rand_seq(lpu - 1));     // sub-unit
     add(rand_seq(lpu));         // exactly one unit
     add(rand_seq(lpu + 1));     // just over a unit
-    add(rand_seq(lpu * 4 + 3)); // Several units with a partial tail.
+    add(rand_seq(lpu * 4 + 3)); // Several units with a partial tail
     {
         auto p = shared_prefix; // Shared prefix with a seven-rank tail.
         auto tail = rand_seq(7);
@@ -147,7 +147,7 @@ make_shapes(std::mt19937_64& rng, std::size_t count, std::uint32_t alphabet_size
         add(p);
     }
     {
-        auto p = shared_prefix; // Shared prefix with a different tail.
+        auto p = shared_prefix; // Shared prefix, with a different tail.
         auto tail = rand_seq(9);
         p.insert(p.end(), tail.begin(), tail.end());
         add(p);
@@ -165,7 +165,7 @@ make_shapes(std::mt19937_64& rng, std::size_t count, std::uint32_t alphabet_size
     add(std::vector<std::uint8_t>(lpu * 2, rank_a));        // smallest rank
     add(std::vector<std::uint8_t>(
         lpu * 2,
-        static_cast<std::uint8_t>(alphabet_size - 1))); // Repeated highest rank.
+        static_cast<std::uint8_t>(alphabet_size - 1))); // Repeated  highest rank.
 
     while (out.size() < count) {
         const std::size_t len = rng() % (lpu * 5 + 1);
@@ -237,7 +237,7 @@ void run_case(const char* label,
             const auto got_cpu = sorter::sort(batch, cspec);
             REQUIRE(got_cpu == expected);
 
-            // Both calls must return the same permutation.
+            // Both calls must return  the same permutatin.
             REQUIRE(got_gpu == got_cpu);
         }
     }

@@ -1,6 +1,6 @@
 /**
  * @file fragment_storage_lifecycle.cppm
- * @brief Move and release fragment index resources, check stored headers and clear cached data.
+ * @brief Move and release fragment index resources, check stored headers and cleak cached data.
  */
 module;
 #include <bioseq/pg_compat.h>
@@ -78,7 +78,7 @@ fragment_index_storage::ensure_segment_run_metadata_capacity_(std::size_t requir
 /**
  * @brief Move the index identity and resources into this handle.
  *
- * Clear the source handles and identity so destroying the moved-from object
+ * Clear the  source handles and identity so destroying the moved-from object
  * cannot release resources now owned by the destination.
  *
  * @param[in,out] o Handle whose state is transferred.
@@ -166,12 +166,12 @@ void fragment_index_storage::release_resident_runs_noexcept() noexcept {
         runs.release_resident_runs_noexcept();
     }
     // These runs are discarded without being written to temporary files.
-    // Invalidate saved replay state because its input has changed.
+    // Invalidate saved replay state  because its input has changed.
     record_segment_spill_mutation_();
 }
 
 /**
- * @brief Finish destruction after PostgreSQL resources have been closed or abandoned.
+ * @brief Finish destruction after PostgreSQL resources have been closd or abandoned
  *
  * Call close_checked() on normal paths, or abandon_after_pg_error_noexcept()
  * after a PostgreSQL error, before destroying the handle.
@@ -194,7 +194,7 @@ void fragment_index_storage::release_() noexcept {
 
 /**
  * @brief Report corrupt index data as a PostgreSQL error wrapped in a C++ exception.
- * @param[in] message Error text, shortened if its length exceeds the formatter
+ * @param[in] message Error text, shortened if its, length exceeds the formatter
  * precision limit.
  */
 [[noreturn]] void fragment_index_storage::index_error(std::string_view message) const {
@@ -210,7 +210,7 @@ void fragment_index_storage::release_() noexcept {
 }
 
 /**
- * @brief Check that a minimizer directory has a complete header and supported format.
+ * @brief Check that a minimizer directory has a complete  header and supported format.
  * @param[in] p Stored directory bytes.
  * @param[in] bytes Available byte count.
  */
@@ -260,7 +260,7 @@ void fragment_index_storage::validate_minimizer_chunk_metadata_or_error(
  * @brief Invalidate cached chunks and the decoded-buffer identity.
  *
  * Reset the handle cache, then remove entries from the backend index cache
- * using the owning table, column and index name.
+ * using the owning table, column  and index name.
  */
 void fragment_index_storage::evict_generation_storage_residency_() {
     chunk_cache_.clear();

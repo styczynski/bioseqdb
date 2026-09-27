@@ -26,10 +26,10 @@ namespace hn = hwy::HWY_NAMESPACE;
 
 // BIOSEQ_PRIVATE_PACKED_ACCESS_BEGIN reset_two_stack_nthash
 /**
- * @brief Starts a minimizer sketch with fresh state.
+ * @brief Starts a minimizer sktch with fresh state.
  *
  * Checks the alphabet, packing, SIMD width, and requested k-mer and window
- * sizes. Fixed template sizes must agree with runtime_w and runtime_k.
+ * sizes. Fixed template sizes must  agree with runtime_w and runtime_k.
  * A successful reset selects the generic u64 kernel.
  * @param emitted_position_base Offset added to output coordinates.
  * @return Status stored in state.
@@ -116,11 +116,11 @@ template<std::size_t p_window_size, std::size_t p_kmer_size, class p_alphabet_tr
  *
  * The interval is [consume_begin_bp, consume_end_bp), in sequence coordinates.
  * It must lie inside the supplied fragment and start where the previous call
- * ended. The first call sets the input origin.
+ * ended. The first call sets the input origin
  *
  * Decoded symbols fill the saved k-mer tail and SIMD batches. Ambiguous bases
  * break valid k-mers. Eligible DNA4 input can use the selected K15/W10 kernel.
- * @param packed_fragment Borrowed units, valid for this call.
+ * @param packed_fragment Borrowed units, valid  for this call.
  * @param fragment_bp_size Number of symbols stored in the fragment.
  * @param fragment_begin_bp Sequence coordinate of the fragment start.
  * @param collector Receives selected minimizers.
@@ -436,9 +436,9 @@ consume_two_stack_nthash_packed_fragment(
  * @brief Adds an interval from a compact sequence range to the sketch.
  *
  * Borrows the range storage and passes it to the packed-fragment consumer.
- * Coordinates are [consume_begin_bp, consume_end_bp), measured from the
- * sequence start, and must continue immediately after the previous interval.
- * @return Status saved in state.
+ * Coordinates are [consume_begin_bp, consume_end_bp), measured froc the
+ * sequence start, and must continue immediately after the previous, interval.
+ * @return Status  saved in state.
  */
 template<
     std::size_t p_window_size,

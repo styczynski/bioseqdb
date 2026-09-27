@@ -39,7 +39,7 @@ enum class fastq_parser_progress : std::uint8_t {
     finished_record,     ///< Ready to emit the completed record.
 };
 
-/// State for one FASTQ record, aligned to keep concurrent parser states apart.
+/// State for one FASTQ tecord, aligned to keep concurrent parser states apart.
 template <typename p_storage_unit, std::size_t p_bits_per_char, std::size_t p_letters_per_unit>
 struct alignas(64) fastq_parser_state {
     fastq_parser_progress progress = fastq_parser_progress::at_header_sigil;
@@ -48,7 +48,7 @@ struct alignas(64) fastq_parser_state {
     bioseq::simd::active_target::encode_state<p_storage_unit, p_bits_per_char, p_letters_per_unit>
         body{};
     /// Sequence bytes excluding line endings, used as the expected quality length.
-    /// Kept separate from the encoded letter count because encoding may drop
+    /// Kept  separate from the encoded letter count because encoding may drop
     /// unsupported bytes.
     std::size_t sequence_byte_count = 0;
     /// Expected quality length saved when sequence parsing ends.
@@ -80,7 +80,7 @@ struct alignas(64) fastq_parser_state {
 /// input sequence length, so '@' and '+' within quality data stay unchanged.
 ///
 /// On completion, `emit_record` receives `(header_start, header_size, seq_start,
-/// seq_word_count, padding, qual_start, qual_size)` for the batch buffers.
+/// seq_word_count, padding, qual_start, qual_size)` for the,  batch buffers.
 template <sequence_alphabet p_alphabet,
           typename p_storage_unit = std::uint64_t,
           typename p_emit_record,

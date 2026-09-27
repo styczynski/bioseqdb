@@ -12,11 +12,11 @@ import bioseq.common.logging;
 import bioseq.postgres.support;
 
 /**
- * @brief Find columns read by the scan output, filters, and extra expressions.
+ * @brief Find columns read by the scan output, filters, and  extra expressions.
  * A whole-row reference requests every column. ctid and tableoid need no stored
  * column data, while other system attributes are unsupported.
  * @param executor_scan_state PostgreSQL scan executor state.
- * @param additional_expressions Optional expressions from a wrapping custom scan.
+ * @param additional_expressions Optional expressions from a, wrapping custom scan.
  * @return A PostgreSQL-allocated bitmap of zero-based column indexes.
  * @throws PostgreSQL ERROR for an unsupported system attribute.
  */

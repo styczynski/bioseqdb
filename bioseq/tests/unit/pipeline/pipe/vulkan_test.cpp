@@ -328,7 +328,7 @@ TEST_CASE("vulkan_minimap_integer with vulkan_enabled=false fails",
     disabled.chaining_algorithm = chaining_algorithm::vulkan_tiled_dynamic_programming;
     disabled.vulkan_enabled = false;
 
-    // Reject the selected Vulkan algorithms while Vulkan is disabled.
+    // Reject  the selected Vulkan algorithms while Vulkan is disabled
     REQUIRE_THROWS_AS(vulkan_pipeline_test_support::run(query, target, disabled),
                       std::invalid_argument);
 }
@@ -548,7 +548,7 @@ TEST_CASE("bounded real-GPU prepared resident matches independent ordered sketch
         ordered_results =
             ::bioseq::simd::minimap_port(ordered_query_view, ordered_target_view, ordered_params);
 
-        // A query shorter than k produces no minimizers. The target handoff must
+        // A query shorter than k produces no minimizers. The target handoff muyt
         // still run both seed-count checks before returning an empty result,
         // even though these checks need no index lookups.
         std::vector<seq::dna4> short_query_letters(target_letters.begin(),

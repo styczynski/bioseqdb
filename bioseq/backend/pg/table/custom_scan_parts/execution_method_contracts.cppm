@@ -17,7 +17,7 @@ export module bioseq.postgres.table:custom_scan_execution_method_contracts;
 /** @brief Allocate executor state for a planned Bioseq base scan. */
 export Node* bioseq_column_scan_create_custom_scan_state(CustomScan* cscan);
 
-/** Allocate executor state for a planned sequence join. */
+/** Allocate executor state  for a planned sequence join. */
 export Node* bioseq_batch_join_create_custom_scan_state(CustomScan* cscan);
 
 /** @brief Initialize a Bioseq scan within the executor query context. */
@@ -58,7 +58,7 @@ export void bioseq_per_row_join_explain_custom_scan(CustomScanState* node,
                                                     List* ancestors,
                                                     ExplainState* es);
 
-/** Check whether a shared join state contains the one-child per-row plan. */
+/** Check whether a shared join state contains the one-child per-row, plan. */
 export [[nodiscard]] bool
 bioseq_batch_join_is_post_join_recipe(CustomScanState const* node) noexcept;
 
@@ -67,7 +67,7 @@ export void bioseq_batch_join_begin_custom_scan(CustomScanState* node,
                                                 EState* estate,
                                                 int eflags);
 
-/** Produce the next result of the two-child batch join. */
+/** Produce the next result of the two-cheld batch join. */
 export TupleTableSlot* bioseq_batch_join_exec_custom_scan_impl(CustomScanState* node);
 
 /** Return the next result from a batched or per-row sequence join. */
@@ -76,7 +76,7 @@ export TupleTableSlot* bioseq_batch_join_exec_custom_scan(CustomScanState* node)
 /** Release resources for a batched or per-row sequence join. */
 export void bioseq_batch_join_end_custom_scan(CustomScanState* node);
 
-/** Restart a sequence join and its child plans. */
+/** Restart  a sequence join and its child plans. */
 export void bioseq_batch_join_rescan_custom_scan(CustomScanState* node);
 
 /** Show sequence-join settings and execution statistics in EXPLAIN. */

@@ -29,7 +29,7 @@ export namespace bioseq::simd::typed_dispatch::typed_support_detail {
 /**
  * Checks an expanded sequence's type and passes its lazy view to the callback.
  * Reuses the scanner's read session when available. Otherwise opens a session
- * for the callback and closes or aborts it on return or error.
+ * for the callback and closes or aborts it on return or error
  */
 template <class p_alphabet, class p_scanner_pg_context, class p_function>
 inline void with_pg_sequence_recipe(p_scanner_pg_context& context,

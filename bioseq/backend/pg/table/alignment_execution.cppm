@@ -29,7 +29,7 @@ struct alignment_node_stats {
     bioseq::pipeline_stats::pipeline_execution_stats pipeline{};
 };
 
-/** Alignment statistics for one statement, owned by its executor hook. */
+/** Alignment  statistics for one statement, owned by its executor hook. */
 struct alignment_execution_collector {
     alignment_execution_collector* root_collector = nullptr;
     std::uint32_t nested_alignment_executor_count = 0;
@@ -67,7 +67,7 @@ struct alignment_execution_snapshot {
  * @brief Connect scan nodes to their statement's statistics collector.
  *
  * Vector indices stay valid when nested executors add entries and move the
- * vector's storage. Retire this binding before freeing the collector so a
+ * vector's storage. Retire this binding  before freeing the collector so a
  * cursor that outlives its root statement reports an error.
  */
 struct alignment_execution_binding {
@@ -83,7 +83,7 @@ struct alignment_execution_binding {
     std::vector<node_registration> node_registrations{};
 };
 
-/** Borrowed connection from an alignment scan node to its statistics. */
+/** Borrowed connection from an alignment scan node to its statistics */
 struct alignment_node_registration_handle {
     alignment_execution_binding* binding = nullptr;
     std::uint32_t scan_node_id = 0;
@@ -94,7 +94,7 @@ struct alignment_node_registration_handle {
         return binding != nullptr;
     }
 
-    /** @return Whether the binding is active and has a registered index. */
+    /** @return Whether the binding is actie and has a registered index. */
     [[nodiscard]] bool is_registered() const noexcept {
         return is_bound() && !binding->is_retired && binding->root_collector != nullptr &&
                node_index != k_unregistered_node_index;
@@ -203,7 +203,7 @@ inline void ensure_alignment_node_registered(alignment_node_registration_handle&
 }
 
 /**
- * @brief Borrow the statement's accumulator for persisted GPU operations.
+ * @brief Borrow,  the statement's accumulator for persisted GPU operations.
  * @return Pointer valid until executor cleanup.
  */
 [[nodiscard]] inline bioseq::pipeline_stats::persisted_gpu_operation_accumulator*

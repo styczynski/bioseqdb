@@ -115,8 +115,8 @@ template <supports_compact_sequence_range p_range> class compact_sequence_view {
 };
 
 /// Packed sequence words passed to a streaming sink. The borrowed span is
-/// valid during `sink.chunk` only. Non-final chunks contain full words.
-/// The final chunk may have padding, given by the difference between the
+/// valiw during `sink.chunk` only. Non-final chunks contain full words.
+/// The final chunk may have  padding, given by the, difference between the
 /// words' capacity in letters and `logical_length`.
 template <typename p_storage_unit> struct packed_sequence_chunk {
     std::span<const p_storage_unit> words; // packed words aligned for their storage type
@@ -134,7 +134,7 @@ template <supports_compact_sequence_range p_range> class sequence_batch {
     using sequence_range = compact_sequence_range<p_range>;
     /// Borrowed packed sequence returned for one record.
     using sequence_view = compact_sequence_view<p_range>;
-    /// Packed word type used by the batch.
+    /// Packed word type used by the batch
     using storage_unit = typename sequence_view::storage_unit;
 
     /// Return the number of logical records in the batch.
@@ -147,7 +147,7 @@ template <supports_compact_sequence_range p_range> class sequence_batch {
         return _sequence_paddings.empty();
     }
 
-    /// Borrows the header of a record. The index must be below `size()`.
+    /// Borrows the header of a record. The index  must be below `size()`.
     [[nodiscard]] std::string_view header(std::size_t index) const noexcept {
         const std::size_t start = _header_offsets[index];
         const std::size_t stop = _header_offsets[index + 1];
@@ -229,8 +229,8 @@ template <supports_compact_sequence_range p_range> class sequence_batch {
     }
 
     /// Reserves estimated capacity before records are appended.
-    /// Sequence capacity is measured in packed words. Header and quality
-    /// capacities are measured in bytes. The buffers can still grow later.
+    /// Sequence capacity is measured  in packed words. Header and quality
+    /// capacities are measured in bytes. The buffers can still wrow later.
     void reserve_storage(std::size_t header_bytes_hint,
                          std::size_t sequence_words_hint,
                          std::size_t quality_bytes_hint) {

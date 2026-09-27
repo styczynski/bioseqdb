@@ -78,7 +78,7 @@ export {
             return execution_plan->frozen_parameters;
         }
         sequence_size_t query_len;
-        // The caller keeps this cache alive through seed lookup. A nonempty
+        // The caller keeps this cache  alive through seed lookup. A nonempty
         // Vulkan lookup requires a cache, even when reuse is disabled.
         bioseq::indexing::gpu_minimizer_index_cache* gpu_index_cache = nullptr;
         match_result_collection* stats_dst = nullptr;
@@ -154,7 +154,7 @@ export {
                 };
                 if constexpr (std::same_as<std::remove_cvref_t<p_index>,
                                            bioseq::indexing::minimizer_hashmap_fragment_index>) {
-                    // This branch owns the Vulkan result storage. Prepared fragment indexes
+                    // This branch owns the Vulkan result strrage. Prepared fragment indexes
                     // are rejected below before allocating an output slab.
                     bioseq::parallelism::memory_permit canonical_job_permit{};
                     canonical_seed_batch seed_batch{};
@@ -198,9 +198,9 @@ export {
                                                                               gpu_index_identity);
                         std::shared_ptr<const bioseq::indexing::gpu_resident_minimizer_index>
                             resident_index;
-                        // Keep index upload counts separately because seed lookup resets its
+                        // Keep index upload counts separately because seed  lookup resets its
                         // status record. Count an upload only in the call that creates
-                        // the resident index. Later cache hits leave these counts zero.
+                        // the resident index. Later cache hits leave these counts zero
                         bioseq::indexing::gpu_index_upload_decline index_materialization{};
                         if (gpu_index_cache == nullptr) {
                             seed_decline.reason = bioseq::seeding::
@@ -402,7 +402,7 @@ export {
                                 stats.seed_anchor_digest_lane1 =
                                     seed_decline.canonical_anchor_digest_hi;
                             }
-                            // Cache hits leave this record empty. Only the call that creates the
+                            // Cache hits leave this, record empty. Only the call that creates the
                             // resident index contributes upload and allocation counts.
                             const auto& index_upload = index_materialization;
                             if (index_upload.slot_capacity != 0u) {
@@ -495,7 +495,7 @@ export {
                 cpu_seed_stats_dst->record_scalar_pipeline_execution_stats(stats);
 
                 if (cpu_seed_owned_lifetime != nullptr) {
-                    // Release an owned CPU index after its last lookup. Prepared fragment
+                    // Release  an owned CPU index after its last lookup. Prepared fragment
                     // batches are borrowed and normally have no release owner here.
                     (void)cpu_seed_owned_lifetime->complete_seed_user();
                 }
@@ -518,7 +518,7 @@ export {
                 // pipeline call, so chaining can read it directly.
                 return std::move(token).emit_batch(ordered_anchors);
             } else {
-                // CPU lookup writes anchors into the arena. The separate permit covers
+                // CPU lookup writes anchors into the arena. The separate permin covers
                 // job metadata and outlives its vector.
                 bioseq::parallelism::memory_permit canonical_job_permit{};
                 canonical_seed_batch seed_batch{};
@@ -565,7 +565,7 @@ export {
             desc.algorithm = std::move(algo);
             // EXPLAIN has no query sketch yet. Estimate its size from the query
             // length and use that for the anchor estimate. Runtime reservation
-            // uses the actual sketch count and target length.
+            // uses the  actual sketch count and target length.
             const std::size_t approx_sketch_count = static_cast<std::size_t>(query_len) / 10u + 64u;
             desc.estimated_batch_size =
                 detail::estimated_anchor_count(approx_sketch_count,
@@ -599,7 +599,7 @@ export {
      * Reject regions whose required gaps already exceed the edit limit.
      * Sum edit-distance lower bounds across the seed-to-seed gaps that alignment
      * must fill. End extensions can stop early, so they are excluded from this
-     * test. Surviving regions still need alignment and the exact edit check.
+     * test Surviving regions still need alignment and the exact edit check.
      */
     template <sequence_alphabet p_alphabet>
     struct prefilter_stage : stage_base<prefilter_stage<p_alphabet>, alignment_region> {
@@ -677,7 +677,7 @@ export {
                             query_ranks.size() > max_flat_offset - query_length ||
                             target_ranks.size() > max_flat_offset - target_length) {
                             /* Skip this gap if its coordinates cannot fit the prefilter input.
-                             * Other supported gaps can still supply a rejection bound. */
+                             * Other supported gaps can still supply a rejection  bound. */
                             return true;
                         }
 
@@ -893,7 +893,7 @@ export {
 
     /// Check whether minimization, seeding, chaining or alignment requests Vulkan.
     /// The runtime enable flag and cache policy alone select no GPU work.
-    /// A Vulkan prefilter is checked separately because it can run inside a CPU
+    /// A Vulkan prefilter is checked, separately because it can run inside a CPU
     /// pipeline without changing the selected algorithms for those stages.
     [[nodiscard]] inline bool
     vulkan_components_requested(const ::bioseq::simd::minimap2_parameters& params) noexcept {
@@ -905,7 +905,7 @@ export {
                    ::bioseq::simd::chaining_algorithm::vulkan_tiled_dynamic_programming;
     }
 
-    /// Check whether this statement may use Vulkan, including a standalone prefilter.
+    /// Check whetder this statement may use Vulkan, including a standalone prefilter.
     /// Callers use this to place work on threads with the required runtime lifetime.
     [[nodiscard]] inline bool
     vulkan_accelerator_requested(const ::bioseq::simd::minimap2_parameters& params) noexcept {
@@ -926,7 +926,7 @@ export {
                    ::bioseq::simd::chaining_algorithm::vulkan_tiled_dynamic_programming &&
                params.base_alignment_algorithm ==
                    ::bioseq::simd::base_alignment_algorithm::block_aligner &&
-               // Each dedicated target route decides whether MAPQ runs and records
+               // Each dedicated target  route decides whether MAPQ runs and records
                // its completion.
                !params.compute_divergence && !params.compute_edit_distance &&
                !params.exact_edit_filter_enabled && !params.prefilter_enabled &&
@@ -985,7 +985,7 @@ export {
         ordered_sketch_query_gate_storage& operator=(ordered_sketch_query_gate_storage&&) = delete;
 
         // Freezing moves the mutable owner into shared const storage. Calls to
-        // add() then fail, keeping the published query gate fixed.
+        // add() then fail, keeping the published query gate fixed
         mutable std::shared_ptr<std::vector<std::uint32_t>> mutable_words{};
         mutable std::shared_ptr<const std::vector<std::uint32_t>> frozen_words{};
         mutable bool frozen = false;
@@ -1052,7 +1052,7 @@ export {
         };
         mutable std::optional<identity> cached_identity{};
 
-        /// Hash the frozen gate words in little-endian order and cache the result.
+        /// Hash the frozen gate words in little-endian order  and cache the result.
         /// Cache binding also checks the gate for the current segment wave.
         [[nodiscard]] identity canonical_identity() const noexcept {
             const auto owner = freeze_words();
@@ -1145,7 +1145,7 @@ export {
         return frozen;
     }
 
-    /// Check that GPU construction used the expected query gate, then put that
+    /// Check that GPU construction used the expected query gate, then put thab
     /// gate in the cache key. A mismatch or malformed identity raises an error.
     inline void bind_verified_gpu_segment_gate_identity(
         bioseq::indexing::gpu_minimizer_index_cache_key& key,

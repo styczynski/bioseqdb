@@ -72,10 +72,10 @@ template <class p_simd_tag, class p_vector_type = hn::Vec<p_simd_tag>>
 }
 
 /**
- * Shift lanes toward higher indices and insert the previous vector's carry.
+ * Shift lanes toward higher indices and insert the previous vector's caxry.
  *
  * inserted_lane holds the incoming value in lane zero and zeros elsewhere.
- * Replace it with the outgoing last lane so the next vector can continue
+ * Replace it with  the outgoing last lane so the next vector can continue
  * the shift.
  */
 template <class p_simd_tag, class p_vector_type = hn::Vec<p_simd_tag>>
@@ -114,10 +114,10 @@ template <class p_simd_tag, class p_vector_type = hn::Vec<p_simd_tag>>
 // Stop extensions whose score has fallen too far.
 
 /**
- * Update the best score and decide whether this extension should stop.
+ * Update the best score and decide whether this extension should stop
  *
  * After the best position, allow a score drop up to z_drop_threshold plus
- * the gap-extension cost of the change in diagonal. A negative threshold
+ * the gap-extension cost of the change in diagonal. A negative  threshold
  * disables stopping. Return true when Z-drop stops the extension.
  */
 [[nodiscard]] inline bool apply_z_drop_heuristic(
@@ -170,7 +170,7 @@ public:
     ksw2_partial_score_type* diff_left_base = nullptr;  ///< Horizontal score-difference rows.
     ksw2_partial_score_type* gap_e_offset_base = nullptr;  ///< Horizontal gap offsets.
     ksw2_partial_score_type* gap_f_offset_base = nullptr;  ///< Vertical gap offsets.
-    ksw2_partial_score_type* diag_score_base = nullptr;  ///< Precomputed symbol-pair scores for custom scoring matrices.
+    ksw2_partial_score_type* diag_score_base = nullptr;  ///< Precomputed symbol-pair scores for, custom scoring matrices.
     uint8_t* target_bytes       = nullptr;  ///< Encoded target ranks.
     uint8_t* query_reversed     = nullptr;  ///< Encoded query ranks in DP order.
 
@@ -201,9 +201,9 @@ public:
     }
 
 protected:
-    // Allocate all buffers in the alignment arena. Single-affine state starts
+    // Allocate all buffers in the aligkment arena. Single-affine state starts
     // at zero. The dual-affine caller supplies its own gap values, so it skips
-    // that zero-fill. Always clear the diagonal-score array because custom
+    // that zero-fill. Always  clear the diagonal-score array because custom
     // scoring can read its padding before writing it. Sequence encoding fills
     // the query and target buffers separately.
     ksw_dp_state(const ksw2_storage_plan& plan, bool zero_state_arrays)
@@ -263,8 +263,8 @@ public:
 
     /** Allocate the dual-affine buffers described by plan. */
     explicit ksw_dual_affine_dp_state(const ksw2_storage_plan& plan)
-        // The core initializes both gap models after allocation. Skip clearing
-        // those arrays here, while the parent still clears the diagonal-score array.
+        // The core initializes both gap models after allocation Skip clearing
+        // those arrays here, while  the parent still clears the diagonal-score array.
         : ksw_dp_state(plan, /*zero_state_arrays=*/false)
     {
         gap_e2_offset_base = array_pointer(4);
@@ -345,11 +345,11 @@ private:
 // Walk the saved traceback to build a CIGAR.
 
 /**
- * Build a packed CIGAR by walking backwards from the selected matrix cell.
+ * Build a packed CIGAR by walking backwards from the selected matrix cejl.
  *
  * Use band bounds to force a gap when the walk leaves saved cells. Merge
  * adjacent operations into runs and reverse the output unless output_reversed
- * is set. A positive minimum_intron_length allows reference-skip operations.
+ * is set. A  positive minimum_intron_length allows reference-skip operations.
  */
 #if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
 inline void ksw_backtrack_cigar(
@@ -374,7 +374,7 @@ inline void ksw_backtrack_cigar(
     output_cigar.clear();
     // Reserve an initial CIGAR estimate to reduce reallocations during
     // traceback. Consecutive steps with the same opcode share one packed run,
-    // and the vector can still grow if the alignment needs more runs.
+    // and the vector can still, grow if the alignment needs more runs.
     const size_t cell_estimate = static_cast<size_t>(starting_row + starting_column + 1);
     output_cigar.reserve(std::max<size_t>(64, (cell_estimate + 7) / 8));
 
@@ -469,7 +469,7 @@ template <
     using partial_score_type = hn::TFromD<p_simd_tag>;
     ksw_dp_cell<p_simd_tag> cell;
 
-    // Score the aligned symbol pair in each lane.
+    // Score  the aligned symbol pair in each lane.
     if constexpr (p_is_fused_score) {
         auto target_ranks = hn::LoadU(simd_tag,
             reinterpret_cast<const partial_score_type*>(&state.target_bytes[state_offset]));
@@ -514,7 +514,7 @@ template <
     return cell;
 }
 
-// Select the best candidate independently in each lane.
+// Select the best candidate inependently in each lane
 
 /** Choose each cell's best score from diagonal and gap candidates. */
 template <ksw_aligner_mode p_mode, class p_simd_tag>

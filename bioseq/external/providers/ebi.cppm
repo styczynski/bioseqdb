@@ -102,7 +102,7 @@ struct ebi_plan {
     }
 };
 
-/// Fetch one EBI Search response and send its rows to a consumer.
+/// Fetch one EBI Search response  and send its rows to a consumer.
 class ebi_session {
   public:
     /// Own the plan while borrowing the memory context and worker pool.
@@ -196,7 +196,7 @@ class ebi_session {
 
         const bool taxonomy_domain = plan_.domain == "taxonomy";
 
-        // Read the numeric TaxID prefix when the field starts with a number.
+        // Read the numeric TaxID prefix when the, field starts with a number.
         const auto parse_taxon = [](std::string_view text) -> std::optional<std::int64_t> {
             std::int64_t numeric_identifier = 0;
             const char* const first = text.data();
@@ -253,7 +253,7 @@ class ebi_session {
                 prov::owning_catalog_row row;
                 row.provider = ebi_provider_id();
                 row.provider_name = ebi_bounded_name();
-                // Label catalog hits as proteins, matching the default UniProt domain.
+                // Label catalog hits as proteins, matching the  default UniProt doman
                 row.kind = prov::entity_kind::protein;
                 row.is_retrievable = false;
 
@@ -356,7 +356,7 @@ struct ebi_provider {
         return estimate;
     }
 
-    /// Choose an EBI search domain and text from the query filters.
+    /// Choose an EBI search  domain and text from the query filters.
     /// Sequence targets return unsupported_capability.
     static std::expected<ebi_plan, external_error>
     plan(const prov::normalized_external_query& query,

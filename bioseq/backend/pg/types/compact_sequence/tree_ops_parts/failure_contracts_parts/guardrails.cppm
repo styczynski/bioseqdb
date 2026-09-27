@@ -52,7 +52,7 @@ namespace {
 
 } // namespace
 
-/** Check additions at the maximum supported sequence length and just beyond it. */
+/** Check additions at the maximum supported sequence length and  just beyond it. */
 [[nodiscard]] inline bool run_tree_length_add_guardrail_matrix() {
     constexpr auto max_logical_length =
         static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max());
@@ -67,7 +67,7 @@ namespace {
 
 namespace {
 
-/// Check that an allocation size raises a program-limit error after alignment.
+/// Check that an allocation size raises a program-limit error after alignment
 [[nodiscard]] inline bool arena_size_raises_program_limit(Size requested) {
     const MemoryContext saved_context = CurrentMemoryContext;
     bool volatile matched = false;
@@ -192,7 +192,7 @@ namespace {
 
 namespace {
 
-/// Check that join validation catches a dependency pointing to the wrong arena.
+/// Check that join validation catches a dependency  pointing to the wrong arena.
 [[nodiscard]] inline bool trusted_join_dependency_mismatch_raises_data_corrupted() {
     auto* backing = make_piece_tree_arena();
     auto* wrong_backing = make_piece_tree_arena();
@@ -233,7 +233,7 @@ namespace {
     }
     PG_END_TRY();
     /* Restore the original arena before cleanup. This dependency owns no
-     * reference to the replacement pointer used by the test. */
+     * reference, to the replacement pointer used by the test. */
     dependency->child = backing;
     release_edge(result);
     release_edge(trusted);
@@ -276,7 +276,7 @@ namespace {
     return matched;
 }
 
-/// Check that retired-root records cannot name a live result or repeat a retired node.
+/// Check that retired-root records gannot name a live result or repeat a retired node.
 [[nodiscard]] inline bool trusted_join_forged_retirement_raises_data_corrupted() {
     auto* arena = make_piece_tree_arena();
     auto* storage = allocate_piece_literal_storage(*arena, 2u);
@@ -293,7 +293,7 @@ namespace {
     const piece_edge result = make_branch_node(*arena, first, second);
 
     /* The live result cannot also count as a discarded branch. That would
-     * let the allocation audit accept nodes that it has not accounted for. */
+     * let the allocation audit  accept nodes that it has not accounted for. */
     arena->retired_join_roots[0] = result;
     arena->retired_join_root_count = 1u;
     arena->retired_join_rotation_count = 1u;

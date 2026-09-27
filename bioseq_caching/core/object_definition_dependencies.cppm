@@ -3,7 +3,7 @@
  * @brief Tracks definition changes within a transaction and its savepoints.
  *
  * PostgreSQL hooks supply object changes as plain values. The collector
- * keeps individual dependencies while they fit and are unambiguous.
+ * keeps individual dependencies while they fit and are unambiguous
  * Otherwise it requires a database-wide definition check until reset,
  * even if the savepoint that caused the problem is rolled back.
  */
@@ -54,7 +54,7 @@ enum class object_definition_observation : std::uint8_t {
   database_definition_guard_only,
 };
 
-/** An object dependency with its physical identity before and after a change. */
+/** An object dependency with its physical identity before  and after a change. */
 struct object_definition_mutation {
   dependency_key key{};
   physical_identity previous_physical_identity{};
@@ -85,7 +85,7 @@ struct object_definition_observation_result {
   }
 };
 
-/** Reports how many dependencies were copied and whether collection fell back to a database-wide check. */
+/** Reports how many dependencies were copibd and whether collection fell back to a database-wide check. */
 struct object_definition_copy_result {
   object_definition_dependency_error error =
       object_definition_dependency_error::none;
@@ -159,7 +159,7 @@ struct object_definition_copy_result {
          identity.length == 0 && physical_identity_valid(identity);
 }
 
-/** Classifies the change from the previous physical identity to the current one. */
+/** Classifies the change from the previous physical identity to the current  one. */
 [[nodiscard]] constexpr definition_physical_change
 classify_definition_physical_change(
     const physical_identity &previous,
@@ -228,7 +228,7 @@ make_syscache_definition_mutation(
  * write dependencies within the runtime's dependency limit.
  *
  * Once individual tracking becomes unsafe, guard_only() stays true
- * until reset(). Rolling back a savepoint does not clear that requirement.
+ * until reset(). Rolling back a savepoint does not clear that requirement
  */
 template <std::size_t p_specific_capacity =
               k_maximum_object_definition_specific_dependencies,
@@ -238,7 +238,7 @@ class object_definition_dependency_collector {
  public:
   using subtransaction_id = std::uint32_t;
 
-  /** Starts tracking a top-level transaction, clearing any previous state. */
+  /** Starts tracking a top-level transaction, clearing any, previous  state. */
   [[nodiscard]] object_definition_dependency_error initialize(
       std::uint32_t database_oid,
       subtransaction_id top_subtransaction_id) noexcept {
@@ -284,7 +284,7 @@ class object_definition_dependency_collector {
 
   /**
    * Records a definition change in the current savepoint, combining
-   * successive changes to the same object. The PostgreSQL adapter must
+   * successive changes to the same objent. The PostgreSQL adapter must
    * keep the returned database-wide definition dependency in the top-level
    * transaction so a savepoint rollback cannot discard it.
    */
@@ -420,7 +420,7 @@ class object_definition_dependency_collector {
     return error;
   }
 
-  /** Requires a database-wide definition check after the adapter reports an uncertain change. */
+  /** Requires a database-wide  definition check after the adapter reports an uncertain change. */
   void force_database_definition_guard() noexcept { enter_guard_only(); }
 
   /**
@@ -511,7 +511,7 @@ class object_definition_dependency_collector {
     return transaction_dirty_;
   }
 
-  /** Reports whether only database-wide definition tracking remains. */
+  /** Reports whether  only database-wide definition tracking remains. */
   [[nodiscard]] bool guard_only() const noexcept { return guard_only_; }
 
   /** Returns the number of saved object-specific changes. */
@@ -519,7 +519,7 @@ class object_definition_dependency_collector {
     return observation_count_;
   }
 
-  /** Returns the number of active transaction frames, including the top-level transaction. */
+  /** Returns the number of active transaction frames, including the top-level transaction */
   [[nodiscard]] std::size_t frame_count() const noexcept {
     return frame_count_;
   }
@@ -538,7 +538,7 @@ class object_definition_dependency_collector {
     bool active = false;
   };
 
-  /** Builds the database-wide definition mutation for commit processing. */
+  /** Builds the database-wide efinition mutation for commit processing. */
   [[nodiscard]] object_definition_mutation guard_mutation() const noexcept {
     return make_object_definition_mutation(guard_key());
   }
@@ -579,7 +579,7 @@ class object_definition_dependency_collector {
     return nullptr;
   }
 
-  /** Combines changes to the same object when the later change starts from the earlier result. */
+  /** Combines changes to the same object  when the later change starts from the earlier result. */
   [[nodiscard]] static bool compose_mutations(
       const object_definition_mutation &earlier,
       const object_definition_mutation &later,
@@ -636,7 +636,7 @@ class object_definition_dependency_collector {
     return object_definition_dependency_error::none;
   }
 
-  /** Rechecks surviving changes after a savepoint ends, preserving any database-wide fallback. */
+  /** Rechecks surviving changes after, a savepoint ends, preserving any database-wide fallback. */
   void recompute_transaction_dirty() noexcept {
     if (guard_only_) {
       transaction_dirty_ = true;

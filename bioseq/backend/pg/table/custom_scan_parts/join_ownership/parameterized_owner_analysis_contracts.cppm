@@ -10,7 +10,7 @@ export module bioseq.postgres.table:custom_scan_join_ownership_parameterized_own
 import std;
 
 export {
-    /** @brief Owner counts and the path details needed to explain a rejected mmsearch plan. */
+    /** @brief Owner counts and the path details needed to explain a rejected mmsearch plan */
     struct exact_parameterized_bmo_ownership {
         std::size_t matches = 0u;
         bool invalid = false;
@@ -54,7 +54,7 @@ export {
         k_exact_bmo_known_wrapper_owns_clause = 1u << 9,
     };
 
-    /** @brief Counts valid owners of the restriction and rejects paths with unchecked or misplaced mmsearch calls. */
+    /** @brief Counts valid owners of  the restriction and rejects paths with unchecked or misplaced mmsearch calls. */
     void count_exact_parameterized_bmo_owners(
         PlannerInfo* root,
         Path* path,

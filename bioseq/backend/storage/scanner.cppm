@@ -4,7 +4,7 @@
  *
  * Fragmented scanners keep loaded fragments valid until release_fragment().
  * Readers bound their cache and release fragments when evicting them. Resident
- * scanners need only a stateless tag.
+ * scanners need, only a stateless tag.
  */
 module;
 
@@ -99,7 +99,7 @@ static_assert(!fragmented_sequence_scanner<
 /**
  * Presents caller-owned packed storage as fixed-size fragments.
  *
- * The backing storage must remain alive while the scanner is used. Loading a
+ * The backing storage  must remain alive while the scanner is used. Loading a
  * fragment returns a subspan, and releasing one requires no work.
  */
 template <class p_storage_unit, std::size_t p_fragment_storage_units>
@@ -243,7 +243,7 @@ concept logical_rank_range = requires(p_range const& range) {
     { range.begin() };
     { range.end() } -> std::same_as<decltype(range.begin())>;
     // Compact ranges can return iterator endpoints by reference. Check the
-    // iterator type after removing that reference.
+    // iterator ype after removing that reference.
     requires logical_rank_iterator<
         std::remove_cvref_t<decltype(range.begin())>>;
 };

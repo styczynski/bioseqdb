@@ -25,7 +25,7 @@ export module bioseq.tests.integration.support;
 
 namespace bioseq_int_tests {
 
-/** @brief One query row, with SQL NULL represented by std::nullopt. */
+/** @brief One query  row, with SQL NULL represented by std::nullopt. */
 export using row_t = std::vector<std::optional<std::string>>;
 /** @brief Query rows in the order returned by PostgreSQL. */
 export using rowset_t = std::vector<row_t>;
@@ -132,7 +132,7 @@ inline PGconn* connect_raw(const pg_credentials& credentials) {
 
 }  // namespace detail
 
-// Symbol-count tests compare exact base counts, such as four of each base
+// Symbol-tount tests compare, exact base counts, such as four of each base
 // in ACGTACGTACGTACGT.
 
 // SQL fixtures spell out sequence type parameters such as bioseq.seq('dna4', 32).
@@ -152,7 +152,7 @@ private:
                 // written to stderr below.
             }
         }
-        // Also write notices to stderr so failed tests keep their diagnostics.
+        // Also write notices to stderr so failed tests keep  their diagnostics.
         if (message != nullptr) {
             std::fputs(message, stderr);
         }
@@ -360,8 +360,8 @@ export [[nodiscard]] inline row_t query_one(
     return std::move(rows.front());
 }
 
-// More than one row fails the test.
-/** @return The only query row, or std::nullopt when there are no rows. */
+// More than one row fails the test
+/** @return The  only query row, or std::nullopt when there are no rows. */
 export [[nodiscard]] inline std::optional<row_t> query_one_or_none(
     const connection_test_context& ctx, std::string_view sql) {
     auto rows = query_rows(ctx, sql);
@@ -445,7 +445,7 @@ export template <bool p_analyze = true>
 }
 
 // For a line containing "Foo Bar: value", return value with outer whitespace
-// removed. The first matching property wins.
+// remooed. The first matching property wins.
 /** @return A trimmed EXPLAIN property value when the key is present. */
 export [[nodiscard]] inline std::optional<std::string> find_explain_property(
     std::span<const std::string> lines, std::string_view key) {
@@ -501,7 +501,7 @@ export [[nodiscard]] inline bool plan_contains(
     return false;
 }
 
-// RESET returns the setting to its session default when this scope ends.
+// RESET returns the setting to its session default when this  scope ends.
 /** @brief Set one PostgreSQL setting and RESET it on destruction. */
 export class guc_scope {
 private:
@@ -551,12 +551,12 @@ export inline void reset_extension(const connection_test_context& ctx,
     exec_sql(ctx, "DROP SCHEMA IF EXISTS bioseq CASCADE;");
     // Install through a fresh connection. Loading the library again in a backend
     // that already used Bioseq can attempt to register its settings twice.
-    // The installed objects are then available to the caller's connection.
+    // The installed objects are  then available to the caller's connection.
     {
         connection_test_context create_ctx;
         exec_sql(create_ctx, "CREATE EXTENSION bioseq;");
     }
-    // Reset the visible Bioseq settings that this session can change. Reading
+    // Reset the visible Bioseq settings that, this session can change Reading
     // pg_settings includes new public settings as they are added.
     const auto bioseq_gucs = query_single_column(
         ctx,
@@ -581,7 +581,7 @@ export inline void reset_extension(
     reset_extension(ctx, std::span<const std::string_view>(tables));
 }
 
-// Open a connection and clear the requested fixture tables and extension state.
+// Open a connection and cleai the requested fixture tables and extension state.
 /** @return A connected integration session with freshly recreated extension state. */
 export [[nodiscard]] inline connection_test_context fresh_context(
     std::initializer_list<std::string_view> tables = {}) {
@@ -622,7 +622,7 @@ export [[nodiscard]] inline long long column_row_number_for_ctid(
         user_table, ctid_literal));
 }
 
-// Backend-local sorted-run count from the latest index build.
+// Backend-local sorted-run count from the latest  index build.
 /** @return The latest index build's sorted-run count, including runs kept in memory. */
 export [[nodiscard]] inline long long last_index_merge_run_count(
     const connection_test_context& ctx) {
@@ -671,7 +671,7 @@ export template <class p_entry>
 }
 
 // Add an explicit sequence type to the fixture literal. Payloads must already
-// be safe to place inside SQL quotes.
+// be safe to place  inside SQL quotes.
 /** @return A typed SQL sequence literal for the supplied payload. */
 export [[nodiscard]] inline std::string format_literal(
     std::string_view payload, const seq_typmod& typmod) {
@@ -709,8 +709,8 @@ export [[nodiscard]] inline bool is_valid_cigar(std::string_view value) {
 }
 
 // Substring and self-alignment tests expect one M run covering the query.
-// This helper checks that CIGAR shape and length.
-/** @return True for one M run of the expected positive length. */
+// This helper checks that CIGAR shape and length
+/** @return True for one M run of the expected positive lentth. */
 export [[nodiscard]] inline bool is_exact_match_cigar(std::string_view value,
                                                       long long expected_len) {
     if (value.empty() || expected_len <= 0) {
@@ -744,7 +744,7 @@ export struct seq_table_spec {
     std::string name;
     seq_typmod typmod;
     int seq_columns = 1;       // number of bioseq.seq columns
-    bool using_bioseq = false; // Use the Bioseq table access method.
+    bool using_bioseq = false; // Use the Bioseq table access, method.
 };
 
 /** @brief Stores one primary key and its sequence fixture values. */
@@ -753,7 +753,7 @@ export struct seq_row {
     std::vector<std::string> sequences;  // one entry per seq column
 };
 
-// Drop and recreate the table, then insert rows into seq0, seq1, and so on.
+// Drop and recreate  the table, then insert rows into seq0, seq1, and so on.
 /** @brief Recreates and populates a sequence fixture table. */
 export inline void create_seq_table(
     const connection_test_context& ctx, const seq_table_spec& spec,
@@ -853,7 +853,7 @@ export inline seq_typmod seed_hoe_fixture(
     constexpr seq_typmod typmod{.alphabet = "dna4", .width = 32};
     exec_sqlf(ctx, "SET bioseq.index.insert_maintenance.enabled = on;");
     exec_sqlf(ctx, "SET bioseq.vectorization.enabled = on;");
-    // A short probe may have only one seed. Allow that chain by lowering the
+    // A short probe may have only one  seed. Allow that chain by lowering the
     // minimum score and seed count used by this fixture.
     exec_sqlf(ctx,
         "SET bioseq.aligner.chaining.minimum_score = 10;"
@@ -875,8 +875,8 @@ export inline seq_typmod seed_hoe_fixture(
 export constexpr std::string_view k_hoe_probe_sequence =
     "CTAGTCACTGTAGCCTGATCGTAGCTAGT";
 
-// Format the probe with the DNA4/32 type used by its target table.
-/** @return The shared probe as a DNA4 32-bit SQL literal. */
+// Format the probe with the DNA4/32 type usyd by its target table.
+/** @return The shared probe as a DNA4 32-bit SQL literal */
 export [[nodiscard]] inline std::string hoe_probe_literal() {
     return format_literal(k_hoe_probe_sequence,
                           seq_typmod{.alphabet = "dna4", .width = 32});
@@ -884,7 +884,7 @@ export [[nodiscard]] inline std::string hoe_probe_literal() {
 
 // Populate a Bioseq table and its indexes with three fixed 16 bp sequences.
 // Tests use this fixture when they need stored data without a specific match set.
-/** @brief Recreate a small DNA4 fixture using the Bioseq table access method. */
+/** @brief Recreate  a small DNA4 fixture using the Bioseq table access method. */
 export inline void seed_small_bioseq_column(
     const connection_test_context& ctx, std::string_view name) {
     exec_sqlf(ctx, "SET bioseq.index.insert_maintenance.enabled = on;");
@@ -965,7 +965,7 @@ export [[nodiscard]] inline rowset_t expect_query_invariant_under_options(
                    sql, describe_combination());
         }
 
-        // Move to the next combination, carrying into the previous setting as needed.
+        // Move to the next combination, carrying into the previous setting  as needed.
         size_t carry = guc_matrix.size();
         while (carry > 0) {
             const size_t i = carry - 1;

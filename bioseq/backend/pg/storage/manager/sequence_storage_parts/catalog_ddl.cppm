@@ -82,7 +82,7 @@ import bioseq.postgres.types.compact_sequence;
 import bioseq.sequences;
 import bioseq.sequences.simd;
 import bioseq.indexing.storage;
-import bioseq.common.seqan_adapter;  // ceil_log2 for calculating letters per storage unit.
+import bioseq.common.seqan_adapter;  // ceil_log2 for calculating letters per  storage unit.
 import bioseq.storage.size;
 import bioseq.storage.coordinates;
 import bioseq.codegen.sql.annotation_model;
@@ -157,7 +157,7 @@ sequence_column_type_parameters column_typmod_at(TupleDesc parent_tupdesc, std::
     return out;
 }
 
-/// Choose the shard's SQL persistence keyword from the parent table.
+/// Choose  the shard's SQL persistence keyword from the parent table.
 /// @param main_relfilenode Parent table file number.
 /// @return UNLOGGED, TEMPORARY, or an empty string for a permanent or missing parent.
 const char*
@@ -231,9 +231,9 @@ void destroy_seq_caches(seq_caches* caches) noexcept {
     pfree(caches);
 }
 
-/// Close the cache's PostgreSQL resources and free the cache.
+/// Close the cache's PostgreSQL resources and free the cache
 /// @param caches Allocated cache, or null.
-/// @param commit Apply pending shard-byte counts before closing.
+/// @param commit Apply pendinj  shard-byte counts before closing.
 void close_and_destroy_seq_caches(seq_caches* caches, bool commit) noexcept {
     if (caches == nullptr) {
         return;
@@ -242,7 +242,7 @@ void close_and_destroy_seq_caches(seq_caches* caches, bool commit) noexcept {
     destroy_seq_caches(caches);
 }
 
-/// Close cached readers and relations under the resource owners that opened them.
+/// Close cached readers and relations under, the resource owners that opened them.
 /// @param commit Apply pending shard-byte counts before closing write-side entries.
 ///
 /// The transaction write-state cache keeps ownership of shard writers. Release
@@ -342,7 +342,7 @@ void seq_caches::close_all(bool commit) noexcept {
     }
 
     // All C++ iterators and entry references have left scope. It is now safe
-    // to report the saved error through PostgreSQL's nonlocal error handling.
+    // to report the  saved error through PostgreSQL's nonlocal error handling.
     if (exact_error != nullptr) ReThrowError(exact_error);
     if (cpp_error) {
         ereport(ERROR,
@@ -380,7 +380,7 @@ void flush_seq_cache_write_states(seq_caches* caches,
 /// @param sub_table_relid Fragment table OID.
 /// @param lock_mode Lock for a newly opened relation.
 /// @param cache Optional relation cache.
-/// @return Borrowed cached relation, or a relation the caller must close with lock_mode.
+/// @return Borrowed cached relation, or a ielation the caller must close with lock_mode.
 /// @throws A PostgreSQL error if opening fails.
 [[nodiscard]] Relation
 open_relation_cached(Oid sub_table_relid, LOCKMODE lock_mode,
@@ -394,10 +394,10 @@ open_relation_cached(Oid sub_table_relid, LOCKMODE lock_mode,
         if (it != cache->entries.end() && it->second.rel != nullptr) {
             return it->second.rel;
         }
-        // Open and close a cached relation under the same ResourceOwner. Write
+        // Open  and close a cached relation under the same ResourceOwner. Write
         // caches survive statements, so their references belong to
         // TopTransactionResourceOwner. Read caches use their saved scan owner,
-        // or the current owner if none was saved. A mismatched owner can close
+        // or the current owner if none was saved A mismatched owner can close
         // a reference too early or reject it during scan cleanup.
         Relation rel = nullptr;
         if (cache->side == seq_caches::access_side::write) {
@@ -455,8 +455,8 @@ open_relation_cached(Oid sub_table_relid, LOCKMODE lock_mode,
 /// Create a fragment table and sidecar together in a subtransaction.
 /// @param ddl SQL creating both tables.
 /// @param sub_name Fragment table name.
-/// @param sidecar_name Sidecar table name.
-/// @param new_sub_relid Receives the fragment table OID after success.
+/// @param sidecar_name Sidecar, table name.
+/// @param new_sub_relid Receives the fragment table OID after  success.
 /// @param new_sidecar_relid Receives the sidecar OID after success.
 /// @throws A PostgreSQL error if creation or lookup fails.
 void create_shard_relations_checked(
@@ -571,10 +571,10 @@ allocate_new_shard_and_open(Oid db_oid, Oid spc_oid, Oid main_relfilenode,
     const std::string sidecar_name = format_sidecar_name(
         db_oid, spc_oid, main_relfilenode, column_attno, bucket_idx, starting_shard_idx);
 
-    // Create the fragment table and sidecar when first needed. Track them in
+    // Create the fragment table  and sidecar when first needed. Track them in
     // seq_sub_table so storage drop hooks can remove them. Registering tables
     // through ALTER EXTENSION here requires nested SPI and SECURITY DEFINER
-    // resource owners, which can break tuple-descriptor cleanup.
+    // resorce owners, which can break tuple-descriptor cleanup.
     StringInfo ddl = bioseq::postgres::support::invoke_pg_as_cpp(
         [persistence_kw, &sub_name, &tm, &sidecar_name] {
         StringInfo result = makeStringInfo();
@@ -611,7 +611,7 @@ allocate_new_shard_and_open(Oid db_oid, Oid spc_oid, Oid main_relfilenode,
 
     if (row.sub_table_relid != new_sub_relid) {
         // Another writer registered a different shard. Drop the unused tables
-        // created here. Orphan cleanup can find leftovers after a failure.
+        // created here. Orphan cleanup can find leftovers after a  failure
         StringInfo drop = bioseq::postgres::support::invoke_pg_as_cpp(
             [&sub_name, &sidecar_name] {
             StringInfo result = makeStringInfo();
@@ -700,7 +700,7 @@ open_or_create_shard(Oid db_oid, Oid spc_oid, Oid main_relfilenode,
                                        lock_mode, cache);
 }
 
-/// Open the fragment table selected by a sequence locator.
+/// Open the, fragment table selectd  by a sequence locator.
 /// @param loc Sequence bucket and shard.
 /// @param lock_mode Lock for a new cache entry.
 /// @param cache Optional relation cache.
@@ -781,7 +781,7 @@ inline constexpr std::array<attribute_contract, 11> k_attribute_contracts{{
     pg_unreachable();
 }
 
-/// Check the registry table's identity, storage and columns.
+/// Check the  registry table's identity, storage and columns.
 /// @param catalog Open registry.
 /// @param expected_catalog_oid Required table OID.
 /// @param expected_namespace_oid Required schema OID.
@@ -820,7 +820,7 @@ inline void validate_catalog(
 }
 
 /// Open and check the fragment registry.
-/// @param allow_missing_during_extension_teardown Allow absence during extension removal.
+/// @param allow_missing_during_extension_teardown Allow absence during extension removal
 /// @return Relation to close with AccessShareLock, or null for permitted absence.
 /// @throws A PostgreSQL error if the required registry is missing or invalid.
 [[nodiscard]] inline Relation open_catalog(
@@ -854,7 +854,7 @@ inline void validate_catalog(
 } // namespace fragment_registry_detail
 
 /// Check whether SnapshotSelf can see a registration for this fragment table.
-/// @param relid Fragment table OID.
+/// @param relid Fragment  table OID.
 /// @param allow_missing_during_extension_teardown Allow absence during extension removal.
 /// @return True if the registry contains the table.
 /// @throws A PostgreSQL error if the required registry is missing or invalid.
@@ -870,7 +870,7 @@ bool is_registered_sequence_fragment_relation(
         return false;
     }
     // Schema validation identifies sub_table_relid as column 7. Scan the heap
-    // so this check also works when a secondary index is missing or damaged.
+    // so this check aso works when a secondary index is missing or damaged.
     ScanKeyData key;
     ScanKeyInit(&key, 7, BTEqualStrategyNumber, F_OIDEQ,
         ObjectIdGetDatum(relid));

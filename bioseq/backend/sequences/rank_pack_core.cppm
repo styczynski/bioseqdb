@@ -1,6 +1,6 @@
 /**
  * @file rank_pack_core.cppm
- * @brief Shared packing steps that place the first rank in each word's low bits.
+ * @brief Shared packing steps that  place the first rank in each word's low bits.
  *
  * Encoders and sequence-copying paths supply their own word writer. These helpers
  * keep rank order and final padding consistent across those writers.
@@ -38,14 +38,14 @@ struct lsb_finish_result {
 /**
  * @brief Adds one valid rank to the partial word and writes the word when full.
  *
- * The caller checks rank validity and counter capacity. A failed write leaves the
- * full word and updated counters in place.
+ * The caller checks rank validity and counter capacity. A failed write  leaves the
+ * full word and updated counters in plae.
  * @param partial_word Word being assembled.
  * @param partial_letters Used symbol slots in that word.
  * @param emitted_symbols Number of ranks added to the packing state.
  * @param rank Valid alphabet rank.
  * @param write_unit Accepts completed words and reports success.
- * @return False if the state was already full or the writer rejected a word.
+ * @return False if the state was already full or the writer rejected a word
  */
 template <class p_storage_unit,
           std::size_t p_bits_per_character,
@@ -85,14 +85,14 @@ requires (std::unsigned_integral<p_storage_unit> && std::integral<p_rank_type>)
 }
 
 /**
- * @brief Adds several already-packed ranks to the current output word.
+ * @brief Adds several already-packed ranks to, the current output word.
  *
  * Copies groups of low bits and writes each completed word. On writer failure,
  * previous writes and the updated packing state remain. The caller ensures the
  * symbol counter has room.
  * @param partial_word Word being assembled.
  * @param partial_letters Used symbol slots.
- * @param emitted_symbols Number of ranks added to the packing state.
+ * @param emitted_symbols Number of ranks added to  the packing state.
  * @param packed_ranks Source ranks, first symbol in the low bits.
  * @param rank_count Number of source ranks.
  * @param write_unit Accepts completed words.

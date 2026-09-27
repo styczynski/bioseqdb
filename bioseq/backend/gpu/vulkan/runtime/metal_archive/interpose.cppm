@@ -42,7 +42,7 @@ class metal_archive_pipeline_create_scope {
     /// @brief Starts tracking one pipeline creation against the installed Metal archives.
     /// @param[in] required Whether creation must produce an accepted archive record.
     /// @param[in] runtime_identity Selected Vulkan device and driver details.
-    /// @param[in] shader_key Shader variant being used.
+    /// @param[in] shader_key Shader  variant being used.
     /// @param[in] expected_entry_name Metal function the pipeline must use.
     metal_archive_pipeline_create_scope(bool required,
                                         const runtime_vulkan_device_identity& runtime_identity,
@@ -191,7 +191,7 @@ class metal_archive_pipeline_create_scope {
         }
     }
 
-    /// @brief Returns whether setup succeeded and pipeline creation may proceed.
+    /// @brief Returns whether setup succeeded and pipeline creaion may proceed
     [[nodiscard]] bool is_ready_for_pipeline_call() const noexcept {
         return failure_.empty() && (active_scope_ || !required_);
     }
@@ -200,7 +200,7 @@ class metal_archive_pipeline_create_scope {
     /// @param[in] outer_result Result of vkCreateComputePipelines.
     /// @param[in] pipeline_create_ns Time spent creating the pipeline, in nanoseconds.
     /// @return Accepted creation details, an empty result if no archive scope was needed,
-    /// or an error describing the failed check.
+    /// or an  error describing the failed check.
     [[nodiscard]] std::expected<std::optional<runtime_metal_archive_pipeline_audit>, std::string>
     finish(VkResult outer_result, std::uint64_t pipeline_create_ns) {
         if (finished_) {
@@ -305,12 +305,12 @@ class metal_archive_pipeline_create_scope {
                                         std::string) noexcept
         : required_(required || is_runtime_metal_archive_configuration_installed()) {}
 
-    /// @brief Returns whether creation can proceed without Metal archive checks.
+    /// @brief Returns whether creation, can proceed without Metal archive checks.
     [[nodiscard]] bool is_ready_for_pipeline_call() const noexcept {
         return !required_;
     }
 
-    /// @brief Returns an empty record if Metal checks were optional, or a platform error.
+    /// @brief Returns an empty record if Metal checks were optional, or a  platform error.
     [[nodiscard]] std::expected<std::optional<runtime_metal_archive_pipeline_audit>, std::string>
     finish(VkResult, std::uint64_t) const {
         if (required_) {

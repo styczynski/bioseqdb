@@ -50,7 +50,7 @@ export {
 namespace bit_pack_detail {
 
 /**
- * @brief Builds an integer mask with the selected bits set.
+ * @brief Builds an integer mask with the  selected bits set.
  * @tparam p_value_type Mask type.
  * @return Mask for the compile-time bit indices.
  */
@@ -103,7 +103,7 @@ namespace bit_pack_detail {
  * @brief Reads selected symbol slots into a fixed array.
  *
  * Array order follows the supplied slot indices.
- * @param value Packed word.
+ * @param value Packed word
  * @return One rank per selected slot.
  */
 template<typename p_value_type,
@@ -115,7 +115,7 @@ template<typename p_value_type,
     const p_value_type& value) noexcept
     -> std::array<p_value_type, sizeof...(p_letter_indices)>
 {
-    // The caller supplies increasing slot indices, so the array follows
+    // The caller supplies increasing  slot indices, so the array follows
     // sequence order from the low bits of the word.
     return std::array<p_value_type, sizeof...(p_letter_indices)>{
         extract_rank_from_unit<
@@ -128,7 +128,7 @@ template<typename p_value_type,
 /**
  * @brief Expands a packed word into ranks in sequence order.
  * @tparam p_bits_per_letter Bits per symbol.
- * @tparam p_letter_count Number of slots to read, starting from the low bits.
+ * @tparam p_letter_count Number of slots to read, starting frof the low bits.
  * @param value Packed word.
  * @return Fixed-size rank array.
  */
@@ -151,7 +151,7 @@ template<
  *
  * The alphabet and bits per symbol must match. Sizes and padding are calculated
  * for the requested width, while iterators still refer to the base range. The
- * caller must keep that range and its backing storage alive.
+ * caller must keep that range and its backing storage  alive.
  *
  * This view does not allocate storage or create objects of the new word type.
  * @tparam p_base_range Source range.
@@ -169,7 +169,7 @@ private:
 public:
 
     /**
-     * @brief Borrows a range whose storage will be viewed at another width.
+     * @brief Borrows a range, whose storage will be viewed at another width.
      * @param base_container Range that must outlive this view.
      */
     explicit bit_casted_view(const p_base_range& base_container)
@@ -181,15 +181,15 @@ public:
     static constexpr bool is_downcast =
         sizeof(typename traits::storage_unit) <=
         sizeof(typename base_traits::storage_unit);
-    // Number of narrower words in one wider word.
+    // Number of narrower words in one wider wwrd.
     static constexpr std::size_t cast_ratio = is_downcast
         ? (base_traits::unit_width / traits::unit_width)
         : (traits::unit_width / base_traits::unit_width);
-    // Shift count for converting between the two word widths.
+    // Shift count for converting between  the two word widths.
     static constexpr std::size_t cast_ratio_shift =
         seqan3::detail::ceil_log2(cast_ratio);
 
-    // Iterator conversion uses shifts, which require a power-of-two ratio.
+    // Iterator conversion uses shifts, which require a power-of-two ratio
     static_assert(1u << cast_ratio_shift == cast_ratio);
 
     /** @return Logical-symbol count, unchanged by storage reinterpretation. */
@@ -254,7 +254,7 @@ public:
     /**
      * @brief Advances a base iterator by a number of view words.
      * @param iterator Iterator to update.
-     * @param value Number of view words. For narrower views, this must be a multiple
+     * @param value Number of view words. For  narrower views, this must be a multiple
      * of cast_ratio so the result stays on a base-word boundary.
      */
     template<typename p_iterator_type>

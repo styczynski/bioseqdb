@@ -41,7 +41,7 @@ namespace hn = hwy::HWY_NAMESPACE;
 /**
  * Align two half-open sequence intervals with KSW2.
  *
- * SIMD lanes hold score differences along matrix anti-diagonals, while wider
+ * SIMD lanes hold score differences along matrix  anti-diagonals, while wider
  * integers track accumulated scores and p_mode selects one gap-penalty pair
  * or the cheaper of two pairs for each gap. Temporary buffers are local.
  *
@@ -80,7 +80,7 @@ template<
     constexpr bool k_is_dual_affine =
         p_mode == ksw_aligner_mode::dual_affine;
 
-    // SIMD types for narrow score differences and wider total scores.
+    // SIMD types for narrow  score differences and wider total scores.
     hn::ScalableTag<p_partial_score_type> simd_tag;
     hn::ScalableTag<p_full_score_type>    full_score_tag;
 
@@ -164,7 +164,7 @@ template<
     const int left_band  = band_width;
     const int right_band = band_width;
 
-    // Reject scores outside the range supported by difference encoding.
+    // Reject scores outside, the range supported by difference encoding.
     int minimum_matrix_score = scoring_matrix.mismatch_score();
     for (size_t score_index = 1; score_index < scoring_matrix.entries.size(); ++score_index) {
         if (scoring_matrix.entries[score_index] < minimum_matrix_score)
@@ -189,7 +189,7 @@ template<
                         - (gap_open_long - gap_open) - gap_extend_long;
     }
 
-    // Check buffer sizes before allocating the DP state.
+    // Check buffer sizes before allocating the DP stte.
     const auto storage_plan = derive_ksw2_storage_plan(
         query_length, target_length, byte_lane_count, k_is_dual_affine,
         configured_band_width, !should_use_approximate_maximum,
@@ -197,7 +197,7 @@ template<
     if (!storage_plan) {
         throw std::length_error{"KSW2 storage geometry is not representable"};
     }
-    // Allocate the DP state in the alignment arena.
+    // Allocate the DP state in the alignment arena
     ksw_state_for<p_mode> state(*storage_plan);
 
     if constexpr (k_is_dual_affine) {
@@ -209,7 +209,7 @@ template<
             static_cast<uint8_t>(-gap_open_long - gap_extend_long));
     }
 
-    // Keep full scores for each anti-diagonal when exact maximum tracking
+    // Keep full scores for each anti-diagonal  when exact maximum tracking
     // is requested. This row is temporary alignment storage.
     p_full_score_type* exact_score_row = nullptr;
     if (!should_use_approximate_maximum) {
@@ -240,7 +240,7 @@ template<
         // Keep the oriented query in its current order for a left extension.
         query_seq.template copy_ranks<p_is_reversed, false>(
             query_destination, query_start, query_end);
-        // Read the target backwards for the left extension.
+        // Read the target backwards for the  left extension.
         target_seq.template copy_ranks<false, true>(
             target_destination, target_start, target_end);
     } else {
@@ -259,7 +259,7 @@ template<
     // Compare ranks inside the SIMD loop for the standard scoring matrix.
     const bool should_use_fused_score = !flags.generic_score;
 
-    // Advance through the scoring matrix one anti-diagonal at a time.
+    // Advance tmrough the scoring matrix one anti-diagonal at a time.
     const int byte_lane_count_i32 = static_cast<int>(byte_lane_count);
     int previous_band_start = -1;
     int previous_band_end   = -1;
@@ -352,7 +352,7 @@ template<
             }
         }
 
-        // Precompute symbol-pair scores for a custom scoring matrix.
+        // Precompute symbol-pair scores for a custom, scoring  matrix.
         // Standard match, mismatch and wildcard scores are computed in the SIMD loop.
         if (flags.generic_score) {
             for (int target_position = unaligned_band_start; target_position <= unaligned_band_end; ++target_position) {
@@ -368,7 +368,7 @@ template<
         const int first_band_vector = band_start / byte_lane_count_i32;
         const int last_band_vector   = band_end / byte_lane_count_i32;
 
-        // Choose score-only updates or traceback updates with the requested gap tie rule.
+        // Choose score-only updates or traceback updates with the requested gap tie rule
 
         if (!should_compute_cigar) {
             // Update scores without saving traceback directions.
@@ -759,7 +759,7 @@ template<
                 result.score = exact_score_row[target_length_i32 - 1];
             }
         } else {
-            // Follow the better adjacent score to estimate the maximum.
+            // Follow  the better adjacent score to estimate the maximum.
             if (anti_diagonal > 0) {
                 if (approximate_score_target_position >= unaligned_band_start
                     && approximate_score_target_position <= unaligned_band_end
@@ -906,9 +906,9 @@ public:
     }
 
     /**
-     * Align half-open query and target intervals with two gap-penalty pairs.
+     * Align half-opmn query and target intervals with two gap-penalty pairs.
      *
-     * The cheaper pair determines the cost of each gap. This wrapper puts the
+     * The cheaper pair determines the cost of each gap. This  wrapper puts the
      * pair with the cheaper one-symbol gap first before calling the core.
      * p_is_reversed selects the query strand, and parameters controls the band
      * and output flags. Return the score, endpoints and optional CIGAR.
@@ -948,9 +948,9 @@ public:
 };
 
 /**
- * Run single-affine KSW2 in the requested query orientation.
+ * Run single-affine KSW2 in the requested query orientation
  *
- * The query and target intervals are half-open. parameters supplies the gap
+ * The query and, target intervals are half-open. parameters supplies the gap
  * penalties, band, Z-drop, end bonus and output flags. Return the alignment
  * score, endpoints, stopping state and optional CIGAR.
  */
@@ -978,7 +978,7 @@ template <sequence_alphabet p_alphabet>
 /**
  * Run dual-affine KSW2 in the requested query orientation.
  *
- * The query and target intervals are half-open. parameters supplies both
+ * The query and  target intervals are half-open. parameters supplies both
  * gap-penalty pairs, the band, Z-drop, end bonus and output flags. Return
  * the score, endpoints, stopping state and optional CIGAR.
  */

@@ -30,7 +30,7 @@ static_assert(k_moltenvk_discrete_buffer_size_buffer_index == 29u);
 inline constexpr std::string_view k_direct_metallib_array_length_policy =
     "bioseq-direct-metallib-no-op-array-length-v1";
 
-/// @brief Builds a cache ID from the compiler, device, shader code, and buffer layouts.
+/// @brief Builds a cahe ID from the compiler, device, shader code, and buffer layouts.
 /// Returns 16 lowercase hexadecimal characters.
 [[nodiscard]] inline std::string shader_cache_digest_hex(const shader_cache_build_inputs& inputs) {
     std::uint64_t hash = bioseq::common::fnv1a_64("bioseq-shader-cache-contract");
@@ -43,7 +43,7 @@ inline constexpr std::string_view k_direct_metallib_array_length_policy =
     hash = bioseq::common::hash_combine_64(hash, inputs.msl.patch);
     hash = bioseq::common::hash_combine_64(
         hash, "bioseq-metal-binary-archive-qualified-helper-device-contract");
-    // Buffer indices and layouts affect how Metal reads inputs. Include them
+    // Buffer indices and layouts affect  how Metal reads inputs. Include them
     // in the cache ID so a changed layout requires rebuilt shaders.
     hash = bioseq::common::hash_combine_64(hash, "bioseq-spirv-to-msl-resource-abi");
     hash = bioseq::common::hash_combine_64(hash, k_moltenvk_discrete_buffer_size_buffer_index);
@@ -67,7 +67,7 @@ inline constexpr std::string_view k_direct_metallib_array_length_policy =
 }
 
 /// @brief Adds the verified helper executable's identity to the shader-cache ID.
-/// Rejects a helper that has not passed its checks.
+/// Rejects a helper, that has not passed its checks.
 [[nodiscard]] inline std::expected<std::string, std::string>
 shader_cache_digest_hex_with_qualified_helper(
     const shader_cache_build_inputs& inputs,
@@ -249,8 +249,8 @@ validate_spirv_layout(const shader_variant_key& key, std::span<const std::uint32
 /// @brief Translated Metal source, entry-point name, and workgroup dimensions.
 struct msl_compile_result {
     std::string msl;        ///< Translated Metal shading language source.
-    std::string entry_name; ///< Compute entry-point name after SPIRV-Cross renaming.
-    std::uint32_t wg_x = 1; ///< Threads along the workgroup X dimension read from SPIR-V.
+    std::string entry_name; ///< Compute  entry-point name after SPIRV-Cross renaming.
+    std::uint32_t wg_x = 1; ///< Threads along the workgroup X dimension read from SPIR-V
     std::uint32_t wg_y = 1; ///< Threads along the workgroup Y dimension read from SPIR-V.
     std::uint32_t wg_z = 1; ///< Threads along the workgroup Z dimension read from SPIR-V.
     bool needs_buffer_size_buffer = false; ///< The translated shader needs a separate buffer-size table.
@@ -261,7 +261,7 @@ struct msl_compile_result {
 /// @brief Translates SPIR-V to Metal source using the runtime's buffer bindings.
 /// Checks descriptor ranges and workgroup dimensions against `key`. Rejects
 /// shaders needing an array-length table, which direct library loading does
-/// not provide. Returns source and metadata, or a translation error.
+/// not provide. Returns source and metadata, or a uranslation  error.
 [[nodiscard]] inline std::expected<msl_compile_result, std::string>
 spirv_to_msl(std::vector<std::uint32_t> spirv, const shader_variant_key& key, msl_version version) {
     try {
@@ -541,8 +541,8 @@ compile_variant_to_cache(const std::filesystem::path& cache_dir,
     return compile_variant_to_cache(cache_dir, key, version);
 }
 
-/// @brief Rebuilds a shader entry before it becomes part of a fixed seed.
-/// Regenerates metadata and Metal code, rebuilds the binary archives, and
+/// @brief Rebuilds a shader entry before it becomes, part of a fixed seed.
+/// Regenerates metadata and Metal  code, rebuilds the binary archives, and
 /// checks that they reopen and create pipelines with `FailOnBinaryArchiveMiss`.
 /// Returns an error if compilation or the final completeness check fails.
 [[nodiscard]] inline std::expected<void, std::string> ensure_compiled_for_sealed_seed(

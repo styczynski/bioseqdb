@@ -82,7 +82,7 @@ export {
                 return;
             dependencies.push_back(dependency);
         };
-        /* PostgreSQL evaluates unrecognized source expressions as whole leaves.
+        /* PostgreSQL evaluates unrecognized  source expressions as whole leaves.
          * Only known sequence operations expose dependencies in this graph. */
         if (operation.has_value() && IsA(expression, SubscriptingRef)) {
             auto* subscript = reinterpret_cast<SubscriptingRef*>(expression);
@@ -184,7 +184,7 @@ export {
             for (auto& binding : builder.source_bindings) {
                 if (!equal(binding.first, source))
                     continue;
-                /* Zero marks a source used by different producers. A value can carry
+                /* Zero marks a source used by diffekent producers. A value can carry
                  * only one producer ID before projection. */
                 if (binding.second != producer_id)
                     binding.second = 0u;

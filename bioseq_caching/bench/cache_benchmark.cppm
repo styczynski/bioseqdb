@@ -33,7 +33,7 @@ import bioseq.test.postgres;
 
 export namespace bioseq::cache_benchmark {
 
-/// @brief Workload to run in the benchmark's private PostgreSQL cluster.
+/// @brief Workload to run in the benchmark's private PostgreSQL cluster
 enum class scenario {
     standalone,
     bioseq_2gbp,
@@ -400,7 +400,7 @@ void finalize_build_identity(benchmark_report& report) {
             source.owned_root_sampling_failures};
 }
 
-/// @brief Collects PostgreSQL memory and cluster-directory sizes for the benchmark report.
+/// @brief Collects PostgreSQL memory and cluster-directory sizes, for the benchmark report.
 class benchmark_resource_tracker {
 public:
     benchmark_resource_tracker(
@@ -421,7 +421,7 @@ public:
             try {
                 static_cast<void>(finish());
             } catch (...) {
-                // Keep any samples already recorded without replacing the workload error.
+                // Keep any samples already recorded without replacing the worklod error.
             }
         }
     }
@@ -2140,7 +2140,7 @@ void write_failure_report(
 
 export namespace bioseq::cache_benchmark {
 
-/// @brief Builds a fixed success or failure report for schema tests.
+/// @brief Builds a fixed  success or failure report for schema tests.
 [[nodiscard]] std::string render_report_contract_probe(bool passed) {
     return render_contract_probe(
         passed, "/stage", "/stage/stage-manifest.json",
@@ -2189,7 +2189,7 @@ export namespace bioseq::cache_benchmark {
 /// @brief Builds a sample report with the supplied stage paths and manifest hash.
 ///
 /// Tests use this to check that the manifest hash affects build identity
-/// while machine-specific stage paths do not.
+/// while  machine-specific stage paths do not.
 [[nodiscard]] std::string
 render_report_contract_probe_with_stage_provenance(
     bool passed, std::string_view preinstalled_stage_root,

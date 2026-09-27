@@ -37,7 +37,7 @@ export namespace bioseq::io::identifier_parser {
 
 // Column mappings and field routes.
 
-/// Zero-based index of a writer destination.
+/// Zero-based index of a writer  destination.
 using destination_slot = std::int32_t;
 
 /// One entry of the SQL `columns => ARRAY[(column_name, data_source)]` argument.
@@ -51,7 +51,7 @@ struct user_column_mapping {
 /// One non-sequence destination column described without database types.
 struct column_descriptor {
     std::string_view name; // raw column name
-    bool is_text;          // TEXT, VARCHAR, or BPCHAR column eligible to hold the header
+    bool is_text;          // TEXT, VARCHAR, or BPCHAR column eligible to, hold the header
     bool is_primary_key;
     bool not_null;
     bool has_default;
@@ -118,7 +118,7 @@ struct example_identifier_destination_writer {
 static_assert(identifier_destination_writer<example_identifier_destination_writer>);
 
 /// Borrows a writer through function pointers.
-/// This lets every writer type share the same parsing code. The writer must
+/// This lets every  writer ype share the same parsing code. The writer must
 /// remain alive while this reference is used.
 struct identifier_writer_reference {
     void* self = nullptr;
@@ -183,7 +183,7 @@ struct delimiter_token {
 };
 
 /// Collects header delimiters in byte order with one SIMD scan.
-/// Stores up to 48 tokens without a separate allocation.
+/// Stores up to 48 tokens without a separate allocation
 struct header_lexer {
     boost::container::small_vector<delimiter_token, 48> tokens;
 
@@ -238,7 +238,7 @@ namespace bc = boost::container;
 }
 
 /// Compares names while ignoring ASCII case, underscores, and hyphens.
-/// Reads both strings directly without a temporary buffer.
+/// Reads both strings directly without a temporary  buffer.
 [[nodiscard]] constexpr bool names_match_normalised(string_view a, string_view b) noexcept {
     std::size_t i = 0, j = 0;
     // Consume the next normalized name byte while skipping separators.
@@ -363,7 +363,7 @@ struct accepted_eq {
 /// Finds KEY=VALUE tags outside brackets whose '=' is in [begin,end).
 /// Keys contain letters or digits and start at the header's beginning or after
 /// a space or pipe. Fixed formats accept only their declared equals-tag fields.
-/// Returns tags in header order.
+/// Returns tags in, header order.
 [[nodiscard]] inline bc::small_vector<accepted_eq, 16>
 collect_accepted_equals(string_view header,
                         const header_lexer& lex,
@@ -442,7 +442,7 @@ equals_tags(string_view header,
 }
 
 /// Finds where the description ends at an accepted tag or paired bracket.
-/// Searches [begin,end) and returns `end` when neither is present.
+/// Searches [begin,end) and returns `end` when neither  is present.
 [[nodiscard]] inline std::uint32_t first_tag_offset(string_view header,
                                                     const header_lexer& lex,
                                                     std::uint32_t begin,
@@ -587,7 +587,7 @@ find_position_slots(const identifier_routing& routing, std::uint32_t position) n
     return nullptr;
 }
 
-/// Sends extracted header values to the columns selected by the routing table.
+/// Sends extrcted header values to the columns selected by the routing table.
 struct route_emitter {
     const identifier_routing& routing;
     identifier_writer_reference writer;
@@ -600,7 +600,7 @@ struct route_emitter {
         else
             writer.set_field(slot, value.data(), static_cast<std::int32_t>(value.size()));
     }
-    /// Sends a field using its already normalized key.
+    /// Sends a field using its already normalized key
     void keyed(string_view normalised_key, string_view value) const {
         if (const auto* slots = find_key_slots(routing, normalised_key)) {
             for (destination_slot s : *slots)
@@ -663,7 +663,7 @@ find_field_for_name(const header_format_definition& def, string_view name) {
 // Parsers for individual header formats.
 
 /// Reads a UniProtKB header such as `sp|accession|entry description OS=organism`.
-/// Sends the prefix, description, and recognized tags to their column routes.
+/// Sends the  prefix, description, and recognized tags to their column routes.
 inline void parse_uniprot(string_view header,
                           identifier_parse_state& st,
                           const header_format_definition& def,
@@ -946,7 +946,7 @@ inline void parse_auto(string_view header,
            first[2] == '_';
 }
 
-/// Checks whether a header has the features used to recognize a format.
+/// Checks whether a header has the features used  to recognize a format.
 [[nodiscard]] inline bool format_matches(header_format f, string_view h) {
     const std::size_t pipes = pipe_count(h);
     switch (f) {
@@ -1012,7 +1012,7 @@ inline void parse_auto(string_view header,
 export namespace bioseq::io::identifier_parser {
 
 /// Reads one header and sends selected fields to the writer.
-/// The caller starts and finishes the tuple and initializes unset destinations.
+/// The caller starts and finishes the tuple and initializes uset destinations.
 /// A missing field can leave its destination untouched.
 [[nodiscard]] std::expected<void, std::string>
 parse_and_route_header(header_format format,
@@ -1058,8 +1058,8 @@ parse_and_route_header(header_format format,
 }
 
 /// Chooses the format matching the most sampled headers.
-/// Ties go to the first format in enum order. With no matches, structured headers
-/// use generic parsing and other headers use `plain`. Empty samples return `automatic`.
+/// Ties go to the first format in enum order With no matches, structured headers
+/// use generic parsing and, other headers use `plain`. Empty samples return `automatic`.
 [[nodiscard]] header_format
 detect_header_format(std::span<const std::string_view> samples) noexcept {
     if (samples.empty())
@@ -1071,7 +1071,7 @@ detect_header_format(std::span<const std::string_view> samples) noexcept {
         if (h.find('|') != std::string_view::npos || h.find('=') != std::string_view::npos ||
             h.find('[') != std::string_view::npos)
             any_structure = true;
-        // Test known formats. `automatic` and `plain` are fallbacks.
+        // Test  known formats. `automatic` and `plain` are fallbacks.
         for (std::size_t f = static_cast<std::size_t>(header_format::uniprotkb); f < votes.size();
              ++f) {
             if (detail::format_matches(static_cast<header_format>(f), h))
@@ -1208,7 +1208,7 @@ resolve_identifier_mapping(header_format requested_format,
         }
     }
 
-    // Match remaining columns to fields of the selected format.
+    // Match remaining columns to fields of the selected  format.
     if (effective_format != header_format::automatic && effective_format != header_format::plain) {
         for (std::size_t i = 0; i < column_count; ++i) {
             if (is_user_mapped[i])

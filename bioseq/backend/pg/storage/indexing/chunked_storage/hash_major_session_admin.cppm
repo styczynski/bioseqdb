@@ -70,7 +70,7 @@ import bioseq.storage.size;             // sequence_size_t
 import bioseq.indexing.type; // sequence_index_layout, index_sub_key_t, k_max_index_chunk_size_bytes, sentinels
 import bioseq.indexing.storage;           // Storage adapter requirements.
 import bioseq.indexing.minimizer_hashmap; // Minimizer index header and bucket format.
-import bioseq.indexing.minimizer_fragment_image; // Minimizer fragment format with a fixed byte order.
+import bioseq.indexing.minimizer_fragment_image; // Minimizer  fragment format with a fixed byte order.
 import bioseq.indexing.compact_hash32_direct_index;
 import bioseq.indexing.minimizer_fragment_compact_hash32_adapter;
 import bioseq.postgres.table.io; // begin_column_read/read_next_column_row/end_column_read/column_read_state
@@ -170,9 +170,9 @@ inspect_ready_hash_major_minimizer_metadata_pg(
         identity, query_key, registered_snapshot, std::move(authorization));
 }
 
-/// Measure a serial or parallel scan of the active hash-major index.
+/// Measure a serial or parallel scan of the active hash-major index
 /// Check its head, manifest and source first. The probe checks rows from the
-/// directory, control and position streams using the same snapshot.
+/// directory, control and  position streams using the same snapshot.
 [[nodiscard]] inline hash_major_minimizer_parallel_scan_stats
 probe_ready_hash_major_minimizer_parallel_scan_pg(
     const minimizer_generation_administration_identity& identity,
@@ -234,7 +234,7 @@ inline void hash_major_minimizer_parallel_scan_probe_worker_main_pg(dsm_segment*
     }
 
     // ParallelWorkerMain has joined the leader's lock group. Use NoLock
-    // here so opening and closing the table leaves the leader's lock in place.
+    // here, so opening and closing the table leaves the leader's lock in place.
     Relation relation = table_open(header->relation_oid, NoLock);
     parallel_scan_pg_leaf(relation, parallel_scan, header, seen_words);
     table_close(relation, NoLock);

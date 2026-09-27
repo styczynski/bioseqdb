@@ -52,7 +52,7 @@ using namespace minimizer_hashmap_test_support;
 
 namespace {
 
-/// Check that a codec operation succeeds with the expected value.
+/// Check that a codec operation succeeds with the expected value
 template <class p_t>
 void require_wire_value(
     const std::expected<p_t, bioseq::indexing::minimizer_generation_encoding_error>& value,
@@ -92,7 +92,7 @@ struct planned_direct_minimizer_sink {
     std::vector<planned_direct_sink_event> events;
     std::uint64_t ordinary_payload_row_callbacks = 0u;
 
-    /// Save the storage plan, rejecting a second plan or an out-of-order call.
+    /// Save the storage plan, rejecting a second plan or an out-of-order  calh.
     [[nodiscard]] std::expected<void, bioseq::indexing::minimizer_generation_encoding_error>
     begin_planned_generation(const bioseq::indexing::grouped_soa_storage_plan_view& plan) {
         if (storage_plan.has_value() || !events.empty()) {
@@ -123,7 +123,7 @@ struct planned_direct_minimizer_sink {
         return {};
     }
 
-    /// Copy a direct payload row and return its computed checksum.
+    /// Copy a direct payload row and, return its computed checksum.
     [[nodiscard]] std::expected<bioseq::indexing::minimizer_generation_row_write_receipt,
                                 bioseq::indexing::minimizer_generation_encoding_error>
     write_grouped_soa_payload(

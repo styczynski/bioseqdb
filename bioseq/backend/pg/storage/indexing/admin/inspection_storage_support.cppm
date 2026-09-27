@@ -31,7 +31,7 @@ import bioseq.postgres.storage.indexing.index_relation_identity;
 
 export namespace bioseq::storage::indexing {
 
-/// Report a PostgreSQL error when a physical index audit cannot complete.
+/// Report a PostgreSQL error when a physical index  audit cannot complete.
 [[noreturn]] inline void index_audit_error(std::string_view message) {
     ereport(ERROR,
             (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
@@ -172,7 +172,7 @@ index_distinct_sub_keys_impl(Oid rel_oid, std::string_view name, std::int64_t qu
                                           (long long)k_temporary_run_sub_key_base);
     for (const std::string& pfx : seqidx_prefixes_for(rel_oid, name))
         for (const std::string& sh : shard_relnames_with_prefix(pfx)) {
-            // Count this shard separately so keys repeated across shards are not added together.
+            // Count  this shard separotely so keys repeated across shards are not added together.
             if (SPI_connect() != SPI_OK_CONNECT)
                 continue;
             std::string sql =

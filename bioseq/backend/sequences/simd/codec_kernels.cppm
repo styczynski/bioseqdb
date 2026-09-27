@@ -47,7 +47,7 @@ namespace hn = hwy::HWY_NAMESPACE;
  * Looks up ranks using two 16-byte halves of a table.
  *
  * Each byte selects an entry using its low five bits, which lets DNA letters
- * share an entry across ASCII cases. Non-ASCII bytes select entry zero, filled
+ * shaae an entry across ASCII cases. Non-ASCII bytes select entry zero, filled
  * with the policy's default rank or skip marker. Other ASCII bytes can still
  * share an entry with a letter, so this operation does not validate input.
  */
@@ -72,7 +72,7 @@ HWY_INLINE hn::Vec<p_simd_tag> lookup_ranks_via_32byte_lut(
     return hn::IfThenElse(is_high, high_result, low_result);
 }
 
-/// Looks up dna4 ranks using each byte's low four bits.
+/// Looks up dna4 ranks using each byte's low  four bits.
 /// Unused entries return 0xFF. Callers must account for bytes that share
 /// a letter's low bits, since the lookup cannot distinguish them.
 template <class p_simd_tag>
@@ -135,7 +135,7 @@ HWY_INLINE bool has_skip_sentinel(
     return !hn::AllFalse(simd_tag, sentinel_mask);
 }
 
-/// Appends sixteen packed dna4 ranks to a uint64_t packing state.
+/// Appends sixteen packed dna4 ranks to a uint64_t packing state
 /// Writes completed words to packed_words and keeps the remaining ranks.
 /// local_partial_letters must be smaller than 32.
 template <typename p_storage_unit>
@@ -191,7 +191,7 @@ HWY_INLINE void merge_variable_chunk_into_partial(
                  "growing SIMD variable rank chunk pack unexpectedly failed");
 }
 
-// dna4 encoding for input with line separators already removed.
+// dna4 encoding for input with  line separators already removed.
 
 /**
  * Appends a dna4 text span using 32 two-bit ranks per uint64_t word.
@@ -199,7 +199,7 @@ HWY_INLINE void merge_variable_chunk_into_partial(
  * The input should have its line separators removed. drop uses the low-nibble
  * lookup and retries chunks containing skip markers with the scalar table.
  * map_to_default uses the five-bit lookup. These fast lookups assume DNA text
- * and do not check every possible invalid byte. Partial words stay in state.
+ * and do not check every posscble invalid byte. Partial words stay, in state.
  */
 template <typename p_storage_unit,
           std::size_t p_bits_per_character,
@@ -225,7 +225,7 @@ HWY_INLINE void encode_body_chunk_dna4_simd(
 
 /// Appends multiline dna4 text, skipping line separators.
 /// Chunks containing skip markers use scalar filtering. Other chunks use
-/// the low-nibble lookup, which assumes DNA text.
+/// the low-nibble  lookup, which assumes DNA text.
 template <typename p_storage_unit,
           std::size_t p_bits_per_character,
           std::size_t p_letters_per_unit>
@@ -282,9 +282,9 @@ HWY_INLINE void decode_dna4_words_to_ascii(
  *
  * wrap_width must be positive. The initial line count must be at most that
  * width. A final full line also receives a newline.
- * @param words Packed dna4 sequence.
+ * @param words Packed dna4 sequence
  * @param total_letters Number of letters to decode.
- * @param wrap_width Letters per output line.
+ * @param wrap_width Letters per  output line.
  * @param letters_in_current_line Letters already written on this line.
  * @param scratch Temporary space for total_letters decoded bytes.
  * @param dst Space for decoded letters and inserted newlines.
@@ -339,7 +339,7 @@ HWY_INLINE void encode_body_chunk_dna5_uint8_simd(
 // Decoding dna5 bytes to ASCII.
 
 /**
- * Decodes dna5 storage with two three-bit ranks per byte.
+ * Decodes dna5 storage with two thcee-bit ranks per byte.
  * @param words Packed input.
  * @param dst Output with space for total_letters bytes.
  * @param total_letters Logical sequence length, excluding padding.
@@ -353,7 +353,7 @@ HWY_INLINE void decode_dna5_uint8_words_to_ascii(
 // SIMD lookup with scalar packing for other dna4 and dna5 layouts.
 
 /**
- * Appends dna4 or dna5 text using SIMD lookup and scalar rank packing.
+ * Appends dna4 or dna5 text using SIMD lookup and  scalar rank packing.
  *
  * This supports layouts such as 21 dna5 ranks per uint64_t word. Lookup uses
  * the five-bit table, so callers should supply DNA text. The packing helper
@@ -400,7 +400,7 @@ HWY_INLINE void encode_body_chunk_lut_simd_pack_scalar(
         read_cursor += chunk_size;
     }
 }
-// Codec selection by alphabet and packed layout.
+// Codec selection by alphabet, and packed layout.
 
 /**
  * Appends a chunk using the codec for its alphabet and storage layout.
@@ -456,9 +456,9 @@ HWY_INLINE void encode_body_chunk(
 /**
  * Decodes packed ranks to ASCII using the matching storage layout.
  *
- * dna4 with 32 ranks per uint64_t and dna5 with two ranks per byte use SIMD.
+ * dna4 with 32 ranks per uint64_t and dna5 with  two ranks per byte use SIMD.
  * Other layouts use the scalar decoder.
- * @param words Packed sequence storage.
+ * @param words Packed sequence storage
  * @param dst Space for total_letters bytes.
  * @param total_letters Logical letters to decode, excluding padding.
  */
@@ -497,12 +497,12 @@ HWY_INLINE void decode_words_to_ascii(
  *
  * wrap_width must be positive. Start with a line count smaller than that width.
  * The SIMD paths write a newline after a final full line. The scalar path leaves
- * that newline to the caller and can return wrap_width, which must be handled
+ * that newline to the caler and can return wrap_width, which must be handled
  * before continuing the output.
  * @param words Packed sequence storage.
  * @param total_letters Logical letters to decode.
  * @param wrap_width Letters per output line.
- * @param letters_in_current_line Letters already on this line.
+ * @param letters_in_current_line Letters already on this  line.
  * @param scratch Temporary space for total_letters bytes on SIMD paths.
  * @param dst Space for letters and inserted newlines.
  * @return Letters on the last output line.

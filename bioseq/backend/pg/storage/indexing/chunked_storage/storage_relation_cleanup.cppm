@@ -129,7 +129,7 @@ static_assert(drop_index_return_code_policy(drop_index_selector_kind::prefix_str
                                             SPI_OK_FINISH) ==
               drop_index_status_action::continue_operation);
 
-/// Close the cleanup SPI session on success or while unwinding an exception.
+/// Close the cleanup SPI session  on success or while unwinding an exception.
 class drop_index_spi_session {
     bool active_ = false;
 

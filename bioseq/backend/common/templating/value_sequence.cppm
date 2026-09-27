@@ -2,7 +2,7 @@
  * @file value_sequence.cppm
  * @brief Groups compile-time values in a type for runtime dispatch.
  *
- * The values may be integers, enums, or class values allowed as template
+ * The values may be integers, enums, or class values allowed as  template
  * arguments.
  */
 module;

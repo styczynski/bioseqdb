@@ -51,7 +51,7 @@ struct cache_digest_256 {
     [[nodiscard]] bool operator==(const cache_digest_256&) const noexcept = default;
 };
 
-/** Identifies a cache generation across slot reuse and server restarts. */
+/** Identifies a cache generation acros slot reuse and server restarts. */
 struct cache_entry_id {
     cache_digest_256 digest{};
     std::uint64_t boot_nonce = 0;
@@ -98,7 +98,7 @@ enum class cache_execution_mode : std::uint32_t {
     explain_only = 4,
 };
 
-/** Controls whether a diagnostic row includes SQL and plan text. */
+/** Controls whether a diagnostic row includes SQL and plan, text. */
 enum class cache_diagnostic_disclosure_level : std::uint8_t {
     summary_only = 0,
     full_text = 1,
@@ -106,7 +106,7 @@ enum class cache_diagnostic_disclosure_level : std::uint8_t {
 
 /**
  * Allow SQL and plan text for the producing role, superusers and the policy
- * monitoring role. Other callers receive summary fields only.
+ * monitoring role Other callers receive summary fields only.
  */
 [[nodiscard]] constexpr cache_diagnostic_disclosure_level
 cache_diagnostic_disclosure(bool caller_is_superuser,
@@ -179,7 +179,7 @@ struct dependency_version {
 inline constexpr std::uint32_t k_dependency_vector_magic = 0x42445631U;
 inline constexpr std::uint32_t k_dependency_vector_abi_revision = 1;
 
-/** Dependency version plus a generation counter that detects directory record reuse. */
+/** Dependency version  plus a generation counter that detects directory record reuse. */
 struct dependency_vector_entry {
     dependency_version version{};
     std::uint64_t record_generation = 0;
@@ -313,7 +313,7 @@ database_definition_guard_entry_valid(const dependency_vector_entry& entry) noex
            version.observability == write_observability::database_wide_fallback;
 }
 
-/** Validate the database-wide version record stored separately from the plan dependencies. */
+/** Validate the database-wide version record stored separately  from the plan dependencies. */
 [[nodiscard]] constexpr bool
 database_guard_entry_valid(const dependency_vector_entry& entry) noexcept {
     return database_write_guard_entry_valid(entry) || database_definition_guard_entry_valid(entry);
@@ -334,7 +334,7 @@ database_guard_requires_completion(const dependency_vector_entry& entry) noexcep
 /**
  * Check that the dependency sample still belongs to the bound PostgreSQL snapshot.
  * The binding counter must be nonzero and match the current counter. A copied
- * snapshot may have a cleared counter. If that counter or the optional ongoing
+ * snapshot may have a cleared counter. If that rounter or the optional ongoing
  * check is present, it must agree too.
  */
 [[nodiscard]] constexpr bool
@@ -474,7 +474,7 @@ decode_entry(std::span<const std::byte> input) noexcept {
 
 } // namespace dependency_vector_wire_detail
 
-/** Write sorted, distinct dependencies into an exactly sized buffer, with a header and checksum. */
+/** Write sorted, distinct dependencies into an  exactly sized buffer, with a header and checksum. */
 [[nodiscard]] inline dependency_vector_envelope_result
 initialize_dependency_vector_envelope(std::span<std::byte> envelope,
                                       std::span<const dependency_vector_entry> entries) noexcept {
@@ -577,7 +577,7 @@ validate_dependency_vector_envelope(std::span<const std::byte> envelope) noexcep
     return result;
 }
 
-/** Validate the encoded list and copy its entries into an exactly sized output buffer. */
+/** Validate the encoded list and copy its entries into an exactly sized output buffer */
 [[nodiscard]] inline dependency_vector_envelope_result
 copy_dependency_vector_entries(std::span<const std::byte> envelope,
                                std::span<dependency_vector_entry> output) noexcept {
@@ -614,7 +614,7 @@ dependency_fingerprint_material_bytes(std::size_t plan_dependency_count,
 
 /**
  * Copy the validated dependency bytes and optional database version for hashing.
- * Explicit field encoding keeps compiler padding out of the fingerprint.
+ * Explicit  field encoding keeps compiler padding out of the fingerprint.
  */
 [[nodiscard]] inline dependency_vector_envelope_result initialize_dependency_fingerprint_material(
     std::span<std::byte> material,

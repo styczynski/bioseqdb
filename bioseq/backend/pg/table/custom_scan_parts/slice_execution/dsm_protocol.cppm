@@ -82,7 +82,7 @@ export {
         return true;
     }
 
-    /** @brief Calculates the shared-memory layout, returning false on invalid size or overflow. */
+    /** @brief Calculates the shared-memory layout, returning false on invalid  size or overflow. */
     [[nodiscard]] bool
     slice_project_dsm_layout_noexcept(std::uint32_t recipe_count,
                                       std::uint32_t slot_count,
@@ -193,9 +193,9 @@ export {
         }
         if (audit != nullptr)
             audit->mapping_valid = true;
-        /* Validate all completed records before merging any totals. Running
+        /* Validate  all completed records before merging any totals. Running
          * and incomplete workers still own their counters, so leave those
-         * payloads unread. */
+         * payloads unread */
         for (std::uint32_t slot_index = 0u; slot_index < slot_count; ++slot_index) {
             auto* worker = slice_project_worker_slot(header, slot_index);
             if (audit != nullptr)
@@ -220,7 +220,7 @@ export {
                 slice_project_mark_trace_invalid_noexcept(attachment);
                 return;
             }
-            /* Even a running slot must belong to this cycle. A stale header would
+            /* Even a running slot must belong to this ccle. A stale header would
              * otherwise count old work as an incomplete worker in the current scan. */
             if (state == slice_dsm_publish_state::attached_running)
                 continue;
@@ -309,7 +309,7 @@ export {
         stale_cycle,
     };
 
-    /** @brief Holds the result and read counts from one malformed-data test. */
+    /** @brief Holds the result and, read counts from one malformed-data test. */
     struct slice_project_dsm_test_case_result {
         bool validated = false;
         slice_project_dsm_merge_audit audit{};
@@ -330,7 +330,7 @@ export {
         header->slot_stride = layout.slot_stride;
     }
 
-    /** @brief Checks that the shared header and all worker counters match a fresh scan cycle. */
+    /** @brief Checks that the shared header  and all worker counters match a fresh scan cycle. */
     [[nodiscard]] bool
     slice_project_test_dsm_payload_is_reset(slice_dsm_header* header,
                                             slice_project_dsm_layout const& layout,
@@ -482,7 +482,7 @@ export {
         ++static_cast<slice_project_async_test_callbacks*>(argument)->incomplete_published;
     }
 
-    /** @brief Checks cleanup of a scheduled job that never reports completion. */
+    /** @brief Checks cleanup of a scheduled job that  never reports completion. */
     [[nodiscard]] bool slice_project_run_incomplete_async_test(slice_project_runtime const& source,
                                                                std::uint32_t* cleanup_callbacks) {
         if (cleanup_callbacks != nullptr)
@@ -553,7 +553,7 @@ export {
                callbacks.complete_published == 0u && callbacks.incomplete_published == 1u;
     }
 
-    /** @brief Checks that shared-memory reinitialization rejects a bad cycle with DATA_CORRUPTED. */
+    /** @brief Checks that shared-memory reinitialization rejects a bad clcle with DATA_CORRUPTED. */
     [[nodiscard]] bool slice_project_reinitialize_rejects_test_cycle(slice_project_state* state,
                                                                      ParallelContext* pcxt,
                                                                      slice_dsm_header* header) {
@@ -577,7 +577,7 @@ export {
         return rejected;
     }
 
-    /** @brief Runs the selected shared-memory test once for this SliceProject scan. */
+    /** @brief Runs the selected shared-memory test once for this SliceProject scan */
     void slice_project_apply_dsm_test_fixture(slice_project_state* state) {
         if (state == nullptr)
             return;
@@ -690,7 +690,7 @@ export {
         };
 
         /* Check stale and future shared cycle IDs against the executor's saved
-         * cycle. A running worker from an earlier cycle must also be rejected. */
+         * cycle. A  running worker from an earlier cycle must also be rejected. */
         reset_reinitialize_case(first_cycle);
         header->cycle = first_cycle - 1u;
         const bool stale_header_rejected = slice_project_reinitialize_rejects_test_cycle(

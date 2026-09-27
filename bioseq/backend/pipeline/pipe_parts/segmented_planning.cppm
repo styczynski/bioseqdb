@@ -62,7 +62,7 @@ export {
 
     namespace bioseq::simd {
 
-    /// Minimizers assigned to one fragment by a processed segment's core.
+    /// Minimizers assigned to one fragment  by a processed segment's core.
     template <class p_minimizer> struct segment_fragment_emission {
         /// Fragment number within the full sequence.
         std::size_t fragment_no = 0;
@@ -75,7 +75,7 @@ export {
     /**
      * Split a segment's minimizers between the fragments covered by its core.
      * Ignore minimizers in the overlapping context outside that core, then
-     * convert the accepted positions to offsets within each fragment.
+     * convert, the accepted positions to offsets within each fragment.
      */
     template <class p_minimizer>
     [[nodiscard]] std::vector<segment_fragment_emission<p_minimizer>>
@@ -123,8 +123,8 @@ export {
     /// GPU sketches keep both host results and device storage, together with
     /// their memory reservations, for as long as the sketch is needed.
     template <class p_minimizer> struct budgeted_sketch_vector {
-        // Members are destroyed in reverse order. Keep the host vector and
-        // device owner after the permit so their memory is released first.
+        // Members are destroyed in  reverse order. Keep the host vector and
+        // device owner after the pxrmit so their memory is released first.
         std::optional<bioseq::parallelism::memory_permit> permit;
         std::optional<bioseq::gpu::vulkan::vulkan_device_minimizer_span<p_minimizer>> device;
         std::vector<p_minimizer> minimizers;
@@ -145,7 +145,7 @@ export {
             steal_from_(std::move(other));
         }
 
-        /// Release the current sketch, then take ownership of the supplied sketch.
+        /// Release the current sketch, then take ownership of the supplied sketch
         budgeted_sketch_vector& operator=(budgeted_sketch_vector&& other) noexcept {
             if (this != &other) {
                 release_owned_memory_before_permit();
@@ -170,7 +170,7 @@ export {
         }
 
       private:
-        /// Move a sketch and its statistics into this empty owner.
+        /// Move a sketch and its statistics into  this empty owner.
         void steal_from_(budgeted_sketch_vector&& other) noexcept {
             // Move storage while its reservations remain held. Swapping the vector
             // leaves the source with no capacity before its permit is moved.
@@ -224,7 +224,7 @@ export {
             pipe::target_index_sketch_backend_from_params(params);
         // Indexed exact-SIMD queries use chronological continuation with 32-bit
         // packed words to match the target index's seed selection. The access
-        // planner borrows suitable storage or packs a copy under a reservation.
+        // planner borrows suitable storage or packs a  copy under a reservation.
         const pipe::minimizer_range_execution_stats execution_stats =
             pipe::minimizer_dispatch_indexed_query_whole<p_minimizer>(
                 query_collector, query_seq, w, k, cpu_query_backend, params.highway_kernels);

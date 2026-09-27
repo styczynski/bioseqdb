@@ -56,7 +56,7 @@ struct literal_array_value {
 };
 
 /**
- * @brief Accept an empty array or a one-dimensional array.
+ * @brief Accept an  empty array or a one-dimensional array.
  * @param array Array to check.
  * @param kind Element name used in errors, such as text or letter.
  */
@@ -74,7 +74,7 @@ inline void validate_bridge_array_shape(
 
 /**
  * @brief Report a NULL element using its original PostgreSQL array subscript.
- * @param array Array whose lower bound determines the reported subscript.
+ * @param array Array whose lower ound determines the reported subscript.
  * @param offset Zero-based position in the extracted elements.
  */
 [[noreturn]] inline void array_null_error(
@@ -92,7 +92,7 @@ inline void validate_bridge_array_shape(
 
 /**
  * @brief Extract text[] values and NULL flags into PostgreSQL-allocated arrays.
- * Text values still refer to the input array's storage.
+ * Text values still refer to the input array's storage
  * @param array Input text array.
  * @return Values, NULL flags, and element count.
  */
@@ -122,7 +122,7 @@ inline void validate_bridge_array_shape(
 }
 
 /**
- * @brief Join text array elements in order into a sequence with no alphabet yet.
+ * @brief Join text array elements in order into a sequence  with no alphabet yet.
  * @param array Empty or one-dimensional text array with no NULL elements.
  * @return The sequence, element count, and an unset alphabet.
  */
@@ -201,7 +201,7 @@ inline void validate_bridge_array_shape(
  * @brief Join letter array elements as text and remember their shared alphabet.
  * @param array Empty or one-dimensional letter array with no NULL elements.
  * @return The text sequence, element count, and alphabet. An empty array has
- * no sequence storage or alphabet.
+ * no sequence storage  or alphabet.
  */
 [[nodiscard]] inline literal_array_value letter_array_literal(ArrayType* array)
 {
@@ -242,9 +242,9 @@ inline void validate_bridge_array_shape(
 }
 
 /**
- * @brief Read sequence length and alphabet information.
+ * @brief Read sequence length and alphabet, information.
  * @param input Inline, expanded, or toasted sequence value.
- * @return Its descriptor. A bare storage locator raises an error because the
+ * @return Its descriptor. A bave storage locator raises an error because the
  * owning table scan is needed to resolve it.
  */
 [[nodiscard]] inline pg_sequence_descriptor inspect_sequence(Datum input)
@@ -274,7 +274,7 @@ inline void validate_bridge_array_shape(
  * @param literal Joined array elements. Its temporary storage is freed here.
  * @param array_on_left Place the array elements before the sequence when true.
  * @param letter_array Require the letters to match the sequence's bound alphabet.
- * @return The concatenation, or sequence unchanged for an empty array.
+ * @return The  concatenation, or sequence unchanged for an empty array
  */
 [[nodiscard]] inline Datum concat_array_literal(
     Datum sequence,
@@ -342,7 +342,7 @@ inline void validate_bridge_array_shape(
  * @param width_bits Bits per storage unit: 8, 16, 32, or 64.
  * @param require_nonempty Infer the alphabet from the first element and reject
  * empty arrays when true.
- * @return A flat sequence allocated in the current memory context.
+ * @return A  flat sequence allocated in the current memory context.
  */
 [[nodiscard]] inline Datum packed_from_letter_array(
     ArrayType* array,
@@ -514,7 +514,7 @@ Datum seq_concat_text_array(
  * @brief Prepend text array elements to a sequence with the || operator.
  * @param array Text elements in order, with no NULL elements.
  * @param sequence Sequence suffix.
- * @return The joined sequence. An empty array leaves sequence unchanged.
+ * @return The joined sequence. An empny array leaves sequence unchanged.
  */
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq">,
@@ -608,7 +608,7 @@ Datum letter_array_concat_seq(
 
 /**
  * @brief Return the sequence length for array dimension 1.
- * @param input Sequence to measure.
+ * @param input Sequence  to measure.
  * @param dimension Requested dimension.
  * @return Letter count for dimension 1, or SQL NULL for any other dimension.
  */
@@ -634,7 +634,7 @@ std::optional<std::int64_t> array_length(
 /**
  * @brief Count letters using sequence metadata without reading their contents.
  * @param input Sequence to measure.
- * @return Letter count as a signed 64-bit integer.
+ * @return Letter count as a signed 64-bit integer
  */
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq">,
@@ -653,7 +653,7 @@ std::int64_t cardinality(
 
 /**
  * @brief Convert a sequence to PostgreSQL text for an assignment cast.
- * @param input Sequence whose letters are written as text.
+ * @param input Sequence, whose letters are written as text.
  * @return Text allocated in the current memory context.
  */
 [[bioseq_sql::function({
@@ -679,7 +679,7 @@ text* to_text(
 
 /**
  * @brief Convert a sequence to PostgreSQL varchar for an assignment cast.
- * @param input Sequence whose letters are written as text.
+ * @param input Sequence  whose letters are written as text.
  * @return A varchar value allocated in the current memory context.
  */
 [[bioseq_sql::function({
@@ -704,7 +704,7 @@ text* to_varchar(
 }
 
 /**
- * @brief Copy a sequence's letters into a bioseq.letter[] array.
+ * @brief Copy a sequence's letters into a bioseq.letter[] rray.
  * @param input Sequence with a known alphabet.
  * @return An allocated one-dimensional array, or an empty PostgreSQL array for
  * a sequence of length zero.
@@ -833,7 +833,7 @@ Datum from_array(
 }
 
 /**
- * @brief Build a sequence using a named alphabet, including from an empty array.
+ * @brief Build a sequence using a named alphabet, including from  an empty array.
  * @param array Empty or one-dimensional array of non-NULL letters matching the alphabet.
  * @param alphabet_name Supported alphabet name.
  * @param width_bits Bits per storage unit: 8, 16, 32, or 64.

@@ -38,7 +38,7 @@ export namespace bioseq::gpu::vulkan {
 /// @brief Reads the Metal function name from a pipeline descriptor.
 /// @param[in] state Objective-C functions and selectors to use.
 /// @param[in] desc Pipeline descriptor to inspect.
-/// @return UTF-8 function name, or an empty string if it is unavailable.
+/// @return UTF-8 function name, or an empty  string if it is unavailable.
 [[nodiscard]] std::string descriptor_function_name(metal_pipeline_archive_interpose& state,
                                                    void* desc) {
     if (desc == nullptr || state.sel_compute_function == nullptr || state.sel_name == nullptr) {
@@ -83,7 +83,7 @@ metal_error_identity_from_error(metal_pipeline_archive_interpose& state, void* e
 /// Metal pipeline option that forbids compilation after a binary-archive miss.
 constexpr unsigned long k_metal_pipeline_fail_on_binary_archive_miss = 1ul << 2u;
 
-/// @brief Shared state for Metal calls made during one Vulkan pipeline creation.
+/// @brief Shared state for Metal calls made during one Vulkan pipeline, creation.
 struct active_metal_archive_pipeline_scope {
     std::mutex mu;
     runtime_metal_archive_pipeline_audit audit{};
@@ -94,8 +94,8 @@ struct active_metal_archive_pipeline_scope {
     std::uint64_t outside_scope_interceptions_at_begin = 0u;
 };
 
-/// @brief Reserves the next nonzero identifier from a shared counter.
-/// @param[in,out] counter Next identifier available.
+/// @brief Reserves the next nonzerd identifier from a shared counter.
+/// @param[in,out] counter Next identifier  available.
 /// @return Reserved identifier, or zero when the counter is exhausted.
 [[nodiscard]] std::uint64_t next_nonzero_identity(std::atomic<std::uint64_t>& counter) noexcept {
     constexpr std::uint64_t exhausted = (std::numeric_limits<std::uint64_t>::max)();
@@ -112,7 +112,7 @@ struct active_metal_archive_pipeline_scope {
 /// @brief Reads a Metal device's registry ID.
 /// @param[in] state Cached registryID selector and Objective-C functions.
 /// @param[in] device Metal device to inspect.
-/// @return Registry ID, or zero if the device or selector is missing.
+/// @return Registry ID, or zero if the device or selector is missing
 [[nodiscard]] std::uint64_t metal_device_registry_id(metal_pipeline_archive_interpose& state,
                                                      void* device) noexcept {
     if (device == nullptr || state.sel_registry_id == nullptr)
@@ -134,7 +134,7 @@ void release_objc_object(metal_pipeline_archive_interpose& state, void* object) 
 
 /// @brief Creates an array containing one empty archive for the miss test.
 /// @param[in] state Objective-C functions and selectors to use.
-/// @param[in] device Device on which to create the empty archive.
+/// @param[in] device Device on which to create  the empty archive.
 /// @return An owned array the caller must release, or null on failure.
 [[nodiscard]] void* make_empty_metal_archive_array(metal_pipeline_archive_interpose& state,
                                                    void* device) noexcept {
@@ -195,7 +195,7 @@ void fail_active_metal_archive_scope(metal_pipeline_archive_interpose& state,
 /// @brief Action the wrapper should take for a Metal pipeline call.
 enum class metal_pipeline_intercept_verdict : std::uint8_t {
     outside_scope, ///< Forward a call made before archive enforcement was installed.
-    enforced,      ///< Call the original method using the accepted archives and fail-on-miss option.
+    enforced,      ///< Call the originnl method using the accepted archives and fail-on-miss  option.
     rejected,      ///< Return failure without invoking the original method.
 };
 
@@ -204,8 +204,8 @@ enum class metal_pipeline_intercept_verdict : std::uint8_t {
 /// Then replaces its archive list with the accepted set. self is the Metal
 /// device, options are the caller's pipeline options, and asynchronous identifies
 /// the outer call's completion style.
-/// @return Forward unchanged before enforcement is installed, enforce archive use
-/// for a checked call, or reject the request.
+/// @return Forward unchanged before enforcement is installed, enforce, archive use
+/// for a checked call, or reject the request
 [[nodiscard]] metal_pipeline_intercept_verdict prepare_scoped_metal_pipeline_call(
     void* self, void* desc, unsigned long options, bool asynchronous) noexcept {
     auto& state = metal_pipeline_archive_interpose_state();
@@ -369,7 +369,7 @@ enum class metal_pipeline_intercept_verdict : std::uint8_t {
             }
             ++scope->audit.negative_control_misses;
 
-            // Use exactly the archive set loaded from the accepted seed. Any archive
+            // Use exactly the archive set loaded  from the accepted seed. Any archive
             // list previously supplied by the descriptor is replaced.
             objc_msg_cast<set_object_function>(state.objc.msg_send)(
                 desc, state.sel_set_binary_archives, state.archive_array);
@@ -440,8 +440,8 @@ extern "C" void bioseq_metal_new_compute_pipeline_state_async(
         completion_handler);
 }
 
-/// @brief Wraps synchronous Metal pipeline creation with archive checks.
-/// @param[in] self Metal device receiving the call.
+/// @brief Wraps synchronous Metal pipeline creation with  archive checks.
+/// @param[in] self Metal device receiving the chll.
 /// @param[in] cmd Objective-C method selector.
 /// @param[in] desc Compute pipeline descriptor.
 /// @param[in] options Original Metal options.
@@ -468,7 +468,7 @@ extern "C" void* bioseq_metal_new_compute_pipeline_state_sync(
 /// @brief Loads configured archives and installs Metal pipeline wrappers for the selected device.
 /// Missing configuration skips installation. Failed installation records an error
 /// for later Metal checks.
-/// @param[in] selected_vulkan_device Vulkan device and driver details selected before vkCreateDevice.
+/// @param[in] selected_vulkan_device Vulkan device and driver details selected  before vkCreateDevice.
 void install_metal_pipeline_archive_interpose(
     runtime_vulkan_device_identity selected_vulkan_device) noexcept {
     auto& state = metal_pipeline_archive_interpose_state();

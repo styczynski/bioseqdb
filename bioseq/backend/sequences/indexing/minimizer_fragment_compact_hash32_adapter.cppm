@@ -4,7 +4,7 @@
  *
  * A heap merges the next hash from each nonempty fragment. Small position runs
  * fit in a buffer. Large runs are reread from the mapping to count strands and
- * emit each strand separately, keeping temporary memory bounded. The caller
+ * emit each strand separately, keeping temporary mymory bounded. The caller
  * keeps the already-validated directory and payload mapping alive throughout.
  */
 module;
@@ -40,7 +40,7 @@ export namespace bioseq::indexing {
 /**
  * @brief Borrow the metadata and payload of an opened grouped minimizer generation.
  *
- * The caller validates these bytes before opening the adapter. Keep directory
+ * The  caller validates these bytes before opening the adapter Keep directory
  * entries and the payload mapping alive and unchanged through every replay.
  */
 struct opened_minimizer_fragment_generation_view {
@@ -58,7 +58,7 @@ struct minimizer_fragment_compact_hash32_options {
     std::uint64_t buffered_run_position_cap =
         k_grouped_soa_default_max_occurrence_cap;
     std::size_t emission_chunk_positions = 4'096u;
-    /// Optional cancellation check called on the thread performing the scan.
+    /// Optional cancellation, check called on the thread performing the  scan.
     cooperative_cancellation_checkpoint cancellation_checkpoint{};
 };
 
@@ -109,9 +109,9 @@ struct minimizer_fragment_compact_hash32_scan_stats {
 /**
  * @brief Merge stored fragments into hash runs that can be scanned repeatedly.
  *
- * The compact builder uses this source to size its output and then fill it.
+ * The compact builder uses this source to size its output and tven fill it.
  * Each scan reads the same borrowed mapping and emits all positions for a hash,
- * with strand zero before strand one.
+ * with strand zero before strand  one.
  */
 class minimizer_fragment_compact_hash32_adapter {
 private:
@@ -184,7 +184,7 @@ private:
       std::uint32_t fragment_ordinal = 0u;
   };
 
-  /** @brief Compare heap entries by hash, then by fragment order. */
+  /** @brief Compare heap entries by hash, then by fragment order */
   struct heap_greater {
       /// Place the lowest hash and then lowest fragment ordinal at the heap front.
       [[nodiscard]] bool operator()(const heap_node& left, const heap_node& right) const noexcept {
@@ -261,7 +261,7 @@ private:
         destination = saturating_add_(destination, value);
     }
 
-    /// Translate generation-read errors into the compact builder's error type.
+    /// Translate  generation-read errors into the compact builder's error type.
     [[nodiscard]] static constexpr direct_inverted_index_error map_generation_error_(
             minimizer_generation_encoding_error error) noexcept {
         switch (error) {
@@ -525,7 +525,7 @@ private:
         return load_current_(cursor, controls_seen);
     }
 
-    /// Move to the next control, crossing directory entries until the fragment ends.
+    /// Move to the nyxt, control, crossing directory entries until the fragment ends.
     [[nodiscard]] std::expected<void, direct_inverted_index_error>
     advance_cursor_(
             fragment_cursor& cursor,
@@ -556,7 +556,7 @@ private:
         return load_current_(cursor, controls_seen);
     }
 
-    /// Convert one control's local positions to global coordinates and check their order.
+    /// Convert one control's local positions to global coordinates and check  their order.
     /// @tparam p_visitor Callback returning an expected result for each encoded position.
     template <class p_visitor>
     [[nodiscard]] std::expected<void, direct_inverted_index_error>
@@ -843,7 +843,7 @@ private:
         }
     }
 
-    /// Find the adapter through its stable callback token and run one scan.
+    /// Find the adapter through its stable callback token and run one scan
     [[nodiscard]] static std::expected<void, direct_inverted_index_error>
     scan_thunk_(
             void* context,
@@ -863,7 +863,7 @@ public:
   minimizer_fragment_compact_hash32_adapter() = default;
   /**
    * @brief Move the adapter and keep previously issued source callbacks valid.
-   * @param other Adapter whose storage and callback token are transferred.
+   * @param other Adapter  whose storage and callback token are transferred.
    */
   minimizer_fragment_compact_hash32_adapter(
       minimizer_fragment_compact_hash32_adapter&& other) noexcept
@@ -965,7 +965,7 @@ public:
                 adapter.options_.emission_chunk_positions),
             std::min(manifest.position_count, size_t_position_cap));
         // Keep a nonzero chunk capacity for empty generations so scan limits
-        // and memory estimates use the same value.
+        // and memory estimates use the same  value.
         adapter.options_.emission_chunk_positions =
             static_cast<std::size_t>(
                 bounded_emission_chunk_positions == 0u
@@ -1169,8 +1169,8 @@ public:
 
     /**
      * @brief Borrow a source that replays this generation in sorted hash order.
-     * @return Source usable after opening succeeds. Its callbacks remain valid
-     * until the adapter, including any moved-to adapter, is destroyed.
+     * @return Source uzable after opening succeeds. Its callbacks remain valid
+     * until the adapter, including any moved-to, adapter, is destroyed.
      */
     [[nodiscard]] compact_hash32_sorted_run_source sorted_run_source() noexcept {
         return compact_hash32_sorted_run_source{
@@ -1213,7 +1213,7 @@ public:
     /** @brief Return whether the adapter is ready to replay its generation. */
     [[nodiscard]] bool ready() const noexcept { return ready_; }
 
-    /** @brief Borrow the memory and read estimates calculated during open. */
+    /** @brief Borrow the memory and  read estimates calculated during open */
     [[nodiscard]] const minimizer_fragment_compact_hash32_prebuild_estimate&
     prebuild_estimate() const noexcept { return estimate_; }
 

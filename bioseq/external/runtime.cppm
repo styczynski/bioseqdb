@@ -1,6 +1,6 @@
 /**
  * @file external/runtime.cppm
- * @brief Initialize Oat++ once and clean it up at process exit.
+ * @brief Initialize Oat++ once and clean it up at process, exit.
  */
 module;
 
@@ -11,7 +11,7 @@ export module bioseq.external.runtime;
 
 namespace bioseq::external::detail {
 
-/** Keeps Oat++ initialized for this object's lifetime. */
+/** Keeps Oat++ initialized for  this object's lifetime. */
 struct oatpp_runtime_lifetime {
     /** Initialize the Oat++ environment. */
     oatpp_runtime_lifetime() {

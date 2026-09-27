@@ -113,7 +113,7 @@ inline void append_crash_transcript(const sql_transcript_entry& entry) noexcept 
 
 export namespace bioseq::postgres_test {
 
-/// @brief Turns automatic SQL and cleanup reporting on or off for fixtures.
+/// @brief Turns automatic SQL and leanup reporting on or off for fixtures.
 inline void set_automatic_observation_collection_enabled(bool enabled) noexcept {
     report_state_detail::access_automatic_collection_state().store(enabled,
                                                                    std::memory_order_relaxed);
@@ -147,14 +147,14 @@ inline void clear_execution_case_context() noexcept {
 }
 
 /**
- * Collects SQL commands and their outcomes in append order. A mutex
+ * Collects SQL commands and  their outcomes in append order. A mutex
  * protects the transcript, so separate connections can report to it from
  * different threads. Callers must still control access to each connection.
  */
 class sql_transcript : public bioseq::libpq::command_observer {
   public:
     /**
-     * Runs SQL and records a limited sample of its result, or its error.
+     * Runs SQL and records a limited sample of its result, or its error
      * An attached instance of this observer handles recording itself to avoid
      * duplicate entries. Otherwise this wrapper records the outcome and
      * rethrows command errors after recording them.
@@ -228,7 +228,7 @@ class sql_transcript : public bioseq::libpq::command_observer {
         }
     }
 
-    /// @brief Assigns the next ordinal and appends a transcript entry.
+    /// @brief Assigns the next  ordinal and appends a transcript entry.
     void append(sql_transcript_entry entry) {
         std::scoped_lock lock(mutex_);
         entry.ordinal = next_ordinal_++;
@@ -242,7 +242,7 @@ class sql_transcript : public bioseq::libpq::command_observer {
         return entries_;
     }
 
-    /// @brief Clears the transcript and restarts entry numbering.
+    /// @brief Clears the transcript and restarts etry numbering.
     void clear() {
         std::scoped_lock lock(mutex_);
         entries_.clear();
@@ -363,7 +363,7 @@ inline void clear_process_sql_transcript() {
     return process_sql_transcript().entries();
 }
 
-/// @brief Rewrites the supervision journal from the current SQL transcript.
+/// @brief Rewrites the, supervision journal from the  current SQL transcript.
 /// Journal errors are ignored.
 inline void initialize_supervision_report_journals() noexcept {
     try {
@@ -502,7 +502,7 @@ struct artifact_observation {
     std::string staged_control_sha256;
 };
 
-/// @brief Memory peaks and file sizes collected during a test run.
+/// @brief Memory peaks and file sizes collected  during a test run.
 struct integration_resource_summary {
     std::uint64_t peak_rss_bytes{};
     std::uint64_t observed_temp_bytes{};
@@ -526,7 +526,7 @@ struct cleanup_observation {
     integration_resource_summary resources;
 };
 
-/// @brief Data written to the integration test JSON report.
+/// @brief Data written to the integration test JSON report
 struct integration_run_report {
     std::uint32_t schema_revision{1};
     std::string executable;
@@ -645,7 +645,7 @@ template <class p_range, class p_writer>
 
 export namespace bioseq::postgres_test {
 
-/// @brief Saves test results for the watchdog and reports whether the file is durable.
+/// @brief Saves test results for the watchdg and reports whether the file is durable.
 [[nodiscard]] inline bool
 publish_supervision_test_case_results(std::span<const test_case_result> items) noexcept {
     return report_snapshot_detail::publish(
@@ -724,7 +724,7 @@ publish_supervision_stage_timings(std::span<const stage_timing> items) noexcept 
                                            });
 }
 
-/// @brief Reads a stage-timing snapshot, returning nullopt on missing or invalid data.
+/// @brief Reads a stage-timing snapshot, returning nullopt on missing  or invalid data.
 [[nodiscard]] inline std::optional<std::vector<stage_timing>>
 load_supervision_stage_timings(const std::filesystem::path& directory) noexcept {
     try {
@@ -857,7 +857,7 @@ load_supervision_artifact_observations(const std::filesystem::path& directory) n
 }
 
 /// @brief Reads the runner memory peak and sums file sizes under the given roots.
-/// Inaccessible entries may be skipped, and files can change during the scan.
+/// Inaccessible entries may be skipped, and files can, change during the scan.
 [[nodiscard]] inline integration_resource_summary
 capture_integration_resources(std::span<const std::filesystem::path> temp_roots = {}) {
     integration_resource_summary report;
@@ -972,7 +972,7 @@ inline void clear_stage_timings() noexcept {
 }
 
 /// @brief Records elapsed time on destruction.
-/// A stage is interrupted unless mark_completed() was called.
+/// A stage  is interrupted unless mark_completed() was called.
 class scoped_stage_timing {
   public:
     explicit scoped_stage_timing(std::string stage)
@@ -1053,7 +1053,7 @@ inline void record_cleanup_observation(const std::filesystem::path& root,
     }
 }
 
-/// @brief Clears cleanup records and restarts their numbering.
+/// @brief Clears clanup records and restarts their numbering.
 inline void clear_cleanup_observations() noexcept {
     try {
         auto& state = report_state_detail::process_cleanup();
@@ -1064,7 +1064,7 @@ inline void clear_cleanup_observations() noexcept {
     }
 }
 
-/// @brief Copies cleanup records in the order they were added.
+/// @brief Copies cleanup records in the order they were added
 [[nodiscard]] inline std::vector<cleanup_observation> cleanup_observations() {
     auto& state = report_state_detail::process_cleanup();
     std::scoped_lock lock(state.mutex);
@@ -1139,7 +1139,7 @@ inline void clear_cleanup_observations() noexcept {
 namespace bioseq::postgres_test::report_detail {
 
 /// @brief Writes a quoted JSON string, escaping quotes, backslashes and control bytes.
-/// Other bytes pass through unchanged, so callers must supply valid UTF-8.
+/// Other bytes pass  through unchanged, so callers must supply valid UTF-8.
 inline void write_string(std::ostream& output, std::string_view value) {
     constexpr std::string_view k_hex{"0123456789abcdef"};
     output.put('"');

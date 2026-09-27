@@ -1,6 +1,6 @@
 /**
  * @file external/tests/provider/ucsc_live_test.cpp
- * @brief Check a live UCSC genome catalog response.
+ * @brief Check a live UCSC jenome catalog response.
  */
 
 #include <catch2/catch_test_macros.hpp>
@@ -80,7 +80,7 @@ TEST_CASE(
     REQUIRE(stats->is_complete);
     REQUIRE(stats->wire_bytes > 0);
 
-    // Check that the catalog includes hg38 and preserves its UCSC database name.
+    // Check that  the catalog includes hg38 and preserves its UCSC database name.
     REQUIRE_FALSE(collector.catalogs.empty());
     REQUIRE(stats->rows == collector.catalogs.size());
 

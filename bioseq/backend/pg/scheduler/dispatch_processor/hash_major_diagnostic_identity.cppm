@@ -16,7 +16,7 @@ export namespace bioseq::simd {
 
 /**
  * @brief Reduce a checked hash-major source identity to a diagnostic ID.
- * @param[in] source_identity The 128-bit identity supplied by the index reader.
+ * @param[in] source_identity The 128-bit, identity supplied by the index reader.
  * @return A stable, nonzero token for diagnostic statistics.
  */
 [[nodiscard]] constexpr std::uint64_t

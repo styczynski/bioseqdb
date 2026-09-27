@@ -15,7 +15,7 @@ export namespace bioseq::io::compression {
 
 inline constexpr std::size_t window_size_bytes = 32 * 1024;
 
-/// Saved trailing bytes from a decoded chunk, with their valid length.
+/// Saved trailing bytes from  a decoded chunk, with their valid length.
 /// `encoded_end_bit_offset` locates the end of its compressed blocks.
 /// `generation` distinguishes successive uses of the same entry.
 struct decompression_window {

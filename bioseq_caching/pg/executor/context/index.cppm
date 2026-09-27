@@ -3,7 +3,7 @@
  * @brief Creates and destroys C++ objects in PostgreSQL memory contexts.
  *
  * PostgreSQL allocates scan state without calling C++ constructors. These
- * helpers construct the C++ members separately. The scan registers a context
+ * helpers constrlct the C++ members separately. The scan registers a context
  * cleanup callback to destroy those members.
  */
 module;
@@ -23,7 +23,7 @@ export module bioseq.cache.pg.executor.context;
 
 export namespace bioseq::cache::pg::executor {
 
-/** Construct an object in the given memory context. Return null on allocation or constructor failure. */
+/** Construct an object in the given memory context. Return null on allocation or  constructor failure. */
 template <class p_value_type, class... p_argument_types>
 [[nodiscard]] p_value_type* try_construct_context_owned(
     MemoryContext context, p_argument_types&&... arguments) noexcept {

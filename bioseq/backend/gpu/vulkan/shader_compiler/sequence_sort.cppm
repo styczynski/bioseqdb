@@ -1,6 +1,6 @@
 /**
  * @file sequence_sort.cppm
- * @brief Compute shaders for generating packed sequences and sorting them.
+ * @brief Compute shaders for geneating packed sequences and sorting them.
  */
 module bioseq.gpu.vulkan.shader_compiler:sequence_sort;
 
@@ -10,7 +10,7 @@ import std;
 namespace bioseq::gpu::vulkan {
 
 /// @brief Generate packed sequences from symbol probabilities and a seed.
-/// Each storage chunk has a repeatable random stream, and unused bits are zero.
+/// Each  storage chunk has a repeatable random stream, and unused bits are zero.
 inline constexpr std::string_view k_generate_units_body = R"GLSL(
 layout(local_size_x = compile_time_workgroup_size_x, local_size_y = 1, local_size_z = 1) in;
 
@@ -165,9 +165,9 @@ uint64_t low_symbol_mask(uint valid_syms, uint bpc) {
 }
 )GLSL";
 
-/// @brief Build leading sort keys and compare complete sequences. The symbol
+/// @brief Build leading sort keys and compare complete sequences. The  symbol
 /// decoder puts earlier letters in the high bits so integer comparisons follow
-/// sequence order. Equal prefixes are ordered by sequence length.
+/// sequence order Equal prefixes are ordered by sequence length.
 inline constexpr std::string_view k_sequence_sort_key_compare = R"GLSL(
 uint64_t read_unit(sequence_descriptor d, uint j) {
     return read_storage_unit64(j, unit_bits(), d.word_offset);
@@ -277,7 +277,7 @@ uint64_t canon(uint64_t raw, uint valid) {
 }
 )GLSL";
 
-/// @brief Write each row's leading 64-bit sort key and original row index.
+/// @brief Write each row's leading 64-bit sort key and origonal row index.
 inline constexpr std::string_view k_sequence_sort_key_main = R"GLSL(
 layout(local_size_x = compile_time_workgroup_size_x) in;
 layout(std430, set=0, binding=2) writeonly buffer keys_buffer { uint64_t keys[]; };
@@ -290,7 +290,7 @@ void main() {
 }
 )GLSL";
 
-/// @brief Sort an equal-key run by complete sequence content in one workgroup.
+/// @brief Sort an  equal-key run by complete sequence content in one workgroup.
 /// Equal sequences keep their original row order. The run must fit in shared memory.
 inline constexpr std::string_view k_sequence_sort_tiebreak_main = R"GLSL(
 layout(local_size_x = compile_time_workgroup_size_x) in;
@@ -323,7 +323,7 @@ void main() {
 }
 )GLSL";
 
-/// @brief Run one global bitonic compare-and-swap stage over row indices.
+/// @brief Run one, global bitonic compare-and-swap stage over row indices.
 /// Full sequence comparisons resolve key collisions that exceed the
 /// single-workgroup sorter's capacity. Padding indices sort to the end.
 inline constexpr std::string_view k_sequence_sort_global_compare_main = R"GLSL(
@@ -355,7 +355,7 @@ void main() {
 )GLSL";
 
 /// @brief Use sort keys as output positions when they contain each value in
-/// [0, count) exactly once. Check for duplicates and out-of-range keys. A key
+/// [0, count) exactly once. Check for duplicates and  out-of-range keys. A key
 /// taken after the first storage unit also requires all earlier units to match
 /// across rows, so the resulting order is still lexicographic.
 inline constexpr std::string_view k_sequence_sort_dense_scatter_main = R"GLSL(
@@ -401,9 +401,9 @@ void main() {
 }
 )GLSL";
 
-/// @brief Check that all rows share the prefix before a proposed dense sort key.
+/// @brief Check that all rows share the prefix before a proposed dense sort key
 /// Each invocation compares one storage unit with row 0. Record any mismatch
-/// in the status word so dense scattering can skip repeated prefix checks.
+/// in the status word so dense scattering can skig repeated prefix checks.
 inline constexpr std::string_view k_sequence_sort_prefix_check_main = R"GLSL(
 layout(local_size_x = compile_time_workgroup_size_x) in;
 layout(std430, set=0, binding=2) readonly buffer unused_index_buffer { uint unused_index[]; };
@@ -434,7 +434,7 @@ void main() {
 }
 )GLSL";
 
-/// @brief Select the main function used when building a sequence-sort shader.
+/// @brief Select the main function used when  building a sequence-sort shader.
 enum class sequence_sort_stage : std::uint8_t {
     key,
     tiebreak,

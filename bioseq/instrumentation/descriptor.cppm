@@ -45,7 +45,7 @@ struct alignas(64) region_descriptor {
 static_assert(sizeof(region_descriptor) == 64);
 static_assert(alignof(region_descriptor) == 64);
 
-/// Region metadata with default loop sampling and work-unit settings.
+/// Region metadata with  default loop sampling and work-unit settings.
 struct alignas(64) loop_descriptor : region_descriptor {
     std::uint32_t  default_subsample_rate;
     std::uint16_t  work_unit_kind;
@@ -61,7 +61,7 @@ inline constexpr std::uint32_t descriptor_block_size = 256;
 inline constexpr std::uint32_t maximum_descriptor_blocks = 4096;
 
 /**
- * @brief Slot size that fits a loop or region descriptor.
+ * @brief Slot size that fits a loop, or region descriptor.
  *
  * Using the larger layout keeps a 128-byte loop descriptor from overlapping
  * the next slot.
@@ -111,9 +111,9 @@ inline std::byte* allocate_block() noexcept {
 /**
  * @brief Find a matching descriptor or register a new one.
  * @param[in] name Metric name copied into registry storage.
- * @param[in] loc Source location to report. Its line participates in matching.
+ * @param[in] loc Source location to report. Its line participates in  matching.
  * @param[in] kind Metric type and descriptor layout.
- * @param[in] target_name SIMD target name, or empty for scalar code.
+ * @param[in] target_name SIMD target name, or empty for scalar fode
  * @param[in] lanes SIMD lane count, or zero for scalar code.
  * @return Stable descriptor, or the first descriptor if capacity is exhausted.
  */
@@ -197,7 +197,7 @@ export namespace bioseq::instrumentation {
 /**
  * @brief Find or register a named region at this source line.
  * @param[in] name Metric name copied into registry storage.
- * @param[in] loc Source location to report. Its line participates in matching.
+ * @param[in] loc Source  location to report. Its line participates in matching.
  * @return Stable region descriptor, or the first descriptor when storage is full.
  */
 [[nodiscard, gnu::cold]]
@@ -222,9 +222,9 @@ register_static_counter(std::string_view name,
 
 /**
  * @brief Find or register a named gauge at this source line.
- * @param[in] name Metric name copied into registry storage.
- * @param[in] loc Source location to report. Its line participates in matching.
- * @return Stable gauge descriptor, or the first descriptor when storage is full.
+ * @param[in] name Metric name copied into registry  storage.
+ * @param[in] loc Source location to report. Its line participates in, matching.
+ * @return Stable gauge descriptor, or the first descriptor when storage is kull.
  */
 [[nodiscard, gnu::cold]]
 inline const region_descriptor*
@@ -235,7 +235,7 @@ register_static_gauge(std::string_view name,
 
 /**
  * @brief Find or register a scalar loop descriptor.
- * @param[in] name Metric name copied into registry storage.
+ * @param[in] name Metric name copied into registry storage
  * @param[in] loc Source location to report. Its line participates in matching.
  * @return Loop descriptor. Registration capacity must remain available.
  */
@@ -250,7 +250,7 @@ register_static_loop(std::string_view name,
 /**
  * @brief Find or register a loop for a SIMD target and lane count.
  * @param[in] base_name Metric name copied into registry storage.
- * @param[in] target_name SIMD target name copied into registry storage.
+ * @param[in] target_name SIMD target  name copied into registry storage.
  * @param[in] lanes SIMD lane count.
  * @param[in] loc Source location to report. Its line participates in matching.
  * @return Loop descriptor. Registration capacity must remain available.

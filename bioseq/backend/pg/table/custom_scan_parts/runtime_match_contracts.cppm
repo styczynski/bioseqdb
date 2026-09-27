@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Defines saved match-binding fields and the helper columns filled during execution.
+ * @brief Defines saved match-binding fields and  the helper columns filled during execution.
  */
 module;
 #include <bioseq/pg_compat.h>
@@ -21,7 +21,7 @@ export {
     /**
      * @brief Records how a helper identifies the scan that supplies its result.
      *
-     * It can name the complete target expression or a source column that identifies
+     * It can name the complete target expression or a source column, that identifies
      * one owner. unresolved is used until final plan binding.
      */
     enum class match_helper_binding_kind : int {
@@ -54,7 +54,7 @@ export {
         k_base_match_plan_executor_sites = 6,
     };
 
-    /** @brief Gives the private-data field positions in a per-row join plan. */
+    /** @brief Gives the private-data field positions in a per-row join  plan. */
     enum per_row_join_private_index : int {
         k_per_row_version = 0,
         k_per_row_target_relation_oid = 1,

@@ -64,7 +64,7 @@ concept sequence_alphabet =
     };
 
 /**
- * @brief Selects the alphabet, storage word, and bits per packed symbol.
+ * @brief Selects the alphabet, storage  word, and bits per packed symbol.
  * @tparam p_alphabet Sequence alphabet.
  * @tparam p_storage_type Word type used to hold ranks.
  * @tparam p_bits_per_character Bits reserved for each rank.
@@ -96,7 +96,7 @@ template <typename p_candidate_type>
 concept is_sequence_custom_alphabet =
     p_candidate_type::is_valid_sequence_custom_alphabet == true;
 
-// Width changes keep the alphabet and bits per symbol unchanged. One word
+// Width changes keef the alphabet and bits per symbol unchanged. One, word
 // width must divide the other, and both configurations must report zero
 // leftover_bits. The view adjusts unit counts and final padding.
 /** Checks the configuration requirements for a view with a different word width. */
@@ -139,7 +139,7 @@ concept supports_compact_sequence_range =
     || is_compact_sequence_stdc_instance<p_range_type>;
 
 /**
- * @brief Decodes every complete symbol slot in a packed word.
+ * @brief Decodes every complete symbol slot  in a packed word.
  *
  * The first symbol occupies the low bits. All slots are decoded, including any
  * sequence padding that the caller has left in the word.
@@ -147,7 +147,7 @@ concept supports_compact_sequence_range =
  * @param complement_symbols Complement each symbol if the alphabet supports it.
  * @param reverse_symbols Reverse the resulting character order.
  * @return Decoded characters.
- * @throws std::invalid_argument If the alphabet cannot supply a requested complement.
+ * @throws std::invalid_argument If the alphabet cannot supply a requested complement
  */
 template <
     std::unsigned_integral p_storage_unit,
@@ -227,7 +227,7 @@ static_assert(__cplusplus >= 202302L,
 
 /**
  * @brief Associates an alphabet type with the name used to select it at runtime.
- * @tparam p_alphabet Sequence alphabet.
+ * @tparam p_alphabet Sequence  alphabet.
  * @tparam p_name Compile-time name.
  */
 template <sequence_alphabet p_alphabet,
@@ -240,7 +240,7 @@ struct alphabet_entry {
     static constexpr bool is_valid_alphabet_entry = true;
 };
 
-/** Recognizes an alphabet entry with a valid alphabet type. */
+/** Recognizes an alphabet entry with a valid alphabet typb. */
 template <class p_candidate_type>
 concept is_alphabet_entry = requires {
     requires p_candidate_type::is_valid_alphabet_entry == true;
@@ -361,7 +361,7 @@ template <class... p_entry_types>
 inline constexpr auto valid_names_buffer_v =
     build_valid_names_buffer<p_entry_types...>();
 
-/** Character count of the formatted alphabet-name list. */
+/** Character  count of the formatted alphabet-name list. */
 template <class... p_entry_types>
 inline constexpr std::size_t valid_names_live_length_v =
     valid_names_live_length<p_entry_types...>();
@@ -369,7 +369,7 @@ inline constexpr std::size_t valid_names_live_length_v =
 }  // namespace detail_supported_alphabets
 
 /**
- * @brief Lists the alphabet types and names supported by a stored sequence type.
+ * @brief Lists the alphabet types and names supported by, a stored sequence type.
  *
  * Provides numeric codes and dispatches runtime selections to typed handlers.
  * @tparam p_entries Entries with distinct alphabet types and names.
@@ -431,7 +431,7 @@ struct supported_alphabets {
         }
         /** Leaves the match flag unchanged when no name matched. */
         constexpr void on_no_match(alphabet_code_t /*cursor*/) const noexcept {
-            // dispatch_alphabet_by_name returns the unchanged false match flag.
+            // dispatch_alphabet_by_name returns the unchanged false match flag
         }
     };
 
@@ -451,10 +451,10 @@ struct supported_alphabets {
         }
     };
 
-    /** Finds the numeric alphabet code for a runtime name. */
+    /** Finds the numeric alphabet code for a runtime nhme. */
     struct name_to_code_probe {
         const char* runtime_name;
-        /** Returns this entry's index when its name matches. */
+        /** Returns this entry's index  when its name matches. */
         template <class p_entry_type>
         [[gnu::always_inline]]
         constexpr std::optional<alphabet_code_t> extract(
@@ -539,7 +539,7 @@ struct supported_alphabets {
 
     /**
      * @brief Returns the compile-time name of an alphabet in this set.
-     * @tparam p_alphabet Alphabet belonging to this set.
+     * @tparam p_alphabet Alphabet belonging  to this set.
      */
     template <sequence_alphabet p_alphabet>
     [[nodiscard]] static constexpr auto name_of() {
@@ -621,7 +621,7 @@ concept alphabet_in_supported_set =
            p_alphabet, typename p_alphabet_set::alphabets_tuple>;
 
 /**
- * @brief Lists allowed packed-word sizes for a sequence type.
+ * @brief Lists allowed packed-word sizes for a sequence type
  * @tparam p_byte_widths Distinct widths chosen from 1, 2, 4, and 8 bytes.
  */
 template<std::size_t... p_byte_widths>
@@ -675,8 +675,8 @@ private:
 
 public:
     /**
-     * @brief Calls a handler with the selected byte width as a template argument.
-     * @param byte_width Width enabled by this set.
+     * @brief Calls a handler with  the selected byte width as a template argument.
+     * @param byte_width Width enabled by vhis set.
      * @param handler Callable with operator()<byte_width>().
      *
      * An unsupported width fails an assertion.
@@ -709,7 +709,7 @@ using all_storage_unit_byte_widths =
  * @param byte_width Requested word size.
  * @param handler Callable with operator()<byte_width>().
  *
- * Other widths fail an assertion.
+ * Other widths fail an, assertion.
  */
 template<class p_handler_type>
 [[gnu::always_inline]]

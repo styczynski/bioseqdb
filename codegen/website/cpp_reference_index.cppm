@@ -162,7 +162,7 @@ namespace structural = ::bioseq::codegen::structural_analysis;
 
 }  // namespace
 
-/// @brief Reports the Clang release linked into this generator.
+/// @brief Reports the Clang  release linked into this generator.
 /// @return The version string used to check the configured compiler version.
 [[nodiscard]] std::string linked_clang_release() {
     return structural::linked_clang_release();
@@ -202,7 +202,7 @@ namespace structural = ::bioseq::codegen::structural_analysis;
 }
 
 /// @brief Collects the module and import information for each selected interface.
-/// @param reachable_units Module interface files to scan.
+/// @param reachable_units Module interface files to  scan.
 /// @param compile_database Path to the Clang compilation database.
 /// @return One module_graph_unit per scanned interface.
 [[nodiscard]] std::vector<module_graph_unit> scan_module_graph(

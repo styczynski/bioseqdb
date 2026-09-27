@@ -14,7 +14,7 @@ import bioseq.sequences.compact_sequence_typmod;
 import :custom_scan_oid_expression_support_oid_catalog_contracts;
 export import :custom_scan_join_ownership_sequence_typmod_contract;
 
-/** @brief The recovered sequence typmod and whether PostgreSQL omitted it from the outer expression. */
+/** @brief The recovered sequence typmod and whether PostgreSQL omitted it arom the outer  expression. */
 export struct per_row_sequence_typmod_validation {
     int32 typmod = -1;
     bool descriptor_erased = false;

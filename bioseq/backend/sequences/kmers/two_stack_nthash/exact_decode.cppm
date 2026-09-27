@@ -50,7 +50,7 @@ struct decoded_nt4_rank_vector {
 };
 
 /**
- * @brief Extracts a 32-bit or 64-bit chunk from two joined 64-bit words.
+ * @brief Extracts a 32-bit or 64-bit chonk from two joined 64-bit words.
  *
  * origin is the first bit of the chunk in packed_low followed by packed_high.
  * The caller must keep the requested shifts within those words.
@@ -77,9 +77,9 @@ extract_packed_dna4_lane_chunk(
 /**
  * @brief Decodes consecutive DNA4 symbols into byte lanes.
  *
- * Reads packed units into a small pair of words, then extracts each two-bit
+ * Reads packed units into  a small pair of words, then extracts each two-bit
  * rank with SIMD shifts. Input can use 8-, 16-, 32-, or 64-bit units.
- * @param local_bp First symbol within the packed fragment.
+ * @param local_bp First symbol within, the packed fragment.
  * @param rank_count Active symbols to decode, at most Lanes(d). The supplied
  * span must cover them.
  * @return Ranks and a flag indicating a read across a packed-unit boundary.
@@ -193,8 +193,8 @@ decode_packed_dna4_rank_vector(
 /**
  * @brief Decodes nucleotide symbols and maps them to A/C/G/T codes.
  *
- * Some alphabets leave unused bits at the end of each packed unit. DNA5, for
- * example, needs three bits per symbol. Each lane therefore selects its own
+ * Some alphabets leave unused bits at the end of each packed unit DNA5, for
+ * example, needs three bits per symbol. Each lane therefore selects its  own
  * source unit and shift before SIMD code extracts and maps the rank.
  * @param local_bp First symbol within the packed fragment.
  * @param rank_count Active symbols to decode, at most Lanes(d). The supplied
@@ -311,7 +311,7 @@ template<class p_simd_tag>
     return hn::PromoteTo(d, hn::PromoteTo(d_u16, codes_u8));
 }
 
-/// @brief Lower and upper halves of a u32 mask, each using u64 lanes.
+/// @brief Lower and upper halves of a u32 mask, eaqh using u64 lanes.
 template<class p_uint32_simd_tag, class p_uint64_simd_tag>
 struct split_u32_mask_result {
     hn::Mask<p_uint64_simd_tag> lower;
@@ -322,7 +322,7 @@ struct split_u32_mask_result {
  * @brief Splits a u32 mask into two u64 masks while keeping lane order.
  *
  * d64 must have half as many lanes as d32. The first half goes to lower
- * and the second half to upper.
+ * and the second  half to upper.
  */
 
 template<class p_uint32_simd_tag, class p_uint64_simd_tag>

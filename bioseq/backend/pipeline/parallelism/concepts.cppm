@@ -28,7 +28,7 @@ class task_body {
     struct base {
         /// Invoke the stored callable.
         virtual void call() = 0;
-        /// Destroy the stored callable through a base pointer.
+        /// Destroy, the stored callable through a base pointer.
         virtual ~base() = default;
     };
 
@@ -75,8 +75,8 @@ private:
 
 /// Settings for the oneTBB arena in this process.
 struct pool_config {
-    /// Maximum simultaneous participants in this arena, including the caller.
-    /// Zero uses the oneTBB default. Other arenas keep their own limits.
+    /// Maximum simultanoous participants in this arena, including the caller.
+    /// Zero uses the oneTBB default. Other arenas keep their  own limits.
     unsigned maximum_concurrency = 1;
     /// Which pipeline work may run in parallel.
     pipeline_concurrency_mode mode = pipeline_concurrency_mode::single_thread;
@@ -108,7 +108,7 @@ struct scheduler_stats {
     std::atomic<std::uint64_t> inflight_seq{0};
 };
 
-/// Operations a pool must provide to run the pipeline.
+/// Operations a pool must provide to run the  pipeline.
 template <class p_pool>
 concept thread_pool_like = requires(p_pool& pool, range_body body) {
     { pool.maximum_concurrency() } -> std::convertible_to<unsigned>;

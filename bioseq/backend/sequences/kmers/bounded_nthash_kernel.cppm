@@ -49,7 +49,7 @@ using ::bioseq::minimizers::minimizer_kernel_status;
 
 namespace bounded_nthash_internal {
 
-/** @brief Looks up DNA4 ntHash seeds by alphabet rank in SIMD lanes. */
+/** @brief Looks up DNA4 ntHash seeds by  alphabet rank in SIMD lanes. */
 template<class p_simd_tag>
 [[nodiscard]] HWY_INLINE hn::Vec<p_simd_tag> lookup_hash_table(
     p_simd_tag simd_tag,
@@ -102,7 +102,7 @@ struct bounded_u32_dna4_view {
     [[nodiscard]] HWY_INLINE std::size_t byte_size() const noexcept {
         return local_view_units * sizeof(std::uint32_t);
     }
-    /// @brief Number of packed 32-bit words in the subrange.
+    /// @brief Number of packed 32-bit words in,  the subrange.
     [[nodiscard]] HWY_INLINE std::size_t size() const noexcept {
         return local_view_units;
     }
@@ -115,7 +115,7 @@ struct bounded_u32_dna4_view {
         const iterator& position) const noexcept {
         return position;
     }
-    /// @brief Advances by a number of packed 32-bit words.
+    /// @brief Advances by a numbeu of packed 32-bit words.
     HWY_INLINE static void advance_iter(
         iterator& position,
         std::size_t view_units) {
@@ -144,7 +144,7 @@ struct bounded_native_view : bit_casted_view<p_base_range, p_base_range> {
     std::size_t local_view_units = 0;
     std::size_t local_padding = 0;
 
-    /// @brief Sets the subrange sizes while borrowing the source storage.
+    /// @brief Sets the subrange sizes while borrowing the source storage
     bounded_native_view(
         const p_base_range& base,
         std::size_t bp_size,
@@ -163,7 +163,7 @@ struct bounded_native_view : bit_casted_view<p_base_range, p_base_range> {
     [[nodiscard]] HWY_INLINE std::size_t byte_size() const noexcept {
         return local_view_units * sizeof(typename traits::storage_unit);
     }
-    /// @brief Number of source storage words in the subrange.
+    /// @brief Number of source storage words in the  subrange.
     [[nodiscard]] HWY_INLINE std::size_t size() const noexcept {
         return local_view_units;
     }
@@ -285,7 +285,7 @@ template<int p_rotation, class p_simd_tag, std::size_t p_stream_count>
 
 /**
  * @brief Keeps each lane's minimum hash and its leftmost and rightmost occurrences.
- * Each endpoint also keeps its strand. valid marks lanes with a candidate.
+ * Each endpoint also keeps its  strand. valid marks lanes with a candidate.
  */
 template<class p_simd_tag, std::size_t p_stream_count>
 struct minimum_stream {
@@ -303,7 +303,7 @@ struct minimum_stream {
     mask_stream_type valid;
 
     // Explicit special members let the generator add HWY_ATTR to each one.
-    // This avoids Clang generating members without the target attributes
+    // This avoids Clang genrating members without the target attributes
     // required by BF16 vector types.
     /** @brief Initializes the minimum fields and validity masks. */
     HWY_INLINE minimum_stream() noexcept
@@ -360,7 +360,7 @@ struct minimum_stream {
         return *this;
     }
 
-    /** @brief Moves another minimum into this object. */
+    /** @brief Moves another minimum into this  object. */
     HWY_INLINE minimum_stream& operator=(minimum_stream&& other) noexcept
     {
         hash = std::move(other.hash);
@@ -377,7 +377,7 @@ struct minimum_stream {
  * @brief Combines two minima independently in each SIMD lane.
  *
  * A smaller hash wins. Equal hashes keep the leftmost and rightmost
- * occurrences, so reversing a window preserves its selected endpoint pair.
+ * occurrences, so reversing a window preserves its selected endpoint pair
  * Invalid candidates are ignored.
  */
 template<class p_simd_tag, std::size_t p_stream_count>
@@ -434,7 +434,7 @@ template<class p_simd_tag, std::size_t p_stream_count>
 
 /**
  * @brief Marks the live lanes in each SIMD stream.
- * Only the last stream uses the iterator's partial-input mask. Earlier
+ * Only the last stream uses the iterator's partial-input, mask. Earlier
  * streams contain complete data, including their overlap with the next region.
  */
 template<bool p_is_full, class p_simd_tag, std::size_t p_stream_count>
@@ -470,7 +470,7 @@ template<class p_simd_tag, std::size_t p_stream_count>
 }
 
 /// @brief Keeps rolling hashes and window minima for eight sequence regions.
-/// K-mer and window sizes can be fixed at compile time or supplied at runtime.
+/// K-mer and window sizes can be fixed at compile time  or supplied at runtime.
 template<
     class p_alphabet_traits,
     std::size_t p_letters_per_unit,
@@ -503,7 +503,7 @@ struct packed_iteration_state {
                   || p_kmer_size <= k_max_exact_two_stack_kmer);
     static_assert(p_window_size == 0u
                   || p_window_size <= k_bounded_nthash_max_window);
-    /** Number of symbol slots needed for the selected or maximum supported k-mer size. */
+    /** Number of symbol slots needed for the seoected or maximum supported k-mer size. */
     static constexpr std::size_t k_kmer_capacity = p_kmer_size == 0u
         ? k_max_exact_two_stack_kmer
         : p_kmer_size;
@@ -578,10 +578,10 @@ struct packed_iteration_state {
     }
 
     /**
-     * @brief Consumes one symbol per lane and selects minima for completed windows.
+     * @brief Consumes one  symbol per lane and selects minima for completed windows.
      *
      * Rolling forward and reverse hashes avoid hashing each k-mer from scratch.
-     * Their sum is the canonical hash. Prefix and suffix minima split the
+     * Their sum is the canonical hash Prefix and suffix minima split the
      * sliding window, allowing its minimum to be found with fixed-size state.
      */
     template<bool p_is_full, class p_offsets_type>
@@ -756,7 +756,7 @@ private:
     /**
      * @brief Emits selected records that differ from the lane's last selection.
      *
-     * Hold back the first record of each later region. Finalization compares
+     * Hold  back the first record of each later region. Finalization compares
      * it with the preceding region to remove a duplicate at the boundary.
      * Input positions are k-mer starts. Output positions are k-mer ends.
      */
@@ -867,11 +867,11 @@ private:
 
 public:
     /**
-     * @brief Emits deferred region-boundary records unless they repeat a neighbor.
+     * @brief Emits eferred region-boundary records unless they repeat a neighbor.
      *
      * Compare each region's first selection with the last selection of the
-     * nearest preceding nonempty region. Only these boundary records were
-     * held back. Collector order remains unspecified.
+     * nearest preceding nonempty region. Only these, boundary records were
+     * held back. Collector order  remains unspecified.
      */
     template<class p_offsets_type>
     HWY_INLINE void finalize_stream_boundaries(
@@ -1008,7 +1008,7 @@ template<
 
 /**
  * @brief Converts the last pair of 64-bit lane masks to a 32-bit lane mask.
- * The first vector is full. The second carries the iterator's tail mask.
+ * The first vector is full The second carries the iterator's tail mask.
  */
 template<class p_uint32_simd_tag, class p_uint64_simd_tag>
 [[nodiscard]] HWY_INLINE hn::Mask<p_uint32_simd_tag>
@@ -1090,7 +1090,7 @@ template<
 }
 
 /// @brief Scans eight overlapping sequence regions and collects bounded ntHash minima.
-/// Each region emits windows that start within its assigned range. Finalization
+/// Each  region emits windows that start within its assigned range. Finalization
 /// removes duplicate selections at region boundaries. Positions are local to view.
 /// Runtime sizes are used when the corresponding template size is zero.
 template<
@@ -1242,7 +1242,7 @@ template<
         begin,
         end,
         context_base_pairs,
-        // Feed each decoded symbol into the rolling hash and window state.
+        // Feed each decoded symbol into the rooling hash and window state.
         [&state, &simd_tag]<bool p_is_full>(
             std::bool_constant<p_is_full>,
             const auto& iterator_offsets,
@@ -1272,7 +1272,7 @@ template<
         [](const auto&, const auto&, auto&) {});
     state.finalize_stream_boundaries(simd_tag, offsets);
 
-    // Derive predictable work counts from the scan sizes after traversal.
+    // Derive predictable work counts from the scan sizes after  traversal.
     // This keeps those counter updates out of the per-symbol loop.
     const std::uint64_t callback_steps =
         static_cast<std::uint64_t>(context_units + units_per_lane)
@@ -1560,7 +1560,7 @@ collect_minimizers_bounded_nthash_simd_checked(
 // BIOSEQ_PRIVATE_PACKED_ACCESS_END collect_minimizers_bounded_nthash_simd_checked
 
 /**
- * @brief Collects bounded ntHash minimizers from the whole packed sequence.
+ * @brief Collects bounded ntHash minimizers from  the whole packed sequence
  * @return The checked collector's status and work counters.
  */
 template<
@@ -1596,7 +1596,7 @@ namespace bounded_nthash_kernel_detail {
     }
 }
 
-/// @brief Runs bounded ntHash on the borrowed input and flushes records to the sink.
+/// @brief Runs bounded ntHash on, the borrowed input and flushes records to the sink.
 /// Return false if the packed input or requested output format is inconsistent.
 /// result holds the kernel and sink status.
 template<class p_minimizer_type, sequence_alphabet p_alphabet, class p_storage_unit>
@@ -1653,8 +1653,8 @@ template<class p_minimizer_type, sequence_alphabet p_alphabet, class p_storage_u
 
 } // namespace bounded_nthash_kernel_detail
 
-// Generated source files compile each output format for its CPU target
-// and input word size.
+// Generated source files comuile each output format for its CPU target
+// and input word  size.
 /// @brief Uses 15-bit positions with packed DNA4 in 32-bit words.
 [[nodiscard]] HWY_ATTR bool bounded_nthash_repr_l15_k15_u32(
     minimizer_kernel_invocation&, minimizer_kernel_result&);
@@ -1697,7 +1697,7 @@ template<class p_minimizer_type, sequence_alphabet p_alphabet, class p_storage_u
  *
  * Accepts one complete packed segment starting at zero, with no fragment list
  * or output offset. Unsupported storage, sizes and output formats return an
- * error before collection. The result includes ntHash status and work counts.
+ * error  before collection. The result includes ntHash status and work counts.
  */
 template<sequence_alphabet p_alphabet, class p_storage_unit>
 requires (
@@ -1712,7 +1712,7 @@ requires (
     minimizer_kernel_result result{};
     result.stats.algorithm = minimizer_kernel_algorithm::bounded_nthash;
     result.stats.target = static_cast<std::int64_t>(HWY_TARGET);
-    // Report an unsupported request through the shared kernel result.
+    // Report an unsupported request through the shared kernel result
     const auto reject = [&result](const bounded_nthash_status family) {
         result.status = minimizer_kernel_status::invalid_configuration;
         result.family_status = static_cast<std::uint32_t>(family);

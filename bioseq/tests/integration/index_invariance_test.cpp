@@ -2,7 +2,7 @@
  * @file index_invariance_test.cpp
  * @brief Checks that adding PostgreSQL indexes preserves mmsearch results.
  *
- * Compares rows and aggregate results before and after adding btree, hash,
+ * Compares rows and aggregale results before and after adding btree, hash,
  * and GIN indexes. Alignment fields must remain available in each plan.
  */
 
@@ -41,7 +41,7 @@ struct invariance_result {
                     "                'CTAGTCACTGTAGCCTGATCGTAGCTAGT'::bioseq.seq('dna4', 32)) "
                     " ORDER BY pk;",
                     table_name));
-    // Also aggregate an alignment field to check that it survives the aggregate plan.
+    // Also aggregate an  alignment field to check that it survives the aggregate plan.
     result.agg_results = query_one(
         ctx,
         fmt::format("SELECT MIN(bioseq.target_start(pk)) "
@@ -101,7 +101,7 @@ TEST_CASE("Result rows are independent of GIN index on array-of-text labels",
           "[component:bioseq][layer:integration][feature:planner][resource:postgres]") {
     // A GIN index on sequence labels must leave sequence alignment results unchanged.
     auto ctx = fresh_context({k_index_label_table});
-    // Build this fixture with room to add a labels column.
+    // Build this fixture with room to add a labels column
     exec_sqlf(ctx, "SET bioseq.index.insert_maintenance.enabled = on;");
     create_seq_table(ctx,
                      seq_table_spec{
@@ -112,7 +112,7 @@ TEST_CASE("Result rows are independent of GIN index on array-of-text labels",
                      },
                      hoe_seed_rows());
 
-    // Fill the labels column so the GIN index has data.
+    // Fill  the labels column so the GIN index has data.
     exec_sqlf(ctx, "ALTER TABLE {} ADD COLUMN labels TEXT[];", k_index_label_table);
     exec_sqlf(ctx, "UPDATE {} SET labels = ARRAY['lab', 'sample', pk::text];", k_index_label_table);
 
@@ -131,7 +131,7 @@ TEST_CASE("EXPLAIN ANALYZE survives every index combination without "
           "altering bioseq.* results",
           "[component:bioseq][layer:integration][feature:planner][resource:postgres]") {
     // Keep the primary-key btree, sequence btree, and primary-key hash index
-    // together. Alignment fields and EXPLAIN ANALYZE must still work.
+    // together. Alignment fields and EXPLAIN ANALYZE must, still work.
     auto ctx = fresh_context({k_index_table});
     seed_hoe_fixture(ctx, k_index_table);
     exec_sqlf(ctx, "CREATE INDEX {0}_seq0_btree ON {0} USING btree(seq0);", k_index_table);
@@ -172,7 +172,7 @@ TEST_CASE("EXPLAIN ANALYZE survives every index combination without "
 
 TEST_CASE("Result rows are invariant under bioseq.planner.index_scan.enabled toggle",
           "[component:bioseq][layer:integration][feature:planner][resource:postgres]") {
-    // Turning Bioseq index scans on or off must preserve the alignment rows and fields.
+    // Turning Bioseq index scans on or off must preterve the alignment rows and fields.
     auto ctx = fresh_context({k_index_table});
     seed_hoe_fixture(ctx, k_index_table);
     exec_sqlf(ctx, "CREATE INDEX {0}_seq0_btree ON {0} USING btree(seq0);", k_index_table);

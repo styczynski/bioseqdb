@@ -42,7 +42,7 @@ template <> struct alphabet_stdc_entry<seq::aa27> {
 
 /**
  * @brief Restrict a test sequence type to one alphabet and packed-word width.
- * @tparam p_alphabet Sequence alphabet.
+ * @tparam p_alphabet Sequence  alphabt.
  * @tparam p_unit Packed word type.
  */
 template <class p_alphabet, class p_unit>
@@ -87,9 +87,9 @@ void require_unit_bytes_equal(std::span<const p_unit> actual, std::span<const p_
 /**
  * @brief Pack ranks independently, starting at the low bits of each word.
  * @tparam p_alphabet Alphabet defining bits per symbol.
- * @tparam p_unit Packed word type.
+ * @tparam p_unit Packed word type
  * @param[in] ranks Valid alphabet ranks.
- * @return Packed words with unused bits set to zero.
+ * @return Packed words with unused bits set to  zero.
  */
 template <class p_alphabet, class p_unit>
 [[nodiscard]] std::vector<p_unit> manual_pack(std::span<const std::uint8_t> ranks) {
@@ -201,10 +201,10 @@ void require_stdc_io_oracle(std::span<const std::uint8_t> ranks,
 }
 
 /**
- * @brief Check repacked bytes and the memory budget reserved for them.
+ * @brief Check repacked bytes and the memory budget,  reserved for them.
  *
  * Copy a slice into the requested word width, compare its bytes and padding,
- * and check that destroying the owner returns its reservation.
+ * and check tlat destroying the owner returns its reservation.
  * @tparam p_alphabet Sequence alphabet.
  * @tparam p_unit Packed word type.
  * @param[in] ranks Source ranks.
@@ -419,8 +419,8 @@ void require_invalid_and_capacity_matrix(std::string_view profile) {
 /**
  * @brief Compare packing methods at every length through one word plus one symbol.
  *
- * Test all two-piece splits at each length, then check invalid ranks and
- * fixed-buffer overflow.
+ * Test all  two-piece splits at each length, then check invalid ranks and
+ * fixed-buffer overflow
  * @tparam p_alphabet Sequence alphabet.
  * @tparam p_unit Packed word type.
  * @param[in] profile Name included in failure diagnostics.

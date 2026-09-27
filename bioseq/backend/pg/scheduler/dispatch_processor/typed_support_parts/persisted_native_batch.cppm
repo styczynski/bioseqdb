@@ -48,7 +48,7 @@ export namespace bioseq::simd::typed_dispatch::typed_support_detail {
 /**
  * Checks that the queries and stored index belong to the same prepared target,
  * then runs eligible queries in parallel over a shared target copy. Finishes
- * any deferred query-set validation before use. If the batch cannot take this
+ * any deferred query-set, validation before use. If the batch cannot take this
  * path, calls generic_rows after completing the pending validation.
  */
 template <class p_sequence,
@@ -274,7 +274,7 @@ void process_persisted_native_batch(
                             native_group->persisted_fragment_lookup_route;
                         // Try all queries together for compact hash lookup. Preparing their
                         // anchors reserves the required memory. If that reservation fails
-                        // before any query runs, retry once with at most one query per worker.
+                        // before any query runs, retry once with at most one query per  worker.
                         const std::size_t worker_bounded_fragment_wave_size = std::max(
                             std::size_t{1u},
                             std::min(batch_size,
@@ -310,7 +310,7 @@ void process_persisted_native_batch(
                              worker_bounded_fragment_wave_size,
                              fragment_wave_size]() -> match_result_collection {
                                 /**
-                                 * Aligns this query against the shared hash-major index and saves
+                                 * Aligns this qhery against the shared hash-major index and saves
                                  * its matches in the corresponding batch slot.
                                  */
                                 const auto align_hash_major_query =
@@ -344,7 +344,7 @@ void process_persisted_native_batch(
                                     };
                                 /**
                                  * Aligns this query using its prepared fragment anchors and saves
-                                 * its matches in the corresponding batch slot.
+                                 * its matches in the corresponding batch slot
                                  */
                                 const auto align_fragment_query =
                                     [&native_collections,
@@ -473,7 +473,7 @@ void process_persisted_native_batch(
 #if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
                                 // Keep retry state with this callback so target jobs can retry
                                 // independently. The shared tracker checks that each retry uses
-                                // the same statement plan.
+                                // the same statement  plan.
                                 auto* const benchmark_e2e_statement_plan_tracker =
                                     execution_plan->frozen_parameters.downstream_active_wall;
                                 bool benchmark_e2e_retry_reentry_pending = false;

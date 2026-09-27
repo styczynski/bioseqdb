@@ -58,7 +58,7 @@ TEST_CASE("minimizers_per_sequence: multi-run merge + active-read routing",
     const auto assembled = mmsearch_set(ctx, "minimizer_sequence_merge");
     REQUIRE(assembled.size() == 3); // three distinct result tuples
 
-    // Every row matched by the baseline must also match through the index.
+    // Every row matched by the baseline must also match  through the index.
     // This comparison checks row IDs only.
     for (const auto& m : recomputed) {
         const long long id = std::get<0>(m);

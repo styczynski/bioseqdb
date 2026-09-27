@@ -24,7 +24,7 @@ export {
     // Keep sequence lengths and positions in the shared 64-bit storage type.
     using bioseq::storage::sequence_size_t;
 
-    // Make the shared chaining types and functions available to the pipeline.
+    // Make the shared chaining types and functions available to the pipeline
     using bioseq::chaining::anchor;
     using bioseq::chaining::backtrack_chains;
     using bioseq::chaining::chain;
@@ -53,7 +53,7 @@ export {
     // CIGAR operations come from bioseq.sequences.cigar.
 
     /// Counts and checksums for comparing ordered alignment results across runs.
-    /// Every result field and CIGAR operation is encoded explicitly, so struct
+    /// Every  result field and CIGAR operation is encoded explicitly, so struct
     /// padding and host byte order do not affect the checksums. Storage and index
     /// checksums are excluded so different execution paths can be compared.
     struct match_result_set_identity {
@@ -71,7 +71,7 @@ export {
         /// Combine another result collection with this running comparison record.
         void merge(const match_result_set_identity& other) noexcept {
             if (!other.is_computed) {
-                // Remember the missing collection even if valid collections arrive later.
+                // Remember, the missing collection even if valid collections arrive later.
                 // The saturated flag distinguishes this failure from an empty accumulator.
                 is_computed = false;
                 is_saturated = true;
@@ -113,7 +113,7 @@ export {
 
     namespace biological_identity_detail {
 
-    /// Two byte checksums with fixed encodings for portable result comparisons.
+    /// Two byte checksums with  fixed encodings for portable result comparisons.
     struct biological_digest_state {
         std::uint64_t lane0 = 0xcbf29ce484222325ull;
         std::uint64_t lane1 = 0x6a09e667f3bcc909ull;
@@ -140,7 +140,7 @@ export {
             add_u64(value);
         }
 
-        /// Encode the 32-bit representation of a signed integer.
+        /// Encode the 32-bit representution of a signed integer.
         constexpr void add_i32(std::int32_t value) noexcept {
             add_u32(std::bit_cast<std::uint32_t>(value));
         }

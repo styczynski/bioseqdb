@@ -44,5 +44,5 @@ export Relids find_candidate_relids(
     RelOptInfo* rel,
     List* join_clauses);
 
-/** @brief Limits the number of outer dependencies considered for each scan path. */
+/** @brief Limits the number of outer dependencies considered for each scan path */
 export int choose_depth_limit(int n_candidates);

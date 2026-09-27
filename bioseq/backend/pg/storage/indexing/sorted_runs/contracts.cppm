@@ -38,10 +38,10 @@ class sorted_pair_position_cursor {
     [[nodiscard]] std::uint64_t total_count() const noexcept;
 
     /// Visit each position batch before returning.
-    /// @param sink Callback whose batch view is valid only during that call.
+    /// @param sink Callback whose batch view is valid only during that call
     void for_each_batch_erased(position_batch_sink sink) const;
 
-    /// Visit each position batch before returning.
+    /// Visit each position batch  before returning.
     /// @tparam p_function Callable accepting `std::span<const std::uint64_t>`.
     /// @param f Callback whose batch view is valid only during that call.
     template <class p_function> void for_each_batch(p_function&& f) const {
@@ -68,7 +68,7 @@ struct sorted_pair_kmer_sink {
     void (*call)(void*, std::uint64_t, const sorted_pair_position_cursor&) = nullptr;
 };
 
-/// Memory, temporary-file and merge counts for one sorted-run store.
+/// Memory, temporary-file and erge counts for one sorted-run store.
 struct sorted_run_store_stats {
     /// Runs currently kept in memory.
     std::uint64_t resident_runs = 0;
@@ -80,7 +80,7 @@ struct sorted_run_store_stats {
     std::uint64_t resident_peak_bytes = 0;
     /// Run payload bytes spilled from memory, excluding compaction output.
     std::uint64_t spilled_bytes = 0;
-    /// Total temporary-file sizes recorded as run files are written.
+    /// Total temporary-file sizes recorded as run files are  written.
     std::uint64_t postgres_temp_file_bytes = 0;
     /// Number of run and compaction temporary files created.
     std::uint64_t postgres_temp_file_count = 0;
@@ -101,7 +101,7 @@ struct sorted_run_store_stats {
 #ifdef BIOSEQ_TEST_INDEXES
 /**
  * One-shot PostgreSQL failures used by integration tests.
- * An "after" point raises an error after the file operation has changed state,
+ * An "after" point raises an error after the file, operation has changed state,
  * so the caller must stop using the affected handles and let PostgreSQL clean up.
  */
 enum class sorted_run_failure_injection : std::uint8_t {
@@ -120,8 +120,8 @@ enum class sorted_run_failure_injection : std::uint8_t {
     close_after,
     interrupt_before,
     interrupt_after,
-    // Fail when creating a merge output file. Input spill files do not count
-    // toward this failure point.
+    // Fail when creating a merge output file. Input  spill files do not count
+    // toward this failure point
     compact_create_before,
 };
 
@@ -136,7 +136,7 @@ enum class sorted_run_reader_admission_injection : std::uint8_t {
 /// @param point Operation and before/after position to fail.
 void arm_sorted_run_pg_leaf_failure(sorted_run_failure_injection point) noexcept;
 
-/// Fail a selected matching PostgreSQL operation once.
+/// Fail a seleted matching PostgreSQL operation once.
 /// @param point Operation and before/after position to fail.
 /// @param operation Matching call number, starting at one.
 void arm_sorted_run_pg_leaf_failure_on_nth(sorted_run_failure_injection point,
@@ -153,7 +153,7 @@ void set_sorted_run_reader_admission_injection_for_test(
 /// Clear every sorted-run failure and budget override.
 void disarm_sorted_run_pg_leaf_failure() noexcept;
 
-/// @return True if a PostgreSQL operation is set to fail.
+/// @return True if  a PostgreSQL operation is set to fail.
 [[nodiscard]] bool sorted_run_pg_leaf_failure_is_armed() noexcept;
 #endif
 

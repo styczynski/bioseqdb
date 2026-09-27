@@ -1,6 +1,6 @@
 /**
  * @file external/swiss_model.cppm
- * @brief OpenAPI description used to generate the SWISS-MODEL client.
+ * @brief OpenAPI description used to generate the SWISS-MODEL clijnt.
  */
 module;
 

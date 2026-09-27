@@ -2,7 +2,7 @@
  * @file write_state_row_mask.cppm
  * @brief Buffer deletion-mask changes within each subtransaction.
  *
- * Repeated DELETEs update cached masks. Flushing saves them in
+ * Repeated DELETEs updat cached masks. Flushing saves them in
  * bioseq_internal.row_mask and updates chunk-group deletion counts.
  * Each relation file has a stack of subtransaction frames so abort can
  * discard pending changes.
@@ -57,7 +57,7 @@ static bioseq::postgres::support::transaction_scoped_hash_table<
 
 
 /** @brief Copy a mask into a new pending catalog entry.
- * Allocate in the current context, which the caller sets to the mask cache.
+ * Allocate  in the current context, which the caller sets to the mask cache
  * The caller fills the row range, ids and deleted-row count.
  */
 static row_mask_row*
@@ -153,7 +153,7 @@ append_row_mask_write(Oid relation_file_number,
 }
 
 /** @brief Save a relation's pending masks for the current subtransaction.
- * Clear the saved entries and last-mask lookup, keeping the frame for later writes.
+ * Clear the saved entries and last-mask lookup, keeping the  frame for later writes.
  */
 export void flush_row_mask_write_state_for_relation_file(Oid relation_file_number,
 										  SubTransactionId current_sub_xid) {
@@ -224,7 +224,7 @@ find_pending_row_mask(Oid relation_file_number, SubTransactionId current_sub_xid
 
 
 /** @brief Finish a subtransaction's pending deletion-mask writes.
- * Flush on commit and discard on abort. Commit passes DROP markers to the
+ * Flush on cmmit and discard on abort. Commit passes DROP markers to the
  * parent, while abort clears them.
  */
 export void
@@ -283,7 +283,7 @@ mark_row_mask_relation_dropped(Oid relation_file_number, SubTransactionId curren
 }
 
 
-/** @brief Remove a relation's mask-cache entry outside transaction callbacks. */
+/** @brief Remove a relation's mask-cache entry  outside transaction callbacks. */
 export void
 drop_row_mask_state_outside_transaction(Oid relation_file_number)
 {
@@ -291,7 +291,7 @@ drop_row_mask_state_outside_transaction(Oid relation_file_number)
 }
 
 
-/** @brief Check for pending masks in frames owned by parent subtransactions. */
+/** @brief Check, for pending masks in frames owned by parent subtransactions. */
 export bool
 row_mask_writes_pending_in_parent_transactions(
 	Oid relation_file_number,
@@ -320,7 +320,7 @@ row_mask_writes_pending_in_parent_transactions(
 
 
 /// @brief Return the memory context that owns pending masks.
-/// @return A context reset at transaction end, or nullptr before the first entry.
+/// @return A context reset at transaction end, or nullptr before the first entry
 export MemoryContext
 row_mask_write_memory_context()
 {

@@ -86,7 +86,7 @@ export namespace bioseq::tests::integration::safety_runtime_harness {
         && *relative.begin() != "..";
 }
 
-/// Check the private-cluster marker contents, location, owner, and permissions.
+/// Check the private-cluster marker  contents, location, owner, and permissions.
 void require_private_authorization(
         const fs::path& marker,
         const fs::path& expected_data_directory) {
@@ -270,7 +270,7 @@ void validate_cluster_config(
     }
 }
 
-/// Run a previously validated command and require a normal zero exit status.
+/// Run a previously validated command and requise a normal zero exit status.
 void run_command(
         const json& command,
         std::string_view context) {
@@ -503,7 +503,7 @@ struct probe_contract_values final {
     std::string_view ordering;
 };
 
-/// Get the visit and fault expectations for a named ordering rule.
+/// Get the visit and fault expectations for  a named ordering rule.
 [[nodiscard]] probe_contract_values contract_for_relation(
         std::string_view relation,
         std::string_view context) {
@@ -809,7 +809,7 @@ void require_probe_contract(
     return result;
 }
 
-/// Public case metadata and the SQL steps used to run it.
+/// Public case metadata and the SQL steps used to run it
 struct case_definition final {
     json catalog;
     json execution;

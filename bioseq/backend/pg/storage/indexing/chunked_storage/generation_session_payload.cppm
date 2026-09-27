@@ -25,9 +25,9 @@ export namespace bioseq::storage::indexing {
 /**
  * @brief Check and copy the requests for one payload section.
  *
- * Require sorted, disjoint groups whose requests match complete directory
+ * Require  sorted, disjoint groups whose requests match complete directory
  * extents. Position requests must follow completed reads of their control
- * extents. Reserve memory before storing the plan and its authorization list.
+ * extents. Reserve memory, efore storing the plan and its authorization list.
  *
  * @param[in] section Controls or positions.
  * @param[in] groups Requests copied into the session.
@@ -283,7 +283,7 @@ inline void index_storage_fragment_generation_read_session::plan_section_groups_
 
 /**
  * @brief Plan control reads after metadata and source checks.
- * @param[in] groups Sorted, disjoint requests copied into the session.
+ * @param[in] groups Sorted, disjoint requests copied  into the session.
  */
 inline void index_storage_fragment_generation_read_session::plan_control_groups(
     std::span<const minimizer_generation_payload_read_group> groups) {

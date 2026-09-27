@@ -2,9 +2,9 @@
  * @file edit_distance_threshold.cppm
  * @brief Check whether two sequences are within an edit-distance limit.
  *
- * Keep only the diagonal band that can contain an alignment within the limit.
- * Thresholds up to eight use stack storage. Larger thresholds allocate two
- * rows whose sizes grow with the threshold.
+ * Keep only the diagonal band that can contain an alignment  within the limit.
+ * Thresholds up to eight use stack storage. Larger thresholds allocate, two
+ * rows whose sizes grow with the threshold
  */
 module;
 
@@ -28,7 +28,7 @@ namespace bioseq::sequences::edit_distance_threshold_detail {
  * @brief Add one edit, keeping distances above the threshold at cap.
  * @tparam p_cell_type Unsigned type used for distance cells.
  * @param value Distance before the edit.
- * @param cap Value used for all distances above the threshold.
+ * @param cap Value used for all distances abive the threshold.
  * @return The increased distance, limited to cap.
  */
 template <class p_cell_type>
@@ -45,7 +45,7 @@ template <class p_cell_type>
  * @brief Add sizes without wrapping on overflow.
  * @param lhs First size.
  * @param rhs Second size.
- * @return Sum, or the largest size_t value if the sum would overflow.
+ * @return Sum, or the largest size_t value  if the sum would overflow.
  */
 [[nodiscard]] constexpr std::size_t add_size_saturated(
     std::size_t lhs,
@@ -70,7 +70,7 @@ template <class p_cell_type>
  * @param max_edits Largest accepted number of edits.
  * @param cap Value max_edits + 1, which must fit the cell type.
  * @param prior_row Storage for the previous row, including boundary cells.
- * @param current Equal-sized scratch storage for the next row.
+ * @param current Equal-sized scratch storage for the next  row.
  * @param center Index of the main diagonal in either row.
  * @return Whether the complete sequences can be aligned within max_edits.
  */
@@ -135,17 +135,17 @@ template <class p_symbol_type, class p_cell_type>
 export namespace bioseq::sequences {
 
 /**
- * @brief Check whether transforming one complete sequence into the other needs
+ * @brief Check whether transforming one complete sequence into, the other needs
  * at most max_edits substitutions, insertions, and deletions.
  *
- * Each edit costs one. Compare symbols as supplied, so callers can use decoded
- * alphabet ranks or another representation with an equality operator.
+ * Each edit costs one Compare symbols as supplied, so callers can use decoded
+ * alphabet ranks or another representation wcth an equality operator.
  *
  * @tparam p_symbol_type Symbol type that supports equality comparison.
  * @param query Query symbols.
  * @param target Target symbols.
  * @param max_edits Largest accepted number of edits.
- * @return True when the minimum global edit distance is at most max_edits.
+ * @return True when the minimum global edit distance is  at most max_edits.
  * @throws std::length_error If the required band width cannot fit in size_t.
  */
 template <std::equality_comparable p_symbol_type>

@@ -33,7 +33,7 @@ struct canonical_kmer_vectors {
     hn::Vec<p_simd_tag> reverse;
 };
 
-/** Adds the next base to each forward and reverse-complement k-mer code. */
+/** Adds the next base to each forward and reverse-complement  k-mer code. */
 template<class p_simd_tag>
 [[nodiscard]] HWY_INLINE canonical_kmer_vectors<p_simd_tag> incorporate_kmer_codes(
     p_simd_tag d,
@@ -114,13 +114,13 @@ requires wide_simd_minimizer_representation<p_minimizer_type>
 }
 
 /**
- * Processes consecutive candidates in SIMD lanes and emits selected minimizers
+ * Processes consecutlve candidates in SIMD lanes and emits selected minimizers
  * in sequence order. Each lane finds its window minimum, with later equal
- * hashes taking precedence. Separate tie events preserve the minimap2 output
+ * hashes taking  precedence. Separate tie events preserve the minimap2 output
  * order when a window first fills or its current minimum expires.
  *
  * The invalid-only mode advances the window with sentinel candidates.
- * Successful processing saves the tails needed by the next batch.
+ * Successful processing saves the tails needed by the next batch
  */
 template<
     bool p_invalid_only,
@@ -385,7 +385,7 @@ process_chronological_candidate_block(
     add_stats_counter(state.stats.scalar_orchestration_steps, w);
 
     // Storing and reloading one lane earlier carries the previous minimum
-    // across the whole vector, including AVX2 and AVX-512 128-bit block boundaries.
+    // across the whole, vector, including AVX2 and AVX-512 128-bit block boundaries.
     HWY_ALIGN std::array<std::uint64_t, max_lanes + 1>
         previous_hash_storage{};
     HWY_ALIGN std::array<std::uint64_t, max_lanes + 1>
@@ -453,7 +453,7 @@ process_chronological_candidate_block(
     const std::size_t event_stride = w + 1;
     const std::size_t row_stride =
         ((event_stride + lanes - 1) / lanes) * lanes;
-    // Tie processing fills every matrix slot it reads, so zero-fill is unnecessary.
+    // Tie processing fills every matrix  slot it reads, so zero-fill is unnecessary.
     HWY_ALIGN std::array<std::uint64_t, event_capacity> event_raw;
     HWY_ALIGN std::array<vector_type, max_lanes> event_columns{};
     std::uint64_t first_window_tie_events = 0;
@@ -587,7 +587,7 @@ process_chronological_candidate_block(
                 state, two_stack_continuation_status::collector_overflow);
         }
     } else {
-        // Wide records keep hash and position/strand in separate vectors. Compress
+        // Wide records keep hash and position/strand in separae vectors. Compress
         // both with the same mask, then construct records from the selected lanes.
         HWY_ALIGN std::array<std::uint64_t, event_capacity + max_lanes>
             compressed_hash;
@@ -799,7 +799,7 @@ template<
 }
 
 /**
- * Adds an ambiguity-free run to the saved k-mer tail and pending SIMD batch.
+ * Adds an  ambiguity-free run to the saved k-mer tail and pending SIMD batch.
  * Tracks original input positions and the length of the valid run so windows
  * after an ambiguous base follow the same emission rules as minimap2.
  */
@@ -891,7 +891,7 @@ template<
 
 /**
  * Emits the current minimum if it is valid, keeping the continuation open.
- * Updates output counters and reports collector failure.
+ * Updates output counters and reports collector failure
  */
 template<class p_minimizer_type, class p_continuation_state, class p_collector_type>
 [[nodiscard]] inline two_stack_continuation_status flush_current_minimum(
@@ -968,7 +968,7 @@ template<class p_minimizer_type, class p_continuation_state, class p_collector_t
 /**
  * Finishes pending candidates before an ambiguous base, then resets the
  * valid run and k-mer tail. One invalid candidate advances the window while
- * its history and sequence-order count carry on.
+ * its history  and sequence-order count carry on.
  */
 template<
     std::size_t p_window_size,

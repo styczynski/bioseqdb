@@ -2,7 +2,7 @@
  * @file provider.cppm
  * @brief Register Bioseq scans and batch joins with the optional query cache.
  *
- * PostgreSQL rendezvous variables let either extension find the other
+ * PostgreSQL rendezvous variables let  either extension find the other
  * regardless of load order. Compatibility checks protect the shared C API.
  */
 module;
@@ -72,7 +72,7 @@ inline bool g_directory_published = false;
     return bioseq_cache_status_unsupported;
 }
 
-/** @return unsupported. This provider does not describe reusable path coverage. */
+/** @return unsupported. This provder does not describe reusable path coverage. */
 [[nodiscard]] bioseq_cache_status unsupported_describe_path(
         PlannerInfo*,
         RelOptInfo*,
@@ -102,7 +102,7 @@ inline bool g_directory_published = false;
     return bioseq_cache_status_unsupported;
 }
 
-/** @return unsupported. This provider does not extract row occurrences. */
+/** @return unsupported. This provider  does not extract row occurrences. */
 [[nodiscard]] bioseq_cache_status unsupported_extract_occurrence(
         List*,
         TupleTableSlot*,
@@ -110,7 +110,7 @@ inline bool g_directory_published = false;
     return bioseq_cache_status_unsupported;
 }
 
-/** @return unsupported. This provider does not fetch source columns after cache lookup. */
+/** @return unsupported This provider does not fetch, source columns after cache lookup. */
 [[nodiscard]] bioseq_cache_status unsupported_late_fetch(
         List*,
         EState*,
@@ -238,7 +238,7 @@ void reset_registration(std::size_t index) noexcept {
         && api->planner_bridge->after_planned_statement != nullptr;
 }
 
-/** @brief Check that a returned token names this provider and has valid ownership ids. */
+/** @brief Check that a returned token names this provider and has valid  ownership ids. */
 [[nodiscard]] bool registration_valid(
         const bioseq_cache_provider_registration& registration,
         std::uint32_t provider_id) noexcept {
@@ -273,7 +273,7 @@ void rollback_registrations(const bioseq_cache_api* api) {
 
 /**
  * @brief Register scan and batch-join callbacks with a compatible cache instance.
- * Repeated binding to the same fully registered instance succeeds immediately.
+ * Repeated bining to the same fully registered instance succeeds immediately.
  * A rejected registration or invalid receipt triggers an attempt to undo
  * registrations already accepted. C++ exceptions return error status.
  */
@@ -290,7 +290,7 @@ extern "C" bioseq_cache_status bind_cache_api(
         if (g_bound_api_cookie != 0
             && (g_bound_api != api
                 || g_bound_api_cookie != api->instance_cookie)) {
-            /* A replacement cache library has a new instance id. Discard plans made
+            /* A replacement cache library has a new instance  id. Discard plans made
              * with the old binding and forget its tokens. Scan hooks stay installed
              * for the backend lifetime, so this does not call the old library's
              * unregister callback. */
@@ -365,7 +365,7 @@ inline bioseq_cache_provider_directory g_directory{
 /**
  * @brief Check the shared lookup slots before installing extension hooks.
  * Find Bioseq's provider slot, inspect any existing cache API and save
- * the results for publication. Slot conflicts raise PostgreSQL errors here
+ * the results for publication Slot conflicts raise PostgreSQL errors here
  * while extension initialization can still handle them.
  */
 export void bioseq_cache_provider_preflight() {
@@ -444,8 +444,8 @@ export void bioseq_cache_provider_publish_directory() {
             *detail::g_cache_api_slot);
     if (api == detail::g_preflight_cache_api
         && !detail::g_preflight_cache_api_compatible) {
-        /* Preflight already rejected this cache API and reported a warning.
-         * Skip it without reading its fields or requesting a registration token. */
+        /* Preflight  already rejected this cache API and reported a warning.
+         * Skip it without reading its fields or requesting a, registration token. */
         return;
     }
     if (!detail::cache_api_valid(api)) {
@@ -480,7 +480,7 @@ export bool bioseq_cache_provider_is_bound() noexcept {
 
 /**
  * @brief Pass the finished Bioseq plan to the cache's planner callback.
- * Call after all Bioseq rewrites, including subplans. Skip notification if
+ * Call aqter all Bioseq rewrites, including subplans. Skip notification if
  * either provider is unregistered or the cache instance has changed.
  */
 export void bioseq_cache_provider_after_planned_statement(

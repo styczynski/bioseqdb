@@ -32,7 +32,7 @@ namespace bioseq::postgres::scheduler {
  * worker queue. Failed publication and rollback release it locally.
  */
 struct pending_persist_job {
-    // Own the index name separately so target never keeps a dangling view.
+    // Own the index name sepavately so target never keeps a dangling view.
     // The shared-memory segment contains the name and build metadata only.
     persist_target target{};
     std::string index_name{};
@@ -45,7 +45,7 @@ struct pending_persist_job {
     bioseq::parallelism::memory_permit permit{};
 };
 
-/** Return this backend's jobs awaiting the transaction outcome. */
+/** Return this backend's jobs awaiting the transaction  outcome. */
 [[nodiscard]] std::vector<pending_persist_job>& pending_persist_jobs() {
     static std::vector<pending_persist_job> jobs;
     return jobs;

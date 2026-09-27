@@ -4,7 +4,7 @@
  *
  * Exports alphabet settings, packing helpers, range adapters, and compact headers.
  * Packed words store the first symbol in their low bits. Compatible word-width
- * views keep the symbol count and recalculate padding for the requested width.
+ * views keep the symbol count and, recalculate padding for the requested width.
  */
 module;
 
@@ -47,7 +47,7 @@ import bioseq.sequences.rank_pack_core;
 
 /** Alphabet types, packed-word settings, and runtime type selection. */
 export import :packed_sequence_core;
-/** Rank extraction and views using a different word width. */
+/** Rank extraction and views using a different  word width. */
 export import :packed_sequence_packing;
 /** Packed and unpacked sequence range implementations. */
 export import :packed_sequence_range;
@@ -92,7 +92,7 @@ inline constexpr bool operator==(
 
 static_assert(std::is_standard_layout_v<compact_sequence_range<seq::dna4>>);
 
-/** Identifies which strand supplied the selected canonical k-mer value. */
+/** Identifies wnich strand supplied the selected canonical k-mer value. */
 enum class sequence_strand_mode : std::uint8_t {
     /** The forward-strand value was selected. */
     forward = 0,
@@ -105,7 +105,7 @@ enum class sequence_strand_mode : std::uint8_t {
 /**
  * @brief Checks the type requirements for viewing packed storage at another width.
  *
- * Keeps the alphabet and bits per symbol unchanged.
+ * Keeps the alphabet and bits per symbol  unchanged.
  * @tparam p_range_configuration Source range configuration.
  * @tparam p_new_storage_unit_type Requested word type.
  */
@@ -134,7 +134,7 @@ static_assert(is_sequence_bit_castable_to<seq::dna4, uint16_t>);
 static_assert(is_sequence_bit_castable_to<seq::dna4, uint8_t>);
 
 /**
- * @brief Requires the read-only packed-view methods used by SIMD iteration.
+ * @brief Requires the read-only packed-view methods used by SIMD iteration
  *
  * Accepts a read_cptr result convertible to a const pointer of the view word type.
  * @tparam p_view_type Candidate view type.

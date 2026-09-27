@@ -33,9 +33,9 @@ TEST_CASE("vulkan minimizer: minimizer_representation 16/32/64/128-bit layouts r
     // Compare every supported minimizer record width with scalar output.
     using representation_16 = minimizer_representation<10u, 2u>;
     using representation_32 =
-        minimizer_representation<10u, 9u>;         
-    using representation_64 = minimap_sketch_data; 
-    using representation_128 = minimizer_representation<28u, 30u>; 
+        minimizer_representation<10u, 9u>;
+    using representation_64 = minimap_sketch_data;
+    using representation_128 = minimizer_representation<28u, 30u>;
     static_assert(sizeof(representation_16) == 2);
     static_assert(sizeof(representation_32) == 4);
     static_assert(sizeof(representation_64) == 8);
@@ -75,7 +75,7 @@ TEST_CASE("vulkan minimizer: minimizer_representation 16/32/64/128-bit layouts r
     }
 }
 
-// GPU minimizers for selected sequence intervals.
+// GPU minimizers for selected sequene intervals.
 
 TEST_CASE("Vulkan segment minimizer sketch matches scalar fragmented windows",
           "[component:bioseq][layer:unit][feature:minimizer][resource:gpu]") {
@@ -259,7 +259,7 @@ TEST_CASE("Vulkan segment sorted pairs are ordered by kmer then encoded position
     std::vector<typename configuration_type::alphabet_type> letters;
     constexpr std::size_t dna5_letter_count = range_type::traits::letters_per_unit * 50000u;
     letters.reserve(dna5_letter_count);
-    // Vary the dna5 letters so some k-mer windows avoid N and produce minimizers.
+    // Vary the dna5 letters so  some k-mer windows avoid N and produce minimizers.
     std::uint64_t lcg = 0x2545f4914f6cdd1dULL;
     for (std::size_t i = 0; i < dna5_letter_count; ++i) {
         lcg = lcg * 6364136223846793005ULL + 1442695040888963407ULL;

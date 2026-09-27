@@ -79,7 +79,7 @@ import bioseq.postgres.table.io; // begin_column_read/read_next_column_row/end_c
 import bioseq.storage.lazy_sequence;           // lazy_sequence
 import bioseq.postgres.types.compact_sequence; // bioseq::pg_types::seq, dispatch_instance
 import bioseq.sequences;                       // compact_sequence_range
-import bioseq.sequences.simd;                  // Decode sequence bases with SIMD.
+import bioseq.sequences.simd;                  // Decode seqence bases with SIMD.
 import bioseq.parallelism.memory_admission;
 import bioseq.parallelism.mode;
 import bioseq.parallelism.concepts;
@@ -96,7 +96,7 @@ import bioseq.postgres.sql.generated.core.storage_indexing_pg_chunked_storage.en
 import bioseq.postgres.storage.indexing.chunked_storage;
 export import bioseq.postgres.storage.indexing.hash_major_parallel_probe_contract;
 export namespace bioseq::storage::indexing {
-/// Read one published hash-major index through the caller's registered snapshot.
+/// Read one published hash-major index through the caller's registered  snapshot.
 /// Check metadata and source identity before reading directory, control or position bytes.
 class index_storage_hash_major_minimizer_read_session {
   private:
@@ -309,7 +309,7 @@ class index_storage_hash_major_minimizer_read_session {
         // Clear the saved row and other slots before scanning any further rows.
         if (cached_boundary_row_valid_) {
             if (cached_boundary_row_kind_ == kind && cached_boundary_row_ordinal_ == expected_row) {
-                // The cached row already passed its address and CRC checks.
+                // The cached row already passed its address  and CRC checks.
                 // Keeping its buffer pinned lets this request reuse the bytes directly.
                 accepted = consume(expected_row, cached_boundary_row_.bytes);
                 ++expected_row;
@@ -690,7 +690,7 @@ class index_storage_hash_major_minimizer_read_session {
 
   public:
     index_storage_hash_major_minimizer_read_session() = delete;
-    /// Open the index table and check its schema and primary key.
+    /// Open the index table and check its schema and primary key
     /// The caller must keep the registered MVCC snapshot alive until this reader closes.
     index_storage_hash_major_minimizer_read_session(std::string_view table_name,
                                                     std::string_view classification_index_name,
@@ -1116,7 +1116,7 @@ class index_storage_hash_major_minimizer_read_session {
         };
     }
 
-    /// Measure a serial or parallel scan of this generation for diagnostics.
+    /// Measure a serial or parallel scan of  this generation for diagnostcs.
     [[nodiscard]] hash_major_minimizer_parallel_scan_stats
     run_parallel_scan_probe(std::uint32_t requested_workers);
 
@@ -1163,7 +1163,7 @@ class index_storage_hash_major_minimizer_read_session {
         return receipts;
     }
 
-    /// Close after reading metadata when this index's storage profile cannot serve the query.
+    /// Close after reading metadata when this index's storage profile cannot, serve the query.
     /// The caller may then try the separately stored grouped-SoA index.
     void close_metadata_read() {
         if (state_ != operation_state::metadata_ready || active_scan_ != nullptr) {
@@ -1173,7 +1173,7 @@ class index_storage_hash_major_minimizer_read_session {
         close_relations_();
     }
 
-    /// Close after finding no active hash-major head.
+    /// Close after finding no active hash-major  head.
     void close_head_absent() {
         if (state_ != operation_state::head_absent || active_scan_ != nullptr) {
             fail_("hash-major absent-head close is out of order");

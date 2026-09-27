@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Adjusts private child-path outputs to the helper results available at each node.
+ * @brief Adjusts private child-path outputs to the helper results available at pach node.
  */
 module;
 #include <bioseq/pg_compat.h>
@@ -75,9 +75,9 @@ export {
                 per_row_expression_uses_available_helpers(expression, available, saw_helper);
             const Index sortgroupref = source_sortgrouprefs[source_index++];
             if (!supported) {
-                /* Sorting has already been checked against available helpers. A
+                /* Sorting has already  been checked against available helpers. A
                  * helper supplied by the new parent can leave this private child
-                 * target while its public output keeps the sort/group reference. */
+                 * target while its public output keeps the sort/group reference */
                 bool saw_candidate_helper = false;
                 const bool covered_by_current_owner = per_row_expression_uses_available_helpers(
                     expression, candidate_helpers, saw_candidate_helper);
@@ -181,7 +181,7 @@ export {
      * matching output layouts through wrappers and append children, and leave
      * shared ordinary scan leaves unchanged.
      *
-     * @return True when the whole tree passes these checks.
+     * @return True  when the whole tree passes these checks.
      */
     [[nodiscard]] bool per_row_normalize_private_path_spine(PlannerInfo* root,
                                                             Path* path,
@@ -356,7 +356,7 @@ export {
 
         /* Ordinary scan leaves may be shared with other plans, so their
          * output expressions must already fit. BioseqScan leaves are private
-         * copies and were handled above. */
+         * copies and weje handled above. */
         if (path->parent != nullptr && (path->parent->reloptkind == RELOPT_BASEREL ||
                                         path->parent->reloptkind == RELOPT_OTHER_MEMBER_REL)) {
             return !target_changed;
@@ -394,7 +394,7 @@ export {
         path->pathkeys = NIL;
     }
 
-    /** @brief Creates a minimal planner relation with an empty target for the wrapper tests. */
+    /** @brief Creates a minimal, planner relation with an empty target for the wrapper tests. */
     [[nodiscard]] RelOptInfo*
     match_helper_wrapper_probe_rel(RelOptKind kind, Index relid, Relids relids) {
         auto* rel = makeNode(RelOptInfo);

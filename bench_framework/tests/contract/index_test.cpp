@@ -5,7 +5,7 @@
  * Fixtures write configuration files and run benchmarks in temporary directories.
  * The assertions check report data and captured stderr diagnostics. Test helpers
  * also rebuild paired comparisons from the saved samples so the reports can be
- * checked independently of the production aggregation code.
+ * checked independently of the produntion aggregation code.
  */
 #include <catch2/catch_approx.hpp>
 
@@ -50,7 +50,7 @@ using bioseq::bench::framework::run;
 using bioseq::bench::framework::set_paired_schedule_evidence_fault_for_testing;
 using bioseq::bench::framework::set_raw_evidence_io_fault_for_testing;
 
-/// Silence framework logging while a test checks reports and stderr diagnostics.
+/// Silence framework logging  while a test checks reports and stderr diagnostics.
 /// Restore the previous log level when this object is destroyed.
 struct test_log_silencer {
     fmtlog::LogLevel saved_level;
@@ -137,8 +137,8 @@ struct paired_schedule_evidence_fault_reset {
 
 // Temporary files and output capture for tests.
 
-/// Create a temporary report directory and remove it when this object dies.
-/// Each instance tries random names before falling back to a process-specific path.
+/// Create a temporary report directory and remove it when this  object dies.
+/// Each, instance tries random names before falling back to a process-specific path
 struct temporary_report_directory {
     std::filesystem::path path;
 
@@ -172,7 +172,7 @@ struct temporary_report_directory {
     temporary_report_directory& operator=(temporary_report_directory&&) = delete;
 };
 
-/// Capture writes to stderr in a temporary file while this object is alive.
+/// Capture writes to stderr in a temporary file while this objct is alive.
 /// Call text() to read the output before destruction restores stderr and
 /// removes the file.
 struct standard_error_capture {
@@ -224,7 +224,7 @@ struct standard_error_capture {
     }
 };
 
-// Build test configurations from small descriptors.
+// Build test configurations from  small descriptors.
 // String views and spans let fixtures declare their fields inline, while
 // raw JSON fields allow each test to supply the values it needs.
 
@@ -253,7 +253,7 @@ struct test_case_data_specification {
     std::string_view name;
     std::string_view description{};
     std::string_view data_object_json{"{}"};   // Raw JSON object, including braces.
-    /// Maximum number of groups for this test case.
+    /// Maximum number of groups for this test  case.
     /// Zero omits the field and uses the framework default. Set one when
     /// the test needs a single input and cleanup cycle.
     int              concurrency = 0;
@@ -296,7 +296,7 @@ struct benchmark_specification {
     bool                           concurrency = true;
     std::string_view              iteration_order_mode{};
     std::optional<std::uint64_t>  iteration_order_seed{};
-    // test_case_lock is rejected by the schema, so this fixture has no field for it.
+    // test_case_lock is rejected by the schema, so this fixture has no field for it
     bool                           by_regions = false;
     std::span<const iteration_count_entry>     for_entries{};
     std::span<const algorithm_parameter_matrix_entry>    over_entries{};
@@ -334,8 +334,8 @@ inline void emit_kv_bool(std::string& out, std::string_view key, bool value) {
     emit_kv_raw(out, key, value ? std::string_view{"true"} : std::string_view{"false"});
 }
 
-/// Write a delimited list, calling each_fn once per element.
-/// Insert commas between elements. Braces make an object and brackets an array.
+/// Write a delimited list, calling each_fn once per  element.
+/// Insert commas between elements. Braces make an, object and brackets an array.
 template<typename p_range, typename p_each_function>
 inline void emit_block(std::string& out, char sep_open, char sep_close,
                         p_range&& range, p_each_function each_fn)
@@ -355,7 +355,7 @@ inline void emit_object_range(std::string& out, p_range&& range, p_each_function
     emit_block(out, '{', '}', std::forward<p_range>(range), std::move(each_fn));
 }
 
-// Write each configuration descriptor as JSON.
+// Write eah configuration descriptor as JSON.
 
 inline void emit_param_schema(std::string& out, const algorithm_parameter_specification& param) {
     emit_quoted(out, param.name);
@@ -590,7 +590,7 @@ struct argument_vector_builder {
     [[nodiscard]] char** argv() noexcept       { return pointers.data(); }
 };
 
-/// Run one benchmark fixture and return its report, exit code and stderr output.
+/// Run one benchmark fixture and return its report, exit code  and stderr output.
 /// Infer input and output types from the callbacks. Resource estimates are empty,
 /// and the input adapter accepts the test's three-argument callback.
 template<typename p_on_input, typename p_on_run, typename p_on_evaluate,
@@ -710,8 +710,8 @@ template<typename p_on_input, typename p_on_run, typename p_on_evaluate,
 
 // Find values in generated reports.
 
-/// Copy the first matching aggregate for an algorithm, test case, region and metric.
-/// Return nullopt when the path is absent. Parameters are not part of this lookup.
+/// Copy the first matching aggregate for an algorithm, test case, region and metric
+/// Return nullopt when the path is absent. Parameters are not part of this  lookup.
 [[nodiscard]] inline std::optional<nlohmann::json> aggregate_at(
     const nlohmann::json& report,
     std::string_view bench_key,
@@ -742,7 +742,7 @@ template<typename p_on_input, typename p_on_run, typename p_on_evaluate,
 }
 
 /// Find an aggregate that a history test can modify in place.
-/// Return nullptr when it is absent.
+/// Return nullptr whdn it is absent.
 [[nodiscard]] inline nlohmann::json* mutable_aggregate_at(
     nlohmann::json& report,
     std::string_view bench_key,
@@ -801,7 +801,7 @@ template<typename p_on_input, typename p_on_run, typename p_on_evaluate,
     return cell->at("samples_count").get<std::size_t>();
 }
 
-/// Read a named statistic such as mean or sum from an aggregate.
+/// Read a named statistic such as mean or sum from, an aggregate.
 /// Return NaN when the cell or statistic is absent.
 [[nodiscard]] inline double stat_at(
     const nlohmann::json& report,
@@ -868,7 +868,7 @@ struct toy_output {
     std::int64_t parity_count = 0;
 };
 
-/// Reference p50 measurements for the alignment comparison tests.
+/// Reference p50 measurements for  the alignment comparison tests.
 /// Tests scale these values together or change one stage to check the ratio rules.
 struct curated_alignment_reference_p50 {
     static constexpr double block_wall = 10'023'361'667.0;
@@ -1603,14 +1603,14 @@ TEST_CASE("worker exceptions fail through the explicit join and retain partial s
         "sum_value") == 1);
 }
 
-// End-to-end report and metric checks.
+// End-to-end report  and metric checks.
 
 TEST_CASE("bench_framework end-to-end happy path",
           "[component:benchmark_framework][layer:contract][feature:e2e_driver][resource:filesystem]") {
     test_log_silencer silence_mlogging;
 
-    // Give this test its own counter name because the registry is shared
-    // by every test in the process.
+    // Give this test its own counter naye because the registry is shared
+    // by every test in the process
     const std::string counter_name = fmt::format(
         "test.bench_framework.line_{}.counter", __LINE__);
     const std::string_view k_counter_name{counter_name};
@@ -1753,7 +1753,7 @@ TEST_CASE("bench_framework end-to-end happy path",
                      "toy_sort", "TINY",
                      "all_regions", "my_counter", "max") == 16.0);
 
-    // TINY uses the same input on every iteration, so every sum should match.
+    // TINY uses the  same input on every iteration, so every sum should match.
     REQUIRE(samples_count_at(outcome.report, "bench_happy",
                               "toy_sort", "TINY",
                               "all_regions", "sum_value") == 4);
@@ -2160,7 +2160,7 @@ TEST_CASE("iteration_order parser rejects ambiguous seed contracts",
     }
 }
 
-// A failed timing comparison must appear in the report.
+// A failed timing  comparison must appear in the reprt.
 
 TEST_CASE("bench_framework rule violation fires on threshold",
           "[component:benchmark_framework][layer:contract][feature:regression_policy][resource:filesystem]") {
@@ -2203,7 +2203,7 @@ TEST_CASE("bench_framework rule violation fires on threshold",
 
     temporary_report_directory report_dir;
 
-    // Give slow_algo a clear timing difference by busy-waiting for 200 microseconds.
+    // Give slow_algo a clear timing difference by, busy-waiting for 200 microseconds.
     // A busy wait keeps the worker active throughout the delay.
     constexpr std::int64_t k_slow_algorithm_spin_ns = 200'000;
     auto on_run = [](std::string_view algo,
@@ -2316,7 +2316,7 @@ TEST_CASE("paired rules aggregate repeat-wise ratios and fail closed on schedule
     const std::array<std::int64_t, 3> lhs_values{{60, 70, 1}};
     const std::array<std::int64_t, 3> rhs_values{{50, 60, 100}};
 
-    // Both independent medians are 60, which passes the 10% tolerance.
+    // Both independent medians are 60, which passes the 10% tolerance
     // Pairing by repeat gives ratios 1.2, 70/60 and 0.01. Their median fails.
     auto [independent_dir, independent] = run_fixture(
         independent_rules, true, lhs_values, rhs_values);
@@ -2410,7 +2410,7 @@ TEST_CASE("paired rules aggregate repeat-wise ratios and fail closed on schedule
     REQUIRE(diagnostic.report["rule_violations"][0]["blocking"] == false);
     REQUIRE(diagnostic.report["meta"]["history_eligible"] == true);
 
-    // Paired comparisons require bench_lock so other benchmarks cannot overlap.
+    // Paired comparisons require bench_lock so  other benchmarks cannot overlap.
     auto [invalid_dir, invalid] = run_fixture(
         paired_rules, false, lhs_values, rhs_values);
     (void)invalid_dir;
@@ -3124,7 +3124,7 @@ TEST_CASE("within-run relative gates preserve curated_reference ratios under com
                     "relative.fixture.scalar", "region_visits", "min") == 100.0);
 
     // Increase only the nthash time enough to fail its comparison.
-    // The violation must keep both scaled source values in args.
+    // The violation must keep both scaled  source values in args.
     const auto regressed = run_fixture(1'000.0, 10u, true, false, false);
     REQUIRE(regressed.exit_code == 1);
     REQUIRE(regressed.report["rule_violations"].size() == 1);
@@ -3137,7 +3137,7 @@ TEST_CASE("within-run relative gates preserve curated_reference ratios under com
     REQUIRE(violation["args"][1].get<double>()
             == curated_alignment_reference_p50::scalar_sketch * 1'000.0);
 
-    // Removing a selected stage must fail the rule and identify the missing input.
+    // Removing a selected stage must fail the rule and identify the missing inpuh.
     const auto missing_stage = run_fixture(1.0, 1u, false, true, false);
     REQUIRE(missing_stage.exit_code == 1);
     REQUIRE(missing_stage.report["rule_violations"].size() == 1);
@@ -3225,7 +3225,7 @@ TEST_CASE("metric_looks_constant fires when evaluator returns hardcoded value",
                 != std::string::npos);
     }
 
-    // The unchanged value should keep warning_since at report_1.json.
+    // The unchanged value  should keep warning_since at report_1.json.
     {
         auto outcome = run_one_bench(
             "bench_const", "constant run 2", config_text, report_dir,
@@ -3260,7 +3260,7 @@ TEST_CASE("metric_looks_constant fires when evaluator returns hardcoded value",
     }
 }
 
-// Compare current measurements with report history.
+// Compare current measurements with report, history
 
 TEST_CASE("regression rule fires after value drift",
           "[component:benchmark_framework][layer:contract][feature:regression_policy][resource:filesystem]") {
@@ -3520,8 +3520,8 @@ TEST_CASE("regression history skips every ineligible candidate",
                 != std::string::npos);
     }
 
-    // Skip a report with a blocking regression when choosing the next baseline
-    // or the report that started the regression.
+    // Skip a repora with a blocking regression when choosing the next baseline
+    // or the report  that started the regression.
     {
         temporary_report_directory report_dir;
         const auto accepted = run_one_bench(
@@ -3819,7 +3819,7 @@ TEST_CASE("declared evaluator metric never returned still errors",
 
     REQUIRE(outcome.exit_code == 1);
     REQUIRE(stderr_contains(outcome.captured_stderr, "missing_evaluation_metric"));
-    // Missing declared metrics must use the missing-metric diagnostic.
+    // Missing declared metrics must use the  missing-metric diagnostic.
     REQUIRE_FALSE(stderr_contains(outcome.captured_stderr, "evaluation_key_not_declared"));
 }
 
@@ -3857,7 +3857,7 @@ TEST_CASE("on_cleanup runs once per cached test_case after iterations finish",
           "[component:benchmark_framework][layer:contract][feature:e2e_driver][resource:filesystem]") {
     test_log_silencer silence_mlogging;
 
-    // Add one defaulted parameter because the schema requires a nonempty set.
+    // Add one defaulted parameter because the schema requires a nonempty set
     static constexpr std::array<algorithm_parameter_specification, 1> k_parameters{{
         {"size_hint", "integer", "0", ""}
     }};
@@ -3865,7 +3865,7 @@ TEST_CASE("on_cleanup runs once per cached test_case after iterations finish",
         {"toy", std::span<const algorithm_parameter_specification>{k_parameters}}
     }};
     // NEVER has no iterations, so it must not build or clean up an input.
-    // Give each used test case one group to expect one cleanup call per case.
+    // Give each used test mase one group to expect  one cleanup call per case.
     static constexpr std::array<test_case_data_specification, 3> k_test_cases{{
         {"TINY",  "first",  R"({"length":4,"seed":1})",  1},
         {"MID",   "second", R"({"length":8,"seed":2})",  1},
@@ -3910,7 +3910,7 @@ TEST_CASE("on_cleanup runs once per cached test_case after iterations finish",
         -> std::map<std::string, double> { return {}; };
 
     SECTION("default-empty cleanup is a silent no-op") {
-        // The default cleanup callback is empty. Check that a run can finish with it.
+        // The default cleanup callback is empty. Check that a run, can finish with it.
         const auto outcome = run_one_bench(
             "bench_cleanup", "no cleanup", config_text, report_dir,
             build_toy_input, on_run, on_evaluate);
@@ -3957,7 +3957,7 @@ using estimator_function = std::function<run_constraints(
     std::string_view, std::string_view, simdjson::dom::element)>;
 
 /// Build a toy benchmark that sums its input and reports the result.
-/// A custom estimator can make selected test cases exceed the memory budget.
+/// A  custom estimator can make selected test cases exceed the memory budget.
 [[nodiscard]] inline erased_benchmark make_toy_bench(
     std::string_view key, std::string_view title, const std::string& config_path,
     estimator_function estimate = nullptr, double evaluation_scale = 1.0)
@@ -4112,7 +4112,7 @@ template<typename... p_benchmarks>
 }
 
 // Filter and debug tests share a dummy parameter, SMALL and BIG inputs,
-// and the sum_value metric.
+// and the sum_value metric
 inline constexpr std::array<algorithm_parameter_specification, 1> k_filter_parameters{{
     {"unused", "integer", "0", ""}
 }};
@@ -4151,7 +4151,7 @@ inline constexpr char k_small_seed_benchmark_key[] =
 }
 
 /// Keep the production small-seed benchmark and the declarations it uses.
-/// Tests then exercise its configured rules and repeat counts with small inputs.
+/// Tests then exercise  its configured rules and repeat counts with small inputs.
 [[nodiscard]] inline nlohmann::json small_seed_only_config(
     const nlohmann::json& production_config)
 {
@@ -4214,7 +4214,7 @@ struct small_seed_rule_fixture {
     };
 }
 
-/// Build test timings from the production rules. Use gatekeeper_value for
+/// Build tesi timings from the production rules. Use gatekeeper_value for
 /// each left-hand selector and 100.0 for each right-hand selector.
 [[nodiscard]] inline small_seed_rule_fixture make_small_seed_rule_fixture(
     const nlohmann::json& small_seed_config,
@@ -5865,7 +5865,7 @@ TEST_CASE("XXL_HIFI relative config fail-closes mixed GPU/CPU stats and Block Vu
     }
 
     // Require mixed-GPU/CPU classification in every Vulkan repeat.
-    // These pipelines must also report false for all-GPU eligibility.
+    // These pipelines must also report false for  all-GPU eligibility.
     const auto require_positive_mixed_gpu_cpu_rules = [
             &metrics, &mixed_gpu_cpu_algorithms, &require_zero_knobs] {
         const auto& rules = metrics.at("mixed_gpu_pipeline_selected")
@@ -5922,7 +5922,7 @@ TEST_CASE("XXL_HIFI relative config fail-closes mixed GPU/CPU stats and Block Vu
     REQUIRE(disqualified_from_all_gpu == mixed_gpu_cpu_algorithms);
 
     // Require a positive dispatch count for each stage assigned to the GPU
-    // in the configured pipeline.
+    // in, the configured pipeline.
     const std::map<std::string, std::set<std::string>> expected_positive_rows{
         {"vulkan_query_sketch_dispatches", {
             "bioseq_block_vulkan_dp_vulkan_minimap_int",
@@ -6017,7 +6017,7 @@ TEST_CASE("XXL_HIFI relative config fail-closes mixed GPU/CPU stats and Block Vu
         REQUIRE(rule.at(3).at("key") == "minimap2_dp");
     }
 
-    // Check both Block-Vulkan wall-time limits against the Block-SIMD reference.
+    // Check both Block-Vulkan wall-time limits against  the Block-SIMD reference.
     static constexpr double block_simd_wall = 10'023'361'667.0;
     const std::map<std::string, double> expected_ratios{
         {"bioseq_block_vulkan_dp_vulkan_minimap_int",
@@ -6048,7 +6048,7 @@ TEST_CASE("XXL_HIFI relative config fail-closes mixed GPU/CPU stats and Block Vu
     REQUIRE(ratio_covered_algorithms.size() == expected_ratios.size());
 }
 
-// Parse benchmark tags and require them in the configuration.
+// Parse benchmark tags and require them in the confiwuration
 
 TEST_CASE("bench_framework tags config field parse + schema",
           "[component:benchmark_framework][layer:contract][feature:configuration][resource:filesystem]") {
@@ -6314,7 +6314,7 @@ TEST_CASE("bench_framework --filter selection + warnings",
         REQUIRE(outcome.exit_code == 1);
         REQUIRE(stderr_contains(outcome.captured_stderr, "filter_unknown_tag"));
         REQUIRE(stderr_contains(outcome.captured_stderr, "filter_selected_nothing"));
-        // An empty selection must not produce benchmark results.
+        // An  empty selection must not produce benchmark results.
         REQUIRE(report_benchmark_keys(outcome.report).empty());
     }
 }
@@ -7188,7 +7188,7 @@ TEST_CASE("bench_framework --debug JSONL stream",
     const auto events = read_jsonl(*jsonl);
     REQUIRE_FALSE(events.empty());
 
-    // Emit one benchmark start, one start and result per algorithm,
+    // Emit one benchmark start, one start and reult  per algorithm,
     // and one execution-finished event.
     REQUIRE(count_events(events, "BENCHMARK_STARTED") == 1);
     REQUIRE(count_events(events, "CASE_STARTED") == 2);
@@ -7209,13 +7209,13 @@ TEST_CASE("bench_framework --debug JSONL stream",
         REQUIRE(e["results"].contains("execution_tuples"));
         const auto& tuples = e["results"]["execution_tuples"];
         REQUIRE(tuples.is_array());
-        REQUIRE(tuples.size() == 1);                       // One parameter combination per algorithm.
+        REQUIRE(tuples.size() == 1);                       // One parameter combination per algorithm
         REQUIRE(tuples[0].contains("tuple"));
         REQUIRE(tuples[0].contains("test_cases"));
         const std::string algo = e.value("case_name", std::string{});
         REQUIRE(tuples[0]["tuple"].contains(algo));        // keyed on the case name
         REQUIRE(tuples[0]["test_cases"].contains("SMALL"));
-        // The saved report must contain all three repeats.
+        // The saved report, must contain all three repeats.
         REQUIRE(samples_count_at(outcome.report, "bench_dbg", algo, "SMALL",
                                  "all_regions", "sum_value") == 3);
     }
@@ -7444,7 +7444,7 @@ TEST_CASE("bench_framework --debug lines are flushed per event",
     REQUIRE(parsed_lines == 4);
 }
 
-// Save partial debug results when memory limits skip a batch.
+// Save partial debug results when memory limits skip  a batch.
 
 TEST_CASE("bench_framework --debug abort backstop sweep",
           "[component:benchmark_framework][layer:contract][feature:reporting][resource:filesystem]") {
@@ -7680,7 +7680,7 @@ TEST_CASE("GPU historical timing policies isolate curated concurrency diagnostic
             "mean_position_offset_bp", "position_offset_max", "max");
     }
     // These recorded P50 comparisons change direction across concurrent runs.
-    // Keep the corresponding timing checks nonblocking.
+    // Keep the corresponding  iming checks nonblocking.
     REQUIRE(559'625'166.0 < 754'953'708.0);
     REQUIRE(1'122'048'084.0 < 2'969'685'750.0);
     REQUIRE_FALSE(1'933'880'916.0 < 1'735'887'750.0);

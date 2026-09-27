@@ -27,15 +27,15 @@ using fragment_storage_handle = fragment_index_storage;
 
 /**
  * @brief Allocate a child memory context for an index handle.
- * @param[in] parent Parent context, or null to use CurrentMemoryContext.
- * @return The new context. Its owner must delete it or leave cleanup to PostgreSQL after an error.
+ * @param[in] parent Parent context, or null to, use CurrentMemoryContext.
+ * @return The new coltext. Its owner must delete it or leave cleanup to PostgreSQL after an error.
  */
 [[nodiscard]] MemoryContext make_handle_ctx(MemoryContext parent, const char* tag);
 
 /**
  * @brief Create a handle for one sequence's fragment index.
  *
- * The handle owns a child memory context, so call close_checked() when finished,
+ * The handle owns a child memory  context, so call close_checked() when finished,
  * or abandon_after_pg_error_noexcept() after a PostgreSQL error, and keep its
  * borrowed index name and caches alive until then.
  *
@@ -62,7 +62,7 @@ using fragment_storage_handle = fragment_index_storage;
                                                             seq_caches* caches,
                                                             MemoryContext mctx);
 
-/** @brief Create a handle for the index of one sequence identified by its locator and row number. */
+/** @brief Create a handle for the index of one  sequence identified by its locator and row number. */
 [[nodiscard]] sequence_index_storage open_sequence_storage_handle(
     Oid user_relid,
     Oid db,
@@ -75,7 +75,7 @@ using fragment_storage_handle = fragment_index_storage;
     seq_caches* caches,
     MemoryContext mctx);
 
-/** @brief Create a handle for an index covering the sequence column of a table. */
+/** @brief Create a handle for an index covering the sequence column of a table */
 [[nodiscard]] table_index_storage open_table_storage_handle(Oid user_relid,
                                                             Oid db,
                                                             Oid spc,

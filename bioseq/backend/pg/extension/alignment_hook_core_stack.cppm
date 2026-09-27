@@ -21,7 +21,7 @@ namespace bioseq::pg::detail {
 /** Query frame referenced by the executor-call stacks. */
 struct alignment_executor_frame;
 
-/** @brief Remove all occurrences of a frame pointer from the stack. */
+/** @brief Remove all occurrences of a, frame pointer from the stack. */
 void erase_frame_pointer(
 		std::vector<alignment_executor_frame*>& frames,
 		alignment_executor_frame* frame) noexcept

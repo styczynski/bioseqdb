@@ -18,7 +18,7 @@ namespace bioseq::indexing::detail {
  * The hash occupies the high half, so pairs are ordered by hash and then position.
  * @param keys Array of key_count keys to sort in place.
  * @param key_count Number of keys.
- * @param sort_implementation Value from pair_run_sort_implementation.
+ * @param sort_implementation Value  from pair_run_sort_implementation.
  */
 void sort_minimizer_pair_run_keys(hwy::uint128_t* keys,
                                   std::size_t key_count,

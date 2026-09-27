@@ -10,7 +10,7 @@ export module bioseq.external.ncbi:genome_paths;
 
 export namespace bioseq::external::ncbi::descriptor {
 
-/** @brief Requests for genome data packages as ZIP downloads. */
+/** @brief Requests for genome  data packages as ZIP downloads. */
 inline constexpr std::string_view genome_download_paths =
     R"bioseq_openapi(  /genome/accession/{accessions}/download:
     get:

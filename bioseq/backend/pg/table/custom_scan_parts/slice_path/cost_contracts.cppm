@@ -21,7 +21,7 @@ export struct owned_mmsearch_cost {
  *
  * The mmsearch SQL function has a large cost to discourage plans that call its
  * stub. Costing its arguments separately avoids charging that penalty to the
- * custom scan that performs the search.
+ * custom scan that performs the  search.
  */
 export [[nodiscard]] List* mmsearch_operand_cost_exprs(
     const FuncExpr* expression,

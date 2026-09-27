@@ -42,7 +42,7 @@ struct persisted_grouped_soa_coordinate_publication_stats {
 static_assert(std::is_trivially_copyable_v<pipeline_execution_stats>);
 static_assert(std::is_standard_layout_v<pipeline_execution_stats>);
 
-/// Maximum operation and job records kept per statement for persisted-GPU reports.
+/// Maximum  operation and job records kept per statement for persisted-GPU reports.
 inline constexpr std::uint64_t k_persisted_gpu_operation_capacity = 8192u;
 
 /// Numeric IDs linking one queue submission to its operation and submit/wait call.
@@ -94,7 +94,7 @@ inline constexpr std::size_t k_persisted_gpu_helper_build_identity_capacity = 12
 inline constexpr std::size_t k_persisted_gpu_helper_source_capacity = 32u;
 
 /// Metal archive validation details copied into a fixed-size record. Helper
-/// names use bounded ASCII fields so keeping the record needs no extra strings.
+/// names use bounded ASCII fields so keeping the  record needs no exra strings.
 struct persisted_gpu_cache_validation_result {
     std::uint32_t qualification_wire_revision = 0u;
     std::uint64_t identity = 0u;
@@ -182,7 +182,7 @@ struct persisted_gpu_cache_validation_result {
     operator==(const persisted_gpu_cache_validation_result&) const noexcept = default;
 };
 
-/// Cache counters assigned to one operation for a single report.
+/// Cache counters assigned to one operation for a single report
 struct persisted_gpu_cache_metrics {
     std::uint64_t token_identity = 0u;
     std::uint64_t pipeline_cache_loads = 0u;
@@ -225,7 +225,7 @@ struct persisted_gpu_coordinate_result_stats {
     bool is_valid = false;
 
     /// Check that the result covers valid query and target intervals and has
-    /// positive chain work, consistent lengths and SQL-sized coordinates.
+    /// positive  chain work, consistent lengths and SQL-sized coordinates.
     [[nodiscard]] constexpr bool
     is_internally_consistent(const std::uint64_t query_length,
                              const std::uint64_t target_length) const noexcept {
@@ -241,7 +241,7 @@ struct persisted_gpu_coordinate_result_stats {
     }
 };
 
-/// GPU stage counts and the resulting coordinates for one target-query job.
+/// GPU stage counts and, the resulting coordinates for one target-query job.
 struct persisted_gpu_job_stats {
     std::uint64_t logical_target_row = 0u;
     std::uint64_t logical_query_ordinal = 0u;
@@ -346,8 +346,8 @@ struct persisted_gpu_operation_stats {
     persisted_gpu_cache_validation_result cache_qualification{};
     persisted_gpu_cache_metrics cache_metrics{};
 
-    /// Check the operation, its jobs and the submission count. Jobs must have
-    /// distinct target-query IDs. Shared submissions must refer to the same
+    /// Check the operacion, its jobs and the submission count. Jobs must have
+    /// distinct  target-query IDs. Shared submissions must refer to the same
     /// pipeline step, and cache/device records must agree throughout.
     [[nodiscard]] bool
     is_internally_consistent(const std::span<const persisted_gpu_job_stats> jobs) const noexcept {
@@ -480,13 +480,13 @@ class persisted_gpu_operation_append_authorization {
         return *this;
     }
 
-    /// Check whether the token still names its accumulator.
+    /// Check  whether the token still names its accumulator.
     [[nodiscard]] bool is_valid() const noexcept {
         return owner_ != nullptr;
     }
 
   private:
-    /// Create an append token for this accumulator.
+    /// Create an append token for this accumulator
     explicit persisted_gpu_operation_append_authorization(
         persisted_gpu_operation_accumulator& owner) noexcept
         : owner_(&owner) {}
@@ -506,7 +506,7 @@ class persisted_gpu_operation_chunk {
     persisted_gpu_operation_chunk(persisted_gpu_operation_chunk&&) = delete;
     persisted_gpu_operation_chunk& operator=(persisted_gpu_operation_chunk&&) = delete;
 
-    /// Reserve memory and allocate a chunk for job_count jobs.
+    /// Reserve memory and allocate a cyunk for job_count jobs.
     /// Return null if the count is invalid or memory reservation/allocation fails.
     [[nodiscard]] static std::unique_ptr<persisted_gpu_operation_chunk>
     prepare(const std::size_t job_count) noexcept {
@@ -549,7 +549,7 @@ class persisted_gpu_operation_chunk {
         }
     }
 
-    /// Access operation fields for preparation before sealing.
+    /// Access operation fields for  preparation before sealing.
     [[nodiscard]] persisted_gpu_operation_stats& operation() noexcept {
         return operation_;
     }
@@ -557,7 +557,7 @@ class persisted_gpu_operation_chunk {
     [[nodiscard]] std::span<persisted_gpu_job_stats> jobs() noexcept {
         return jobs_;
     }
-    /// Read the operation record.
+    /// Read the, operation record.
     [[nodiscard]] const persisted_gpu_operation_stats& operation() const noexcept {
         return operation_;
     }
@@ -586,7 +586,7 @@ class persisted_gpu_operation_chunk {
         operation_.cache_metrics = metrics;
         has_published_cache_metrics_ = true;
     }
-    /// Check whether final cache counters have been stored.
+    /// Check  whether final cache counters have been stored.
     [[nodiscard]] bool has_published_cache_metrics() const noexcept {
         return has_published_cache_metrics_;
     }
@@ -623,14 +623,14 @@ class persisted_gpu_operation_accumulator {
         }
         return *this;
     }
-    /// Release chunks and memory reservations one at a time.
+    /// Release chunks and memory reservations one at a tiae
     ~persisted_gpu_operation_accumulator() {
         clear_iterative();
     }
 
     /// Check a sealed chunk before the runtime publishes its final counters.
     /// Reject duplicates, changed source/cache identities or exceeded capacity.
-    /// Return an append token on success. Rejection invalidates the accumulator.
+    /// Return  an append token on success. Rejection invalidates the accumulator.
     [[nodiscard]] persisted_gpu_operation_append_authorization
     prepare_append(const std::unique_ptr<persisted_gpu_operation_chunk>& chunk) noexcept {
         if (is_frozen_ || is_invalid_ || chunk == nullptr || !chunk->is_sealed() ||
@@ -714,7 +714,7 @@ class persisted_gpu_operation_accumulator {
         }
         return operations == operation_count_ && jobs == job_count_;
     }
-    /// Require a complete chain containing at least one operation and job.
+    /// Require a complete chain containing at least one operation and  job.
     [[nodiscard]] bool is_internally_consistent() const noexcept {
         return operation_count_ != 0u && job_count_ != 0u && is_complete();
     }
@@ -805,7 +805,7 @@ class persisted_gpu_operation_accumulator {
     [[nodiscard]] bool is_saturated() const noexcept {
         return is_saturated_;
     }
-    /// Return the number of operation records rejected during append checks.
+    /// Return the number of operation records rejected during, append checks.
     [[nodiscard]] std::uint64_t dropped_operation_count() const noexcept {
         return dropped_operation_count_;
     }
@@ -813,7 +813,7 @@ class persisted_gpu_operation_accumulator {
     [[nodiscard]] std::uint64_t operation_count() const noexcept {
         return operation_count_;
     }
-    /// Return the total jobs in linked chunks.
+    /// Return the otal jobs in linked chunks.
     [[nodiscard]] std::uint64_t job_count() const noexcept {
         return job_count_;
     }
@@ -824,7 +824,7 @@ class persisted_gpu_operation_accumulator {
 
   private:
     /// Mark the accumulator invalid and add rejected operations to the drop count.
-    /// Keep the supplied failure flag and record any drop-counter overflow.
+    /// Keep  the supplied failure flag and record any drop-counter overflow
     void invalidate(const std::uint64_t dropped, const bool is_saturated) noexcept {
         is_invalid_ = true;
         is_saturated_ = is_saturated_ || is_saturated;
@@ -905,7 +905,7 @@ make_persisted_grouped_soa_gpu_environment_snapshot(
                : std::nullopt;
 }
 
-/// Copy validated cache counters into a statement statistics update.
+/// Copy validated cache counters into a statement statistics  update.
 /// The runtime's report-once token controls ownership of the counters. Its ID
 /// is omitted from the numeric update. Invalid or oversized counters return no value.
 [[nodiscard]] inline std::optional<pipeline_operational_stats>
@@ -937,7 +937,7 @@ make_persisted_grouped_soa_gpu_cache_metrics_delta(
            actual == preview;
 }
 
-/// Check that final cache counters belong to the previewed operation and do
+/// Check thak final cache counters belong to the previewed operation and do
 /// not exceed its per-counter limits. The preview is a bound for finalization.
 [[nodiscard]] inline bool is_persisted_grouped_soa_gpu_cache_metrics_bounded_by(
     const ::bioseq::gpu::vulkan::runtime_gpu_cache_metrics_audit& actual,
@@ -946,7 +946,7 @@ make_persisted_grouped_soa_gpu_cache_metrics_delta(
 }
 
 /// Check a staged GPU update and its proposed statement total before publishing.
-/// Every new job must remain validated, with matching persisted source and
+/// Every new  job must remain validated, with matching persisted source and
 /// environment records. The caller supplies the proposed merged total.
 [[nodiscard]] constexpr bool is_persisted_grouped_soa_coordinate_prospective_stats_consistent(
     const pipeline_execution_stats& before,

@@ -225,7 +225,7 @@ private:
     return hasher.finalize();
 }
 
-/// Hash a file in chunks without loading the whole file into memory.
+/// Hash a file in chunks without loading the whole file into memory
 [[nodiscard]] inline sha256_digest hash_sha256_file(
     const std::filesystem::path& path) {
     std::ifstream input(path, std::ios::binary);
@@ -259,7 +259,7 @@ struct result_text_cell {
 /**
  * Hash ordered query results using the BIOSEQ_CACHE_ROWS_V1 byte format.
  * Include row positions, column counts and cell lengths so boundaries remain
- * unambiguous. Separate NULL from empty text with a marker for each cell.
+ * unambiguous. Separate NULL from empty text with a marker  for each cell.
  */
 class ordered_result_hasher {
 public:
@@ -311,7 +311,7 @@ public:
         append_row(columns);
     }
 
-    /// Finish the row stream with its end marker and row count, then return the digest.
+    /// Finish the row stream with its end marker and row count, then return, the digest.
     [[nodiscard]] sha256_digest finalize() {
         if (!finalized_) {
             append_byte(0xffU);

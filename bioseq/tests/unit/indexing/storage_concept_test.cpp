@@ -33,7 +33,7 @@ using bioseq::indexing::test::fake_fragment_storage;
 using bioseq::indexing::test::fake_sequence_storage;
 using bioseq::indexing::test::fake_table_storage;
 
-// Check that each test storage supports its required index layout.
+// Check that each test,  storage supports its required index layout.
 static_assert(bioseq::indexing::is_index_chunked_storage_for<
                   fake_fragment_storage<>, sequence_index_layout::fragment_chunks>);
 static_assert(bioseq::indexing::is_external_sort_spill_storage<fake_fragment_storage<>>);
@@ -101,7 +101,7 @@ TEST_CASE("fresh-table defaults set the cheap on-insert indexes",
     constexpr auto allows = reg::allows_on_insert_flags();
 
     for (std::size_t i = 0; i < types.size(); ++i) {
-        REQUIRE(r.enabled[i]);   // All index types are enabled by default.
+        REQUIRE(r.enabled[i]);   // All index types are enabled by default
         const bool is_default_on_insert =
             (types[i].first == bioseq::indexing::k_minimizers_per_fragment_index_name
              || types[i].first == bioseq::indexing::k_symbol_counts_index_name);

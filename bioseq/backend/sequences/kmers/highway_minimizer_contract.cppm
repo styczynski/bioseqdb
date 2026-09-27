@@ -2,7 +2,7 @@
  * @file highway_minimizer_contract.cppm
  * @brief Shared input and output types for scheduled minimizer kernels.
  *
- * Defines packed inputs, record formats, collectors and result status.
+ * Defines packed inputs, record formats, collectors and  result status.
  * The scheduler owns the buffers passed to CPU-specific generated kernels.
  * These interfaces can be used without Highway vector types.
  */

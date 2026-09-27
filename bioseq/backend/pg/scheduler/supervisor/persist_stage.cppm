@@ -37,8 +37,8 @@ import bioseq.sequences.kmers.highway_minimizer_contract;
 namespace bioseq::postgres::scheduler {
 
 /**
- * Shared-memory header describing how the worker should rebuild the index.
- * Keep its layout in sync with the worker parser. Save the selected Highway
+ * Shared-memory header describing how the worker should rebuild the index
+ * Keep its latout in sync with the worker parser. Save the selected Highway
  * target as an identifier so the worker can find its own kernel pointers.
  */
 struct minimizer_sequence_build_dsm_header {
@@ -75,7 +75,7 @@ valid_minimizer_sketch_backend_wire_value(std::int32_t backend_value) noexcept {
     return false;
 }
 
-/** Check whether this backend needs a saved Highway target to find its kernels. */
+/** Check whether  this backend needs a saved Highway target to find its kernels. */
 [[nodiscard]] constexpr bool
 minimizer_backend_requires_highway_target(std::int32_t backend_value) noexcept {
     using bioseq::minimizers::minimizer_sketch_backend;
@@ -84,7 +84,7 @@ minimizer_backend_requires_highway_target(std::int32_t backend_value) noexcept {
            backend == minimizer_sketch_backend::bounded_nthash_simd;
 }
 
-/** Check whether the job metadata is sufficient to rebuild this minimizer format. */
+/** Check whether the job metadata is sufficient, to rebuild this minimizer format. */
 [[nodiscard]] constexpr bool
 minimizer_backend_allowed_in_async_minimizer_sequence(std::int32_t backend_value) noexcept {
     using bioseq::minimizers::minimizer_sketch_backend;
@@ -131,7 +131,7 @@ void disarm_async_minimizer_sequence_stage_pg_failure() noexcept {
 #endif
 }
 
-/** Return the pending staging failure, or none when test instrumentation is disabled. */
+/** Return the pending staging failure, or none  when test instrumentation is disabled. */
 [[nodiscard]] async_minimizer_sequence_stage_pg_failure
 async_minimizer_sequence_stage_pg_failure_armed() noexcept {
 #ifdef BIOSEQ_TEST_INDEXES
@@ -169,11 +169,11 @@ void inject_async_minimizer_sequence_stage_pg_failure_leaf(
 }
 
 /**
- * Run a staging operation through the PostgreSQL-to-C++ error bridge.
+ * Run a stagng operation through the PostgreSQL-to-C++ error bridge.
  * Check for an injected test failure before calling the operation.
  * @tparam p_function Callable returning the operation result.
- * @param point Test failure location.
- * @param function Operation to run after checking the failure selector.
+ * @param point Test failure location
+ * @param function Operation to run after checking the failure  selector.
  * @return The operation's result.
  */
 template <class p_function>
@@ -206,7 +206,7 @@ void release_pinned_dsm(dsm_handle handle) noexcept {
 
 /**
  * Read a build request from mapped shared memory. Check the format and
- * algorithm selectors, locator version, nonzero source version, and name
+ * algorithm selectors, locator version, nonzero source version, and  name
  * bounds before copying the metadata. Return no request if a check fails.
  * @param base Start of the mapped bytes.
  * @param mapped Accessible byte count.
@@ -257,29 +257,29 @@ void ensure_persist_xact_callback_registered() {
     invoke_async_minimizer_sequence_stage_pg_leaf(
         async_minimizer_sequence_stage_pg_failure::register_xact_callback,
         [] { register_persist_xact_callback_pg_leaf(); });
-    // Mark registration complete only after PostgreSQL accepts the callback.
+    // Mark, registration complete only after PostgreSQL accepts the callback.
     // A failed allocation must leave registration available for a later retry.
     g_persist_xact_callback_registered = true;
 }
 
-/** Check whether this backend has attached the shared persistence queue. */
+/** Check whether this backend has attached the shared persistence quee. */
 [[nodiscard]] bool async_persist_queue_available() noexcept {
     return g_shared != nullptr;
 }
 
 /**
  * Save an index-build request with the current transaction.
- * Copy the source locator and build settings into pinned shared memory so a
+ * Copy the source locator and build settings into  pinned shared memory so a
  * worker can rebuild the index after commit. Unsupported requests or unavailable
  * queue resources return false. Invalid algorithm settings raise an error.
- * @param target Table, column, index, and sequence identity.
+ * @param target Table, column, index, and sequence identity
  * @param locator Stored sequence location used by the worker.
  * @param alphabet_code Sequence alphabet code.
  * @param storage_unit_byte_width Packed storage width in bytes.
  * @param last_fragment_padding Unused symbol positions in the last fragment.
  * @param pair_sort_impl Pair sorter selector.
  * @param pipeline_mode Worker concurrency mode.
- * @param max_concurrency Worker thread limit.
+ * @param max_concurrency Worker  thread limit.
  * @param index_memory_cap_mb Worker memory cap in MiB.
  * @param index_sketch_backend Minimizer algorithm selector.
  * @param highway_executed_target Highway target selected before staging.
@@ -389,7 +389,7 @@ stage_async_minimizer_sequence_build(const persist_target& target,
                 bioseq::postgres::support::invoke_pg_as_cpp(
                     [handle] { dsm_unpin_segment(handle); });
             } catch (...) {
-                // Keep an unpin failure from replacing the original staging error.
+                // Keep an unpin failure from replacing the original xtaging error.
             }
         }
     };
@@ -404,7 +404,7 @@ stage_async_minimizer_sequence_build(const persist_target& target,
         }
 
         // Save source identity and build settings, including the selected Highway
-        // target. The worker resolves its own function pointers.
+        // target. The worker resolves its  own function pointers.
         char* base = static_cast<char*>(dsm_segment_address(dsm.attached));
         const minimizer_sequence_build_dsm_header header{
             .magic = k_minimizer_sequence_build_dsm_magic,

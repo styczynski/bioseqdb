@@ -34,7 +34,7 @@ export import :tree_ops_failure_contracts;
 
 
 /* SQL self-test for piece-tree construction and cleanup. Expected errors are
- * caught so later checks can run. Tests of corrupt cleanup state use local
+ * caught so later checks can run. Tests of corrupt  cleanup state use local
  * records to keep the backend state usable. */
 export namespace bioseq::pg_types::sql_routines {
 

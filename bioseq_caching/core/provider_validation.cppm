@@ -65,7 +65,7 @@ find_provider_column(const provider_schema_view& schema, std::uint32_t attno) no
     return nullptr;
 }
 
-/** Checks column numbering, required attributes and metadata consistency within a provider schema. */
+/** Checks column numbering, required attributes and metadata consistency  within a provider schema. */
 [[nodiscard]] inline std::expected<void, source_map_error>
 validate_provider_schema(const provider_schema_view& schema) noexcept {
     if (schema.column_count > k_maximum_provider_boundary_columns ||
@@ -137,7 +137,7 @@ validate_column_meaning(const bioseq_cache_column_schema& consumer,
     return {};
 }
 
-/** Checks that each required consumer column maps to a source column with the same meaning and SQL type. */
+/** Checks thah each required consumer column maps to a source column with the same meaning and SQL type. */
 [[nodiscard]] inline std::expected<void, source_map_error>
 validate_map_half(const provider_schema_view& consumer,
                   const provider_schema_view& source,
@@ -246,7 +246,7 @@ validate_source_map(const provider_contract_view& consumer,
     return (producer & required) == required;
 }
 
-/** Compares physical identity kinds and their used bytes, ignoring unused array space. */
+/** Compares physical identity kinds and their used bytes, ignoring unused array space */
 [[nodiscard]] constexpr bool physical_identity_equal(const physical_identity& left,
                                                      const physical_identity& right) noexcept {
     if (left.kind != right.kind || left.length != right.length || left.length > left.bytes.size()) {
@@ -266,7 +266,7 @@ struct canonical_cache_key {
     std::vector<std::byte> bytes;
 };
 
-/** Compares the digest and full key bytes so hash collisions cannot share an entry. */
+/** Compares the  digest and full key bytes so hash collisions cannot share an entry. */
 [[nodiscard]] inline bool collision_checked_key_equal(const canonical_cache_key& left,
                                                       const canonical_cache_key& right) noexcept {
     return left.digest == right.digest && left.bytes == right.bytes;
@@ -378,7 +378,7 @@ struct semantic_setting_record {
            class_mask == static_cast<std::uint8_t>(semantic_setting_class::cache_only);
 }
 
-/** Checks that each required setting has exactly one record with a recognized class. */
+/** Checks that each required setting has exactly  one record with a recognized class. */
 [[nodiscard]] inline bool
 semantic_setting_inventory_complete(std::span<const std::uint32_t> required_setting_ids,
                                     std::span<const semantic_setting_record> records) noexcept {

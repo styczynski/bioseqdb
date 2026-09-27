@@ -36,7 +36,7 @@ struct validated_tree_fields {
     std::uint16_t height;
 };
 
-/// Check an arena's reference state and that its storage counts add up.
+/// Check an arena's reference state and that  its stoage counts add up
 inline void validate_arena_accounting(piece_tree_arena const& arena)
 {
     const Size node_unit = MAXALIGN(sizeof(piece_node));
@@ -309,7 +309,7 @@ export inline void validate_tree_and_limits(
   }
 }
 
-/// Counts of new nodes and dependencies checked after a join.
+/// Counts of new nodes and dependencies checked after a  join.
 export struct bounded_join_validation_audit {
     std::uint32_t new_nodes_visited;
     std::uint32_t external_edges_checked;
@@ -470,8 +470,8 @@ inline void validate_bounded_join_leaf(
  * Check a join result using the cached summaries of its already validated inputs.
  *
  * Walk the destination arena's new nodes and the branches discarded by rotations.
- * Match their storage dependencies against the arena's registered references.
- * Older subtrees keep their existing validation, so the work follows the changed
+ * Match, their storage dependencies against the arena's registered references.
+ * Older subtrees keep their existing vwlidation, so  the work follows the changed
  * path instead of growing with the full sequence tree.
  */
 export [[nodiscard]] inline bounded_join_validation_audit
@@ -773,7 +773,7 @@ validate_trusted_join_and_limits(
     };
 
     /* Rotations can leave allocated branches outside the final tree. Check
-     * those recorded roots too, while counting shared children only once.
+     * those recorded roots too, while counting shared children only once
      * Child heights must decrease, which also rules out cycles. */
     for (std::uint32_t retired_index = 0u;
          retired_index < destination.retired_join_root_count;

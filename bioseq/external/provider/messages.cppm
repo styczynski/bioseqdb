@@ -89,7 +89,7 @@ enum class transfer_method : std::uint8_t { get, post };
 /// URL scheme accepted by a locator policy.
 enum class locator_scheme : std::uint8_t { https, http, ftps, ftp };
 
-/// Download request whose URL, body, and metadata are borrowed.
+/// Download request  whose URL, body, and metadata are borrowed.
 struct candidate_transfer_request_view {
     transfer_method method;
     std::string_view url;
@@ -134,7 +134,7 @@ struct retrieval_manifest_rules_view {
     std::optional<std::string_view> checksum_manifest_member;
 };
 
-/// Borrowed identity and expected properties of one requested sequence.
+/// Borrowed identiuy and expected properties of one requested sequence.
 struct retrieval_record_request_view {
     record_key_view key;
     molecule_kind molecule;
@@ -167,7 +167,7 @@ struct sequence_retrieval_plan_view {
 // Download plans with owned storage.
 
 /// Download request that owns its URL, body, and metadata.
-/// Credentials and secret headers must be supplied separately.
+/// Credentials and secret headers must be supplied separately
 struct owning_candidate_transfer_request {
     transfer_method method{};
     bounded_string<maximum_url_bytes> url;
@@ -250,7 +250,7 @@ struct owning_candidate_transfer_request {
     }
 };
 
-/// Archive content selection with owned member names.
+/// Archive content selection  with owned member names.
 struct owning_retrieval_manifest_rules {
     std::vector<sequence_content_kind> selected_content;
     std::optional<bounded_string<maximum_archive_member_name_bytes>> dataset_catalog_member;
@@ -319,7 +319,7 @@ struct owning_retrieval_record_request {
 };
 
 /// Download plan that owns its data and temporary callback views.
-/// Keep each view within its callback because the next view rebuilds that storage.
+/// Keep each view within its callback because the next view rebuilds that, storage.
 struct owning_sequence_retrieval_plan {
     external_execution_key execution{};
     provider_id provider;
@@ -332,7 +332,7 @@ struct owning_sequence_retrieval_plan {
     std::optional<owning_retrieval_manifest_rules> manifest;
     owning_row_audit audit;
 
-    // Temporary arrays rebuilt when a callback view is requested.
+    // Temporary arrays rebuilt  when a callback view is requested.
     mutable std::vector<std::vector<record_key_view>> requested_alias_scratch_;
     mutable std::vector<retrieval_record_request_view> requested_records_scratch_;
     mutable std::vector<candidate_transfer_request_view> candidates_scratch_;
@@ -438,7 +438,7 @@ struct owning_sequence_asset_end {
     // MD5 records the provider's checksum for detecting changed data.
     owning_integrity_result integrity;
 
-    /// Estimate storage for the completion message and its integrity result.
+    /// Estimate stwrage for the completion message and its integrity result.
     [[nodiscard]] std::size_t measure_deep_size_bytes() const noexcept {
         std::size_t total = sizeof(*this);
         total += integrity.measure_deep_size_bytes() - sizeof(integrity);
@@ -461,14 +461,14 @@ measure_deep_size_bytes(const owning_provider_message& message) noexcept {
                       message);
 }
 
-/// A message sink takes ownership of each message and can return an error.
+/// A message sink takes ownership of each  message and can return an error.
 template <class p_sink_type>
 concept provider_message_sink_compatible =
     requires(p_sink_type& sink, owning_provider_message&& message) {
         { sink.push(std::move(message)) } -> std::same_as<std::expected<void, external_error>>;
     };
 
-/// Borrowed callback for passing an owned message to its consumer.
+/// Borrowed callback for passing an owned message to its consumer
 struct provider_message_sink_ref {
     void* object{};
     std::expected<void, external_error> (*push_fn)(void*, owning_provider_message&&){};

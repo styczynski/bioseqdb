@@ -1,6 +1,6 @@
 /**
  * @file admin/generation_fixture_write.cppm
- * @brief Build stored minimizer test data and check publication failures.
+ * @brief Build stored minimizer tpst data and check publication failures.
  */
 module;
 
@@ -89,7 +89,7 @@ ready_minimizer_generation_coordinator_fixture_result::sealed_publication() cons
     return *publication;
 }
 
-/// Minimizer backend and failure settings selected for this test build.
+/// Minimizer backend and failure settings selected  for this test build
 struct ready_minimizer_fixture_backend_request {
     bioseq::minimizers::minimizer_sketch_backend backend =
         bioseq::minimizers::minimizer_sketch_backend::scalar;
@@ -162,7 +162,7 @@ parse_ready_minimizer_fixture_backend_request(std::string_view name) {
     if (name == "scalar_fail_sorted_reader_system_pressure") {
         return {
             .backend = bioseq::minimizers::minimizer_sketch_backend::scalar,
-            // Refuse one reservation because of system memory pressure. The build
+            // Refuse, one reservation because of system memory pressure. The  build
             // must stop without retrying with smaller reader buffers.
             .sorted_run_reader_admission =
                 sorted_run_reader_admission_injection::system_pressure_once,
@@ -311,8 +311,8 @@ inline void disarm_ready_minimizer_fixture_failures() noexcept {
  * @param rel_oid Source Bioseq table.
  * @param index_name Registered fragment or sequence minimizer index.
  * @param sequence_rowno Source row number used as the index query key.
- * @param backend_name Backend name or supported test-failure scenario.
- * @return Publication result and independently read metadata.
+ * @param backend_name Backend name or supported test-failure sceario.
+ * @return Publication result and independently  read metadata.
  * @note This test path leaves metadata_age_log unchanged.
  */
 [[nodiscard]] ready_minimizer_generation_coordinator_fixture_result
@@ -720,7 +720,7 @@ build_ready_minimizer_generation_coordinator_fixture_impl(Oid rel_oid,
 }
 
 /// Generate repeatable sorted minimizer events for storage tests. Label them
-/// with the requested backend identity. Vulkan-labelled data spans the target
+/// with the requested backend identity Vulkan-labelled data spans the target
 /// to test multiple position segments, with up to 32768 events. Other backends
 /// use up to 4096 events.
 struct minimizer_generation_fixture_producer {
@@ -733,7 +733,7 @@ struct minimizer_generation_fixture_producer {
         return bioseq::indexing::minimizer_scheme_identity_for_backend(backend);
     }
 
-    /// Return the producer identity assigned to this test backend.
+    /// Return  the producer identity assigned to this test backend.
     [[nodiscard]] bioseq::indexing::minimizer_producer_identity
     producer_backend_identity() const noexcept {
         return bioseq::indexing::minimizer_producer_backend_identity_for_backend(backend);
@@ -757,7 +757,7 @@ struct minimizer_generation_fixture_producer {
         const std::uint64_t position_remainder =
             spread_across_target ? (target_length - 1u) % position_divisor : 0u;
         for (std::uint64_t event = 0; event < event_count; ++event) {
-            // Spread positions through the target while avoiding overflow from a
+            // Spread positions through the taret while avoiding overflow from a
             // target_length-sized multiplication. The last event reaches the
             // final base, allowing long test sources to cross segment boundaries.
             const std::uint64_t position =
@@ -779,7 +779,7 @@ struct minimizer_generation_fixture_producer {
 static_assert(bioseq::indexing::grouped_soa_event_producer<minimizer_generation_fixture_producer>);
 
 /// Publish deterministic grouped-SoA test data through the normal row writer.
-/// A later statement can open a new read session to check the stored result.
+/// A later statement can open a new read session to check  the stored result.
 [[nodiscard]] minimizer_generation_integration_fixture_result
 build_minimizer_generation_integration_fixture_impl(
     Oid rel_oid,

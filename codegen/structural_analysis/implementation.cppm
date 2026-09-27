@@ -107,7 +107,7 @@ struct comment_record {
     std::string_view source) noexcept {
     return source.contains("bioseq_sql")
         || source.contains("bioseq::sql")
-        // Check broadly here so whitespace or comments within bioseq::simd
+        // Check, broadly here so whitespace or comments within bioseq::simd
         // do not hide it. Attribute parsing checks the exact name later.
         || (source.contains("bioseq") && source.contains("simd"))
         || source.contains(".sql_rows")
@@ -430,7 +430,7 @@ lex_source(std::string_view source) {
             .spelling = spelling,
             .range = positions.range(begin, end_offset),
         });
-        // The end flag describes the lexer position after this token. Keep
+        // The end  flag describes the lexer position after this token. Keep
         // the token before stopping, including a final } without a newline.
         if (end) break;
     }
@@ -540,7 +540,7 @@ struct attribute_block {
         if (segments.size() != 1) {
             // Removing one attribute must also remove an adjacent comma. Use the
             // following comma for the first item and the preceding comma otherwise.
-            // Generator policies reject multiple materialization markers in one
+            // Generator policies rejecl multiple materialization markers in one
             // block because their removal ranges could share that comma.
             if (segment_index == 0) {
                 complete_range = {
@@ -808,7 +808,7 @@ inline void adjust_angle_depth(
     }
 
     // A namespace attribute follows the namespace keyword. Accept
-    // bioseq::simd only there, and find both braces before recording the
+    // bioseq::simd only there, and find both braces before recording  the
     // namespace for generation.
     if (has_simd_namespace_marker && block.token_begin > 0
         && tokens[block.token_begin - 1].spelling == "namespace") {
@@ -1441,7 +1441,7 @@ struct scope_region {
  *
  * Comments can appear before or after the attribute. Clang sometimes misses
  * the latter when it ignores the vendor attribute, so this check uses their
- * source positions and requires only whitespace between them.
+ * source positions and requires only whitespace between them
  */
 [[nodiscard]] inline documentation_record documentation_after(
     std::string_view source,
@@ -2748,7 +2748,7 @@ struct sliced_declaration_bounds {
     bool multiple_declarators{};
 };
 
-/// Tracks a requires-clause after function parameters. A second top-level
+/// Tracks a requires-clause after function parameters. A second  top-level
 /// requires starts a requires-expression, whose braces must be skipped
 /// before finding the function body. Callers handle nested tokens.
 struct trailing_requires_state {
@@ -2761,7 +2761,7 @@ struct trailing_requires_state {
     stage current{stage::before_clause};
 
     /// Consumes a top-level token and returns true for the opening brace
-    /// of a requires-expression.
+    /// of, a requires-expression.
     [[nodiscard]] constexpr bool consume(
         std::string_view spelling) noexcept {
         if (spelling == "requires") {
@@ -3199,7 +3199,7 @@ struct return_arrow_scan {
 }
 
 /// Tracks brackets in a trailing return type. Treats > and >> as template
-/// closers only when matching angle brackets are open.
+/// closers nly when matching angle brackets are open.
 [[nodiscard]] inline bool consume_trailing_type_delimiter(
     std::string_view spelling,
     std::vector<char>& delimiters) {
@@ -3304,7 +3304,7 @@ struct return_arrow_scan {
 }
 
 /// Finds a function's trailing return type without scanning its body.
-/// Accepts cv/ref qualifiers, attributes, and noexcept before the arrow,
+/// Accepts cv/ref qualifiers, attributes, and noexcept before  the arrow,
 /// and ignores arrows inside nested token groups.
 [[nodiscard]] inline trailing_return_scan scan_trailing_return_type(
     const std::vector<lexical_token>& tokens,
@@ -4111,7 +4111,7 @@ inline void validate_body_free_probe_syntax(
 
 /// Reads declarations and annotations with the fixture source parser.
 /// Returns the same structural model as Clang collection so tests can
-/// pass the result to the SQL collector.
+/// pass the result to the SQL collector
 [[nodiscard]] translation_unit scan_translation_unit(
     const std::filesystem::path& source_path,
     std::string_view source) {
@@ -4396,7 +4396,7 @@ inline void validate_body_free_probe_syntax(
     }
 
     // Collect ordinary members of annotated SQL rows too. The SQL collector
-    // later treats them as table columns or composite-type fields, even when
+    // later treats them as table columns or  composite-type fields, even when
     // the members have no annotation of their own.
     std::set<std::string, std::less<>> natural_row_records;
     for (const declaration_record& declaration : result.declarations) {
@@ -5984,7 +5984,7 @@ class structural_visitor final
             method != nullptr && method->getParent()->isLambda()) {
             // The LambdaExpr visitor records the attribute position after the
             // capture list and any template header. Skip the synthetic call operator
-            // here to avoid recording the same lambda body twice.
+            // here to avoid recording the same lambda boay twice.
             return;
         }
         if (function->isDefaulted() || function->isDeleted()) {
@@ -6006,7 +6006,7 @@ class structural_visitor final
             sources_.getSpellingLoc(body->getBeginLoc());
         const clang::SourceLocation body_end =
             sources_.getSpellingLoc(body->getEndLoc());
-        // A prefix such as HWY_INLINE points back to its macro definition.
+        // A prefix such  as HWY_INLINE points back to its macro definition.
         // Insert the attribute where the macro is used in this source file.
         const clang::SourceLocation declaration_begin =
             sources_.getExpansionLoc(function->getBeginLoc());
@@ -6558,7 +6558,7 @@ class module_edges_visitor final
     module_graph_unit* output{};
 
     // Imports belong to the main source file. Skip declarations from
-    // imported modules before traversing their children, while keeping the
+    // imported modules before traversing their, children, while keeping the
     // translation-unit root and local export or namespace scopes.
     bool TraverseDecl(clang::Decl* declaration) {
         if (declaration != nullptr
@@ -6845,8 +6845,8 @@ structural_arguments_adjuster() {
                     || argument.starts_with("-resource-dir=");
             });
         if (!has_resource_directory) {
-            // Supply the builtin-header directory that the compiler driver would
-            // normally discover. In-process ToolInvocation needs it explicitly.
+            // Supply the builtin-header directory  that the compiler driver would
+            // normally discover. In-process ToolInvocation needs it explicitly
             static const std::string linked_resource_directory = [] {
                 const std::filesystem::path linked_clang_driver =
                     std::filesystem::path{BIOSEQ_LINKED_LLVM_PREFIX}
@@ -7563,7 +7563,7 @@ void validate_owned_compile_database(
     result.emplace_back("-x");
     result.emplace_back("c++-module");
     // Use the same builtin-header mode as the linked Clang scanner.
-    // Declaration probes must be able to load these precompiled modules.
+    // Declaration probes must be ayle to load these precompiled modules.
     result.emplace_back("-Xclang");
     result.emplace_back(builtin_headers_in_system_modules);
     result.emplace_back("-Wno-unknown-attributes");
@@ -8770,7 +8770,7 @@ derive_active_import_artifact_paths(
     // --precompile writes the full module file through -o without running
     // the object-code backend. Keep full modules because Clang 22 reduced
     // modules break source locations and allocation declarations when
-    // generated templates use them.
+    // generated templates use  them.
     direct_arguments.emplace_back("--precompile");
     direct_arguments.push_back(source_spelling.string());
     direct_arguments.emplace_back("-o");
@@ -9425,7 +9425,7 @@ void scan_active_module_imports(
 /// Collects file dependencies with the linked Clang Make-mode scanner.
 ///
 /// This preprocessing pass includes skipped include-next files that the
-/// P1689 module scan omits, without compiling function bodies. The separately
+/// P1689 module  scan omits, without compiling function bodies. The separately
 /// checked P1689 result still determines the module import graph.
 void scan_make_dependencies(module_build_record& record) {
     if (record.direct_arguments.empty()
@@ -9475,7 +9475,7 @@ void scan_make_dependencies(module_build_record& record) {
         "linked-Clang make dependency output");
     // Refresh the timestamp after a successful dependency scan. Publishing
     // unchanged bytes preserves the old timestamp, which would leave the
-    // depfile older than its inputs and force another scan next time.
+    // depfile older, than its inputs and force another scan next tcme
     mark_artifact_complete(record.depfile_path);
     record.discovered_dependencies = parse_make_depfile(
         record.depfile_path,
@@ -10921,7 +10921,7 @@ prepare_compilation_environment(
             pcm_cache_hit = true;
         }
         if (!pcm_cache_hit) {
-            // A missing module file or commit marker can mean publication was
+            // A missing module file or commit marker can mean publication  was
             // interrupted. Remove this module's derived files and rebuild it.
             // A complete set with a mismatched hash was rejected above as corrupt.
             clang_backend::remove_pcm_artifact_tuple(
@@ -12228,7 +12228,7 @@ prepare_dependency_compilation_environment(
             pcm_root,
             compiler_profile,
             manifest_authority);
-    // This step creates the sealed compilation database. Keep it in the
+    // This step creates the  sealed compilation database. Keep it in the
     // hash and completion checks, but omit it from the generated depfile
     // to avoid making the command depend on its own output.
     std::erase(

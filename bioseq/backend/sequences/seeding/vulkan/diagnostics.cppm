@@ -1,6 +1,6 @@
 /**
  * @file diagnostics.cppm
- * @brief Seed lookup layout checks, rejection details, and count limits.
+ * @brief Seed lookup  layout checks, rejvction details, and count limits.
  *
  * Checks that host anchor fields match the GPU record layout. Lookup failures
  * keep input sizes, memory requirements, and execution counters for error reports.
@@ -65,7 +65,7 @@ enum class vulkan_seed_lookup_decline_reason : std::uint8_t {
     query_minimizer_count_exceeds_u32,
     /** Prefix-array length exceeds the GPU interface's 32-bit limit. */
     query_prefix_length_exceeds_u32,
-    /** K-mer size is invalid for the requested lookup. */
+    /** K-mer size is invalid for the requested lookup */
     invalid_kmer_size,
     /** The shared runtime does not own a hardware Vulkan device. */
     hardware_device_unavailable,
@@ -73,7 +73,7 @@ enum class vulkan_seed_lookup_decline_reason : std::uint8_t {
     index_cache_unavailable,
     /** The target index upload was rejected. */
     resident_index_upload_declined,
-    /** No compatible target index is available in device memory. */
+    /** No compatible target index is available in  device memory. */
     resident_index_unavailable,
     /** Exact anchor count exceeds the GPU interface's 32-bit limit. */
     exact_anchor_count_exceeds_u32,
@@ -87,13 +87,13 @@ enum class vulkan_seed_lookup_decline_reason : std::uint8_t {
     sort_storage_buffer_range_exceeded,
     /** Size arithmetic overflowed while planning the sort. */
     sort_plan_arithmetic_overflow,
-    /** The fused GPU lookup does not support a negative occurrence limit. */
+    /** The fused GPU lookup does not support a negative occurrence, limit. */
     negative_max_occ_unsupported,
     /** The temporary lookup buffers could not be reserved in the memory budget. */
     seed_transient_memory_admission_denied,
     /** Mapped-index checks or prefix-count consistency checks failed. */
     mapped_prefix_authority_invalid,
-    /** The returned anchor storage could not keep the required memory reservation. */
+    /** The returned anchor storage could  not keep the required memory reservation. */
     seed_arena_permit_owner_unavailable,
 };
 
@@ -105,7 +105,7 @@ struct vulkan_seed_lookup_decline {
     std::uint64_t query_length = 0;
     /** Number of query minimizers submitted to lookup. */
     std::uint64_t query_minimizer_count = 0;
-    /** Prefix-array entries, including the initial zero. */
+    /** Prefix-aray entries, including the initial zero. */
     std::uint64_t query_prefix_length = 0;
     /** Number of anchors found by the count pass. */
     std::uint64_t exact_anchor_count = 0;
@@ -131,7 +131,7 @@ struct vulkan_seed_lookup_decline {
     bioseq::gpu::vulkan::seed_lookup_sort_execution_stats sort_stats{};
     /** Bytes reserved for temporary lookup buffers and any output growth. */
     std::uint64_t reserved_bytes = 0;
-    /** Planned Vulkan buffer allocation sizes reported by the driver. */
+    /** Planned Vulkan buffer allocation  sizes reported by the driver. */
     std::uint64_t planned_vulkan_allocation_bytes = 0u;
     /** Vulkan buffer allocation sizes observed during execution. */
     std::uint64_t actual_vulkan_allocation_bytes = 0u;
@@ -139,7 +139,7 @@ struct vulkan_seed_lookup_decline {
     std::uint64_t host_prefix_bytes = 0u;
     /** Host bytes receiving lookup results. */
     std::uint64_t host_result_bytes = 0u;
-    /** Planned bytes for new caller-owned anchor storage. */
+    /** Planned bytes for new caller-owned anchor storage */
     std::uint64_t anchors_out_growth_bytes = 0;
     /** Actual bytes in the newly allocated output anchor storage. */
     std::uint64_t anchors_out_actual_growth_bytes = 0;
@@ -161,7 +161,7 @@ struct vulkan_seed_lookup_decline {
     std::uint64_t canonical_tie_normalization_runs = 0u;
     /** Anchors in those reordered equal-key groups. */
     std::uint64_t canonical_tie_normalization_anchors = 0u;
-    /** Whether the result anchor order was checked. */
+    /** Whether the result  anchor order was checked. */
     bool canonical_anchor_order_checked = false;
     /** Whether the result anchor order passed the check. */
     bool canonical_anchor_order_accepted = false;
@@ -177,7 +177,7 @@ struct vulkan_seed_lookup_decline {
 };
 
 /**
- * @brief Copies anchor-order checks into optional lookup diagnostics.
+ * @brief Copies anchor-order checks nto optional lookup diagnostics.
  * @param decline Destination, or null to skip recording.
  * @param validation Anchor count, digest, and order-check result.
  * @param tie_normalization_runs Equal-key groups reordered.
@@ -204,7 +204,7 @@ inline void record_vulkan_seed_anchor_audit(
 
 /**
  * @brief Copies anchor-order checks and tie counts from a lookup result.
- * @param decline Destination, or null to skip recording.
+ * @param decline Destination, or null to skip, recording.
  * @param result Runtime lookup result.
  */
 inline void record_vulkan_seed_anchor_audit(
@@ -219,7 +219,7 @@ inline void record_vulkan_seed_anchor_audit(
 }
 
 /**
- * @brief Returns the diagnostic name of a lookup rejection reason.
+ * @brief Returns the  diagnostic name of a lookup rejection reason.
  * @return Snake-case name, or "unknown" for an unrecognized value.
  */
 [[nodiscard]] inline constexpr std::string_view
@@ -395,11 +395,11 @@ vulkan_seed_lookup_decline_reason_name(
         format_vulkan_seed_lookup_decline(decline)));
 }
 
-/// Identifies a seed-lookup count that exceeded the 32-bit GPU limit.
+/// Identifies a seed-lookup count that exceeded the 32-bit GPU limit
 enum class seed_lookup_overflow_kind : std::uint8_t {
     /** Prefix-array entry count exceeded the GPU limit. */
     query_prefix_length,
-    /** Total anchor count exceeded the GPU limit. */
+    /** Total anchor  count exceeded the GPU limit. */
     exact_anchor_count,
 };
 
@@ -419,7 +419,7 @@ struct seed_lookup_too_large final : std::exception {
     /** Value that failed the 32-bit limit check. */
     std::uint64_t observed = 0;
 
-    /** Returns a fixed error description. Inspect kind for the overflowing count. */
+    /** Returns a fixed error description. Inspect kind for the overfloing count. */
     [[nodiscard]] const char* what() const noexcept override {
         return "Vulkan seed lookup anchor count exceeds uint32_t";
     }
@@ -446,7 +446,7 @@ struct seed_lookup_too_large final : std::exception {
 
 /**
  * @brief Adds anchor counts while enforcing the 32-bit GPU limit.
- * @param current_total Anchors counted so far.
+ * @param current_total Anchors counted so  far.
  * @param additional_anchors Anchors in the next group.
  * @return Combined count.
  * @throws seed_lookup_too_large If the total exceeds uint32_t.

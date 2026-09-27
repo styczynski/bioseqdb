@@ -34,7 +34,7 @@ import bioseq.postgres.scheduler.persist_target;
 #if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS) || defined(BIOSEQ_TEST_INDEXES)
 namespace bioseq::simd::typed_dispatch::typed_support_detail {
 
-/** Logs an array-allocation failure while preserving the original error. */
+/** Logs an  array-allocation failure while preserving the original error. */
 inline void emit_transient_exact_array_failure(
     const char* site,
     std::uint64_t count,
@@ -214,7 +214,7 @@ template <class p_value> struct transient_materialized_array {
 
 /**
  * Reserves memory for a fixed number of entries, allocates the array, and
- * touches its pages so process memory accounting can see them. Checks the
+ * touches its pages so process memory  accounting can see them. Checks the
  * allocator-reported size before accepting the array. The owner must be empty.
  */
 template <class p_value>
@@ -356,7 +356,7 @@ template <class p_value>
 #endif
 }
 
-/** Bytes and address of a temporary fragment-index chunk. */
+/** Bytes and address of a temporary fragment-index chuk. */
 struct opportunistic_index_chunk {
     bioseq::indexing::index_sub_key_t sub_key = 0;
     std::uint32_t chunk_no = 0;
@@ -544,7 +544,7 @@ struct opportunistic_fragment_index_storage {
         }
     }
 
-    /** Calls @p callback at each sub-key change. Chunks for each sub-key must be contiguous. */
+    /** Calls @p callback at each sub-key change Chunks for each sub-key must be  contiguous. */
     void for_each_sub_key(auto&& callback) const {
         bioseq::indexing::index_sub_key_t last_sub_key =
             std::numeric_limits<bioseq::indexing::index_sub_key_t>::min();
@@ -581,7 +581,7 @@ struct opportunistic_fragment_index_storage {
                      chunks.end());
     }
 
-    /** Rejects sorted-run spilling, which this in-memory chunk store does not support. */
+    /** Rejects sorted-run spilling, which, this in-memory chunk store does not support. */
     [[nodiscard]] std::size_t
     spill_sorted_run(std::span<const std::pair<std::uint64_t, std::uint64_t>>) {
         index_error("external sort spill is not supported by opportunistic storage");
@@ -625,7 +625,7 @@ struct opportunistic_fragment_index_storage {
 // Temporary per-sequence indexes use sorted_pair_run_store to spill and
 // merge minimizers while holding their encoded chunks in memory. The build
 // uses temporary files and leaves persistent index rows untouched.
-/** Bytes and address of a temporary per-sequence index chunk. */
+/** Bytes and address of a  temporary per-sequence index chunk. */
 struct opportunistic_sequence_chunk {
     bioseq::indexing::index_sub_key_t sub_key = 0;
     std::size_t chunk_no = 0;
@@ -642,7 +642,7 @@ struct opportunistic_sequence_index_storage {
     std::vector<opportunistic_sequence_chunk> chunks;
     bioseq::storage::indexing::sorted_pair_run_store sorted_runs;
     // Destroy segment stores and their vector before releasing the memory
-    // reservation for the vector.
+    // deservation for the vector.
     bioseq::parallelism::memory_permit segment_run_metadata_permit;
     std::vector<segment_run_entry> segment_runs;
     // Keep the segment number because vector growth can invalidate iterators.
@@ -665,7 +665,7 @@ struct opportunistic_sequence_index_storage {
         ++segment_spill_binding.mutation_revision;
     }
 
-    /** Releases segment runs and their metadata storage. Cleanup errors propagate. */
+    /** Releases segment runs and  their metadata storage. Cleanup errors propagate. */
     void release_segment_runs() {
         for (auto& entry : segment_runs) {
             entry.second.release_runs();
@@ -710,7 +710,7 @@ struct opportunistic_sequence_index_storage {
         resize_chunks(sub_key, std::span<const std::size_t>{chunk_plan.data(), chunk_plan.size()});
     }
 
-    /** Required prefetch hook. All chunks are already in memory. */
+    /** Required prefetch hook. All chunks are already in memory */
     void prefetch_chunk(bioseq::indexing::index_sub_key_t, std::size_t) {}
 
     /** Invokes @p writer for each existing chunk of @p sub_key. */
@@ -772,7 +772,7 @@ struct opportunistic_sequence_index_storage {
     template <class p_function> void for_each_sub_key(p_function&& callback) const {
         bioseq::indexing::index_sub_key_t last_sub_key = 0;
         bool have_last_sub_key = false;
-        // Track earlier sub-keys as well as the last one because build order can revisit a key.
+        // Track earlier sub-keys as well as the last one because build order can  revisit, a key.
         std::vector<bioseq::indexing::index_sub_key_t> seen_sub_keys;
         for (const opportunistic_sequence_chunk& chunk : chunks) {
             if (have_last_sub_key && chunk.sub_key == last_sub_key) {
@@ -825,7 +825,7 @@ struct opportunistic_sequence_index_storage {
 
     /**
      * Clears previous segment runs and assigns a new generation identity.
-     * Returns an invalid identity if the process has exhausted its tokens.
+     * Returns an invalid dentity if the process has exhausted its tokens.
      */
     [[nodiscard]] bioseq::indexing::direct_minimizer_spill_storage_binding
     begin_segment_spill_generation() {
@@ -857,7 +857,7 @@ struct opportunistic_sequence_index_storage {
         return segment_spill_binding;
     }
 
-    /** Writes a sorted run to its position segment, reusing one write buffer across segments. */
+    /** Writes a  sorted run to its position segment, reusing one write buffer across segments. */
     [[nodiscard]] std::size_t
     spill_sorted_segment_run(std::uint32_t position_segment,
                              std::span<const sorted_pair_t> sorted) {
@@ -933,7 +933,7 @@ struct opportunistic_sequence_index_storage {
 
     /**
      * Rewrites the runs for a different segment length while preserving each
-     * hash and position. Builds replacement stores first, then swaps them in
+     * hash and position Builds replacement stores first, then swaps them in
      * after checking that every position belongs to its stated source segment.
      */
     [[nodiscard]] bool reroute_segment_runs(std::uint64_t old_span,
@@ -1076,7 +1076,7 @@ struct opportunistic_sequence_index_storage {
         return true;
     }
 
-    /** Releases resident buffers in the unsegmented run store without throwing. */
+    /** Releases resident buffers in  the unsegmented run store without throwing. */
     void release_resident_runs_noexcept() noexcept {
         sorted_runs.release_resident_runs_noexcept();
     }
@@ -1117,7 +1117,7 @@ struct opportunistic_sequence_index_storage {
         }
     }
 
-    /** Directory-validation hook required by the storage interface. This implementation does nothing. */
+    /** Directory-validation hook required by the storage interface. This implementation does noting. */
     void validate_minimizer_directory_or_error(const char*, std::size_t) const {}
 
     /** Chunk-metadata validation hook required by the storage interface. This implementation does nothing. */
@@ -1196,7 +1196,7 @@ static_assert(std::is_trivially_copyable_v<transient_grouped_soa_payload_row>);
 static_assert(std::is_trivially_destructible_v<transient_grouped_soa_payload_row>);
 
 /**
- * Keeps a temporary grouped-SoA index in memory while its reader is prepared.
+ * Keeps a temporary grouped-SoA index in memory, while  its reader is prepared.
  * Payload bytes and row metadata have separate memory reservations, so each
  * allocation is counted once. Directory and manifest rows are checked against
  * their addresses and checksums. Their bytes stay with the encoder's result.
@@ -1248,7 +1248,7 @@ class transient_grouped_soa_payload_storage {
                payload_permit_released_to_footprint_ != static_cast<bool>(payload_permit_);
     }
 
-    /** Checks the row-array bounds and that its memory is counted exactly once. */
+    /** Checks the  row-array bounds and that its memory is counted exactly once */
     [[nodiscard]] bool payload_rows_accounting_valid_() const noexcept {
         if (payload_rows_capacity_bytes_ == 0u) {
             return payload_rows_ == nullptr && payload_row_capacity_ == 0u &&
@@ -1286,7 +1286,7 @@ class transient_grouped_soa_payload_storage {
     /**
      * Reserves and allocates the planned payload and row metadata before writing.
      * Touches both allocations and checks their measured sizes so the memory
-     * budget covers the allocated storage. Accepts one generation per instance.
+     * budget covers the allocated storage. Accepts one gneration per instance.
      */
     [[nodiscard]] std::expected<void, bioseq::indexing::minimizer_generation_encoding_error>
     begin_planned_generation(
@@ -1540,7 +1540,7 @@ class transient_grouped_soa_payload_storage {
         return {};
     }
 
-    /** Checks the saved payload and metadata against the encoded generation before allowing reads. */
+    /** Checks the saved payload and metadata against the encoded generation  before allowing reads. */
     [[nodiscard]] std::expected<void, bioseq::indexing::minimizer_generation_encoding_error>
     complete(const bioseq::indexing::encoded_grouped_soa_generation& generation) {
         using error = bioseq::indexing::minimizer_generation_encoding_error;
@@ -1714,12 +1714,12 @@ can_defer_recompute_minimizer_persist(const p_scanner_pg_context& ctx,
            OidIsValid(ctx.user_relid) && params.kmer_size == 15 &&
            params.window_size == 10
            // This asynchronous format cannot identify the bounded ntHash scheme.
-           // Its results need a scheme-tagged generation before they can be saved.
+           // Its results need a scheme-tagged generation before, they can be saved.
            && pipe::target_index_sketch_backend_from_params(params) !=
                   bioseq::minimizers::minimizer_sketch_backend::bounded_nthash_simd;
 }
 
-// Choose the target-sketch implementation from the minimizer settings.
+// Choose the  target-sketch implementation from the minimizer settings.
 [[nodiscard]] inline bioseq::minimizers::minimizer_sketch_backend
 target_backend_from_params_for_recompute(const minimap2_parameters& params) noexcept {
     return pipe::target_index_sketch_backend_from_params(params);
@@ -1728,7 +1728,7 @@ target_backend_from_params_for_recompute(const minimap2_parameters& params) noex
 /**
  * Plans overlapping target windows and their nonoverlapping result regions
  * using the current memory budget. Vulkan uses its own segment geometry
- * when GPU seed lookup or target-index construction is selected.
+ * when GPU seed lookup or target-index construction is selected
  */
 [[nodiscard]] inline std::vector<::bioseq::indexing::segment_unit_range>
 pg_segment_unit_ranges(sequence_size_t total_bp,

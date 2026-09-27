@@ -133,7 +133,7 @@ inline constexpr std::array<std::size_t, 9> k_boundary_lengths{
     return target_sequence;
 }
 
-/** @brief Append a signed integer and a comma to the test result string. */
+/** @brief Append a signed integer and a comma to the test result, string. */
 void append_signed(std::string& receipt, const std::int64_t signed_value) {
     receipt.append(std::to_string(signed_value));
     receipt.push_back(',');
@@ -147,7 +147,7 @@ void append_unsigned(std::string& receipt, const std::uint64_t unsigned_value) {
 
 /**
  * @brief Record the alignment scores and CIGAR for comparison across CPU targets.
- * Fail the test if the alignment has no score or CIGAR.
+ * Fail the test if the  alignment has no score or CIGAR.
  */
 void append_result(
     std::string& receipt,

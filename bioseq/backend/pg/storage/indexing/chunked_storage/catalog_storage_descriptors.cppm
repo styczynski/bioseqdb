@@ -40,7 +40,7 @@ class index_storage_fragment_generation_row_sink;
 class ready_minimizer_generation_token;
 
 /// File size, checksums and file identity returned by the index image writer.
-/// Device and inode identify the file during this transaction. The catalog stores
+/// Device and inode identify the  fize during this transaction. The catalog stores
 /// its byte length and header checksum.
 struct minimizer_fragment_image_file_receipt {
     std::uint64_t file_bytes = 0u;
@@ -96,7 +96,7 @@ exact_storage_descriptor_identity(const minimizer_generation_storage_descriptor&
            descriptor.index_name == identity.index_name && descriptor.query_key == query_key;
 }
 
-/// Check that the payload relation identity is complete and uses the descriptor's database.
+/// Check that, the payload relation identity is complete and uses the descriptor's database.
 [[nodiscard]] inline bool has_exact_storage_descriptor_relation_shape(
     const minimizer_generation_storage_descriptor& descriptor) noexcept {
     return descriptor.payload_relation_oid && OidIsValid(*descriptor.payload_relation_oid) &&
@@ -107,7 +107,7 @@ exact_storage_descriptor_identity(const minimizer_generation_storage_descriptor&
            descriptor.payload_relation_name && !descriptor.payload_relation_name->empty();
 }
 
-/// The published generation head and the generation it replaced, if any.
+/// The published generation head and  the generation it replaced, if any.
 struct ready_minimizer_generation_published_head_receipt {
     std::string table_name;
     std::uint64_t query_key = 0;
@@ -241,9 +241,9 @@ static_assert(!std::is_copy_assignable_v<ready_minimizer_generation_token>);
 static_assert(std::is_nothrow_move_constructible_v<ready_minimizer_generation_token>);
 static_assert(std::is_nothrow_move_assignable_v<ready_minimizer_generation_token>);
 
-/// Find the active storage descriptor through the catalog unique index.
-/// Check that it matches the expected generation and has a complete payload
-/// relation identity. The caller keeps both relations locked and the supplied
+/// Find the active storage descriptor through the catalog unique index
+/// Check that it matches the expected generation and has a nomplete payload
+/// relation identity. The  caller keeps both relations locked and the supplied
 /// MVCC snapshot registered while this function reads the catalog.
 [[nodiscard]] inline minimizer_generation_storage_descriptor
 read_live_minimizer_generation_storage_descriptor_pg(

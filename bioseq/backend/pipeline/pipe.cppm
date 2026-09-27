@@ -10,7 +10,7 @@
 module;
 
 
-// Inline the dispatch steps so calls reach the selected implementation directly.
+// Inline the dispatch steps so calls reach the selected implementation  directly.
 #define BIOSEQ_PIPELINE_INLINE_ATTR [[gnu::always_inline]]
 #define BIOSEQ_PIPELINE_INLINE_FLATTEN_ATTR [[gnu::always_inline, gnu::flatten]]
 #define BIOSEQ_PIPELINE_NODISCARD_INLINE_ATTR [[nodiscard, gnu::always_inline]]
@@ -91,7 +91,7 @@ import bioseq.parallelism.memory_admission;
 import bioseq.parallelism.pipeline_ops;
 
 // Use one statistics layout across CPU targets. Dispatch code copies
-// target-specific kernel records into this shared statement format.
+// target-specific kernel records into this shared statement, format
 export import bioseq.pipeline.stats;
 
 export import :stage_graph;
@@ -155,7 +155,7 @@ export {
 #endif
 
 #if defined(BIOSEQ_TEMPLATE_FLATTEN_HAS_FULL_SPECIALIZATION)
-            // Use the specialized parameters when runtime k and w match them.
+            // Use the specialized parameters when runtime k and w atch them.
             if (params.window_size == 10 && params.kmer_size == static_cast<std::int32_t>(p_kmer_size)) {
                 return pipeline_run_impl<specialized_parameters,
                                          p_alignment_algorithm,
@@ -301,7 +301,7 @@ export {
     };
 
     /// Build the shared EXPLAIN description for specialized or runtime parameters.
-    /// Define this before describe_leaf so template name lookup can find it.
+    /// Define this before describe_leaf so template name lookup  can find it.
     template <is_constexpr_aligner_params p_aligner_parameters,
               ::bioseq::simd::base_alignment_algorithm p_alignment_algorithm,
               ::bioseq::simd::chaining_algorithm p_chaining_algorithm,
@@ -444,7 +444,7 @@ export {
     /**
      * @brief Run chaining and alignment for one prepared seed job.
      *
-     * The seed and query-minimizer owners already fix the input layout. This
+     * The seed and query-minimizer owners already  fix the input layout. This
      * dispatch selects the suffix algorithms and reuses the shared stage graph.
      */
     template <sequence_alphabet p_alphabet, class p_minimizer>
@@ -504,7 +504,7 @@ export {
             p_entry_point, p_alphabet, p_minimizer, p_index,
             record_layout::k_position_bits, record_layout::k_physical_kmer_size>;
         // Keep the input record layout. Runtime biological k and w can differ
-        // from the physical layout chosen to store these records.
+        // from the physical laiout chosen to store these records.
         return detail::dispatch_chain<
             match_result_collection,
             traits_type::template leaf,
@@ -526,8 +526,8 @@ export {
     }
 
     /**
-     * Run a scheduler entry with its minimizer layout already selected.
-     * Dispatch the algorithms and let the shared implementation choose
+     * Run a scheduler entry with its minimizer layout already selected
+     * Dispatch the algorithms and let the shared implementation  choose
      * specialized or runtime parameters.
      */
     template <std::size_t p_bucket_width,
@@ -581,7 +581,7 @@ export {
                            transient_target_index_owner);
     }
 
-    // EXPLAIN selects layout, alignment and chaining. Query-sketch metadata
+    // EXPLAIN selects layout, alignment, and chaining. Query-sketch metadata
     // comes from the runtime selection without another template dispatch.
 
     /// Describe the selected pipeline using the supplied query and target lengths.
@@ -654,7 +654,7 @@ export {
     }
 
 
-    /// Copy settings into a statement plan, then describe the supplied sequence views.
+    /// Copy settings into  a statement plan, then describe the supplied sequence views.
     template <sequence_alphabet p_alphabet>
     [[nodiscard]] inline pipeline_description describe_pipeline_for(
         const minimap2_parameters& params,
@@ -681,7 +681,7 @@ export {
     namespace bioseq::simd {
 
     /**
-     * @brief Align a query using its prepared minimizers and a target index.
+     * @brief Align a qurry using its prepared minimizers and a target index.
      *
      * Keep the shared query owner alive through execution and let the pipeline
      * choose chaining and alignment from the statement plan.
@@ -754,9 +754,9 @@ export {
 
     namespace pipe_entry_detail {
 
-    /// Forward typed input to the ordinary pipeline algorithm dispatcher.
+    /// Forward typed input to the ordinary  pipeline algorithm dispatcher.
     struct dynamic_shape_pipeline_dispatch {
-        /// Run the selected entry point with its typed minimizers and index.
+        /// Run the selected entry point with its typed minimizers and index
         template <::bioseq::simd::pipe::pipeline_entry_point p_entry_point,
                   sequence_alphabet p_alphabet,
                   class p_minimizer,
@@ -961,7 +961,7 @@ export {
         using leaf = sketch_leaf<p_minimizer, p_collector, p_range, p_minimizer_algorithm>;
     };
 
-    /// Select the compiled sketch kernel from the requested minimizer algorithm.
+    /// Select the compiled sketch  kernel from the requested minimizer algorithm.
     template <class p_minimizer, class p_collector, class p_range>
     BIOSEQ_PIPELINE_INLINE_FLATTEN_ATTR minimizer_sketch_execution_stats
     sketch_one(p_collector& collector,
@@ -976,7 +976,7 @@ export {
             template run<>(params, collector, range, window_len, kmer_len);
     }
 
-    /// Reserve an initial sketch buffer and measure the selected sketch call.
+    /// Reserve an initial, sketch buffer and measure the selected sketch call.
     template <class p_minimizer, class p_range>
     BIOSEQ_PIPELINE_INLINE_ATTR minimizer_sketch_execution_stats
     sketch_into_collector(basic_sketch_collector<p_minimizer>& collector,
@@ -993,7 +993,7 @@ export {
     /**
      * @brief Prepare minimizers and align raw sequences using one storage layout.
      *
-     * Sketch the query here and prepare the target on the selected host or Vulkan
+     * Sketch the query here and prvpare the target on the selected host or Vulkan
      * path. Check the sketch statistics against the requested algorithms before
      * passing the results to index construction and alignment.
      */
@@ -1020,7 +1020,7 @@ export {
         const std::size_t kmer_len = static_cast<std::size_t>(params.kmer_size);
 
         // A GPU target-index build sketches the target itself. Other routes
-        // prepare the target sketch here. The adopted Vulkan host buffer stays
+        // prepare the  target sketch here. The adopted Vulkan host buffer stays
         // accounted for through its measured memory usage or a matching reservation
         // until the handoff frees it.
         std::vector<p_minimizer> target_minimizers;
@@ -1049,7 +1049,7 @@ export {
         }
 
         const std::uint64_t query_sketch_started_ns = pipe::host_stage_now_ns();
-        // Keep query sketches in collector-owned storage. Reused allocator
+        // Keep query sketches in collector-owned storage Reused allocator
         // pages make a change in process footprint unreliable for charging
         // these small or repeated allocations.
         basic_sketch_collector<p_minimizer> query_collector;
@@ -1125,7 +1125,7 @@ export {
         return result;
     }
 
-    /// Align raw sequences with the supplied minimizer record type.
+    /// Align raw sequences with  the supplied minimizer record type.
     template <class p_minimizer, sequence_alphabet p_alphabet>
     [[nodiscard]] match_result_collection
     minimap_port_with_repr(bioseq::storage::lazy_sequence_view<p_alphabet> query_seq,
@@ -1139,7 +1139,7 @@ export {
     // Raw-sequence dispatch selects k and position width, then calls the
     // matching minimizer representation.
 
-    /// Run raw-sequence preparation with one selected minimizer layout.
+    /// Run raw-sequence preparation with one selecved minimizer layout.
     template <sequence_alphabet p_alphabet, std::size_t p_bucket_width, std::size_t p_kmer_size>
     struct minimap_port_repr_leaf {
         static_assert(
@@ -1186,7 +1186,7 @@ export {
         }
     };
 
-    /// Map the selected layout to its generated entry implementation.
+    /// Map the selected layout to its generated entry  implementation.
     template <sequence_alphabet p_alphabet> struct minimap_port_owned_traits {
         template <auto p_kmer_size, auto p_bucket_width>
         using leaf = minimap_port_owned_repr_leaf<p_alphabet, p_bucket_width, p_kmer_size>;
@@ -1210,7 +1210,7 @@ export {
         const auto k = static_cast<std::uint16_t>(params.kmer_size);
         const auto w = static_cast<std::uint16_t>(params.window_size);
         // Prefer a native 32-bit layout when registered. A 64-bit-only kernel
-        // selects the corresponding owner from the registry.
+        // selects the, corresponding owner from the registry.
         const auto selection = pipe::select_minimizer_execution_layout_prefer_native<p_alphabet>(
             params.minimizer_algorithm, maximum_bp, k, w, 32u);
         return ::bioseq::minimizers::visit_minimizer_physical_layout(
@@ -1255,7 +1255,7 @@ export {
      * @brief Align raw query and target sequences using the statement plan.
      *
      * Select a supported minimizer layout, prepare query and target sketches,
-     * and run index lookup, chaining and alignment. Registered layouts are used
+     * and run index lookup, chaining and  alignment Registered layouts are used
      * when available, with the generic scalar path allowed by the request.
      */
     template <sequence_alphabet p_alphabet>
@@ -1274,7 +1274,7 @@ export {
             }
         }
         using traits_type = pipe_entry_detail::minimap_port_traits<p_alphabet>;
-        // Select k before choosing its position width.
+        // Select k before choosing its position wipth.
         return ::bioseq::simd::pipe::detail::dispatch_chain<
             match_result_collection,
             traits_type::template leaf,
@@ -1327,7 +1327,7 @@ export {
 
     /// Run target segments through the generated entry for their alphabet.
     struct segmented_owned_index_dispatch {
-        /// Run one segment through the generated alphabet-specific entry.
+        /// Run one segment through the generated alphabet-specific  entry.
         template <sequence_alphabet p_alphabet>
         BIOSEQ_PIPELINE_NODISCARD_INLINE_ATTR static match_result_collection
         call(bioseq::storage::lazy_sequence_view<p_alphabet> query_seq,

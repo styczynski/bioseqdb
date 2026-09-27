@@ -15,7 +15,7 @@ export struct batch_join_bioseq_path_candidate {
 };
 
 /**
- * @brief A test BioseqScan with a projection above it.
+ * @brief A test BioseqScan with a projection  above it.
  *
  * PostgreSQL usually keeps unrelated expressions in an upper projection, so SQL
  * cannot reliably produce the base projection shapes these tests need. Build
@@ -48,7 +48,7 @@ export [[nodiscard]] bool batch_join_target_expression_is_forbidden(
     const Var* target_var,
     bool allow_mmsearch_qualifier);
 
-/** @brief Rejects malformed restrictions and restrictions that expose the target sequence to ordinary SQL evaluation. */
+/** @brief Rejects malformed restrictions and restrictions that  expose the target sequence to ordinary SQL evaluation. */
 export [[nodiscard]] bool batch_join_target_restrictions_are_forbidden(
     List* restrictions,
     const Var* target_var,

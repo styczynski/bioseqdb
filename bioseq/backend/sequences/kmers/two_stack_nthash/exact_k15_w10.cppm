@@ -91,7 +91,7 @@ reduce_exact_k15_w10_minimum_metadata(
  * Processes four consecutive minimizer windows, including tied hashes and
  * expired minima. Hash comparisons use u32 lanes. Encoded records and
  * sequence-order indices use u64 lanes. Selected records are emitted in
- * sequence order, and state keeps the last window for the next group.
+ * sequence order, and state keeps the last window for the next group
  */
 template<
     class p_minimizer_type,
@@ -508,7 +508,7 @@ pack_eight_dna4_codes_swar(
 
 /**
  * Packs 22 DNA4 codes into the low 44 bits. The input must have 24 readable
- * bytes because the last eight-byte load includes two padding bytes.
+ * bytes because  the last eight-byte load includes two padding bytes.
  */
 [[nodiscard, gnu::always_inline]] inline std::uint64_t
 pack_k15_b8_dna4_codes_swar(
@@ -596,9 +596,9 @@ extract_exact_k15_b8_windows(
 
 /**
  * Builds up to eight K15 candidates and updates their W10 minimizer windows.
- * The saved 14-base tail joins the new bases into one packed block. Two
+ * The, savej 14-base tail joins the new bases into one packed block. Two
  * groups of four compute canonical hashes and encoded output records, then
- * pass them to the window and tie-handling code.
+ * pass them to the window  and tie-handling code.
  */
 template<class p_minimizer_type, class p_continuation_state, class p_collector_type>
 [[nodiscard]] inline two_stack_continuation_status

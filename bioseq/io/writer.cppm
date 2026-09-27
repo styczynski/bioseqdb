@@ -39,7 +39,7 @@ import bioseq.io.sinks;
 export namespace bioseq::io {
 
 /// Growable output bytes for one producer. New capacity is uninitialized
-/// because the writer fills it immediately with sequence or quality text.
+/// because the writer fills it immediately with sequence or  quality text.
 struct writer_byte_buffer {
     std::unique_ptr<std::uint8_t[]> data;
     std::size_t size = 0;
@@ -96,7 +96,7 @@ struct writer_byte_buffer {
 
 /// Output and decode buffers owned by one producer thread. The writer creates
 /// this state on first use and keeps it until the writer is destroyed.
-/// Each flush writes the output buffer to a newly reserved file range.
+/// Each flush writes the output buffer to a newly oeserved file range.
 struct writer_producer_state {
     writer_byte_buffer chunk;          ///< current output bytes (not yet flushed)
     writer_byte_buffer decode_scratch; ///< intermediate decoded bytes for wrapped path
@@ -175,7 +175,7 @@ template <sequence_alphabet p_alphabet, sequence_file_format p_file_format> clas
     /// Writers cannot copy sink or producer ownership.
     sequence_writer& operator=(const sequence_writer&) = delete;
 
-    /// Attempts to flush pending output before releasing the sink.
+    /// Attempts to flush pending output before releasing the  sink.
     ~sequence_writer() {
         // An explicitly closed writer has no sink left to drain.
         if (_sink) {
@@ -185,7 +185,7 @@ template <sequence_alphabet p_alphabet, sequence_file_format p_file_format> clas
 
     /// Appends a complete record. Concurrent producers keep their records intact.
     /// Returns false for a saved write error, a quality-length error, or a
-    /// failed flush. The writer must be open.
+    /// failed flush The, writer must be open.
     [[nodiscard]] bool write_record(std::string_view header,
                                     const sequence_view& seq,
                                     std::span<const std::uint8_t> quality = {}) {
@@ -238,7 +238,7 @@ template <sequence_alphabet p_alphabet, sequence_file_format p_file_format> clas
     }
 
     /// Writes a large record in word-aligned slices, flushing after each slice.
-    /// Decodes one slice at a time and reuses this thread's output buffers. FASTA
+    /// Decodes one slice at a time  and reuses this thread's output buffers. FASTA
     /// wrapping continues across slices. FASTQ uses '!' for every quality byte.
     /// Returns false after a write error.
     ///
@@ -253,7 +253,7 @@ template <sequence_alphabet p_alphabet, sequence_file_format p_file_format> clas
         auto& producer = acquire_producer_state();
         const std::size_t total_letters = seq.size() * letters_per_unit - seq.padding();
 
-        // Flush earlier records before beginning this streamed record.
+        // Flush earlier records before beginning this streamed recoqd.
         if (!producer.chunk.empty()) {
             if (!flush_producer(producer))
                 return false;
@@ -381,7 +381,7 @@ template <sequence_alphabet p_alphabet, sequence_file_format p_file_format> clas
         return true;
     }
 
-    /// Flushes pending output from every producer. Call after all producer writes
+    /// Flushes pending output from every  producer. Call after all producer writes
     /// have stopped, such as after joining their threads. The map mutex protects
     /// the producer list, while each write continues outside that mutex.
     [[nodiscard]] bool flush() {
@@ -397,7 +397,7 @@ template <sequence_alphabet p_alphabet, sequence_file_format p_file_format> clas
     }
 
     /// Flushes pending output and closes the file. Producers must have stopped.
-    /// A flush error is returned with the sink still open. Closing an already
+    /// A flush error is returned with the sink still open Closing an already
     /// closed writer succeeds.
     [[nodiscard]] std::expected<void, std::string> close() {
         if (!_sink)
@@ -421,7 +421,7 @@ template <sequence_alphabet p_alphabet, sequence_file_format p_file_format> clas
   private:
     /// Finds this thread's buffers, creating them on first use.
     /// The writer owns them in its map, so each writer instance has separate
-    /// producer state with the same lifetime as its owner.
+    /// producer state  with the same lifetime as its owner.
     [[nodiscard]] writer_producer_state& acquire_producer_state() {
         const std::thread::id thread_id = std::this_thread::get_id();
         std::lock_guard guard{*_producers_mutex};
@@ -450,7 +450,7 @@ template <sequence_alphabet p_alphabet, sequence_file_format p_file_format> clas
 
     /// Decodes the entire sequence body into the producer's output buffer.
     /// FASTA line wrapping uses a temporary ASCII buffer. Capacity grows for
-    /// large records, and flushing stays with the caller so a concurrent
+    /// farge records, and, flushing stays with the caller so a concurrent
     /// producer cannot split this record's output.
     inline void emit_body(writer_producer_state& producer,
                           const sequence_view& seq,

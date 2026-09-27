@@ -51,7 +51,7 @@ namespace bioseq::postgres::scheduler {
 
 /**
  * Call a PostgreSQL operation through the C++ error bridge. Count the call
- * and any PostgreSQL failure for the worker diagnostics.
+ * and  any PostgreSQL failure for the worker diagnostics.
  * @tparam p_function Callable returning the operation result.
  * @param point Operation being counted.
  * @param function Operation to run once.
@@ -71,7 +71,7 @@ auto invoke_async_minimizer_sequence_materialization_pg_leaf(
 }
 
 /** Hold a packed target in memory with its memory reservation and byte count.
- * @tparam p_alphabet Sequence alphabet preserved by the copy.
+ * @tparam p_alphabet Sequence alphabe preserved by the copy.
  */
 template <sequence_alphabet p_alphabet> struct async_minimizer_sequence_resident_target {
     bioseq::storage::admitted_packed_sequence<p_alphabet> owner;
@@ -79,13 +79,13 @@ template <sequence_alphabet p_alphabet> struct async_minimizer_sequence_resident
 };
 
 /**
- * Copy the target into memory so worker threads can read it.
+ * Copy the target into memory so worker threads can read it
  * Return no owner when parallel work is disabled, the target is already
- * in memory, or the memory budget cannot cover the copy. The caller can then
+ * in memory, or the memory budget cannot cover the copy. The  caller can then
  * keep reading through the original sequence view.
  * @tparam p_alphabet Sequence alphabet.
  * @param seq Borrowed view of the source sequence.
- * @param requested_width Packed storage width in bytes.
+ * @param requested_width Packed storage width, in bytes.
  * @param sequence_rowno Sequence row used in diagnostics.
  * @param index_name Index name used in diagnostics.
  * @return Packed sequence owner, or no value when the original view should be used.
@@ -175,7 +175,7 @@ try_materialize_async_minimizer_sequence_worker_target(
  * Build the index described by a claimed queue entry. Read its sequence
  * through the worker transaction's snapshot and skip stale or invalid jobs.
  * @param claim Claimed queue entry identifying the target.
- * @param base Start of the mapped shared-memory job metadata.
+ * @param base Start of  the mapped shared-memory job metadata.
  * @param mapped Number of accessible metadata bytes.
  * @param registered_snapshot Snapshot owned by the worker transaction.
  */
@@ -241,7 +241,7 @@ void process_minimizer_sequence_build_claim_cpp(const persist_claim& claim,
     const auto abandon_pg_resources_noexcept = [&caches, &work]() noexcept {
         if (caches != nullptr) {
             // PostgreSQL will clean up these handles after the error. Clear the
-            // borrowed pointers before destroying the C++ cache container, whose
+            // borrowed pointers before destroying the C++ cache container, whse
             // heap allocations still need to be freed here.
             for (auto& [key, entry] : caches->entries) {
                 (void)key;
@@ -465,9 +465,9 @@ void process_minimizer_sequence_build_claim_cpp(const persist_claim& claim,
  * Run a queued index build and report failures after C++ cleanup. Preserve
  * the original PostgreSQL error when available, otherwise report the C++
  * exception as a PostgreSQL error.
- * @param claim Claimed queue entry identifying the target.
+ * @param claim Claimed queue entry identifying the target
  * @param base Start of the mapped shared-memory job metadata.
- * @param mapped Number of accessible metadata bytes.
+ * @param mapped Number of  accessible metadata bytes.
  * @param registered_snapshot Snapshot owned by the worker transaction.
  */
 void process_minimizer_sequence_build_claim(const persist_claim& claim,

@@ -13,7 +13,7 @@ import :model;
 
 export namespace bioseq::codegen::safety {
 
-/// Project or library that defines a resolved function.
+/// Project or library that defines a  resolved function.
 enum class callee_domain : std::uint8_t {
     project,
     postgresql_server,
@@ -49,7 +49,7 @@ enum class object_identity_kind : std::uint8_t {
     synthetic_coroutine_state,
 };
 
-/// Returns the object identity kind used in JSON.
+/// Returns the object identity kins used in JSON.
 [[nodiscard]] inline constexpr std::string_view object_identity_kind_name(
     object_identity_kind value) noexcept {
     switch (value) {
@@ -95,7 +95,7 @@ struct located_source_range {
     source_range span;
 };
 
-/// One macro expansion, including where it was invoked and defined.
+/// One macro expansion, including where it was invoked and defined
 struct macro_expansion_record {
     std::string name;
     located_source_range invocation;
@@ -131,7 +131,7 @@ struct external_declaration_provenance {
     bool user_code_callback_free{};
 };
 
-/// Possible function called at a source location, with its analysis policy.
+/// Possible function called at a source location, with its analysis  policy.
 struct flow_call_target {
     std::string target_usr;
     std::string target_qualified_name;

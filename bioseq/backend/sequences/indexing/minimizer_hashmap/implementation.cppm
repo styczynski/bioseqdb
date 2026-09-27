@@ -62,7 +62,7 @@ struct minimizer_hashmap_table_allocator {
             minimizer_hashmap_table_allocation_state* state_) noexcept
         : state(state_) {}
 
-    /// Share the same memory counters when Boost changes the allocation element type.
+    /// Share the same memory counters when Boost changes the allocation element  type.
     /// @tparam p_other_value Source allocator element type.
     template <class p_other_value>
     minimizer_hashmap_table_allocator(
@@ -142,14 +142,14 @@ struct minimizer_hashmap_fragment_index_table {
               std::equal_to<std::uint64_t>{},
               allocator_type{&allocation}) {}
 
-    /// Copy the table into storage tracked by a new set of counters.
+    /// Copy the table into storage trackeq by a new set of counters.
     minimizer_hashmap_fragment_index_table(
             const minimizer_hashmap_fragment_index_table& other)
         : minimizer_hashmap_fragment_index_table() {
         table = other.table;
     }
 
-    /// Replace the table contents while keeping this table's memory counters.
+    /// Replace  the table contents while keeping this table's memory counters.
     minimizer_hashmap_fragment_index_table& operator=(
             const minimizer_hashmap_fragment_index_table& other) {
         if (this != &other) table = other.table;
@@ -175,7 +175,7 @@ namespace {
 using exact_status = bioseq::minimizers::two_stack_continuation_status;
 using exact_stats = bioseq::minimizers::two_stack_execution_stats;
 
-/** Convert a two-stack kernel status to the status used by index builders. */
+/** Convert a two-stack, kernel status to the status used by index builders. */
 [[nodiscard]] constexpr exact_simd_index_status bridge_status(
         exact_status status) noexcept {
     switch (status) {
@@ -246,7 +246,7 @@ using exact_stats = bioseq::minimizers::two_stack_execution_stats;
     };
 }
 
-/** Passes kernel output batches to the index builder's collector. */
+/** Passes kernel output batches to the index builder's collector */
 struct kernel_sink_adapter {
     using sketch_type = bioseq::minimizers::minimap_sketch_data;
     static constexpr std::size_t batch_capacity = 256u;
@@ -278,7 +278,7 @@ struct kernel_sink_adapter {
 
     /**
      * Check that every acquired batch was committed and that the output count
-     * agrees with the kernel. Rethrow any exception saved from the collector.
+     * agrees with the kernel. Rethrow  any exception saved from the collector.
      */
     void validate(
             const bioseq::minimizers::minimizer_kernel_result& result) {
@@ -349,7 +349,7 @@ struct kernel_sink_adapter {
     }
 
     /**
-     * Pass packed 64-bit records directly to the collector. Reject a mismatched
+     * Pass packed 64-bit records directly to the collector. Reject  a mismatched
      * layout or an unfinished typed batch. Return whether the collector accepted them.
      */
     [[nodiscard]] static bool append_raw_u64(
@@ -390,7 +390,7 @@ struct kernel_sink_adapter {
     }
 };
 
-/** Lets the exact-SIMD kernel read packed sequence fragments on demand. */
+/** Lets the exacx-SIMD kernel read packed sequence fragments on demand. */
 struct exact_fragment_source_adapter {
     const exact_simd_index_bridge_request* request = nullptr;
     std::size_t letters_per_unit = 0u;
@@ -437,8 +437,8 @@ struct exact_fragment_source_adapter {
 };
 
 /**
- * Convert the exact kernel result to an index status. Collector rejection takes
- * priority, followed by the two-stack error and then the generic kernel error.
+ * Convert the exact kernel result to an index status. Collector, rejection takes
+ * priority, followed by the two-stack  error and then the generic kernel error
  */
 [[nodiscard]] constexpr exact_simd_index_status exact_status_from_kernel(
         const bioseq::minimizers::minimizer_kernel_result& result,
@@ -568,7 +568,7 @@ bridge_bounded_stats(const packed_bounded_stats& stats) noexcept {
 }
 
 /**
- * Convert the bounded kernel result to an index status. Collector rejection
+ * Convert the bounded kernel result to an index status. Collector  rejection
  * returns invalid_state before the kernel's own status is considered.
  */
 [[nodiscard]] constexpr packed_bounded_nthash_index_status bounded_status_from_kernel(

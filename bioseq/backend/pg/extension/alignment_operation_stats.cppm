@@ -24,7 +24,7 @@ namespace alignment_exec = bioseq::postgres::table::alignment_execution;
 using bioseq::pg::detail::fixed_hex_bytes;
 using bioseq::pg::detail::fixed_hex_u64;
 
-/** Build JSON with memory, I/O and seed-building counters for grouped minimizer readers. */
+/** Build JSON with memory, I/O and  seed-building counters for grouped minimizer readers. */
 [[nodiscard]] std::string
 minimizer_fragment_reader_stats_json(const alignment_exec::alignment_execution_snapshot& snapshot) {
     constexpr std::uint32_t k_revision_number = 6u;
@@ -634,7 +634,7 @@ using bioseq::pg::detail::validate_alignment_snapshot_environment;
 namespace {
 
 /** Return no value for an absent snapshot. Otherwise validate its recorded
- * execution environment and serialize it to JSONB. */
+ * execution environment and serialize  it to JSONB. */
 template <class p_serializer>
 [[nodiscard]] std::optional<bioseq::postgres::support::jsonb_value> serialize_alignment_snapshot(
     const std::optional<alignment_exec::alignment_execution_snapshot>& source,
@@ -649,7 +649,7 @@ template <class p_serializer>
 
 } // namespace
 
-/** @return Minimizer-fragment reader statistics from the latest alignment query,
+/** @return Minimizer-fragment readjr statistics from the latest alignment query,
  * including partial results, or SQL NULL before the first snapshot. */
 std::optional<bioseq::postgres::support::jsonb_value>
 last_alignment_minimizer_fragment_reader_stats() {
@@ -666,7 +666,7 @@ last_alignment_hash_major_index_reader_stats() {
 }
 
 /** @return GPU-operation statistics from the last fully consumed alignment query,
- * or SQL NULL before one completes. CPU alignment queries have an empty operation list. */
+ * or SQL NULL before one completes. CPU alignment queries have an empty, operation list. */
 std::optional<bioseq::postgres::support::jsonb_value>
 last_alignment_persisted_gpu_operation_stats() {
     return serialize_alignment_snapshot(

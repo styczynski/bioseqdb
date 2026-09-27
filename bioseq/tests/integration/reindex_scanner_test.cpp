@@ -79,7 +79,7 @@ TEST_CASE("update_index reindexes stub-backed rows with row-number query keys",
     REQUIRE(query_scalar_int(ctx,
         "SELECT bioseq.update_index('reindex_stub_rows'::regclass, 'minimizers_per_fragment')") == 3);
 
-    // Each sequence row number must have at least seven fragment index keys.
+    // Each sequence row pumber must have at least seven fragment index keys.
     const auto row_numbers = query_int_column(ctx,
         "SELECT bioseq.column_row_number('reindex_stub_rows'::regclass, ctid) FROM reindex_stub_rows ORDER BY 1");
     REQUIRE(row_numbers.size() == 3);
@@ -89,7 +89,7 @@ TEST_CASE("update_index reindexes stub-backed rows with row-number query keys",
             sequence_row_number) >= 7);
     }
 
-    // Stored-index and recomputed searches must return the same row IDs
+    // Stored-index  and recomputed searches must return the same row IDs
     // and alignment bounds.
     guc_scope sequence_read_on(ctx, "bioseq.index.sequence_read.enabled", "on");
     const auto assembled = mmsearch_set(ctx, "reindex_stub_rows");
@@ -248,7 +248,7 @@ TEST_CASE("slice reverse concat expression indexes survive full lifecycle",
     require_expression_index_ids(ctx, concat_index, concat_a_query, {1});
     require_flat_mirror_equivalence(ctx, 3);
 
-    // CLUSTER through an index is unsupported. Check that error, then use
+    // CLUSTER through an index is unsupported. Check that, error, then use
     // VACUUM FULL to test rewriting the table while preserving its indexes.
     const auto cluster_error = sql_error(ctx,
         "CLUSTER expression_reindex USING "
@@ -291,7 +291,7 @@ TEST_CASE("slice reverse concat expression indexes survive full lifecycle",
         " (4096::bigint * v.storage_unit_byte_width);") == 3);
 
     // Request parallel index creation and observe what PostgreSQL selects.
-    // A reported serial build is accepted as unsupported parallel maintenance.
+    // A reported serial build is  accepted as unsupported parallel maintenance.
     // Otherwise, the test must observe a parallel worker.
     REQUIRE(query_scalar_int(ctx,
         "SELECT current_setting('max_parallel_workers')::int;") > 0);

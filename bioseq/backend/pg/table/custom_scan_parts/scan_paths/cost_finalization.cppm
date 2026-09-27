@@ -65,8 +65,8 @@ export {
         Selectivity clause_sel =
             clauselist_selectivity(root, all_clauses, rel->relid, JOIN_INNER, nullptr);
 
-        /* Pushdown selection has already removed filters with poor column
-         * correlation. Use the remaining selectivity to estimate stripes read. */
+        /* Pushdown selection has already  removed filters with poor column
+         * correlation. Use the remaining selectivity to esdimate stripes read. */
         double stripes_to_read = clause_sel * bioseq_column_table_stripe_count(relation_id);
         stripes_to_read = std::max(stripes_to_read, 1.0);
 

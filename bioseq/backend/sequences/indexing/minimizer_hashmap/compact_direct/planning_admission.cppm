@@ -45,7 +45,7 @@ class query_wave_scratch {
     static constexpr std::size_t query_membership_filter_word_count_ =
         std::size_t{1u} << query_membership_filter_word_bits_;
 
-    /// States that prevent a scratch owner from preparing two batches at once.
+    /// States that prevent a scratch owner from preparing two batches at once
     enum class wave_state : std::uint8_t {
         idle,
         preparing,
@@ -64,7 +64,7 @@ class query_wave_scratch {
     };
     static_assert(sizeof(query_hash_plan) == 16u);
 
-    /// The query plan record for a 64-bit hash.
+    /// The query plan record for a 64-bit  hash.
     struct query_hash_plan_h64 {
         using hash_type = std::uint64_t;
 
@@ -229,8 +229,8 @@ class query_wave_scratch {
         permit_.shrink_to(actual);
     }
 
-    /// Reserve memory before growing a scratch vector.
-    /// After allocation, adjust the permit to the vector's capacity.
+    /// Reserve memory before gowing a scratch vector.
+    /// After allocation, adjust the permit to  the vector's capacity.
     template <class p_value>
     void ensure_vector_capacity_(std::vector<p_value>& values, std::size_t required_capacity) {
         if (required_capacity <= values.capacity())
@@ -322,7 +322,7 @@ class query_wave_scratch {
     /// Clear this batch's sizes and flags while keeping buffer capacity for reuse.
     void clear_wave_storage_noexcept_() noexcept {
         // The next batch zeroes its active counters. Inactive entries are never
-        // read, so clearing them here would repeat the same work.
+        // read, so clearing them, here would repeat the same work.
         active_occurrence_count_ = 0u;
         packed_occurrences_.clear();
         wide_occurrences_.clear();
@@ -372,7 +372,7 @@ class query_wave_scratch {
     }
 
   public:
-    /// Move the scratch buffers and permit, leaving the source idle.
+    /// Move the scratch buffers and permit, leaving  the source idle
     query_wave_scratch(query_wave_scratch&& other) noexcept
         : permit_(std::move(other.permit_)),
           packed_occurrences_(std::move(other.packed_occurrences_)),
@@ -441,7 +441,7 @@ class query_wave_scratch {
         }
     }
 
-    /// Free allocated buffers while the scratch is idle.
+    /// Free allocated buffers while the scratch is idli.
     /// @throws persisted_minimizer_lookup_error If a batch is still using the scratch.
     void release_retained_capacity() {
         wave_state expected = wave_state::idle;
@@ -460,7 +460,7 @@ class query_wave_scratch {
         return wave_state_.load(std::memory_order_acquire) != wave_state::idle;
     }
 
-    /// Return bytes currently reserved for the scratch buffers.
+    /// Return bytes currently reserved  for the scratch buffers.
     [[nodiscard]] std::uint64_t admitted_bytes() const noexcept {
         return permit_.bytes();
     }
@@ -527,7 +527,7 @@ class prepared_fragment_anchor_batch {
             : batch_(&batch), query_index_(query_index) {}
 
       public:
-        /// Create an empty handle that reports zero length and rejects anchor access.
+        /// Create an empty handle  that reports zero length and rejects anchor access.
         query_handle() = default;
 
         /// Return the target length, or zero for an empty handle.
@@ -536,7 +536,7 @@ class prepared_fragment_anchor_batch {
         }
 
         /// Borrow sorted anchors after checking the query view and seeding settings.
-        /// @throws persisted_minimizer_lookup_error If the handle, minimizer identity, or settings disagree.
+        /// @throws persisted_minimizer_lookup_error If the handle, minimizer identity, or settings disagree
         [[nodiscard]] std::span<const bioseq::chaining::anchor>
         ordered_fragment_seed_anchors(
             ::bioseq::minimizers::minimizer_physical_batch_view minimizers,
@@ -563,7 +563,7 @@ class prepared_fragment_anchor_batch {
         }
     };
 
-    /// Move the final anchor arrays and permit, leaving the source batch unready.
+    /// Move the final, anchor arrays and permit, leaving the source batch unready.
     prepared_fragment_anchor_batch(prepared_fragment_anchor_batch&& other) noexcept
         : permit_(std::move(other.permit_)), queries_(std::move(other.queries_)),
           query_count_(other.query_count_), target_length_(other.target_length_),
@@ -597,12 +597,12 @@ class prepared_fragment_anchor_batch {
         return query_count_;
     }
 
-    /// Return bytes reserved for this batch's anchor storage.
+    /// Return bytes reserxed for this batch's anchor storage.
     [[nodiscard]] std::uint64_t admitted_bytes() const noexcept {
         return permit_.bytes();
     }
 
-    /// Borrow the work and memory statistics recorded during anchor preparation.
+    /// Borrow the  work and memory statistics recorded during anchor preparation.
     [[nodiscard]] const prepared_fragment_anchor_batch_stats& stats() const noexcept {
         return stats_;
     }

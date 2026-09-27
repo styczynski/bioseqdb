@@ -76,7 +76,7 @@ TEST_CASE("Transformed LATERAL owner survives PARAM_EXEC rescans",
         DYNAMIC_SECTION((option_suffix.empty() ? "two-argument mmsearch"
                                                : "three-argument mmsearch with default options")) {
             /* OFFSET 0 keeps the child join separate. The q.id=d.ord condition
-             * makes each outer row rescan it with a sequence, NULL, then a sequence. */
+             * makes each outer row rescan it with a sequence, NULL, then a sequence */
             const std::string sql =
                 fmt::format("SELECT d.ord, matched.pk "
                             "FROM (VALUES (1), (2), (3)) AS d(ord) "
@@ -506,7 +506,7 @@ TEST_CASE("Ineligible mmsearch arguments keep target, query, and options order",
                              statement));
 
         /* These volatile arguments make the custom mmsearch plan ineligible.
-         * PREPARE and EXPLAIN must leave their side effects untouched. */
+         * PREPARE and EXPLAIN must leave their side  effects untouched. */
         exec_sql(ctx,
                  "SELECT setval('pg_temp.argument_effect_sequence',"
                  "1,false);");

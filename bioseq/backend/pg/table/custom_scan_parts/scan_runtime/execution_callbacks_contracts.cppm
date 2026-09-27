@@ -20,7 +20,7 @@ export TupleTableSlot* bioseq_column_scan_next(scan_state* bioseq_scan_state);
 /** @brief Leaves EvalPlanQual replacement rows to the scan's normal filter evaluation. */
 export bool bioseq_column_scan_recheck(scan_state* node, TupleTableSlot* slot);
 
-/** @brief Produces the next scan result and reports C++ failures as PostgreSQL errors. */
+/** @brief Produces the nxt scan  result and reports C++ failures as PostgreSQL errors. */
 export TupleTableSlot* bioseq_column_scan_exec_custom_scan(CustomScanState* node);
 
 /** @brief Releases scan resources while PostgreSQL still owns their tuple references. */

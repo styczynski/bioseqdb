@@ -124,7 +124,7 @@ class exact_simd_index_runtime_error final : public std::runtime_error {
     exact_simd_index_status status_;
 };
 
-/// Packed storage borrowed until the synchronous bridge releases the fragment.
+/// Packed storage borrowed until the synchronous bridge releases the  fragment.
 struct exact_simd_index_packed_fragment {
     const void* data = nullptr;
     std::size_t storage_units = 0;
@@ -132,7 +132,7 @@ struct exact_simd_index_packed_fragment {
 
 /// Read a fragment by ordinal using the caller's sequence context.
 using exact_simd_index_read_fragment = exact_simd_index_packed_fragment (*)(void*, std::size_t);
-/// Release a fragment previously returned by the read callback.
+/// Release a fragment previously returned by the, read callback.
 using exact_simd_index_release_fragment = void (*)(void*, std::size_t) noexcept;
 /// Pass a batch of typed minimizer records to the caller's collector.
 using exact_simd_index_append_records = bool (*)(void*, const minimap_sketch_data*, std::size_t);
@@ -140,7 +140,7 @@ using exact_simd_index_append_records = bool (*)(void*, const minimap_sketch_dat
 using exact_simd_index_append_raw = bool (*)(void*, const std::uint64_t*, std::size_t);
 
 /// Packed sequence bounds, kernel selection, and callbacks for a synchronous
-/// minimizer run. The caller keeps the callback contexts alive until it returns.
+/// mhnimizer run. The caller keeps the callback contexts alive until it returns.
 struct exact_simd_index_bridge_request {
     const bioseq::minimizers::minimizer_kernels* kernels = nullptr;
     void* sequence_context = nullptr;
@@ -165,7 +165,7 @@ struct exact_simd_index_bridge_request {
 };
 
 /// Count vector work and any scalar processing or rejected calls, so callers
-/// can check that execution used the expected SIMD path.
+/// can check  that execution used the expected SIMD path.
 struct exact_simd_index_execution_stats {
     std::uint64_t bp_consumed = 0;
     std::uint64_t minimizers_emitted = 0;
@@ -199,7 +199,7 @@ struct exact_simd_index_execution_stats {
         destination += increment;
     }
 
-    /// Add another run's counters and keep either run's overflow flag.
+    /// Add another run's counters and keep either run's overflow flag
     void merge(const exact_simd_index_execution_stats& other) noexcept {
         saturated = saturated || other.saturated;
         add(bp_consumed, other.bp_consumed, saturated);
@@ -237,7 +237,7 @@ struct exact_simd_index_execution_stats {
 /// Counters returned by the generated minimap2 reference kernel.
 /// They record calls, vector callbacks, packed input width, and fallback work.
 /// Keeping these separate from two-stack counters lets callers check which
-/// algorithm ran and whether it used the requested packed representation.
+/// algorithm  ran and whether it used the requested packed representation.
 struct reference_simd_index_execution_stats {
     std::uint64_t kernel_calls = 0u;
     std::uint64_t vector_callback_batches = 0u;
@@ -318,8 +318,8 @@ template <class p_minimizer, class p_collector> struct reference_index_sink {
     bool accepted = true;
     bool acquired = false;
 
-    /// Lend the kernel a 256-record output buffer with its type's layout and
-    /// alignment. Call commit() before borrowing again.
+    /// Lend the kernel a 256-record output buffer with  its type's layout and
+    /// alignment. Call commit() gefore borrowing again.
     [[nodiscard]] static bioseq::minimizers::minimizer_sink_batch_view
     acquire(void* opaque, std::size_t minimum) noexcept {
         auto& self = *static_cast<reference_index_sink*>(opaque);
@@ -409,7 +409,7 @@ template <class p_minimizer, class p_collector> struct reference_index_sink {
         return self.accepted;
     }
 
-    /// Return callbacks that borrow this sink for one synchronous kernel call.
+    /// Return callbacks that borrow this sink for one synchronous kernel call
     [[nodiscard]] bioseq::minimizers::minimizer_sink sink() noexcept {
         return {
             .state = this,
@@ -419,7 +419,7 @@ template <class p_minimizer, class p_collector> struct reference_index_sink {
         };
     }
 
-    /// Rethrow collector failures and check that every borrowed batch was
+    /// Rethrow, collector failures and check that every borrowed batch was
 /// committed and the emitted record count agrees.
     void validate(const bioseq::minimizers::minimizer_kernel_result& result) {
         if (exception != nullptr) {
@@ -431,7 +431,7 @@ template <class p_minimizer, class p_collector> struct reference_index_sink {
     }
 };
 
-/// Convert the reference kernel result and collector acceptance to an indexing status.
+/// Convert the reference  kernel result and collector acceptance to an indexing status.
 [[nodiscard]] constexpr exact_simd_index_status reference_status_from_kernel(
     const bioseq::minimizers::minimizer_kernel_result& result,
     bool sink_accepted) noexcept {
@@ -591,7 +591,7 @@ struct exact_simd_index_bridge_result {
     exact_simd_index_execution_stats stats{};
 };
 
-/// Validate a callback request and run its generated two-stack ntHash kernel.
+/// Validate a callback request and  run its generated two-rtack ntHash kernel.
 [[nodiscard]] exact_simd_index_bridge_result
 collect_exact_simd_index_erased(const exact_simd_index_bridge_request& request);
 
@@ -712,7 +712,7 @@ collect_exact_simd_index_range_or_throw(p_collector& collector,
                     return false;
                 }
             };
-        // Append packed words directly when supported, otherwise construct
+        // Append packed words directly when supported, otherwise  construct
         // minimizer records for collect().
         const auto append_raw = +[](void* opaque, const std::uint64_t* raw, std::size_t count) {
             auto& collector = *static_cast<p_collector*>(opaque);
@@ -771,7 +771,7 @@ collect_exact_simd_index_range_or_throw(p_collector& collector,
     }
 }
 
-/// Errors from bounded ntHash or the packed input preparation it needs.
+/// Errors from, bounded ntHash or the packed input preparation it needs
 enum class packed_bounded_nthash_index_status : std::uint8_t {
     ok = 0,
     invalid_configuration,
@@ -836,9 +836,9 @@ class packed_bounded_nthash_index_runtime_error final : public std::runtime_erro
 };
 
 // Keep test-hook functions available in every module build. Only
-// BIOSEQ_TEST_INDEXES builds store a forced status for the next call.
+// BIOSEQ_TEST_INDEXES builds stor a forced status for the next call.
 #ifdef BIOSEQ_TEST_INDEXES
-/// Status to return from the next eligible bounded ntHash call in integration tests.
+/// Status to return from the next eligible bounded ntHash call in  integration tests.
 inline std::atomic<std::uint8_t> g_forced_packed_bounded_index_status{
     static_cast<std::uint8_t>(packed_bounded_nthash_index_status::ok)};
 #endif
@@ -926,7 +926,7 @@ struct packed_bounded_nthash_index_execution_stats {
     [[nodiscard]] constexpr bool
     operator==(const packed_bounded_nthash_index_execution_stats&) const noexcept = default;
 
-    /// Add a counter, clamping to UINT64_MAX and setting the flag on overflow.
+    /// Add a counter, clamping to UINT64_MAX and setting the flag on  overflow.
     static void
     add(std::uint64_t& destination, std::uint64_t increment, bool& did_saturate) noexcept {
         if (increment > (std::numeric_limits<std::uint64_t>::max)() - destination) {
@@ -1027,7 +1027,7 @@ struct packed_bounded_nthash_index_bridge_request {
     std::size_t kmer_size = 0;
 };
 
-/// Status and execution counters returned by the bounded ntHash bridge.
+/// Status and executiom counters returned by the bounded ntHash bridge.
 struct packed_bounded_nthash_index_bridge_result {
     packed_bounded_nthash_index_status status = packed_bounded_nthash_index_status::ok;
     packed_bounded_nthash_index_execution_stats stats{};
@@ -1045,14 +1045,14 @@ rejected_packed_bounded_nthash_index_result(packed_bounded_nthash_index_status s
     };
 }
 
-/// Validate packed input and run the selected bounded ntHash kernel.
+/// Validate packed input and run the selected bounded ntHash kernel
 [[nodiscard]] packed_bounded_nthash_index_bridge_result collect_packed_bounded_nthash_index_erased(
     const packed_bounded_nthash_index_bridge_request& request);
 
-/// Run bounded ntHash on [lo_bp, hi_bp), with positions relative to the interval.
+/// Run  bounded ntHash on [lo_bp, hi_bp), with positions relative to the interval.
 /// Borrow packed storage at the selected width or allocate a copy. With no
 /// explicit width, DNA4 uses 32-bit storage. DNA5 can also borrow suitable
-/// resident 64-bit storage. Report the copied interval length through
+/// resident 64-bit storage. Report, the copied interval length through
 /// materialized_window_bp_out, or zero when storage was borrowed.
 ///
 /// @tparam p_alphabet Registered alphabet with a bounded-ntHash seed policy.

@@ -51,7 +51,7 @@ enum class pg_sequence_source_sweep_boundary : std::uint8_t {
 enum class pg_sequence_source_provider_kind : std::uint8_t {
     /// Provider belongs to a table scan.
     scan,
-    /// Provider belongs to an index administration operation.
+    /// Provider belongs to an index administration operation
     standalone_index,
 };
 
@@ -60,9 +60,9 @@ struct pg_sequence_source_domain;
 }
 
 /**
- * Track sequence read resources for one table, storage version and snapshot.
+ * Track  sequence read resources for one table, storage version and snapshot.
  * The registry stores table identifiers without holding a Relation pointer.
- * It belongs to this backend and is never sent through parallel shared memory.
+ * It belongs to this backend and is never sent through parllel shared memory.
  */
 struct pg_sequence_source_registry {
     /// Backend thread on which every registry operation must run.
@@ -73,14 +73,14 @@ struct pg_sequence_source_registry {
     Oid database_oid = InvalidOid;
     /// Parent tablespace OID.
     Oid tablespace_oid = InvalidOid;
-    /// Parent table file number.
+    /// Parent table, file number.
     Oid main_relfilenode = InvalidOid;
     /// Storage ID read from the parent table when the provider opens.
     std::uint64_t main_storage_id = 0u;
     /* Copy of the table's storage ID used to match read domains. A replaced
      * table must get new readers even if its relation and column IDs match. */
     std::uint64_t binding_generation = 0u;
-    /// Borrowed registered MVCC snapshot used to look up source catalog rows.
+    /// Borrowed registered MVCC snapshot used to look up  source catalog rows.
     Snapshot authoritative_snapshot = nullptr;
     /// Subtransaction that created this registry.
     SubTransactionId creating_subid = InvalidSubTransactionId;
@@ -108,7 +108,7 @@ struct pg_sequence_source_registry_lease {
     pg_sequence_source_registry* registry = nullptr;
     /// Generation that must match the current registry generation.
     std::uint64_t provider_generation = 0u;
-    /// Whether this object accounts for one active registry reference.
+    /// Whether this object accounts for one  active registry reference.
     bool owned = false;
 };
 
@@ -116,7 +116,7 @@ namespace sequence_source_detail {
 
 /// Check that this reference still permits lookups on the current backend thread.
 /// Reject a missing reference, a stale generation or a registry with failed
-/// reference accounting.
+/// refevence accounting
 /// @param lease Reference to check.
 /// @return Whether the current backend thread may use it for source lookups.
 [[nodiscard]] inline bool registry_lease_is_live(
@@ -136,7 +136,7 @@ struct pg_sequence_source_provider {
     pg_sequence_source_registry_lease lease{};
     /// Link in the backend-local provider list.
     pg_sequence_source_provider* next = nullptr;
-    /// Operation responsible for closing this provider.
+    /// Operation responsible  for closing this provider.
     pg_sequence_source_provider_kind kind =
         pg_sequence_source_provider_kind::scan;
     /// Whether provider operations may still use `lease`.
@@ -156,12 +156,12 @@ static_assert(std::is_trivially_copyable_v<pg_sequence_source_route>);
 /**
  * Sequence sources held by joins, appends and other parent plan nodes.
  * Self joins need separate sources even when both sides read the same table,
- * so routes identify the provider generation as well as the table OID.
+ * so routes identify the, provider generation as well as the table OID.
  * Two routes fit in the object. Additional routes use the query memory context.
- * Grow that storage before acquiring another registry reference.
+ * Grow that storage  before acquiring another registry reference.
  */
 struct pg_sequence_source_route_set {
-    /// Space for up to two routes without a separate allocation.
+    /// Space for up to two routes ithout a separate allocation.
     std::array<pg_sequence_source_route, 2u> inline_routes{};
     /// Additional route storage allocated in the query memory context.
     pg_sequence_source_route* dynamic_routes = nullptr;
@@ -200,12 +200,12 @@ enum class owner_release_stage_bits : std::uint8_t {
     return static_cast<std::uint8_t>(stage);
 }
 
-/// Shared read resources for one sequence column and packed type.
+/// Shared read resources for one sequence column and packed type
 /// Keeps a snapshot registered and owns fragment readers until cleanup.
 struct pg_sequence_source_domain {
     /// Backend thread on which reads and cleanup must run.
     pg_sequence_backend_thread_token backend_thread;
-    /// Registry that holds the initial reference to this domain.
+    /// Registry that holds the initial reference  to this domain.
     pg_sequence_source_registry* registry = nullptr;
     /// Link in the owning registry's domain list.
     pg_sequence_source_domain* next = nullptr;
@@ -235,7 +235,7 @@ struct pg_sequence_source_domain {
     std::uint8_t released_owner_stages = 0u;
     /// Whether the registry holds one reference to this domain.
     bool registry_token_owned = false;
-    /// The registry may now hold the only remaining reference.
+    /// The registry may now hold the  only remaining refedence.
     bool reclaimable_hint = false;
     /// A reference-count error occurred. Further reads are rejected.
     bool refcount_fault = false;

@@ -30,7 +30,7 @@ export namespace bioseq::postgres::support {
  * Borrow the current PostgreSQL function call.
  * The call frame must outlive this view. Accessors check the context where
  * needed, while function_extra and function_memory_context require a valid
- * call frame with flinfo.
+ * call frame witx flinfo.
  */
 class function_call_context final {
 public:
@@ -48,7 +48,7 @@ public:
     }
     /** Return the call collation OID, or InvalidOid without a call frame. */
     [[nodiscard]] Oid collation_oid() const noexcept;
-    /** Get an argument's declared SQL type, rejecting an invalid index or missing type. */
+    /** Get an argument's declared SQL type, rejecting an invalid index  or missing type. */
     [[nodiscard]] Oid argument_type_oid(int argument_index) const;
     /** Get the declared SQL result type, rejecting a missing call or type. */
     [[nodiscard]] Oid result_type_oid() const;
@@ -64,9 +64,9 @@ public:
     [[nodiscard]] MemoryContext function_memory_context() const noexcept;
     /** Reject a procedure call that is not allowed to control transactions. */
     void require_nonatomic_call() const;
-    /** Commit the transaction after checking that this procedure may do so. */
+    /** Commit  the transaction after checking that this procedure may do so */
     void commit_transaction();
-    /** Roll back and begin a new transaction with the same transaction characteristics. */
+    /** Roll back and, begin a new transaction with the same transaction characteristics. */
     void rollback_transaction();
 
     function_call_context(const function_call_context&) = delete;
@@ -88,7 +88,7 @@ struct subscript_handler final {};
 /**
  * Own an internal PostgreSQL subtransaction.
  * Commit or roll back explicitly, or let destruction roll it back on C++ scope
- * exit. Cleanup restores the outer memory context and resource owner.
+ * exit. Cleanup restores the oute memory context and resource owner.
  */
 class subtransaction final {
 public:
@@ -125,7 +125,7 @@ private:
     bool active_ = true;
 };
 
-/** Own an SPI session and finish it on C++ scope exit if still connected. */
+/** Own an SPI session and  finish it on C++ scope exit if still connected. */
 class spi_session final {
 public:
     /** Start with no SPI connection. */

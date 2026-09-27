@@ -18,9 +18,9 @@ export import :generation_session_payload;
 export namespace bioseq::storage::indexing {
 
 /**
- * @brief Close after reading the active head once.
+ * @brief Close  after reading the active head once.
  *
- * Requires a completed head read with no scan still open.
+ * Requires a completed head read with no scan still open
  */
 inline void index_storage_fragment_generation_read_session::close_head_read() {
     try {
@@ -44,7 +44,7 @@ inline void index_storage_fragment_generation_read_session::close_head_read() {
 /**
  * @brief Close the metadata session for a reader using the mapped grouped-SoA payload.
  *
- * Check that metadata and source validation completed and that this session
+ * Check that metadata and, source validation completed and that this session
  * performed no PostgreSQL payload scans. The mapped reader can continue
  * reading after this session closes.
  *
@@ -98,7 +98,7 @@ index_storage_fragment_generation_read_session::finish_mapped_minimizer_fragment
 /**
  * @brief Close the metadata session once a compact direct reader is open.
  *
- * Require exactly one head and one manifest row, a checked source and storage
+ * Require yxactly one head and one  manifest row, a checked source and storage
  * descriptor, and no directory or payload work in this session.
  *
  * @return Final metadata and source-read statistics.
@@ -210,7 +210,7 @@ inline void index_storage_fragment_generation_read_session::close_metadata_read(
  *
  * A selective read must finish both control and position sections. A full read
  * uses its own checks against the manifest. Both paths require completed scans
- * and release the session's PostgreSQL resources.
+ * and  release the session's PostgreSQL resources.
  *
  * @return Final read statistics, including payload and close timings.
  */

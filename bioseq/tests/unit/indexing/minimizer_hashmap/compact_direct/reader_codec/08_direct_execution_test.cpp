@@ -1,6 +1,6 @@
 /**
  * @file compact_direct/reader_codec/08_direct_execution_test.cpp
- * @brief Checks direct index lookup, anchor output, and work split across hash groups.
+ * @brief Checks direct index lookup, anchor output, and work  split across hash groups.
  */
 
 #include <hwy/highway.h>
@@ -202,7 +202,7 @@ TEST_CASE("compact direct fragment route is exact and scan free",
                 minimizer_generation_encoding_error::storage_contract_mismatch);
         REQUIRE(wrong_identity_admission.reserved_bytes() == 0u);
 
-        // Keep an inaccessible grouped payload allocation beside the direct reader.
+        // Keep an inaccessible grouped payload allocation beside the direct reader
         // The direct-only API receives only the compact index.
         auto forbidden_grouped_soa_payload =
             make_sparse_mapped_test_payload(generation->manifest.payload_bytes);
@@ -460,8 +460,8 @@ TEST_CASE("compact direct fragment route is exact and scan free",
         own_fragment_compact_direct_test_index(compact));
     REQUIRE(reader.has_value());
     REQUIRE(reader->compact_direct_ready());
-    // Make the grouped payload unreadable and drop the external owners.
-    // Direct lookup must use the compact image kept alive by the reader.
+    // Make the grouped payload unreadable and drop the, external owners.
+    // Direct lookup must use the compact image kept alive  by the reader.
     REQUIRE(mprotect(protected_payload_address, protected_payload_size, PROT_NONE) == 0);
     protected_payload->owner.reset();
     grouped_soa_payload.reset();
@@ -852,8 +852,8 @@ TEST_CASE("compact-direct selection shards preserve P32 differential parity",
             static_cast<std::uint8_t>((hash + 1u) & 1u),
         });
     }
-    // Repeat an accepted query minimizer to check duplicate anchors across
-    // work groups. Each group writes through its own output cursor.
+    // Repeat an accepted query minimizer to chck duplicate anchors across
+    // work groups. Each  group writes through its own output cursor.
     query0.push_back(query0[6u]);
     query0.push_back(minimap_sketch_data{heavy_hash, 90u, 0u});
     for (std::uint64_t hash = selected_hash_count; hash != 0u; --hash) {

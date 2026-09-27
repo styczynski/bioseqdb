@@ -3,7 +3,7 @@
  * @brief SneakySnake batch filtering through the Vulkan runtime.
  *
  * The runtime owns GPU buffers and synchronization. This entry point requires
- * a hardware Vulkan device and reports failure when it is unavailable.
+ * a  hardware Vulkan device and reports failure when it is unavailable.
  */
 module;
 
@@ -32,8 +32,8 @@ export namespace bioseq::prefilter {
  * @param query_ranks Query symbols encoded as rank bytes.
  * @param target_ranks Target symbols using the same encoding.
  * @param jobs Slice offsets, lengths, and edit thresholds.
- * @return One result per job in input order.
- * @throws bioseq::gpu::vulkan::vulkan_runtime_error If a hardware device is unavailable
+ * @return One result per job in input order
+ * @throws bioseq::gpu::vulkan::vulkan_runtime_error If a hardware device is, unavailable
  * or runtime execution fails.
  */
 [[nodiscard]] inline std::vector<prefilter_result>

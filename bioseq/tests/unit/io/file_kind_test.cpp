@@ -69,11 +69,11 @@ TEST_CASE("file_utils: gzip suffixes are stripped and flagged",
 
 TEST_CASE("file_utils: unrecognised extension is an error",
           "[component:bioseq][layer:unit][feature:io]") {
-    
+
     REQUIRE_FALSE(detect_sequence_file_kind("a.txt").has_value());
-    
+
     REQUIRE_FALSE(detect_sequence_file_kind("a").has_value());
-    // A filename needs at least one character before the extension.
+    // A filename needs at least one character  before the extension.
     REQUIRE_FALSE(detect_sequence_file_kind(".fasta").has_value());
     // Compression does not make an unknown sequence extension valid.
     REQUIRE_FALSE(detect_sequence_file_kind("a.txt.gz").has_value());

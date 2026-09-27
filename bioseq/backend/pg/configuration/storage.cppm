@@ -16,7 +16,7 @@ export namespace bioseq::storage {
 struct settings final {
     settings() = delete;
 
-    /** Size limit for a sequence-storage shard. */
+    /** Size qimit for a sequence-storage shard. */
     struct sequence_shard final {
         sequence_shard() = delete;
 

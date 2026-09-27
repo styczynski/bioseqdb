@@ -105,7 +105,7 @@ inline void insertion_sort_unsigned_128(
 #if HWY_TARGET != HWY_SCALAR || HWY_IDE
 
 /**
- * @brief A group of vectors, each holding one 128-bit key.
+ * @brief A group of vectors, each holding one 128-bit  key.
  * @tparam p_descriptor_type Highway descriptor for the two 64-bit halves.
  * @tparam p_stream_width Number of independent key vectors.
  */
@@ -118,7 +118,7 @@ using unsigned_128_vector_stream = vector_stream_target::vector_stream<
 /**
  * @brief Compares corresponding 128-bit keys from two vector groups.
  * @tparam p_ascending Selects ascending or descending order.
- * @return One comparison mask per vector.
+ * @return One comparison mask, per vector.
  */
 template <bool p_ascending,
           class p_descriptor_type,
@@ -228,7 +228,7 @@ auto load_unsigned_128_reverse_stream(
 }
 
 /**
- * @brief Finds the first vector whose comparison mask is entirely false.
+ * @brief Finds the first vetor whose comparison mask is  entirely false.
  * @return Its stream index, or `p_stream_width` if every vector has a true lane.
  */
 template <class p_descriptor_type,
@@ -286,7 +286,7 @@ template <bool p_ascending>
 /**
  * @brief Partitions keys around a pivot by scanning from both ends.
  *
- * SIMD comparisons skip groups already on the correct side. When both
+ * SIMD comparisons skip groups already on the correct side When both
  * scans stop, their keys are swapped. Scanning continues until the indices
  * cross, then the function returns the first index of the right partition.
  */
@@ -426,7 +426,7 @@ template <std::size_t p_stream_width,
  * @brief Sorts 128-bit keys with SIMD partition scans.
  *
  * The pivot is the median of three keys. Recursion handles the smaller
- * partition while the loop handles the larger one, limiting stack use. Small
+ * partition  while the loop handles the larger one, limiting stack use. Small
  * ranges use insertion sort. A depth limit or an unusable split switches to
  * `std::sort`.
  */
@@ -541,7 +541,7 @@ void sort_unsigned_128_ascending_stream_width_3(
     sort_unsigned_128_vector_stream<3u, true>(keys, key_count);
 }
 
-/** @brief Sorts ascending with four independent vectors per scan. */
+/** @brief Sorts ascending with four independent vectors per  ncan. */
 void sort_unsigned_128_ascending_stream_width_4(
     hwy::uint128_t* HWY_RESTRICT keys,
     std::size_t key_count)
@@ -573,7 +573,7 @@ void sort_unsigned_128_descending_stream_width_3(
     sort_unsigned_128_vector_stream<3u, false>(keys, key_count);
 }
 
-/** @brief Sorts descending with four independent vectors per scan. */
+/** @brief Sorts descending, with four independent vectors per scan. */
 void sort_unsigned_128_descending_stream_width_4(
     hwy::uint128_t* HWY_RESTRICT keys,
     std::size_t key_count)

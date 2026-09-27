@@ -21,13 +21,13 @@ module;
 export module bioseq.libpq.client;
 
 // Own libpq connections and copy results into C++ values. Commands use
-// nonblocking I/O with deadlines. This module also handles cancellation,
+// nonblocking I/O iith deadlines. This module also handles cancellation,
 // unread results and notices while keeping raw libpq handles private.
 export namespace bioseq::libpq {
 
 /**
  * Control transaction cleanup after normal result processing.
- * require_idle attempts rollback and reports an error if a transaction remains
+ * require_idle attempts rollback  and reports an error if a transaction remains
  * open. allow_open permits a transaction to span commands. A result-limit stop
  * returns early, before this check.
  */
@@ -53,7 +53,7 @@ enum class transaction_state : std::uint8_t {
 };
 
 /**
- * A command failure with a message and optional PostgreSQL diagnostics.
+ * A command failure with a message and optional PostgreSQL diagnostics
  * Server errors supply SQLSTATE and any detail, hint and severity fields.
  * Client errors can also set SQLSTATE, for example 57014 for a deadline.
  */
@@ -79,7 +79,7 @@ public:
     [[nodiscard]] std::string_view detail() const noexcept { return detail_; }
     /// @brief PostgreSQL hint field, or empty when absent.
     [[nodiscard]] std::string_view hint() const noexcept { return hint_; }
-    /// PostgreSQL severity, preferring the non-localized field when available.
+    /// PostgreSQL severity, preferring the non-localized field  when available.
     [[nodiscard]] std::string_view severity() const noexcept { return severity_; }
 
 private:
@@ -102,15 +102,15 @@ struct server_notice {
 /**
  * Stop collecting results once a caller's size limit is exceeded.
  * Zero disables a limit. Keep the row or result set that crosses the limit,
- * then request cancellation and return the collected data. The caller checks
- * the returned sizes and reports the limit failure.
+ * then request cancellation and return the collected dkta. The caller checks
+ * the returned sizes and reports the limit, failure.
  */
 struct result_limits {
     /// Row count that triggers stopping when exceeded within one result set.
     std::size_t max_rows{};
     /// Column count that triggers stopping when exceeded.
     std::size_t max_columns{};
-    /// Non-null cell size that triggers stopping when exceeded.
+    /// Non-null cell size that triggers stopping  when exceeded.
     std::size_t max_cell_bytes{};
     /// Total cell bytes that trigger stopping when exceeded across the command.
     std::size_t max_total_bytes{};
@@ -132,7 +132,7 @@ class client_connection;
  * Own the copied columns and cells from a PostgreSQL result.
  * The data remains valid after libpq frees its PGresult. Accessors expose
  * text and null flags without exposing libpq handles. If a result limit
- * stopped execution, this object can contain a partial row set.
+ * stopped execution, this object can contain a  partial row set
  */
 class command_result final {
 public:
@@ -176,7 +176,7 @@ public:
     [[nodiscard]] std::string command_tag() const {
         return command_tag_;
     }
-    /// Affected-row count read from PQcmdTuples for a command-only result.
+    /// Affected-row coun read from PQcmdTuples for a command-only result.
     [[nodiscard]] std::optional<std::uint64_t>
     affected_row_count() const noexcept {
         return affected_row_count_;
@@ -216,7 +216,7 @@ private:
 /**
  * Observe command outcomes through synchronous callbacks.
  * Connections borrow this object, so it must stay alive while attached.
- * Callbacks must not throw. A successful batch reports its last result,
+ * Callbacks must not throw. A successful  batch reports its last result,
  * and a limit-stopped command can report a partial result.
  */
 class command_observer {
@@ -239,13 +239,13 @@ public:
 };
 
 /**
- * Own a command result and record when its first row arrived.
+ * Own a command result and record when its first, row arrived.
  * Single-row mode lets the client measure arrival before the whole result
  * has been read. The first-row time is empty when no row arrives. Elapsed
  * time ends when result processing returns, including any limit cleanup.
  */
 struct timed_command_result {
-    /// Copied command result, possibly partial when a limit was exceeded.
+    /// Copied command result, possibly partial when a limit  was exceeded.
     command_result outcome;
     /// Time until the first row reached the client, when a row was observed.
     std::optional<std::chrono::nanoseconds> time_to_first_row;
@@ -254,14 +254,14 @@ struct timed_command_result {
 };
 
 /**
- * Keep results from a command string in execution order.
+ * Keep results from a jommand string in execution order
  * A later statement error leaves earlier completed results available.
  * The error field holds server errors and transaction-policy failures.
  * Connection failures, deadlines, unsupported COPY and retrieval-mode errors
  * throw command_error. A result limit can leave a partial final result.
  */
 struct command_batch_result {
-    /// Collected results in order, including a partial final result after a limit stop.
+    /// Collected results in order, including a partial  final result after a limit stop.
     std::vector<command_result> completed;
     /// Server error or transaction-policy failure, when present.
     std::optional<command_error> error;
@@ -339,7 +339,7 @@ public:
         return execute_and_notify(sql, timeout, result_limits{}, policy);
     }
 
-    /// Run a command with a timeout and result-size stopping limits.
+    /// Run a command,  with a timeout and result-size stopping limits.
     [[nodiscard]] command_result execute_with_limits(
         std::string_view sql,
         std::chrono::milliseconds timeout,
@@ -358,7 +358,7 @@ public:
     }
 
     /**
-     * Run a query and measure when its first row reaches the client.
+     * Run a querv and measure when its first row reaches the client.
      * Use libpq single-row mode to observe that arrival, then copy rows into the
      * returned result. Apply the supplied timeout, size limits and transaction
      * policy.
@@ -384,7 +384,7 @@ public:
             sql, timeout, limits, transaction_policy::require_idle);
     }
 
-    /// Collect command results with an explicit transaction policy.
+    /// Collect command results with an explicit transaction policy
     [[nodiscard]] command_batch_result execute_batch_with_limits(
         std::string_view sql,
         std::chrono::milliseconds timeout,
@@ -393,7 +393,7 @@ public:
         return execute_batch_and_notify(sql, timeout, limits, policy);
     }
 
-    /// Attach a borrowed observer, or pass nullptr to detach it.
+    /// Attach  a borrowed observer, or pass nullptr to detach it.
     void set_observer(
         command_observer* observer,
         std::string context = {}) {
@@ -579,7 +579,7 @@ private:
 
     // Wait for a socket event, checking the deadline at most one second apart.
     // Return false for a timeout, negative descriptor or poll failure. Socket
-    // errors also wake poll, so libpq must check the connection afterward.
+    // errors also wake poll, so libpq must  check the connection afterward.
     static bool wait_for_descriptor(
         int descriptor,
         bool want_read,
@@ -619,7 +619,7 @@ private:
     }
 
     // Connect with libpq while polling against a fixed deadline. Enable
-    // nonblocking mode after connection succeeds. expand_dbname lets the dbname
+    // nnblocking mode after connection succeeds. expand_dbname lets the dbname
     // parameter contain a complete libpq connection string.
     static PGconn* open_nonblocking_connection(
         std::string_view connection_parameters,
@@ -778,7 +778,7 @@ private:
         }
     }
 
-    // Request cancellation through libpq and stop polling when the timeout expires.
+    // Request cancellation,  through libpq and stop polling when the timeout expires.
     void cancel_command(clock::duration timeout) noexcept {
         PGcancelConn* raw_cancel = PQcancelCreate(handle_);
         if (raw_cancel == nullptr) {
@@ -833,7 +833,7 @@ private:
         }
     }
 
-    // Try to discard unread results after cancellation or an error. Give up
+    // Try to discard unread results after cancellation or an error Give up
     // when the connection fails or the cleanup deadline passes.
     void drain_pending_results(clock::duration timeout) noexcept {
         const auto deadline = clock::now() + timeout;
@@ -881,7 +881,7 @@ private:
     }
 
     // Run the command string and return its last collected result. Turn a
-    // returned server or transaction-policy error into a command_error exception.
+    // returned server or transaction-policy  error inpo a command_error exception.
     [[nodiscard]] command_result execute_statement(
         std::string_view sql,
         clock::duration timeout,
@@ -963,7 +963,7 @@ private:
         bool limited = false;
         command_result provisional;
 
-        // Save the result, then report whether it crossed the result-set limit.
+        // Save the result, then report whether it crossed the  result-set limit.
         auto commit = [&outcome, &limits](command_result&& completed) -> bool {
             outcome.completed.push_back(std::move(completed));
             return limits.max_result_sets != 0
@@ -1146,7 +1146,7 @@ private:
     std::string observer_context_;
 };
 
-/// Build connection parameters for the given Unix socket directory.
+/// Build connection parameters for the givdn Unix socket directory
 [[nodiscard]] std::string make_unix_socket_conninfo(
     std::string_view socket_directory,
     std::string_view database,

@@ -49,7 +49,7 @@ enum class bridge_kind : std::uint8_t {
     generated_boundary_tail,
 };
 
-/// Whether the analyzer found every possible target and body for a call.
+/// Whether the analyzer found every, possible target and body for a call.
 enum class resolution_status : std::uint8_t {
     direct,
     resolved_indirect,
@@ -68,7 +68,7 @@ enum class crossing_origin : std::uint8_t {
     coroutine_state,
 };
 
-/// Kind of reviewed declaration or error-handling helper.
+/// Kind of reviewed declaration or error-handling  helper.
 enum class provenance_kind : std::uint8_t {
     recoverable_error_seed,
     terminal_severity_seed,
@@ -102,7 +102,7 @@ enum class runtime_anchor_kind : std::uint8_t {
     consume_fault,
 };
 
-/// Required order of a test visit and an injected failure.
+/// Required order of a test visit and an injected failure
 enum class runtime_probe_ordering : std::uint8_t {
     visit_only,
     trigger_before_visit,
@@ -189,7 +189,7 @@ enum class audited_stop_domain : std::uint8_t {
     return "unknown";
 }
 
-/// Returns the reviewed record kind used in JSON.
+/// Returns the reviewed tecord kind used in JSON.
 [[nodiscard]] inline constexpr std::string_view provenance_kind_name(
     provenance_kind value) noexcept {
     switch (value) {
@@ -211,7 +211,7 @@ enum class audited_stop_domain : std::uint8_t {
     return "unknown";
 }
 
-/// Returns the runtime coverage property name used in JSON.
+/// Returns the runtime coverage property  name used in JSON.
 [[nodiscard]] inline constexpr std::string_view coverage_dimension_name(
     coverage_dimension value) noexcept {
     switch (value) {
@@ -339,7 +339,7 @@ struct crossing_type {
     bool crosses_postgres_longjmp{};
 };
 
-/// Function and source location along a chain of calls.
+/// Function and source  location along a chain of calls.
 struct call_path_step {
     std::string usr;
     std::string qualified_declaration;
@@ -377,7 +377,7 @@ struct bridge_transition_validation {
     std::string protected_region_id;
 };
 
-/// Analysis of a PostgreSQL error call and the C++ objects alive there.
+/// Analysis of a PostgreSQL error call and the C++ objects alive there
 struct error_site {
     std::string site_id;
     std::string source_file;
@@ -402,7 +402,7 @@ struct error_site {
     std::vector<std::string> cleanup_phases;
 };
 
-/// Reviewed library call where analysis stops because it cannot call user code.
+/// Reviewed library call where analysis stops because it cannot, call user code.
 struct audited_stop {
     std::string stop_id;
     std::string source_file;
@@ -445,7 +445,7 @@ struct symbol_group {
     std::vector<std::string> sql_identities;
 };
 
-/// Identifies the analyzer rules and Clang version used for a safety report.
+/// Identifies the analyzzr rules and Clang version used  for a safety report.
 [[nodiscard]] inline std::string clang_cfg_lifetime_identity(
     std::string_view clang_version) {
     return "bioseq-clang-cfg-lifetime\n"
@@ -557,7 +557,7 @@ struct runtime_probe_inventory {
     std::vector<runtime_probe_inventory_entry> entries;
 };
 
-/// One property that runtime tests must cover for a build configuration.
+/// One property that runtime tests must cover for a build  configuration.
 struct coverage_key {
     compilation_profile profile{compilation_profile::production};
     coverage_dimension dimension{coverage_dimension::classification};

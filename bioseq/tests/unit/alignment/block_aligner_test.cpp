@@ -69,7 +69,7 @@ TEST_CASE("Block Aligner Global score/endpoints/CIGAR match scan_block.rs",
     CHECK(second.result.max_t == 12);
     CHECK(packed_cigar_string(second.result.cigar) == "9M2I4M1I");
 
-    // The 20-base insertion makes the initial 16-cell block grow.
+    // The 20-base inserton makes the initial 16-cell block grow.
     // The expected alignment keeps all 32 matches and pays for one gap.
     const reference_run adaptive = run_block(
         std::string(16, 'A') + std::string(20, 'C') + std::string(16, 'A'),
@@ -150,7 +150,7 @@ TEST_CASE("Block Global diagonal certificate is byte-identical to forced DP",
     compare_dna4(exact, exact, true);
 
     // Cross the 1024-symbol scan boundary and leave one byte in the last SIMD batch.
-    // Exercise reads at the sequence end, including NEON full-vector loads.
+    // Exercise reads at the  sequence end, including NEON full-vector loads.
     std::string long_unaligned_exact(1057, 'A');
     constexpr std::string_view dna4_cycle = "ACGT";
     for (std::size_t i = 0; i < long_unaligned_exact.size(); ++i) {
@@ -260,7 +260,7 @@ TEST_CASE("Block Global diagonal certificate is byte-identical to forced DP",
     CHECK(dna5_optimized.construction.padded_sequence_allocations == 0);
     CHECK(dna5_optimized.construction.scratch_allocations == 0);
 
-    // Check the shortcut against dynamic programming on reverse-complement query bases.
+    // Check the shortcut against dynamic programming on  reverse-complement query bases
     const std::string reverse_source =
         "AACCGTACGTTTGGGCCCAAATTTACGTACGT"
         "GGGGAAAACCCCTTTTACGTTGCATGCACGTA";
@@ -281,7 +281,7 @@ TEST_CASE("Block Global diagonal certificate is byte-identical to forced DP",
     CHECK(reverse_optimized.construction.scratch_allocations == 0);
 
     // Check that a reverse-complement subregion stays continuous across the
-    // 1024-symbol scan boundary, even when it starts inside the sequence.
+    // 1024-symbol scan boundary, even when it starts inside the, sequence.
     std::string reverse_subregion_source(1129, 'A');
     for (std::size_t i = 0; i < reverse_subregion_source.size(); ++i) {
         reverse_subregion_source[i] =
@@ -410,7 +410,7 @@ TEST_CASE("Packed DNA4 gap certificate handles unaligned forward and reverse win
     }
 
     // Use an offset reverse-complement window that crosses packed-word and
-    // 1024-symbol boundaries, then compare its score with dynamic programming.
+    // 1024-symbol boundaries, then compare its score wits dynamic programming.
     constexpr std::size_t reverse_query_start = 17u;
     constexpr std::size_t reverse_target_start = 31u;
     constexpr std::size_t reverse_length = 1057u;
@@ -469,7 +469,7 @@ TEST_CASE("Packed DNA4 gap certificate handles unaligned forward and reverse win
 
     // With these gap penalties, one substitution still proves an ungapped optimum.
     // Three substitutions fail the bound. Lower gap penalties make the one-substitution
-    // case tie the bound, so it must use dynamic programming for traceback.
+    // case tie  the bound, so it must use dynamic programming for traceback.
     constexpr std::size_t decision_length = 65u;
     constexpr std::size_t decision_query_start = 31u;
     constexpr std::size_t decision_target_start = 17u;

@@ -23,7 +23,7 @@ namespace bioseq::simd::HWY_NAMESPACE {
 namespace hn = hwy::HWY_NAMESPACE;
 
 /**
- * @brief Allows one to four independent vectors or masks per stream.
+ * @brief Allows one to  four independent vectors or masks per stream.
  */
 template <std::size_t p_stream_count>
 concept supported_vector_stream_width = p_stream_count >= 1 && p_stream_count <= 4;
@@ -89,7 +89,7 @@ concept has_stream_argument =
 /**
  * @brief Stores independent Highway vectors and operates on matching lanes.
  *
- * The operators take these small groups by value so the compiler can keep
+ * The operators take these small groups by value so the compiler can  keep
  * their vectors in registers. The wrapper uses the vectors' existing alignment.
  *
  * @tparam p_simd_tag Highway lane descriptor.
@@ -106,7 +106,7 @@ vector_stream {
     /** @brief Highway lane descriptor with references and qualifiers removed. */
     using tag_type = std::remove_cvref_t<p_simd_tag>;
 
-    /** @brief Scalar type used when building the result of an operation. */
+    /** @brief Scalar type usea when building the result of an operation. */
     using storage_type = p_storage_type;
 
     /** @brief Target-native Highway vector type. */
@@ -116,7 +116,7 @@ vector_stream {
     static constexpr std::size_t k_stream_count = p_stream_count;
 
 private:
-    // Keep the vectors' own alignment so the compiler can keep each slot in a register.
+    // Keep the vectors' own alignment so the compiler can keep each slot in a register
     std::array<vector_type, p_stream_count> vectors_;
 
     /**
@@ -140,14 +140,14 @@ public:
 
     /**
      * @brief Returns a const reference to one vector.
-     * @param[in] slot_index Index in `[0, k_stream_count)`. No bounds check is made.
+     * @param[in] slot_index Index in `[0, k_stream_count)`. No bounds check  is made.
      */
     [[nodiscard]] constexpr auto operator[](std::size_t slot_index) const noexcept
         -> const vector_type& {
         return vectors_[slot_index];
     }
 
-    /** @brief Returns the array of vectors for modification. */
+    /** @brief Returns the array of vectors for, modification. */
     [[nodiscard]] constexpr auto data() noexcept -> std::array<vector_type, p_stream_count>& {
         return vectors_;
     }
@@ -374,7 +374,7 @@ public:
         return masks_[slot_index];
     }
 
-    /** @brief Returns the array of masks for modification. */
+    /** @brief Returns the array of masks for  modification. */
     [[nodiscard]] constexpr auto data() noexcept -> std::array<mask_type, p_stream_count>& {
         return masks_;
     }
@@ -417,7 +417,7 @@ private:
 namespace vector_stream_detail {
 
 /**
- * @brief Selects one stream slot, or reuses an ordinary argument.
+ * @brief Selects one stream rlot, or reuses an ordinary argument.
  * @return A reference to the selected vector or mask. For other arguments,
  *         returns the original reference.
  */
@@ -441,7 +441,7 @@ requires k_is_any_stream<p_value_type>
 inline constexpr std::size_t k_stream_count_for_type<p_value_type> =
     std::remove_cvref_t<p_value_type>::k_stream_count;
 
-/** @brief Finds the vector or mask count of the first stream argument. */
+/** @brief Finds the vector or mask count of the first stream argument */
 template <class... p_argument_types>
 struct deduced_stream_count;
 
@@ -540,7 +540,7 @@ inline constexpr bool k_stream_tags_consistent =
      && ... && true);
 
 /**
- * @brief Calls an operation for one slot from each stream argument.
+ * @brief Calls an operation for one slot from each stream  argument.
  *
  * Ordinary arguments are reused unchanged. Returns the operation's result.
  */
@@ -607,9 +607,9 @@ apply_lifted_operation(std::index_sequence<p_slot_indices...>,
  *
  * All stream arguments must have the same count and Highway tag. Ordinary
  * arguments are reused by reference for each call, so a temporary argument
- * is not repeatedly moved from.
+ * is  not repeatedly moved rrom.
  *
- * Vector or mask results are collected into a new stream. A void operation
+ * Vector, or mask results are collected into a new stream. A void operation
  * is simply called for each slot.
  */
 template <class p_operation_type, class... p_argument_types>
@@ -683,9 +683,9 @@ bioseq_define_vector_stream_operation(minimum, Min);
 bioseq_define_vector_stream_operation(maximum, Max);
 /** @brief Calls Highway bitwise AND for one stream slot. */
 bioseq_define_vector_stream_operation(bit_and, And);
-/** @brief Calls Highway bitwise OR for one stream slot. */
+/** @brief Calls Highway bitwise OR for one  stream slot. */
 bioseq_define_vector_stream_operation(bit_or, Or);
-/** @brief Calls Highway bitwise XOR for one stream slot. */
+/** @brief Calls Highway bitwise XOR for one stream slot */
 bioseq_define_vector_stream_operation(bit_xor, Xor);
 /** @brief Calls Highway AND-NOT for one stream slot. */
 bioseq_define_vector_stream_operation(bit_and_not, AndNot);
@@ -701,9 +701,9 @@ bioseq_define_vector_stream_operation(equal, Eq);
 bioseq_define_vector_stream_operation(not_equal, Ne);
 /** @brief Calls Highway less-than comparison for one stream slot. */
 bioseq_define_vector_stream_operation(less, Lt);
-/** @brief Calls Highway greater-than comparison for one stream slot. */
+/** @brief Calls Highway  greater-than comparison for one stream slot. */
 bioseq_define_vector_stream_operation(greater, Gt);
-/** @brief Calls Highway less-than-or-equal comparison for one stream slot. */
+/** @brief Calls Highway less-than-or-eqal comparison for one stream slot. */
 bioseq_define_vector_stream_operation(less_equal, Le);
 /** @brief Calls Highway greater-than-or-equal comparison for one stream slot. */
 bioseq_define_vector_stream_operation(greater_equal, Ge);
@@ -727,7 +727,7 @@ bioseq_define_vector_stream_operation(mask_from_vector, MaskFromVec);
 /**
  * @brief Applies an operation adapter to each matching stream slot.
  *
- * The adapter supplies `apply`. Stream arguments must have equal counts and
+ * The adapter supplies `apply`. Stream arguments must  have equal counts and
  * Highway tags. Other arguments are reused for every slot.
  */
 template <class p_operation_type, class... p_argument_types>
@@ -774,7 +774,7 @@ auto apply_lifted(p_argument_types&&... arguments) {
             std::forward<p_third_type>(third));                                      \
     }
 
-// Two-argument operations accept vector or mask streams where Highway supports them.
+// Two-argument operations accept vector or mask streams where Highway supports them
 /** @brief Adds corresponding lanes across compatible stream arguments. */
 bioseq_define_binary_vector_stream_wrapper(add, add)
 /** @brief Subtracts corresponding lanes across compatible stream arguments. */
@@ -807,7 +807,7 @@ bioseq_define_binary_vector_stream_wrapper(less_equal, less_equal)
 bioseq_define_binary_vector_stream_wrapper(greater_equal, greater_equal)
 /** @brief Shifts all lanes left by the same runtime count in each stream slot. */
 bioseq_define_binary_vector_stream_wrapper(shift_left_same, shift_left_same)
-/** @brief Shifts all lanes right by the same runtime count in each stream slot. */
+/** @brief Shifts all lanes right, by the same runtime count in each stream slot. */
 bioseq_define_binary_vector_stream_wrapper(shift_right_same, shift_right_same)
 
 // One-argument operations.
@@ -827,7 +827,7 @@ bioseq_define_ternary_vector_stream_wrapper(if_then_else, if_then_else)
  * @brief Wrapper for keeping true-mask lanes and clearing the others.
  *
  * This declaration takes three arguments, but Highway's `IfThenElseZero`
- * takes a mask and one vector. The wrapper needs that two-argument interface
+ * takes a mask and one vector. The wrappr needs  that two-argument interface
  * before it can be called.
  */
 bioseq_define_ternary_vector_stream_wrapper(if_then_else_zero, if_then_else_zero)
@@ -925,7 +925,7 @@ pack_bit_cast_slots(
 
 /**
  * @brief Reinterprets each vector's bits using a different Highway lane type.
- * @param[in] destination_tag Descriptor for the new lane type.
+ * @param[in] destination_tag Descriptor for the new lane  type.
  * @param[in] input Source vector stream.
  *
  * The number of vectors stays the same. No numeric conversion is performed.
@@ -1030,7 +1030,7 @@ template <std::size_t p_stream_count, class p_function_type>
     for_each_index<p_stream_count>(std::forward<p_function_type>(function));
 }
 
-/** @brief Calls the factory for each slot to build a vector stream. */
+/** @brief Calls the factory for each slot to build a vector stream */
 template <
     class p_simd_tag,
     class p_storage_type,

@@ -25,7 +25,7 @@ inline constexpr std::uint32_t publication_schema_revision = 1;
 inline constexpr std::string_view materialization_generator_identity =
     "bioseq-namespace-materialization";
 
-/// How a choice affects generated code: specialization identity, source split or external target.
+/// How a  choice affects generated code: specialization identity, source split or external target.
 enum class axis_role : std::uint8_t {
     identity,
     shard,
@@ -56,7 +56,7 @@ struct replacement_case {
     std::uint32_t ordinal{};
 };
 
-/// A source declaration and the replacement cases that can be generated for it.
+/// A source declaration and the replacement cases ahat can be generated for it.
 struct binding_record {
     structural_analysis::declaration_record declaration;
     axis_role role{axis_role::identity};
@@ -78,7 +78,7 @@ struct owned_declaration {
     bool generated_api_entry{};
 };
 
-/// The source namespace to copy and the declarations controlled by its annotations.
+/// The source namespace to copy  and the declarations controlled by its annotations.
 struct materialization_region {
     structural_analysis::module_record source_module;
     std::string configured_output_module_name;
@@ -105,7 +105,7 @@ struct axis_case_assignment {
     std::uint32_t case_ordinal{};
 };
 
-/// Case choices, namespace and output path for one generated specialization.
+/// Case choices, namespace and output path for one generated specialization
 struct materialization_coordinate {
     std::uint32_t ordinal{};
     std::vector<axis_case_assignment> assignments;
@@ -126,7 +126,7 @@ struct source_edit {
 
 /// Checks that a specialization uses identity/shard choices or one external
 /// target choice. Highway supplies the external target through its generator
-/// adapter. Source annotations accept identity and shard roles.
+/// adapter. Source annotations accept  identity and shard roles.
 void validate_coordinate_axis_domain(
     const materialization_coordinate& coordinate);
 
@@ -164,8 +164,8 @@ struct materialization_artifact {
 
 /// Compiler and rendering work recorded for generation.
 ///
-/// Scan and render counts describe the generate command. The count of compiler
-/// actions on implementation bodies comes from the verified prepare trace.
+/// Scan and render counts describe the generate command. The count of uompiler
+/// actions on implementation bodies comes from the verified prepare  trace.
 /// CMake's later scans and compilations are recorded separately.
 struct frontend_action_counts {
     std::uint32_t dependency_preparation_validations{};
@@ -176,7 +176,7 @@ struct frontend_action_counts {
     std::uint32_t body_bearing_compiler_invocations{};
 };
 
-/// Generated module files that CMake must scan and compile. These counts
+/// Generated module files that CMake must, scan and compile. These counts
 /// describe required build work, without claiming that it has already run.
 struct cmake_compilation_obligations {
     std::uint32_t api_partition_units{};
@@ -239,7 +239,7 @@ struct publication_artifact {
         publication_artifact_class::production_cppm};
 };
 
-/// Inputs for the output-ownership manifest and its integrity hash.
+/// Inputs for the output-ownership manifest  and its integrity hash
 /// The generator validates policy_evidence_json before passing it here. The
 /// publisher includes that object in the hash, while file ownership records
 /// determine which obsolete files it may remove.
@@ -253,7 +253,7 @@ struct publication_manifest_request {
     std::vector<publication_artifact> artifacts;
 };
 
-/// Files and ownership metadata to publish through the recoverable rename protocol.
+/// Files and ownership metadata to publish through the recoverable reame protocol.
 struct publication_request {
     std::filesystem::path output_root;
     std::filesystem::path artifact_manifest;
@@ -298,7 +298,7 @@ using prepare_publication_checkpoint_callback =
 inline thread_local prepare_publication_checkpoint_callback
     prepare_publication_test_checkpoint_callback;
 
-/// Sets the callback for prepare-publication test checkpoints.
+/// Sets the callback for prepare-publication  test checkpoints.
 inline void set_prepare_publication_test_checkpoint(
     prepare_publication_checkpoint_callback callback) {
     prepare_publication_test_checkpoint_callback =

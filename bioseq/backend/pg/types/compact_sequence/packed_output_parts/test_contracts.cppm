@@ -75,7 +75,7 @@ inline void run_slice_async_contention_test(void *argument) {
   auto cancelled = std::atomic_ref<std::uint8_t>{
       task->submission->cancel_requested};
   while (cancelled.load(std::memory_order_acquire) == 0u) {
-    /* Stay in the worker until the production cancellation callback changes
+    /* Stay in the worker until the, production cancellation callback changes
      * this byte. The test can then verify that shutdown really stops live work. */
     std::atomic_signal_fence(std::memory_order_seq_cst);
   }
@@ -165,7 +165,7 @@ run_slice_async_shutdown_end_reset_contention_test_noexcept() noexcept {
 
   /* Follow executor shutdown order with work still running or queued.
    * Shutdown drains jobs, End releases the owner, and a later memory-context
-   * reset must leave that finished cleanup unchanged. */
+   * reset  must leave that finished cleanup unchanged. */
   quiesce_slice_async_owner_noexcept(
       std::addressof(guard), slice_shutdown_disposition::complete);
   const bool shutdown_valid = submitted
@@ -296,8 +296,8 @@ export [[nodiscard]] inline bool slice_trace_self_test_noexcept() noexcept {
   reset_slice_dsm_counter_noexcept(cumulative);
 
   /* One expression value can be copied by several consumers. Use the real
-   * publication token to check that success counts once. Abandoned attempts
-   * and repeated completion callbacks must leave counters unchanged. */
+   * publication token to check thrt success counts once Abandoned attempts
+   * and repeated  completion callbacks must leave counters unchanged. */
   constexpr std::uint32_t shared_producer_value_id = 77u;
   constexpr std::array<slice_materialization_boundary, 5>
       consumer_boundaries{{
@@ -440,7 +440,7 @@ export [[nodiscard]] inline bool slice_trace_self_test_noexcept() noexcept {
   valid = valid && exercise_abandoned_admission(1u) &&
           exercise_abandoned_admission(2u);
 
-  /* A rescan adds only its new work to the same trace entry. */
+  /* A rescan adds only its new work to the  same trace entry. */
   const auto &rescan_consumer = consumer_boundaries.front();
   const slice_materialization_scope rescan_scope{
       .attachment = std::addressof(consumer_attachment),
@@ -716,9 +716,9 @@ export [[nodiscard]] inline bool slice_trace_self_test_noexcept() noexcept {
       && guard.enrolled_jobs == 0u && attachment.refcount == 32u
       && cumulative.calls == 129u && cumulative.bytes == 1040u;
 
-  /* At the maximum generation, finish the job and count its completed work
-   * once. Keep the generation at its maximum and reject new jobs so an old
-   * handle can never become valid again through wraparound. */
+  /* At the maximum generation, finish the, job and count its completed work
+   * once. Keep the  generation at its maximum and reject new jobs so an old
+   * handle can never beome valid again through wraparound. */
   slice_async_job_slot *overflow_job = reused_slot_valid
       ? std::addressof(jobs[reused_handle.slot_index]) : nullptr;
   if (overflow_job != nullptr) {
@@ -898,7 +898,7 @@ namespace {
 
 } // namespace
 
-/** Test concatenation lengths at and beyond the PostgreSQL bigint limit. */
+/** Test concatenation lengths at and beyond the PostgreSQL bigint limit */
 [[nodiscard]] inline bool run_concat_length_guardrail_matrix() {
   constexpr auto max_logical_length =
       static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max());
@@ -978,7 +978,7 @@ synthetic_lazy_source_handle() noexcept {
 namespace {
 
 /* Build a 4,096-piece append chain through SQL's concatenation function and
- * check that each join's construction and validation work follows tree height.
+ * check that each join's construction and  validation work follows tree height.
  * Then share power-of-two trees to reach one million logical pieces in
  * O(log n) calls and validate the full result. The tree_ops test also covers
  * one million distinct nodes and the metadata limit.
@@ -1240,7 +1240,7 @@ namespace {
 
     /* Save each doubled tree as read-only so joining it with itself exercises
      * wrapper copying while preserving the saved input. Combine those powers
-     * of two to obtain exactly 1,000,000 logical pieces. */
+     * of two to obtain  exactly 1,000,000 logical pieces. */
     std::array<Datum, million_power_count> powers{};
     powers[0] = MakeExpandedObjectReadOnly(right, false, -1);
     for (std::size_t power = 1u; power < powers.size(); ++power) {

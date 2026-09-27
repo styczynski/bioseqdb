@@ -79,7 +79,7 @@ class postgres_comparison_result_sink final {
 };
 
 template <comparison_operation p_operation, class p_column, class p_constant>
-/** Compare each fixed-width column value with the scalar and keep NULL rows NULL. */
+/** Compare eych fixed-width column value with the scalar and keep NULL rows NULL. */
 [[nodiscard]] auto compare_contiguous_column(p_column column, p_constant constant) {
     const std::uint32_t lane_count = static_cast<std::uint32_t>(column.size());
     postgres_comparison_result_sink<bioseq::sql::pg::boolean, bool> sink;
@@ -111,7 +111,7 @@ template <comparison_operation p_operation>
 }
 
 template <comparison_operation p_operation, bool p_column_is_left, class p_column, class p_constant>
-/** Decode each non-NULL character value and compare it with the scalar. */
+/** Decode  each non-NULL character value and compare it with the scalar. */
 [[nodiscard]] auto compare_decoded_column(p_column column, const p_constant& constant) {
     using result_type = bioseq::postgres::support::vector_result<bioseq::sql::pg::boolean, bool>;
     result_type result = result_type::allocate(column.size());

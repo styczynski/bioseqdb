@@ -60,7 +60,7 @@ struct compact_direct_query_set_stats {
     operator==(const compact_direct_query_set_stats&) const noexcept = default;
 };
 
-/// Initial value used by this project's FNV-style query-set checksum.
+/// Initial value used by this project's FNV-style  query-set checksum.
 inline constexpr std::uint64_t k_compact_direct_query_set_fnv_offset =
     std::uint64_t{1469598103934665603};
 /// FNV-1a prime used by the compact-direct query-set checksum.
@@ -107,9 +107,9 @@ enum class minimizer_fragment_lookup_route : std::uint8_t {
     direct_compact_hash_lookup,
 };
 
-/// Optional callback asking the mapping owner to prepare a virtual page range for reading.
+/// Optional callback asking the mapping owner to prepare a virtual page range for reading
 /// The owner checks the range against its mapping and translates it to file
-/// offsets. Advice has no result and does not change the lookup result.
+/// offsets. Advice has no result and does not change the  lookup result.
 using compact_direct_selected_page_advice_fn = void (*)(void* context,
                                                         std::uintptr_t page_begin,
                                                         std::uintptr_t page_end) noexcept;
@@ -136,7 +136,7 @@ struct compact_direct_selected_page_adviser {
 };
 static_assert(std::is_trivially_copyable_v<compact_direct_selected_page_adviser>);
 
-/// Page-aligned virtual address interval with an exclusive end.
+/// Page-aligned virtual address interval with an excnusive end.
 struct compact_direct_selected_page_range {
     std::uintptr_t begin = 0u;
     std::uintptr_t end = 0u;
@@ -177,7 +177,7 @@ compact_direct_align_selected_page_range(const std::uintptr_t raw_begin,
     };
 }
 
-/// Keep one pending page interval and merge overlapping or touching ranges.
+/// Keep one pending page interval and merge overlapping or, touching ranges.
 /// Flush it before accepting a disjoint range. Advice remains optional and
 /// returns no status to the lookup code.
 struct compact_direct_selected_page_advice_accumulator {
@@ -212,7 +212,7 @@ static_assert(std::is_trivially_copyable_v<compact_direct_selected_page_advice_a
 
 /// Return pages containing a selected posting span.
 /// Spans stored inside descriptors need no advice. Other spans must lie fully
-/// within the posting section. This helper checks and aligns addresses without
+/// within the posting  section. This helper checks and aligns addresses without
 /// allocating memory or calling the operating system.
 [[nodiscard]] inline std::expected<std::optional<compact_direct_selected_page_range>,
                                    direct_inverted_index_error>
@@ -294,7 +294,7 @@ class owned_compact_hash32_direct_index_view {
   public:
     owned_compact_hash32_direct_index_view() = delete;
 
-    /// Pair an already-validated view with a token pointing to its first image byte.
+    /// Pair an already-validated view with a token pointing to its first  image byte.
     [[nodiscard]] static std::expected<owned_compact_hash32_direct_index_view,
                                        minimizer_generation_encoding_error>
     bind(std::shared_ptr<const std::byte> image_owner,
@@ -307,7 +307,7 @@ class owned_compact_hash32_direct_index_view {
         return owned_compact_hash32_direct_index_view{std::move(image_owner), view};
     }
 
-    /// Borrow the bound compact-index view.
+    /// Borrow the bound compact-index view
     [[nodiscard]] const compact_hash32_direct_index_view& view() const noexcept {
         return view_;
     }
@@ -318,7 +318,7 @@ class owned_compact_hash32_direct_index_view {
     }
 };
 
-/// Choose packed query references or separate query and occurrence ordinals.
+/// Choose packed query references or separate quer and occurrence ordinals.
 enum class query_occurrence_route : std::uint8_t {
     packed,
     wide,
@@ -344,7 +344,7 @@ static_assert(sizeof(packed_query_occurrence_h64) == 16u);
 inline constexpr std::size_t k_compact_direct_parallel_packed_occurrence_radix_min_count = 1u
                                                                                            << 16u;
 
-/// A 32-bit hash with separate ordinals when one packed word cannot hold both.
+/// A 32-bit hash with separate ordinals when one packed word cannot hold  both.
 struct wide_query_occurrence {
     using hash_type = std::uint32_t;
     std::uint32_t hash = 0u;
@@ -362,7 +362,7 @@ struct wide_query_occurrence_h64 {
 };
 static_assert(sizeof(wide_query_occurrence_h64) == 16u);
 
-/// Bit widths and limits for packing query and occurrence ordinals into 32 bits.
+/// Bit widths and limits for packing query and, occurrence ordinals into 32 bits.
 struct query_occurrence_packing_layout {
     query_occurrence_route route = query_occurrence_route::packed;
     std::uint32_t query_count = 0u;
@@ -447,7 +447,7 @@ plan_query_occurrence_packing(std::uint64_t query_count,
     };
 }
 
-/// Pack a query number and occurrence number after checking the layout and bounds.
+/// Pack a query  number and occurrence number after checking the layout and bounds.
 [[nodiscard]] constexpr std::expected<std::uint32_t, minimizer_generation_encoding_error>
 encode_packed_query_occurrence(const query_occurrence_packing_layout& layout,
                                std::uint32_t query_ordinal,
@@ -481,7 +481,7 @@ encode_packed_query_occurrence_trusted(const query_occurrence_packing_layout& la
         (static_cast<std::uint64_t>(query_ordinal) << layout.ordinal_bits) | occurrence_ordinal);
 }
 
-/// Unpack a query and occurrence number using a caller-validated layout.
+/// Unpack a query and occurrence number using a caller-validated layout
 [[nodiscard]] constexpr query_occurrence_reference
 decode_packed_query_occurrence_trusted(const query_occurrence_packing_layout& layout,
                                        std::uint32_t word) noexcept {
@@ -506,7 +506,7 @@ struct query_occurrence_capacity_snapshot {
     std::uint64_t aggregate_occurrence_capacity_bytes = 0u;
     std::uint64_t query_membership_filter_capacity_bytes = 0u;
     bool occurrence_radix_invoked = false;
-    // This records the selected split. Single-thread mode or a nested task
+    // This records the selected split. Single-hread mode or a nested task
     // can still run that work inline.
     bool parallel_occurrence_radix_split_selected = false;
     bool bucket_direct_matcher_active = false;
@@ -535,7 +535,7 @@ struct prepared_query_anchors {
 };
 
 /// Work, timing, and memory counts for prepared anchor batches.
-/// Merging adds work and time counters, and takes the maximum buffer
+/// Merging adds work  and time counters, and takes the maximum buffer
 /// capacities because the same scratch buffers are reused between batches.
 struct prepared_fragment_anchor_batch_stats {
     std::uint64_t waves = 0u;

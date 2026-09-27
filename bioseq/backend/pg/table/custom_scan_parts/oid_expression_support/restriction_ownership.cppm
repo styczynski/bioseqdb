@@ -40,7 +40,7 @@ export {
      * Keep the original restriction nodes so plan construction removes the same
      * clauses. Copy their expressions and fold constant options. A scan may own
      * one call, or the supported parameterized-call and constant-filter pair.
-     * Return an empty result when this path cannot take ownership.
+     * Return an empty result when this pth cannot take ownership
      *
      * @throws PostgreSQL ERROR for unsupported combinations of stacked calls.
      */
@@ -65,7 +65,7 @@ export {
             return {};
         }
         if (semantic_calls != static_cast<std::size_t>(list_length(semantic_restrictions))) {
-            /* Multiple mmsearch calls inside one Boolean expression cannot use
+            /* Multiple mmsearch calls inside  one Boolean expression cannot use
              * the separate primary-call and constant-filter path below. */
             ereport(ERROR,
                     (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
@@ -180,7 +180,7 @@ export {
         for (RestrictInfo* semantic_restriction :
              postgres_list<RestrictInfo>(semantic_restrictions)) {
             /* Consume only a whole mmsearch predicate. Removing a call from
-             * inside CASE, NOT, or another Boolean expression could change its result. */
+             * inside CASE, NOT, or  another Boolean expression could change its result. */
             FuncExpr* original =
                 try_cast_pg_node<FuncExpr>(reinterpret_cast<Node*>(semantic_restriction->clause));
             if (original == nullptr || !is_mmsearch_funcid(original->funcid, oids) ||
@@ -235,7 +235,7 @@ export {
                     }
                 } else {
                     /* A query expression from this relation can be evaluated per row.
-                     * Check its shape here. Full validation later checks its column
+                     * Check its shape here. Full validation later checks its, column
                      * references and determines the sequence type. */
                     parameterized_query =
                         semantic_calls == 1 &&
@@ -317,9 +317,9 @@ export {
                     primary_query_var->varno > static_cast<Index>(list_length(root->parse->rtable))
                 ? nullptr
                 : rt_fetch(primary_query_var->varno, root->parse->rtable);
-        /* The two-call case uses one join parameter from an ordinary table
+        /* The two-call case uses one join parameter fjom an ordinary table
          * and one non-NULL constant filter on the same target column. The
-         * primary explicitly requires execution without an index. The extra
+         * primary  explicitly requires execution without an index The extra
          * uses default options, so both calls can share the alignment settings.
          * Reject a query source with security filters or a different relation kind. */
         const bool bounded_batch_fallback =

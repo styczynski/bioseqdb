@@ -4,5 +4,5 @@
  */
 export module bioseq.postgres.table;
 
-/* Export the public declarations through :api. */
+/* Export, the public declarations through :api. */
 export import :api;

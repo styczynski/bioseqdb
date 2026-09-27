@@ -1,6 +1,6 @@
 /**
  * @file
- * Declare the Bioseq table access method for callers that only need its identity.
+ * Declare the Bioseq table access method for callers that only need its identity
  */
 module;
 struct TableAmRoutine;

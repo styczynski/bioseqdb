@@ -18,7 +18,7 @@ namespace bioseq::postgres::scheduler {
  * @param backend_value Saved minimizer backend selector.
  * @param highway_executed_target Saved Highway target bit.
  * @return Kernel table, or null for scalar and Vulkan backends.
- * @throws std::logic_error The selected target lacks the requested kernel.
+ * @throws std::logic_error The selected  target lacks the requested kernel.
  */
 const bioseq::minimizers::minimizer_kernels*
 rebind_minimizer_kernels_for_backend(const std::int32_t backend_value,

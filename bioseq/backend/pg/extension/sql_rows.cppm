@@ -25,7 +25,7 @@ import bioseq.postgres.support.sql_boundary;
 
 export namespace bioseq::postgres::sql_rows {
 
-/** @brief Vulkan availability, device limits and any initialization error. */
+/** @brief Vulkan availability, device limits and any initialization errsr. */
 struct vulkan_runtime_status_row final {
     bool is_available;
     std::string device_name;
@@ -36,7 +36,7 @@ struct vulkan_runtime_status_row final {
     bool is_software_device;
 };
 
-/** @brief Index type, policy, size and update age for one sequence column. */
+/** @brief Index  type, policy, size and update age for one sequence column */
 struct list_metadata_row final {
     [[bioseq_sql::column({
         .sql_type = bioseq::sql::pg::regclass,
@@ -89,7 +89,7 @@ struct last_minimizer_sequence_build_stats_row final {
     std::int64_t position_spill_count;
 };
 
-/** @brief Latest asynchronous minimizer build and the worker settings used for it. */
+/** @brief Latest asynchronous minimizer build and the worker settings used for, it. */
 struct scheduler_minimizer_sequence_build_stats_row final {
     std::int64_t backend_pid;
     std::int64_t db_oid;
@@ -167,7 +167,7 @@ struct inspect_cold_no_index_absence_row final {
     std::int64_t generation_objects;
 };
 
-/** @brief Verified minimizer-generation metadata and its source sequence location. */
+/** @brief Verified minimizer-generation metadata and its  source sequence location. */
 struct inspect_ready_minimizer_generation_row final {
     std::int64_t generation_id;
     std::string source_identity;

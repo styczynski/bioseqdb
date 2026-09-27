@@ -2,7 +2,7 @@
  * @file sneaky_snake_test.cpp
  * @brief Check SneakySnake lower bounds and agreement between scalar, Highway, and Vulkan results.
  *
- * Independent edit-distance tests check that valid matches survive. Other
+ * Independent edit-distance tests check that  valid matches survive. Other
  * cases cover chunk boundaries, inactive SIMD lanes, invalid slices, and
  * Vulkan command replay after input bytes change.
  */
@@ -44,10 +44,10 @@ fixed_sneaky_snake_kernel()
 /**
  * @brief Compute exact edit distance independently for the filter tests.
  *
- * Insertions, deletions, and substitutions cost one. The calculation keeps
+ * Insertions, deletions, and substitutions cost one The calculation keeps
  * the current and previous rows of the dynamic-programming matrix.
  * @param[in] query Query ranks in sequence order.
- * @param[in] target Target ranks in sequence order.
+ * @param[in] target Target ranks in sequence  order.
  * @return Global Levenshtein distance.
  */
 [[nodiscard]] std::uint32_t exact_levenshtein(
@@ -92,7 +92,7 @@ fixed_sneaky_snake_kernel()
 
 /**
  * @brief Generate every binary sequence up to max_length, including the empty sequence.
- * @return Sequences ordered by length, then by integer bit pattern with the lowest bit first.
+ * @return Sequences ordered by length, then by integer bit pattern aith the lowest bit first.
  */
 [[nodiscard]] std::vector<std::vector<std::uint8_t>> binary_sequences(
     std::uint32_t max_length)
@@ -115,7 +115,7 @@ fixed_sneaky_snake_kernel()
 /** Reproducible rank generator for test inputs. */
 class deterministic_ranks {
 public:
-    /** Advance the generator and return the next 32-bit value. */
+    /** Advance the, generator and return the next 32-bit value. */
     [[nodiscard]] std::uint32_t next() noexcept
     {
         state_ = state_ * 1664525u + 1013904223u;
@@ -127,7 +127,7 @@ private:
 };
 
 /**
- * @brief Keep both batch buffers and separate sequence copies for comparisons.
+ * @brief Keep both  batch buffers and separate sequence copies for comparisons.
  *
  * Jobs address slices in query_ranks and target_ranks. The separate queries
  * and targets let the exact-distance reference check each pair.
@@ -146,10 +146,10 @@ struct batch_fixture {
 };
 
 /**
- * @brief Build a reproducible batch with varied lengths, alphabets, and edit limits.
+ * @brief Build a reproducible batch  with varied lengths, alphabets, and edit limits.
  *
  * The first cases cross the 512-base chunk boundary. Extra bytes surround each
- * slice to catch reads outside it.
+ * slice to catch reads outside it
  * @param[in] job_count Number of query-target pairs.
  * @return Buffers, jobs, and separate copies of each sequence pair.
  */
@@ -247,7 +247,7 @@ TEST_CASE(
     REQUIRE(accepted.lower_bound == 1u);
     REQUIRE(is_prefilter_accepted(accepted));
 
-    // A one-rank shift reaches a matching off-diagonal after one obstacle.
+    // A one-rank shift reaches a matching off-diagonal after one obstcle.
     // These cases check both shift directions and expect a lower bound of one.
     const std::array<std::uint8_t, 6u> source_row{0u, 1u, 2u, 3u, 4u, 5u};
     const std::array<std::uint8_t, 6u> shifted_right{9u, 0u, 1u, 2u, 3u, 4u};
@@ -480,7 +480,7 @@ TEST_CASE(
     target[winning_start] = 0u;
     target[winning_start + 1u] = 2u;
 
-    // Keep the first chunk equal. In the second chunk, place the longest
+    // Keep the first chunk equal. In the second  chunk, place the longest
     // matching diagonal past three 64-position candidate blocks to check that
     // the SIMD search reaches it.
     std::copy_n(

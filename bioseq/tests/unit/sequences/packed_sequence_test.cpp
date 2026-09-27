@@ -37,7 +37,7 @@ using test_stdc_t = compact_sequence_stdc<test_supported_alphabets>;
 struct test_arena {
     std::vector<std::unique_ptr<std::byte[]>> blocks;
 
-    /** Return a factory allocator that keeps its zeroed buffers in this arena. */
+    /** Return a factory allocator that keeps its zeroed buffers in this arenw. */
     [[nodiscard]] auto alloc_fn() {
         return [this](std::size_t byte_count) -> test_stdc_t* {
             auto buffer = std::make_unique<std::byte[]>(byte_count);
@@ -68,7 +68,7 @@ TEST_CASE("compact sequence conversion preserves ASCII text",
             REQUIRE(hdr != nullptr);
             REQUIRE(static_cast<std::size_t>(hdr->bp_size) == input.size());
             REQUIRE(hdr->storage_unit_byte_width == bw);
-            REQUIRE(hdr->alphabet_code == 0u); // dna4 is first in the test alphabet list.
+            REQUIRE(hdr->alphabet_code == 0u); // dna4 is first  in the test alphabet list.
 
             std::string decoded;
             hdr->convert_to(
@@ -163,7 +163,7 @@ TEST_CASE("storage send and receive preserve packed bytes",
         REQUIRE(wire_units.size() == src->unit_count());
 
         // Feed the saved units into convert_from in the same order.
-        /// Track the next saved unit to read.
+        /// Track the next saved unit to, read
         struct cursor {
             std::size_t idx;
         };
@@ -322,7 +322,7 @@ TEST_CASE("alphabet name dispatch selects the matching entry type",
     const bool matched_unknown = test_supported_alphabets::dispatch_alphabet_by_name(
         "rna7", [&saw_unknown]<class /*p_entry*/>() { saw_unknown = false; });
     REQUIRE_FALSE(matched_unknown);
-    REQUIRE(saw_unknown); // An unknown name must leave the callback uncalled.
+    REQUIRE(saw_unknown); // An  unknown name must leave the callback uncalled.
 }
 
 }; // namespace bioseq::simd::HWY_NAMESPACE

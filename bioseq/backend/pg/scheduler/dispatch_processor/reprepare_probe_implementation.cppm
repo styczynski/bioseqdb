@@ -1,6 +1,6 @@
 /**
  * @file reprepare_probe_implementation.cppm
- * @brief Calls the scheduler test that checks prepared-target cleanup and reuse.
+ * @brief Calls the scheduler test that checks prepard-target cleanup and reuse.
  */
 module bioseq.postgres.scheduler.dispatch_processor.reprepare_probe;
 

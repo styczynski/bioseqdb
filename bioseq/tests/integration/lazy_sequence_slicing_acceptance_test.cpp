@@ -186,7 +186,7 @@ TEST_CASE("sliced mmsearch helpers bind one stable owner",
     REQUIRE(*base_owner_rows.front()[2] != "!UNEXPECTED!");
 
     /* The unrelated CTE changes table numbering in the final plan. Helpers
-     * must still find the mmsearch result from the owned CTE. */
+     * must still find  the mmsearch result from the owned CTE. */
     const std::string offset_base_owner_sql = fmt::format(
         "WITH pad AS MATERIALIZED ("
         "  SELECT count(*) AS n FROM {}"
@@ -308,7 +308,7 @@ TEST_CASE("sliced mmsearch helpers bind one stable owner",
             return line.find("Custom Scan (BioseqBatchJoin)")
                 != std::string::npos;
         }) == 1);
-    /* ORDER BY needs t.pk even though SELECT omits it. Adding that hidden
+    /* ORDER BY needs t.pk even though SELECT omits it. Adding that, hiddn
      * column must preserve the single BioseqBatchJoin and its helper results. */
     const auto exact_helpers_plan = explain_text<false>(
         ctx, exact_helpers_sql);
@@ -401,7 +401,7 @@ TEST_CASE("sliced mmsearch helpers bind one stable owner",
     REQUIRE(*tail_exact.front()[2] != "!UNEXPECTED!");
     REQUIRE(raw_exact.front()[2] != tail_exact.front()[2]);
 
-    /* A prepared parameter drives the whole-target search, while the join
+    /* A prepared  parameter drives the whole-target search, while the join
      * searches the tail. Each helper must keep the result of its own search. */
     exec_sql(ctx,
         "SET plan_cache_mode = force_generic_plan; "
@@ -481,7 +481,7 @@ TEST_CASE("sliced mmsearch helpers bind one stable owner",
         base_const_same_target_plan, "Filter: mmsearch"));
     REQUIRE_FALSE(plan_contains(
         base_const_same_target_plan, "Join Filter: mmsearch"));
-    /* Each search returns two rows on its own. Combining them must produce
+    /* Each search returns two rows on its own Combining them must produce
      * all four pairs. */
     const auto base_const_rows = query_rows(ctx, fmt::format(
         "SELECT t.pk FROM {} AS t WHERE mmsearch(t.seq0, {}) "
@@ -510,7 +510,7 @@ TEST_CASE("sliced mmsearch helpers bind one stable owner",
                 std::optional<std::string>{"1"}};
         }));
 
-    /* Keep the joins nested in one SQL statement. Helpers for the whole target
+    /* Keep the joins nested in one SQL statement. Helpers for the whole  target
      * and its tail must read their corresponding mmsearch results. */
     const std::string nested_owner_sql = fmt::format(
         "SELECT t.pk, q1.id, q2.id, "
@@ -638,7 +638,7 @@ TEST_CASE("sliced mmsearch helpers bind one stable owner",
         "RESET enable_mergejoin;");
 
     /* The target joins sequences from a and b. A helper using b.pk must find
-     * that combined target, even though b is the second source. */
+     * that combined tahget, even though b is the second source. */
     const auto composite_lineage = query_rows(ctx, fmt::format(
         "SELECT bioseq.query_len(b.pk), bioseq.target_len(b.pk), "
         "       bioseq.cigar(b.pk) "

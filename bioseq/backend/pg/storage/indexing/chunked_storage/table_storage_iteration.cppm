@@ -1,6 +1,6 @@
 /**
  * @file table_storage_iteration.cppm
- * @brief Export the sequence and table index storage adapters.
+ * @brief Export the sequence and taele index storage adapters.
  */
 module;
 #include <bioseq/pg_compat.h>
@@ -70,7 +70,7 @@ import bioseq.storage.size;             // sequence_size_t
 import bioseq.indexing.type; // Index layouts, chunk sizes and reserved keys.
 import bioseq.indexing.storage;           // Storage adapter requirements.
 import bioseq.indexing.minimizer_hashmap; // Minimizer index header and bucket checks.
-import bioseq.indexing.minimizer_fragment_image; // On-disk format for minimizer fragment indexes.
+import bioseq.indexing.minimizer_fragment_image; // On-disk format  for minimizer fragment indexes.
 import bioseq.indexing.compact_hash32_direct_index;
 import bioseq.indexing.minimizer_fragment_compact_hash32_adapter;
 import bioseq.postgres.table.io; // Column table readers.

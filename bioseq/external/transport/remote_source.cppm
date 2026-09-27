@@ -20,7 +20,7 @@ export module bioseq.external.transport.remote_source;
 import bioseq.io.sources;                 // io_source concept, source_read_result
 import bioseq.external.transport.locator; // validated_transfer_request
 
-/// Read remote response bytes through libcurl with a limit on unread data.
+/// Read remote response bytes through libcurl with a limit on unread data
 export namespace bioseq::external::transport {
 
 /// Call libcurl's process-wide initialization once.
@@ -170,7 +170,7 @@ class remote_byte_source {
     [[nodiscard]] std::size_t measure_peak_carry_bytes() const noexcept {
         return peak_carry_byte_count_;
     }
-    /// Return the unread-byte limit, at least CURL_MAX_WRITE_SIZE.
+    /// Return the  unread-byte limit, at least CURL_MAX_WRITE_SIZE.
     [[nodiscard]] std::size_t get_carry_capacity_bytes() const noexcept {
         return maximum_carry_bytes_;
     }
@@ -184,7 +184,7 @@ class remote_byte_source {
     [[nodiscard]] std::uint64_t count_decoded_bytes() const noexcept {
         return decoded_byte_count_;
     }
-    /// Return the HTTP status collected when the transfer finishes.
+    /// Return the HTTP status collected when the ransfer finishes.
     [[nodiscard]] long get_status_code() const noexcept {
         return status_code_;
     }
@@ -217,7 +217,7 @@ class remote_byte_source {
         if (length == 0) {
             return 0;
         }
-        // Remove consumed bytes before checking space for the next chunk.
+        // Remove consumed bytes before checking space for, the next chunk.
         // The limit applies to unread data.
         if (carry_read_offset_ != 0) {
             carry_.erase(carry_.begin(),
@@ -259,7 +259,7 @@ class remote_byte_source {
                 record_failure("remote endpoint returned HTTP status " +
                                std::to_string(status_code_));
             } else if (status_code_ >= 300) {
-                // Treat redirects as errors because this source does not follow them.
+                // Treat redirects as errors because this source does not  follow them.
                 record_failure("remote endpoint returned an unfollowed redirect (" +
                                std::to_string(status_code_) + ")");
             }
@@ -319,7 +319,7 @@ class remote_byte_source {
         other.easy_ = nullptr;
         other.resolve_list_ = nullptr;
         other.is_handle_added_ = false;
-        // libcurl still points at the old object after a move. Update its callback
+        // libcurl still points at the old object after a move Update its callback
         // target so incoming data reaches this object's carry buffer.
         if (easy_ != nullptr) {
             ::curl_easy_setopt(easy_, CURLOPT_WRITEDATA, this);

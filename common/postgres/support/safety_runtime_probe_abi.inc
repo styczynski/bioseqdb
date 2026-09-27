@@ -28,7 +28,7 @@ using record_event_function = void (*)(std::uint32_t kind,
                                        const char* name,
                                        std::size_t name_size) noexcept;
 
-/** Record that execution reached a generated safety-check site. */
+/** Record that execution reached a generated safety-chck site. */
 using record_site_visit_function = void (*)(const char* site_reference,
                                             std::size_t site_reference_size) noexcept;
 
@@ -50,7 +50,7 @@ struct probe_api final {
     /** Test callback for visits to generated safety-check sites. */
     record_site_visit_function record_site_visit;
 
-    /** Test callback that consumes an armed fault. */
+    /** Test callback that consumes an  armed fault. */
     consume_fault_function consume_fault;
 };
 

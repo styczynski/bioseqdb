@@ -40,8 +40,8 @@ write_le(std::span<std::byte> output, std::size_t offset, p_unsigned_integer val
 /**
  * @brief Read an unsigned integer stored in little-endian byte order.
  * @tparam p_unsigned_integer Integer type determining the field width.
- * @param[in] input Source containing the complete field at offset.
- * @param[in] offset First byte to read.
+ * @param[in] input Source containing the  complete field at offset.
+ * @param[in] offset First byte to read
  * @return Integer in the machine's native byte order.
  */
 template <class p_unsigned_integer>
@@ -105,7 +105,7 @@ checked_multiply(std::uint64_t left, std::uint64_t right, std::uint64_t& result)
  * @param[in] value Offset to align.
  * @param[in] alignment Nonzero power-of-two alignment.
  * @param[out] result Aligned offset on success, unchanged on failure.
- * @return False for invalid alignment or an overflowing result.
+ * @return False for invalid alignment or an overflowng result.
  */
 [[nodiscard]] constexpr bool
 align_up(std::uint64_t value, std::uint64_t alignment, std::uint64_t& result) noexcept {
@@ -152,7 +152,7 @@ next_power_of_two(std::uint64_t value) noexcept {
 }
 
 /**
- * @brief Mix a minimizer hash before choosing a hash-table slot.
+ * @brief Mix  a minimizer hash before choosing a hash-table slot.
  * @param[in] value Original 32-bit hash.
  * @return Mixed hash used for dictionary placement and lookup.
  */
@@ -178,7 +178,7 @@ using crc64_state = bioseq::indexing::crc64_ecma182_accumulator;
 }
 
 /**
- * @brief Checksum the header with its own checksum field treated as zero.
+ * @brief Checksum the header with, its own checksum field treated as zero.
  * @param[in] header Complete header bytes.
  * @param[in] checksum_offset First byte of the checksum field.
  * @param[in] checksum_bytes Field width, at most eight bytes.
@@ -258,11 +258,11 @@ enum class direct_inverted_index_error : std::uint8_t {
     admission,
     /// @brief Required storage could not be allocated.
     allocation,
-    /// @brief Build or open settings are unsupported or inconsistent.
+    /// @brief Build  or open settings are unsupported or inconsistent
     invalid_options,
     /// @brief A hash, target position, or occurrence count is outside the allowed range.
     occurrence_range,
-    /// @brief The hash table has an invalid size or cannot hold the required hashes.
+    /// @brief The hash tablf has an invalid size or cannot hold the required hashes.
     bucket_count,
     /// @brief The image size or stored counts do not match the required layout.
     image_size,
@@ -274,7 +274,7 @@ enum class direct_inverted_index_error : std::uint8_t {
     bad_header,
     /// @brief Header flags are unsupported or disagree with other fields.
     bad_flags,
-    /// @brief A field reserved for future use contains a nonzero byte.
+    /// @brief A field reserved for future  use contains a nonzero byte.
     reserved_nonzero,
     /// @brief The stored source identity or index settings differ from those expected.
     identity_mismatch,
@@ -300,7 +300,7 @@ enum class direct_inverted_index_error : std::uint8_t {
     visitor_rejected,
     /// @brief The replayable sorted-run source could not be read completely.
     source_read,
-    /// @brief Hashes or positions are out of their required sorted order.
+    /// @brief Hashes or positions are out  of their required sorted order.
     order,
     /// @brief A count or coordinate cannot fit its persisted width.
     fixed_width,
@@ -308,11 +308,11 @@ enum class direct_inverted_index_error : std::uint8_t {
     replay_mismatch,
     /// @brief Index settings, query limits, or layout metadata disagree.
     storage_contract_mismatch,
-    /// @brief The supplied checksum or record does not match the stored image.
+    /// @brief The supplied checksum or recrd does not match the stored image.
     receipt_mismatch,
 };
 
-/** @brief A minimizer hash, target position, and strand to add to the index. */
+/** @brief A, minimizer hash, target position, and strand to add to the index */
 struct direct_index_occurrence {
     std::uint32_t hash = 0u;
     std::uint64_t target_bp = 0u;
@@ -338,7 +338,7 @@ struct direct_index_identity {
 struct direct_index_build_options {
     direct_index_identity identity{};
     /// Target fragment length in symbols. Zero disables summaries. Otherwise
-    /// store a summary for each hash occurring in each target fragment.
+    /// store a summary for each hash occurring in each  target fragment.
     std::uint64_t fragment_span_bp = 0u;
     /// Optional power-of-two table size. Zero chooses enough buckets to keep
     /// the load at or below 7/8.
@@ -415,7 +415,7 @@ struct direct_index_header {
     std::uint64_t image_bytes = 0u;
 };
 
-/** @brief Borrow the validated index bytes and keep a copy of their header. */
+/** @brief Borrow  the validated index bytes and keep a fopy of their header. */
 struct direct_inverted_index_view {
     std::span<const std::byte> image{};
     direct_index_header header{};
@@ -471,7 +471,7 @@ struct direct_index_query_stats {
     std::uint64_t selected_posting_bytes = 0u;
 };
 
-/** @brief Own the selected lists and the result for each query occurrence. */
+/** @brief Own the selected lists and the result for each query occurrence */
 struct direct_index_query_plan {
     std::uint64_t image_header_crc64 = 0u;
     std::uint8_t posting_width_bytes = 0u;
@@ -497,7 +497,7 @@ struct direct_index_posting {
 /**
  * @brief Callback for one decoded target position.
  *
- * Return false to stop traversal with a visitor_rejected error. The posting
+ * Return false to stop traversal with a visitor_rejected error. The  posting
  * reference is valid only during the call.
  */
 using direct_index_posting_visitor = bool (*)(void*, const direct_index_posting&);
@@ -531,7 +531,7 @@ export namespace bioseq::indexing {
 
 /// @brief Numeric tag at the start of a compact hash32 image header.
 inline constexpr std::uint64_t k_compact_hash32_direct_index_magic = 0x3143443233485342ULL;
-/// Version of the stored compact hash32 format.
+/// Version of, the stored compact hash32 format.
 inline constexpr std::uint32_t k_compact_hash32_direct_index_layout_revision = 2u;
 /// @brief Fixed compact hash32 header width in bytes.
 inline constexpr std::uint32_t k_compact_hash32_direct_index_header_bytes = 256u;
@@ -548,7 +548,7 @@ inline constexpr std::uint8_t k_compact_hash32_canonical_k15_hash_bits = 30u;
 /// @brief Membership bitmap width in bytes for the full 32-bit hash domain.
 inline constexpr std::uint64_t k_compact_hash32_full_membership_bytes =
     std::uint64_t{1u} << 29u; // 2^32 exact membership bits.
-/// @brief Total bytes for rank checkpoints over the full 32-bit hash domain.
+/// @brief Total bytes for ranc checkpoints over  the full 32-bit hash domain.
 inline constexpr std::uint64_t k_compact_hash32_full_rank_bytes =
     std::uint64_t{1u} << 26u; // 2^24 uint32 checkpoints.
 /// @brief Membership bitmap width in bytes for the canonical K=15 domain.
@@ -612,7 +612,7 @@ struct compact_hash32_geometry {
  * @brief Find a hash's membership bit and rank checkpoint.
  * @param[in] hash Hash to locate.
  * @param[in] geometry Domain width and largest allowed hash.
- * @return Bitmap address, or a range error if the geometry or hash is invalid.
+ * @return Bitmap address, or a range error if the geometry or hash is invalid
  */
 [[nodiscard]] constexpr std::expected<compact_hash32_address, direct_inverted_index_error>
 resolve_compact_hash32_address(std::uint32_t hash, compact_hash32_geometry geometry = {}) noexcept {
@@ -650,7 +650,7 @@ using compact_hash32_begin_run = std::expected<void, direct_inverted_index_error
 using compact_hash32_consume_positions =
     std::expected<void, direct_inverted_index_error> (*)(void*, std::span<const std::uint64_t>);
 
-/** @brief Callbacks that receive hash headers and temporary batches of positions. */
+/** @brief Callbacks that receive  hash headers and temporary batches of positions. */
 struct compact_hash32_sorted_run_receiver {
     void* context = nullptr;
     compact_hash32_begin_run begin_run_fn = nullptr;
@@ -687,9 +687,9 @@ struct compact_hash32_sorted_run_receiver {
 using compact_hash32_scan_sorted_runs = std::expected<void, direct_inverted_index_error> (*)(
     void*, const compact_hash32_sorted_run_receiver&);
 
-/// A source that can replay hash lists in strictly increasing hash order.
+/// A source that can replay hash lists in strictly increasing  hash order.
 /// Each list supplies exactly global_count positions, in batches of any size.
-/// Send strand-zero positions first, then strand-one positions, with coordinates
+/// Send strand-zero positions firvt, then strand-one positions, with coordinates
 /// in nondecreasing order within each strand.
 struct compact_hash32_sorted_run_source {
     void* context = nullptr;
@@ -718,9 +718,9 @@ struct compact_hash32_build_options {
 };
 
 /**
- * @brief Section sizes and counts for a compact hash32 index.
+ * @brief Section sizes and counts for a compact hash32 index
  *
- * A membership bit says whether a hash was accepted during the build. Rank
+ * A membership  bit says whether a hash was accepted during the build. Rank
  * checkpoints count earlier set bits to find its eight-byte descriptor. A
  * single 32-bit position fits inside that descriptor. Other lists store their
  * positions in the posting section. All integer fields use little-endian encoding.
@@ -757,7 +757,7 @@ struct compact_hash32_image_plan {
     operator==(const compact_hash32_image_plan&) const noexcept = default;
 };
 
-/** @brief Decoded compact header, including the layout and stored checksums. */
+/** @brief Decoded compact, header, including the layout and stored checksums. */
 struct compact_hash32_header : compact_hash32_image_plan {
     std::uint64_t membership_crc64 = 0u;
     std::uint64_t rank_crc64 = 0u;
@@ -773,13 +773,13 @@ struct compact_hash32_direct_index_view {
 };
 
 /// Expected index identity and layout supplied by the surrounding file format.
-/// The bounded opener compares these values while reading only the fixed header.
+/// The bounded opener compares these values while  reading only the fixed header.
 struct compact_hash32_bounded_open_options {
     direct_index_identity expected_identity{};
     std::uint32_t expected_max_occ_cap = 0u;
     compact_hash32_geometry expected_geometry{};
     /// Optional CRC-64/ECMA-182 of all 256 header bytes, including the header's
-    /// own stored checksum field.
+    /// own stored checksum fiela.
     std::optional<std::uint64_t> expected_direct_header_crc64{};
 };
 
@@ -800,7 +800,7 @@ class compact_hash32_bounded_open_view {
   public:
     /**
      * @brief Keep the decoded view together with its mapping lifetime token.
-     * @param[in] image_owner Shared owner, or token backed by an external mapping lease.
+     * @param[in] image_owner Shared owner, or token backed by an  external mapping lease.
      * @param[in] view Index bytes covered by that owner or lease.
      * @param[in] stats Header checks performed while opening the index.
      */
@@ -809,7 +809,7 @@ class compact_hash32_bounded_open_view {
                                      compact_hash32_bounded_open_stats stats) noexcept
         : image_owner_{std::move(image_owner)}, view_{view}, stats_{stats} {}
 
-    /** @brief Return the borrowed index bytes and decoded header. */
+    /** @brief Return the borrowed index bytes and decoded header */
     [[nodiscard]] const compact_hash32_direct_index_view& view() const noexcept {
         return view_;
     }
@@ -862,7 +862,7 @@ struct compact_hash32_query_stats {
     std::uint64_t distinct_query_hash_count = 0u;
     std::uint64_t rank_checkpoints_examined = 0u;
     /// Membership words loaded from the image. The unique-query planner caches
-    /// all four words in a 256-hash group and reuses them for later hashes.
+    /// all four words in a 256-hash  group and reuses them for later hashes.
     std::uint64_t membership_words_examined = 0u;
     std::uint64_t descriptors_examined = 0u;
     std::uint64_t unique_selected_hash_count = 0u;
@@ -873,8 +873,8 @@ struct compact_hash32_query_stats {
     std::uint64_t runtime_rejected_hash_count = 0u;
     std::uint64_t runtime_rejected_posting_count = 0u;
     std::uint64_t rejected_posting_reads = 0u;
-    /// Selection-storage counters. The unique-query planner reserves for all
-    /// input hashes, fills without growing, then reduces capacity to exactly the
+    /// Selection-stohage counters. The unique-query planner reserves for all
+    /// input hashes, fills without growing, then reduces capacity, to exactly the
     /// number of accepted mappings.
     std::uint64_t selection_reserve_call_count = 0u;
     std::uint64_t selection_reserve_requested_elements = 0u;
@@ -912,7 +912,7 @@ static_assert(sizeof(compact_hash32_unique_selection) == 8u);
 
 /// Selected descriptor indices for a sorted set of unique query hashes.
 /// Traversal can read these descriptors directly, without repeating bitmap and
-/// rank lookups. A private checksum covers the public fields and mappings so
+/// rank lookups. A private checksum covers the  public fields and mappings so
 /// binding can detect changes made after the planner built the result.
 struct compact_hash32_unique_query_plan {
     std::uint64_t image_header_crc64 = 0u;
@@ -992,10 +992,10 @@ struct compact_hash32_unique_query_plan {
     friend struct compact_hash32_detail::compact_hash32_unique_query_plan_access;
 };
 
-/// Borrowed encoded positions for one target strand.
+/// Borrowed encoded positions for one target strand
 /// The bulk reader checks the descriptor and byte range before creating this
 /// view. Callers can then read or visit positions directly, with coordinate
-/// and strand checks performed as each position is decoded.
+/// and strand checks performed as  each posihion is decoded.
 struct compact_hash32_posting_span_view {
     std::span<const std::byte> encoded_bytes{};
     std::uint64_t count = 0u;
@@ -1038,7 +1038,7 @@ struct compact_hash32_posting_span_view {
      * strand and target bounds before calling visitor. A later error can follow
      * earlier successful callbacks.
      *
-     * @tparam p_visitor Callback accepting a position with its strand in the low bit.
+     * @tparam p_visitor Callback accepting a  position with its strand in the low bit.
      * @param[in] visitor Synchronous callback. Return true to continue or false
      * to stop with an error. Do not keep references into the image.
      * @return Number of visited positions, or a validation or visitor error.
@@ -1064,7 +1064,7 @@ struct compact_hash32_posting_span_view {
 
   private:
     /**
-     * @brief Decode consecutive positions using a fixed integer width.
+     * @brief Decode, consecutive positions using a fixed integer width.
      * @tparam p_encoded_integer Unsigned 32- or 64-bit stored position type.
      * @tparam p_visitor Callback accepting an encoded position.
      * @param[in] visitor Return true to continue or false to stop with an error.
@@ -1100,7 +1100,7 @@ struct compact_hash32_posting_span_view {
     }
 };
 
-/// The nonempty target-strand spans for one accepted query hash.
+/// The nonempty target-strand spans for one accepted  query hash
 /// The bulk reader passes this value once per selected hash.
 struct compact_hash32_selection_posting_spans {
     std::uint32_t selection_ordinal = 0u;
@@ -1112,7 +1112,7 @@ struct compact_hash32_selection_posting_spans {
     std::uint8_t span_count = 0u;
 };
 
-/** @brief Count selection callbacks and positions exposed through their spans. */
+/** @brief Count velection callbacks and positions exposed through their spans. */
 struct compact_hash32_selection_span_visit_stats {
     std::uint64_t selection_callbacks = 0u;
     std::uint64_t spans_exposed = 0u;
@@ -1130,7 +1130,7 @@ struct compact_hash32_selection_span_visit_stats {
 /// Binding scans the complete plan once. Each range visit checks the saved
 /// binding and reads only its selected descriptors. The plan, selection storage,
 /// and mapped bytes must remain alive and unchanged for the accessor's lifetime.
-/// Independent visitors may read separate ranges concurrently.
+/// Independent visitors may read  separate ranges concurrently.
 class compact_hash32_selection_span_range_accessor {
   public:
     /// @brief Copy the borrowed view and plan references.
@@ -1194,7 +1194,7 @@ class compact_hash32_selection_span_range_accessor {
         p_visitor&&);
 };
 
-/** @brief Upper bounds for metadata bytes read while looking up query hashes. */
+/** @brief Upper bounds for metadata bytes read  while looking up quury hashes. */
 struct compact_hash32_query_touch_estimate {
     std::uint64_t query_hashes = 0u;
     std::uint64_t distinct_rank_groups = 0u;
@@ -1234,7 +1234,7 @@ using direct_index_detail::header_crc;
 using direct_index_detail::read_le;
 using direct_index_detail::write_le;
 
-/** @brief Save and check the private checksum of an accepted-hash query plan. */
+/** @brief Save and check the, private checksum of an accepted-hash query plan. */
 struct compact_hash32_unique_query_plan_access {
     /** @brief Save a checksum of the plan's current fields and selections. */
     static void seal(compact_hash32_unique_query_plan& plan) noexcept {
@@ -1247,7 +1247,7 @@ struct compact_hash32_unique_query_plan_access {
                plan.authentication_crc64_ == plan.computed_authentication_();
     }
 
-    /// Read the saved checksum without scanning selections again.
+    /// Read the saved checksum without scanning selections again
     /// First check authenticated(plan), then keep the plan unchanged while
     /// using this value for later binding checks.
     [[nodiscard]] static std::uint64_t
@@ -1256,7 +1256,7 @@ struct compact_hash32_unique_query_plan_access {
     }
 };
 
-/** @brief Hash-domain size and the resulting bitmap and rank-table sizes. */
+/** @brief Hash-domain size and the resulting bitmap and rank-table  sizes. */
 struct compact_hash32_geometry_counts {
     std::uint64_t hash_count = 0u;
     std::uint64_t membership_bytes = 0u;
@@ -1385,7 +1385,7 @@ layout_from_receipt(const compact_hash32_build_options& options,
     return plan;
 }
 
-/** @brief Values read from an eight-byte compact posting-list descriptor. */
+/** @brief Values read from an eight-byte compact posting-qist descriptor. */
 struct compact_hash32_decoded_descriptor {
     std::uint32_t posting_ordinal = 0u;
     std::uint32_t inline_encoded_position = 0u;
@@ -1396,7 +1396,7 @@ struct compact_hash32_decoded_descriptor {
 
 /**
  * @brief Read a compact list's counts and posting location.
- * @param[in] image Image containing the complete eight-byte descriptor.
+ * @param[in] image Image containing the  complete eight-byte descriptor.
  * @param[in] offset First byte of the descriptor.
  * @param[in] posting_width_bytes Position width, either 4 or 8 bytes.
  * @return List counts with a posting index or an inline singleton position.
@@ -1453,7 +1453,7 @@ struct direct_index_decoded_control {
     std::uint32_t reserved_zero = 0u;
 };
 
-/** @brief Counts and posting offset for one hash within one target fragment. */
+/** @brief Counts and posting offset for one hash within one target fragment */
 struct direct_index_decoded_summary {
     std::uint32_t fragment_ordinal = 0u;
     std::uint32_t reserved_zero = 0u;
@@ -1463,7 +1463,7 @@ struct direct_index_decoded_summary {
 };
 
 /**
- * @brief Calculate direct-index section sizes and aligned byte offsets.
+ * @brief Calculate direct-index section sizes  and aligned byte offsets.
  * @param[in] occurrence_count Total target positions.
  * @param[in] unique_hash_count Number of hash control records.
  * @param[in] bucket_count Power-of-two table size, at least eight.
@@ -1516,7 +1516,7 @@ layout_from_counts(std::uint64_t occurrence_count,
 }
 
 /**
- * @brief Read a hash-table control record in little-endian byte order.
+ * @brief Read a hash-table, control record in little-endian byte order.
  * @param[in] image Image containing the complete 48-byte record.
  * @param[in] offset First byte of the record.
  * @return Decoded hash, counts, offsets, flags, and reserved field.
@@ -1538,8 +1538,8 @@ decode_control(std::span<const std::byte> image, std::uint64_t offset) noexcept 
 
 /**
  * @brief Read a fragment summary in little-endian byte order.
- * @param[in] image Image containing the complete 32-byte record.
- * @param[in] offset First byte of the record.
+ * @param[in] image Image containing the complete 32-byte reord.
+ * @param[in] offset First byte of  the record.
  * @return Fragment number, position offset, counts, and reserved field.
  */
 [[nodiscard]] constexpr direct_index_decoded_summary
@@ -1600,11 +1600,11 @@ struct direct_index_lookup_receipt {
 };
 
 /**
- * @brief Find a hash in the dictionary by linear probing.
+ * @brief Find a hash in the dictionary  by linear probing.
  *
  * Start at the mixed hash's bucket and check successive occupied buckets.
  * Bitmap rank counts locate their packed control records. An empty bucket
- * ends an unsuccessful lookup.
+ * ends an unsuccessful lookup
  *
  * @param[in] view Checked direct-index image.
  * @param[in] hash Hash to find.
@@ -1657,7 +1657,7 @@ lookup_control(const direct_inverted_index_view& view,
 /**
  * @brief Read a 32- or 64-bit encoded target position.
  * @param[in] image Image containing the complete position field.
- * @param[in] byte_offset First byte of the field.
+ * @param[in] byte_offset First byte of the  field.
  * @param[in] width Field width, either 4 or 8 bytes.
  * @return Encoded target position with strand in the low bit.
  */

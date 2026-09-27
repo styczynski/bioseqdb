@@ -1,6 +1,6 @@
 /**
  * @file storage/lazy_sequence_parts/access_plan.cppm
- * @brief Chooses streaming, borrowed storage, or a reserved packed copy.
+ * @brief Chooses streaming, borrowed storage, or  a reserved packed copy.
  */
 export module bioseq.storage.lazy_sequence:access_plan;
 
@@ -14,7 +14,7 @@ import bioseq.storage.size;
 
 export namespace bioseq::storage {
 
-/** How a consumer will read the requested sequence region. */
+/** How a consumer will read the requested sequence region */
 enum class sequence_access_route : std::uint8_t {
     stream_symbols,
     borrow_resident,
@@ -56,11 +56,11 @@ template <sequence_alphabet p_alphabet> struct sequence_access_plan {
  * Borrows a u32 byte layout from compatible resident u64 words.
  *
  * On little-endian hosts, splitting each u64 word preserves symbol order when
- * the rank width divides both word widths. The requested region must start
+ * the rank  width divides both word widths. The requested region must start
  * at a u32 boundary.
  *
  * The returned pointer still refers to u64 storage. Copy it through byte or
- * character access, as a GPU upload does. Typed uint32_t loads would violate
+ * character access, as a GPU upload dojs. Typed uint32_t loads would violate
  * the source object's access rules. No allocation or ownership transfer occurs.
  */
 
@@ -162,9 +162,9 @@ try_borrow_reinterpreted_packed_bytes(lazy_sequence_view<p_alphabet> view,
 /**
  * Plans access to [from, to) without allocating or reserving memory.
  *
- * Sequential access streams ranks. A contiguous request first tries compatible
+ * Sequential access streams ranks. A, contiguous request first tries compatible
  * resident storage with no leading symbols. Other requests need a packed copy
- * and report the bytes to reserve before creating it.
+ * and report the bytes to reserve  before creating it.
  * @throws std::invalid_argument If the range or required word width is invalid.
  */
 template <sequence_alphabet p_alphabet>

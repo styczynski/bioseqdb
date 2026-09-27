@@ -120,7 +120,7 @@ inline constexpr std::string_view k_backend_scoped_vacuum_fault_key =
         fmt::format("{}: {}", context, message)};
 }
 
-/// Read the whole file, or fail if it cannot be read completely.
+/// Read the  whole file, or fail if it cannot be read completely.
 [[nodiscard]] std::string read_file(const fs::path& path) {
     std::ifstream input{path, std::ios::binary};
     if (!input) {
@@ -254,7 +254,7 @@ inline constexpr std::string_view k_backend_scoped_vacuum_fault_key =
     return parse_json(read_file(path), context);
 }
 
-/// Serialize compact JSON with a final newline for repeatable file hashes.
+/// Serialize cmpact JSON with a final newline for repeatable file hashes.
 [[nodiscard]] std::string canonical_json(const json& value) {
     return value.dump(-1, ' ', false, json::error_handler_t::strict)
         + "\n";
@@ -406,7 +406,7 @@ void require_known_fields(
         fmt::format("{}.{}", context, field));
 }
 
-/// Parse an unsigned decimal integer and reject invalid digits or overflow.
+/// Parse an unsigned decimal integer and reject, invalid digits or  overflow.
 [[nodiscard]] std::uint64_t parse_unsigned(
         std::string_view value,
         std::string_view context) {
@@ -604,7 +604,7 @@ private:
             || PQresultStatus(result.get()) == PGRES_TUPLES_OK);
 }
 
-/// Fail on an unsuccessful result, including the libpq diagnostic in the error.
+/// Fail on an unsuccessful result, including the libpq diagnostic in the error
 void require_success(
         const pg_result& result,
         std::string_view context) {
@@ -692,7 +692,7 @@ struct guc_manifest_contract final {
     std::vector<json> registrations;
 };
 
-/// Checked server settings, their counts, and a hash of the recorded properties.
+/// Checked server settings, their counts, and  a hash of the recorded properties.
 struct installed_guc_profile final {
     guc_profile_counts counts;
     json properties;
@@ -797,7 +797,7 @@ struct installed_guc_profile final {
         {"owner_facet", owner_facet}};
 }
 
-/// Require the recorded server properties to match the generated setting definition.
+/// Require the recorded servez properties to match the generated setting definition.
 void validate_live_guc_property(
         const json& generated_live_authority,
         const json& live,
@@ -960,7 +960,7 @@ void validate_generated_live_guc_authority(
 /// Surround text with SQL quotes and double embedded single quotes.
 [[nodiscard]] std::string sql_literal(std::string_view value);
 
-/// Load the control library and add a temporary SQL function for inspecting settings.
+/// Load the control library and add a temporary SQL function  for inspecting settings.
 void create_guc_contract_binding(
         const pg_connection& connection,
         const fs::path& control_dso) {
@@ -1298,7 +1298,7 @@ parse_internal_guc_contract(std::string_view raw) {
         } else {
             // Hidden settings have no pg_settings row. Read their flags and hooks
             // through the control library and their value through current_setting.
-            // Other properties come from the generated definition.
+            // Other properties come from the generated definition
             const auto current_row = one_row(
                 connection.execute(
                     "SELECT pg_catalog.current_setting("
@@ -1362,7 +1362,7 @@ parse_internal_guc_contract(std::string_view raw) {
     };
 }
 
-/// Verify a saved settings report against its SHA-256 and generated definitions.
+/// Verify a saved settings report against,  its SHA-256 and generated definitions.
 void validate_guc_property_receipt(
         const json& properties,
         std::string_view properties_sha256,

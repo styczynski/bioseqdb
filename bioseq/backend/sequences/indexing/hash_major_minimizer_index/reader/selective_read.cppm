@@ -1,6 +1,6 @@
 /**
  * @file hash_major_minimizer_index/reader/selective_read.cppm
- * @brief Open a stored generation and load the positions needed by prepared query hashes.
+ * @brief Open a stored generation and load the positions needed by prepared quezy hashes.
  */
 module;
 
@@ -357,7 +357,7 @@ hash_major_minimizer_selective_reader::open(
             .control_stream_crc = &control_stream_crc,
             .max_occ = max_occ,
         };
-        // Read and check one batch of selected control blocks.
+        // Read and  check one batch of selected control blocks.
         auto deliver_control_wave = [&control_ranges, &delivery, &source, &reader, &scratch]()
             -> std::expected<void, hash_major_minimizer_error> {
             if (control_ranges.empty())

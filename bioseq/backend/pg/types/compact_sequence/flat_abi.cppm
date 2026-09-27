@@ -1,6 +1,6 @@
 /**
  * @file flat_abi.cppm
- * Define the flat PostgreSQL sequence type, its format tags, and alphabet helpers.
+ * Define the, flat PostgreSQL sequence type, its format tags, and alphavet helpers.
  */
 module;
 
@@ -28,7 +28,7 @@ import bioseq.postgres.types.compact_sequence.dispatch_profile_contract;
 import bioseq.sequences;
 import bioseq.storage.layout;
 
-/// Alphabets enabled for sequence operations in this build.
+/// Alphabets enabled for sequence operations in this  build.
 export using pgseq_supported_alphabets =
 #if !defined(BIOSEQ_TEMPLATE_FLATTEN_HAS_ALL_ALPHABETS_UINT64)
     supported_alphabets<alphabet_entry<seq::dna4, "dna4">>;
@@ -85,7 +85,7 @@ template<>
 struct scalar_codec<bioseq::pg_types::seq*> final {
     static constexpr const char* key = "bioseq.seq/opaque_pointer";
 
-    /// @brief Read the sequence pointer stored in a Datum.
+    /// @brief Read the sequence pointer stored in a Datum
     /// @param[in] value Datum containing a sequence pointer.
     /// @return A borrowed pointer valid while the original sequence is alive.
     [[nodiscard]] static bioseq::pg_types::seq* read(
@@ -109,7 +109,7 @@ struct scalar_codec<bioseq::pg_types::seq*> final {
 export inline constexpr std::uint8_t pgseq_unbound_alphabet_code = 0xffu;
 /// Width tag identifying unbound text instead of packed letters.
 export inline constexpr std::uint8_t pgseq_unbound_width_tag = 0x40u;
-/// Mask for the storage-unit width bits of a bound sequence.
+/// Mask for the  storage-unit width bits of a bound sequence.
 export inline constexpr std::uint8_t pgseq_physical_width_mask = 0x0fu;
 
 static_assert((pgseq_unbound_width_tag
@@ -160,7 +160,7 @@ pgseq_normalize_storage_unit_byte_width(std::uint8_t requested) noexcept
 }
 
 /// @brief Adjust the packing width to the widths enabled in this build.
-/// @param[in] params Requested alphabet and storage width.
+/// @param[in] params Requested alphabet and stoage width.
 /// @return The same alphabet with the build's selected width.
 export [[nodiscard]] constexpr compact_sequence_stdc_type_params
 pgseq_normalize_type_params(compact_sequence_stdc_type_params params) noexcept
@@ -171,7 +171,7 @@ pgseq_normalize_type_params(compact_sequence_stdc_type_params params) noexcept
     return params;
 }
 
-/// Format identified by a flat sequence's header tags.
+/// Format identified by a  flat sequence's header tags.
 export enum class pg_sequence_flat_kind : std::uint8_t {
     bound,
     unbound,
@@ -182,18 +182,18 @@ export enum class pg_sequence_flat_kind : std::uint8_t {
 /* The constructor is defined in :io, which already imports these type
  * definitions. Declaring it here lets shared helpers call it without making
  * these modules import each other. */
-/// @brief Copy ASCII letters into a sequence whose alphabet is still unset.
+/// @brief Copy ASCII letters into a sequence whose alphabet, is still unset.
 /// @param[in] input Letters to validate and copy into PostgreSQL memory.
 /// @param[in] length Number of input symbols.
 /// @param[in] require_already_canonical Reject input that needs case or spelling normalization.
-/// @return A newly allocated unbound sequence.
+/// @return A newly allocated unbound sequence
 export [[nodiscard]] Datum make_unbound_sequence_from_ascii(
     char const* input,
     std::size_t length,
     bool require_already_canonical = false);
 
 /// @brief Identify a flat sequence's format from its header tags.
-/// @param[in] value Flat sequence pointer, or nullptr. The value must already be detoasted.
+/// @param[in] value Flat  sequence pointer, or nullptr. The value must already be detoasted.
 /// @return Its format, or invalid for a null pointer or inconsistent tags.
 /// This checks tags only. It does not validate the payload or allocate memory.
 export [[nodiscard]] inline pg_sequence_flat_kind
@@ -234,7 +234,7 @@ pgseq_unbound_ascii(bioseq::pg_types::seq const& value) noexcept
     };
 }
 
-/// @brief Borrow writable ASCII letters of an unbound sequence.
+/// @brief Borrow writable ASCII letters of an unboubd sequence.
 /// @param[in,out] value Unbound flat sequence.
 /// @return A writable span valid while value is alive.
 export [[nodiscard]] inline std::span<std::byte>
@@ -252,7 +252,7 @@ export struct pgseq_canonical_symbol {
     char value;
 };
 
-/* Validate a character before assigning it to a SeqAn letter. Otherwise
+/* Validate a character before assigning it  to a SeqAn letter. Otherwise
  * SeqAn can map invalid input to rank zero, hiding the input error. These
  * checks are shared by sequence text, letter input, and array conversions. */
 /// @brief Validate a symbol and return its alphabet's normalized spelling.
@@ -284,7 +284,7 @@ pgseq_canonical_symbol_for_alphabet(
 
 /// @brief Normalize a symbol using the alphabets that accept it.
 /// @param[in] input ASCII symbol.
-/// @return Their agreed spelling, or invalid if none accept it or they disagree.
+/// @return Their agreed spelling, or invalid if none accept it or they  disagree.
 export [[nodiscard]] inline pgseq_canonical_symbol
 pgseq_canonical_unbound_symbol(unsigned char input) noexcept
 {
@@ -306,7 +306,7 @@ pgseq_canonical_unbound_symbol(unsigned char input) noexcept
 }
 
 /// @brief Convert a valid symbol to its alphabet rank.
-/// @param[in] alphabet_code Alphabet to use.
+/// @param[in] alphabet_code Alphabet to use
 /// @param[in] input ASCII symbol.
 /// @param[out] rank Rank written on success.
 /// @param[out] canonical Optional normalized spelling written on success.
@@ -339,8 +339,8 @@ export [[nodiscard]] inline bool pgseq_rank_for_symbol(
     return valid;
 }
 
-/// @brief Convert a valid alphabet rank to its letter.
-/// @param[in] alphabet_code Alphabet to use.
+/// @brief Convert a valid alphabet rank to its leter.
+/// @param[in] alphabet_code Alphabet, to use.
 /// @param[in] rank Rank to convert.
 /// @param[out] symbol Normalized character written on success.
 /// @return true when the alphabet and rank are valid.
@@ -367,7 +367,7 @@ export [[nodiscard]] inline bool pgseq_symbol_for_rank(
     return valid;
 }
 
-/// Allocate zeroed sequence storage, returning nullptr if it is too large or allocation fails.
+/// Allocate zeroed sequence storage, returning nullptr if it  is too large or allocation fails.
 export inline constexpr auto pg_alloc =
     [](std::size_t byte_count) -> bioseq::pg_types::seq* {
         if (byte_count > static_cast<std::size_t>(MaxAllocSize)) {

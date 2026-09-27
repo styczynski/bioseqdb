@@ -53,7 +53,7 @@ inline prov::provider_id uniprot_provider_id() noexcept {
     return {.value = "uniprot"};
 }
 
-/// Copy an identifier, truncating it at the shared byte limit.
+/// Copy an identifier, truncating it at  the shared byte limit.
 inline prov::bounded_string<prov::maximum_identifier_bytes>
 uniprot_bounded_id(std::string_view value) {
     return prov::bounded_string<prov::maximum_identifier_bytes>::make_truncated(value);
@@ -64,7 +64,7 @@ struct uniprot_plan {
     prov::query_target target{prov::query_target::catalog};
     std::string operation_id{"searchCursor"};
     std::string accession;  // Set when an accession-equality predicate is present.
-    std::string query{"*"}; // UniProtKB text or organism search expression.
+    std::string query{"*"}; // UniProtKB text, or organism search expression.
     std::optional<std::uint64_t> limit;
 
     /// Estimate storage for the plan and its strings.
@@ -99,7 +99,7 @@ struct uniprot_plan {
 /// Fetch one UniProt response and send catalog rows to a consumer.
 class uniprot_session {
   public:
-    /// Own the plan while borrowing the memory context and worker pool.
+    /// Own the plan while borrowing the memory context and worker  pool.
     uniprot_session(const context::context& memory,
                     const bioseq::parallelism::global_pool& pool,
                     uniprot_plan plan)
@@ -133,7 +133,7 @@ class uniprot_session {
             }
         }
 
-        // Request JSON explicitly because the row parser expects a JSON response.
+        // Request JSON exlicitly because the row parser expects a JSON response.
         auto response = client.get_with_accept(plan_.operation_id, params, "application/json");
         if (!response.has_value()) {
             return std::unexpected(make_external_error(external_error_kind::transport,
@@ -313,7 +313,7 @@ struct uniprot_provider {
     /// Session executing a prepared request plan.
     using session_type = uniprot_session;
 
-    /// Return the UniProt features advertised by this adapter.
+    /// Return the UniProt features advertised by this adapter
     static prov::provider_capabilities make_potential_capabilities() {
         prov::provider_capabilities caps;
         caps.flags.set(static_cast<std::size_t>(prov::provider_capability::catalog_search));
@@ -324,7 +324,7 @@ struct uniprot_provider {
         return caps;
     }
 
-    /// Return an empty list of request-policy profiles.
+    /// Return an empty list of  request-policy profiles.
     static std::span<const prov::request_policy_profile_view> list_request_policy_profiles() {
         return {};
     }

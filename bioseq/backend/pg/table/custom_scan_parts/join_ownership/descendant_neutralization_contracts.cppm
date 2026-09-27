@@ -12,7 +12,7 @@ export module bioseq.postgres.table:custom_scan_join_ownership_descendant_neutra
 import std;
 import :custom_scan_oid_expression_support_oid_catalog_core_contracts;
 
-/** @brief Counts mmsearch calls in child filters and repeated executor ownership. */
+/** @brief Counts mmsearch calls in child filters and repeated executor ownership */
 export struct per_row_mmsearch_plan_audit {
     std::size_t executable_qual_copies = 0u;
     std::size_t vector_qual_copies = 0u;

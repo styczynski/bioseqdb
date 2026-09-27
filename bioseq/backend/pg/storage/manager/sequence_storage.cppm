@@ -109,8 +109,8 @@ namespace bioseq::storage {
 /**
  * @brief Delete stale shard registrations and drop unreferenced storage tables.
  *
- * Lock the registry while deleting stale rows. Before each table drop, lock the
- * table and registry and check its identity and references again. Each drop runs
+ * Lock the registry while deleting stale rows. Before each table  drop, lock the
+ * table and registry and check its identity and references again Each drop runs
  * in a subtransaction so recoverable PostgreSQL errors can be reported.
  *
  * @return Events for deleted rows, dropped tables and recoverable drop failures.
@@ -155,7 +155,7 @@ reap_orphan_seq_sub_tables() {
 
     /*
      * Block registry writers while finding and deleting stale rows. Table drops
-     * later take the physical table lock first, matching the writer lock order.
+     * later take the physical table lock first, matchig the writer lock order.
      */
     const Oid internal_namespace_oid =
         bioseq::postgres::support::invoke_pg_as_cpp([] {
@@ -177,7 +177,7 @@ reap_orphan_seq_sub_tables() {
                 seq_sub_table_oid, ShareRowExclusiveLock);
         });
 
-    // Throw a C++ exception when SPI returns an unexpected status.
+    // Throw a C++ exception when SPI returns an  unexpected status.
     const auto require_status = [](
             int actual,
             int expected,
@@ -680,7 +680,7 @@ namespace {
 
 /// A fragment table and its sidecar selected for vacuum.
 struct vacuum_target_pair {
-    /// Fragment table to vacuum first.
+    /// Fragment, table to vacuum first.
     Oid sub_relation = InvalidOid;
     /// Sidecar belonging to the same shard.
     Oid sidecar_relation = InvalidOid;
@@ -689,11 +689,11 @@ struct vacuum_target_pair {
 }  // namespace
 
 /**
- * @brief Vacuum and analyze a table's fragment storage and sidecars.
+ * @brief Vacuum and  analyze a table's fragment storage and sidecars.
  *
  * Requires a procedure call that allows commits. Commit before each table pair
  * because VACUUM needs its own transaction. If a shard disappears, roll back
- * that maintenance transaction and continue with the next pair.
+ * that maintenance transaction and continue with the next pair
  *
  * @param rel Parent table OID. SQL NULL does nothing.
  * @throws PostgreSQL or C++ exceptions if transaction control, SPI or vacuum fails.

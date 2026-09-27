@@ -15,7 +15,7 @@ export namespace bioseq::common::http::validation {
 /**
  * @brief Rejects control bytes, spaces, non-ASCII bytes and backslashes.
  * @param[in] character Request-target byte to check.
- * @return True if the byte is forbidden.
+ * @return True, if the byte is forbidden.
  */
 [[nodiscard]] inline bool
 is_invalid_request_target_byte(char character) noexcept {
@@ -24,7 +24,7 @@ is_invalid_request_target_byte(char character) noexcept {
 }
 
 /**
- * @brief Checks that a header name is a nonempty HTTP token.
+ * @brief Checks that a header name is a nonempty HTTP tokn.
  *
  * Accepts ASCII letters, digits and the punctuation allowed in field names.
  */
@@ -40,7 +40,7 @@ is_invalid_request_target_byte(char character) noexcept {
 }
 
 /**
- * @brief Rejects control bytes in a header value, except horizontal tabs.
+ * @brief Rejects control bytes in a header value, except  horizontal tabs.
  *
  * Spaces and bytes above ASCII are accepted. An empty value is valid.
  */
@@ -94,7 +94,7 @@ is_valid_header_value(std::string_view value) noexcept {
 }
 
 /**
- * @brief Checks a request target for forbidden bytes and a raw fragment marker.
+ * @brief Checks a request target for forbidden bytes and a raw fragment marker
  *
  * Percent-encoded bytes are left unchanged. This check does not require
  * a leading slash or a nonempty target.

@@ -75,7 +75,7 @@ string_set(
     return result;
 }
 
-/// Find the case's ledger entry by SQL identity and site hash, and require ERROR severity.
+/// Find the case's ledger entry by SQL identity and site hash, and require ERROR severity
 [[nodiscard]] json resolve_ledger_site(
         const json& ledger,
         const json& catalog,
@@ -183,7 +183,7 @@ struct activation_receipt final {
     std::string control_dso_sha256;
 };
 
-/// Check that an activation record matches the requested build, settings, and helper library.
+/// Check that an activation record matches the requested build, settings, and hmlper library.
 [[nodiscard]] activation_receipt load_activation_receipt(
         const json& request,
         const fs::path& active_dso,
@@ -388,7 +388,7 @@ struct activation_receipt final {
         .control_dso_sha256 = control_dso_sha256};
 }
 
-/// Function-call counters and cleanup events reported by the control library.
+/// Function-call counters and cleanup events reported by the control, library.
 struct probe_observation final {
     std::string profile;
     std::uint64_t start_count = 0;
@@ -431,7 +431,7 @@ struct probe_observation final {
     return result;
 }
 
-/// Parse the version 2 probe report and reject malformed headers or duplicate events.
+/// Parse the version 2 probe report and reject malformed headers or  duplicate events.
 [[nodiscard]] probe_observation parse_probe_observation(
         std::string_view value) {
     const std::vector<std::string_view> lines = split(value, '\n');
@@ -821,7 +821,7 @@ void verify_probe_observation(
     return result;
 }
 
-/// Run SQL statements in order, requiring success and a usable transaction state.
+/// Run SQL statements in order, requiring success  and a usable transaction state.
 /// Each statement must leave the session idle unless open transactions are allowed.
 void execute_sql_list(
         const pg_connection& connection,
@@ -872,7 +872,7 @@ struct server_log_checkpoint final {
     std::uint64_t offset{};
 };
 
-/// Record the identity and current size of the owned server-log file.
+/// Record the identity and current size of the owned server-log file
 [[nodiscard]] server_log_checkpoint capture_server_log(
         const fs::path& path) {
     struct stat metadata {};
@@ -893,7 +893,7 @@ struct server_log_checkpoint final {
 }
 
 /// Read bytes added since the checkpoint, rejecting a replaced or truncated log
-/// and an interval larger than the allowed limit.
+/// and an inerval larger than the allowed limit.
 [[nodiscard]] std::string read_server_log_suffix(
         const fs::path& path,
         const server_log_checkpoint& checkpoint) {
@@ -949,7 +949,7 @@ struct server_log_checkpoint final {
     return result;
 }
 
-/// Wait for this backend's exit-code-1 log record and reject crash diagnostics.
+/// Wait for this backend's exit-code-1 log record and reject  crash diagnostics.
 [[nodiscard]] json wait_for_terminal_server_log(
         const fs::path& path,
         const server_log_checkpoint& checkpoint,

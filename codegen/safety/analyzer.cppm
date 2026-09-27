@@ -240,7 +240,7 @@ require_postgresql_severity_authority(
             "the exact reviewed PostgreSQL-17 declaration");
     }
     // These error levels match the reviewed PostgreSQL declaration above.
-    // If PostgreSQL changes them, update both the reviewed source record and
+    // If PostgreSQL changes them, update both the reviewed source record, and
     // this mapping.
     return {
         .error_level = 20,

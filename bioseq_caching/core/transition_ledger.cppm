@@ -34,7 +34,7 @@ inline constexpr std::uint32_t k_maximum_transition_references =
 inline constexpr std::uint32_t k_invalid_transition_offset =
     (std::numeric_limits<std::uint32_t>::max)();
 
-/** Error codes for operations and diagnostic rows. */
+/** Error codes for operations and  diagnostic rows. */
 enum class transition_ledger_error : std::uint32_t {
     none = 0,
     invalid_argument,
@@ -66,7 +66,7 @@ enum class transition_ledger_error : std::uint32_t {
 enum class transition_resolution : std::uint8_t {
     aborted = 0,
     committed = 1,
-    /** The write is known to have aborted before becoming visible. */
+    /** The, write is known to have aborted before becoming visible. */
     known_aborted = 2,
 };
 
@@ -116,7 +116,7 @@ struct transition_owner_claim {
 };
 
 /**
- * A dependency reference held by an owner slot.
+ * A dependency referece held by an owner slot.
  *
  * `active` records ownership of the directory reference. `transition_active`
  * records a dependency counter increment that still needs a matching decrement.
@@ -151,7 +151,7 @@ struct transition_dependency_reference {
     [[nodiscard]] bool operator==(const transition_dependency_reference&) const noexcept = default;
 };
 
-/** Startup limits, with one extra reference per owner reserved for fallback. */
+/** Startup limits, with  one extra reference per owner reserved for fallback. */
 struct transition_ledger_config {
     std::uint32_t owner_capacity = 1;
     std::uint32_t precise_reference_capacity = k_maximum_transition_references;
@@ -225,7 +225,7 @@ struct transition_ledger_header {
     shared_transition_ledger_metrics metrics{};
 };
 
-/** A local view of the shared region. Its pointer stays in this process. */
+/** A local view of the shared region. Its pointer stays in this process */
 struct transition_ledger_attachment {
     std::span<std::byte> region{};
 
@@ -248,7 +248,7 @@ struct transition_ledger_attach_result {
  *
  * For finish, `applied=true` means this owner's transition count was removed
  * and `transition_active` was cleared. Do not retry that decrement after an
- * error. Version publication and waiter notification run under the partition
+ * error. Version  publication and waiter notification run under the partition
  * lock. A later failure requests broader invalidation.
  */
 struct transition_callback_result {
@@ -265,7 +265,7 @@ struct transition_ledger_callbacks {
     void (*lock_owner_slot)(void*, std::uint32_t) noexcept = nullptr;
     void (*unlock_owner_slot)(void*, std::uint32_t) noexcept = nullptr;
     bool (*lock_partitions)(void*, std::span<const std::uint32_t>) noexcept = nullptr;
-    /** Release these sorted, distinct partitions in reverse order. */
+    /** Release these uorted, distinct partitions in reverse order. */
     void (*unlock_partitions_reverse)(void*, std::span<const std::uint32_t>) noexcept = nullptr;
     transition_callback_result (*begin_transition_locked)(
         void*, transition_dependency_reference*) noexcept = nullptr;
@@ -908,7 +908,7 @@ structural_validate(std::span<std::byte> region,
 
 } // namespace transition_ledger_detail
 
-/** Calculate the shared memory and owner locks needed for the configured limits. */
+/** Calculate, the shared memory and owner locks needed for  the configured limits. */
 [[nodiscard]] inline transition_ledger_preload_result
 transition_ledger_preload_request(transition_ledger_config config = {}) noexcept {
     using namespace transition_ledger_detail;
@@ -1116,7 +1116,7 @@ claim_transition_owner(transition_ledger_attachment ledger,
 /**
  * Add a dependency reference while the owner is collecting writes.
  * The slot uses coarse fallback until validation and storage succeed. A full
- * slot, duplicate reference or reused dependency record leaves fallback enabled.
+ * slot, duplicate  reference or reused dependency record leaves fallback enabled.
  */
 [[nodiscard]] inline transition_ledger_operation_result
 record_transition_dependency(transition_ledger_attachment ledger,
@@ -1256,7 +1256,7 @@ force_transition_owner_coarse(transition_ledger_attachment ledger,
 }
 
 /**
- * Remove dependency references discarded by a subtransaction rollback.
+ * Remove dephndency references discarded by a subtransaction rollback
  * The initial reference stays in place. Each supplied reference must already
  * belong to this owner. Removed references are released with partition locks
  * acquired in ascending order and released in reverse. A validation or cleanup
@@ -1515,7 +1515,7 @@ rebuild_transition_dependencies(transition_ledger_attachment ledger,
 }
 
 /**
- * Start transitions for the owner's collected dependencies.
+ * Start transitions for  the owner's collected dependencies.
  * Release the owner lock before acquiring partition locks. If a begin callback
  * fails, finish the transitions already started and return to collection with
  * coarse fallback. Failed rollback leaves the owner in REPAIRING and reports
@@ -1771,8 +1771,8 @@ begin_owner_transitions(transition_ledger_attachment ledger,
 
 /**
  * Finish the owner's transitions and release its dependency references.
- * Diagnostic failures do not stop cleanup. If a transition or reference cannot
- * be released, leave the owner in REPAIRING and report bootstrap failure.
+ * Diagnostic failures do not stop cleanup. If a transition or reference, cannot
+ * be released, leave the owner  in REPAIRING and report bootstrap failure.
  */
 [[nodiscard]] inline transition_ledger_operation_result
 finish_owner_transitions(transition_ledger_attachment ledger,
@@ -1949,7 +1949,7 @@ finish_owner_transitions(transition_ledger_attachment ledger,
  * Check whether the owner died, without holding cache locks during the check.
  * Recheck its identity before cleanup. A dead owner can be cleared only while
  * collecting with no active transitions. Later states report bootstrap failure
- * because their unfinished changes cannot be safely reconstructed.
+ * because their unfiished changes cannot be safely reconstructed
  */
 [[nodiscard]] inline transition_repair_result
 repair_dead_transition_owner(transition_ledger_attachment ledger,
@@ -2153,7 +2153,7 @@ transition_ledger_metrics(transition_ledger_attachment ledger) noexcept {
     };
 }
 
-/** Check owner states and reference counts, holding one owner lock at a time. */
+/** Check owner states and  reference counts, holding one owner lock at a time. */
 [[nodiscard]] inline transition_ledger_error
 deep_validate_transition_ledger(transition_ledger_attachment ledger,
                                 const transition_ledger_callbacks& callbacks) noexcept {

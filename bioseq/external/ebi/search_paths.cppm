@@ -1,6 +1,6 @@
 /**
  * @file external/ebi/search_paths.cppm
- * @brief OpenAPI definitions for EBI queries, suggestions, and frequent terms.
+ * @brief OpenAPI definitions for EBI queries, suggestions, and, frequent terms.
  */
 module;
 
@@ -93,7 +93,7 @@ inline constexpr std::string_view autocomplete_path = R"bioseq_openapi(  "/{doma
                 "$ref": "#/components/schemas/WSSuggestionResult"
 )bioseq_openapi";
 
-/** Root and domain search paths, including metadata responses when no query is supplied. */
+/** Root and domain  search paths, including metadata responses when no query is supplied. */
 inline constexpr std::string_view search_paths = R"bioseq_openapi(  "/":
     get:
       tags:

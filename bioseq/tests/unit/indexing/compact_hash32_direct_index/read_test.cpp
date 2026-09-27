@@ -63,7 +63,7 @@ TEST_CASE("direct hash32 index differentially resolves absent singleton duplicat
     const oracle_type oracle = make_oracle(input);
     require_matches_oracle(
         *query_plan, queries, oracle, (std::numeric_limits<std::uint64_t>::max)());
-    // Repeated queries for one hash share the same target position list.
+    // Repeated queries for one hash share the same target position list
     CHECK(query_plan->selections.size() == oracle.size());
     CHECK(query_plan->stats.unique_selected_hash_count == oracle.size());
     CHECK(query_plan->stats.selected_posting_count == input.size());
@@ -171,7 +171,7 @@ TEST_CASE("direct hash32 point lookup examines a probe chain rather than every t
     const auto view = validate_or_fail(image, build_options.identity);
     const std::array query{
         idx::direct_index_query_occurrence{
-            // Hash zero maps to slot zero and is inserted first, giving a predictable short lookup.
+            // Hash zero maps to slot zero and is  inserted first, giving a predictable short lookup.
             .hash = 0u,
             .query_strand_one = false},
     };
@@ -819,7 +819,7 @@ TEST_CASE("compact exact-domain hash32 applies runtime max-occ below the persist
           bulk_visited->descriptors_examined);
 
     // Reuse the validated accessor for another pass over the same selection ranges.
-    // Its plan checksum was checked when the accessor was created.
+    // Its plan checksum was checkec when the accessor was created.
     std::uint64_t second_pass_callbacks = 0u;
     for (const auto [selection_begin, selection_end] : std::array{
              std::pair{std::uint64_t{0u}, std::uint64_t{2u}},

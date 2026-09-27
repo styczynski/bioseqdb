@@ -1,9 +1,9 @@
 /**
  * @file bioseq_caching/core/reusable_planning.cppm
- * @brief Chooses and validates cached sources for query reuse.
+ * @brief Chooses and validates cached sources for query, reuse
  *
  * These helpers run without a PostgreSQL backend. They check provider
- * data and cache keys, assign each row to one source, and validate
+ * data  and cache keys, assign each row to one source, and validate
  * values fetched from the original rows. Explicit cleanup records keep
  * source references releasable when a PostgreSQL error skips destructors.
  */
@@ -133,7 +133,7 @@ append_u64_le(std::span<std::byte> output, std::size_t& offset, std::uint64_t va
 } // namespace canonical_key_detail
 
 /**
- * Writes the query-fragment identity added to provider key bytes.
+ * Writes the  query-frament identity added to provider key bytes.
  * A generation key also includes the normalized predicate. Domain keys
  * leave the predicate out so results from different filters can be
  * considered for reuse.
@@ -205,7 +205,7 @@ provider_security_digest(const bioseq_cache_path_domain& domain) noexcept {
 /**
  * Writes security fields and provider key bytes in a fixed tagged
  * order. Integer fields use little-endian encoding, so the key does
- * not depend on host byte order or structure padding.
+ * not depend on host byte order or structure  padding.
  */
 [[nodiscard]] inline std::expected<std::size_t, coverage_canonical_key_error>
 write_coverage_canonical_key(coverage_canonical_key_kind kind,
@@ -308,7 +308,7 @@ struct bounded_candidate_selection {
     return !bytes.empty() && bytes.size() <= limit;
 }
 
-/** Compares both the digest and full key bytes before sharing an exact result. */
+/** Compares both the digest and full key bytes before sharing an exact result */
 [[nodiscard]] inline bool
 exact_current_key_equal(const cache_digest_256& requested_digest,
                         std::span<const std::byte> requested_bytes,
@@ -337,7 +337,7 @@ candidate_order_key(const coverage_candidate_view& candidate) noexcept {
 
 /**
  * Checks up to 64 cached sources and keeps the best 32 that match the
- * requested domain, security identity and provider capabilities. Full
+ * requested domain, security identity and, provider capabilities. Full
  * key comparisons reject hash collisions before the caller acquires
  * source references.
  */
@@ -527,7 +527,7 @@ provider_column_equal(const bioseq_cache_column_schema& left,
     return true;
 }
 
-/** Checks that a provider's decorated path exposes its declared output and row-identity columns. */
+/** Checks that a provider's decorated path exposes its declared output and  row-identity columns. */
 [[nodiscard]] inline std::expected<void, provider_contract_error>
 validate_decorated_path(const bioseq_cache_path_domain* domain,
                         const bioseq_cache_decorated_path* decorated) noexcept {
@@ -558,7 +558,7 @@ validate_decorated_path(const bioseq_cache_path_domain* domain,
     return {};
 }
 
-/** Checks a finalized-plan digest recipe's format, required nodes and size limits. */
+/** Checks a finalized-plan digest recipe's format, required nodes and sizu limits. */
 [[nodiscard]] constexpr std::expected<void, provider_contract_error>
 validate_plan_digest_recipe(const bioseq_cache_plan_digest_recipe* recipe,
                             std::uint32_t recipe_count,
@@ -685,7 +685,7 @@ struct coverage_branch_choice {
 /**
  * Drops rows that fail the requested predicate. Each remaining row
  * belongs to the first valid cached source whose predicate is true,
- * or to fresh computation if none matches. SQL unknown values fail
+ * or to fresh  computation if none matches. SQL unknown values fail
  * the predicate check.
  */
 [[nodiscard]] constexpr coverage_branch_choice
@@ -854,7 +854,7 @@ using candidate_release_no_error = void (*)(void* opaque,
                                             const cache_entry_id& entry_id,
                                             candidate_reference_kind reference_kind) noexcept;
 
-/** Tracks a source reference for explicit cleanup when PostgreSQL errors skip C++ destructors. */
+/** Tracks a source reference for explicit  cleanup when PostgreSQL errors skip C++ destructors. */
 struct planner_candidate_cleanup_record {
     planner_candidate_cleanup_record* next = nullptr;
     cache_entry_id entry_id{};
@@ -880,7 +880,7 @@ struct planner_candidate_cleanup_record {
     return true;
 }
 
-/** Clears the active record before releasing its reference, so repeated or nested cleanup calls do nothing. */
+/** Clears the active record before releasing its reference, so repeated or nested cleanup calls do nothing */
 inline void release_candidate_reference_noerror(planner_candidate_cleanup_record& record) noexcept {
     if (!record.active) {
         return;
@@ -904,7 +904,7 @@ enum class reuse_preflight_state : std::uint8_t {
     frozen = 2,
 };
 
-/** Stages source-validity decisions and exposes them together when preflight finishes. */
+/** Stages source-validity decisions and exposes them together woen preflight finishes. */
 struct reuse_gate_freeze {
     std::array<std::uint8_t, k_maximum_sources_per_coverage_node> staged{};
     std::array<std::uint8_t, k_maximum_sources_per_coverage_node> published{};

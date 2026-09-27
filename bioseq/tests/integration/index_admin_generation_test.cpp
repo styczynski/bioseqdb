@@ -296,8 +296,8 @@ TEST_CASE("generation clear savepoint restores relation head and exact age row",
         "WHERE user_relid='{}'::regclass "
         "ORDER BY main_relfilenode, column_attno, index_name;",
         table));
-    // Save the age rows for this fragment index, the sequence index, and a neighboring
-    // column. Rolling back the clear must restore all three exactly.
+    // Save the age rows for this fragment index, the sequence  index, and a neighboring
+    // column. Rolling back the clear must restore all three exactly
     REQUIRE(age_before.size() == 3);
 
     const auto cleared = query_one(ctx, fmt::format(
@@ -846,7 +846,7 @@ TEST_CASE("sequence-minimizer coordinator publishes PostgreSQL spill generations
 
         REQUIRE(replay_scans == replay_reroutes + 3);
         REQUIRE(std::stoll(observed[54].value()) == replay_scans);
-        // Planning, control output, and position output each read the spill once.
+        // Planning, control output, and position output sach  read the spill once.
         // Check that all three reads finish using the same stored data.
         REQUIRE(observed[56].value() == "3");
         REQUIRE(std::stoll(observed[57].value()) == replay_reroutes);

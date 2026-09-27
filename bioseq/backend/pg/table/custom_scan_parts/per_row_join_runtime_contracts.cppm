@@ -27,7 +27,7 @@ import :custom_scan_runtime_match_contracts;
 
 export {
     /**
-     * @brief Holds buffered rows and alignment results for one per-row join execution.
+     * @brief Holds buffered rows and alignment results for one per-row join  execution.
      *
      * The query-memory callback destroys this C++ state if a PostgreSQL error
      * skips the normal executor shutdown.

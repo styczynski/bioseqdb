@@ -3,7 +3,7 @@
  * @brief Count allocations under the current memory category.
  *
  * An arena_scope selects the category in the active thread profiler.
- * The configuration can disable this tracking at compile time.
+ * The configuration  can disable this tracking at compile time.
  */
 module;
 
@@ -21,7 +21,7 @@ template<profiling_configuration p_configuration_type>
 struct [[nodiscard]] arena_scope {
     arena_kind previous_arena = arena_kind::none;
 
-    /** @brief Select a category and remember the previous one. */
+    /** @brief Select a ctegory and remember the previous one. */
     [[gnu::always_inline]]
     explicit arena_scope(arena_kind kind) noexcept {
         if constexpr (p_configuration_type::enable_arena_tracking) {
@@ -78,7 +78,7 @@ struct profile_tracker {
         }
     }
 
-    /** @brief Subtract freed bytes from the active category, stopping at zero. */
+    /** @brief Subtract freed bytes from the active  category, stopping at zero. */
     [[gnu::always_inline]]
     void on_node_deallocation(void*, std::size_t bytes, std::size_t) noexcept {
         if constexpr (!p_configuration_type::enable_arena_tracking) return;

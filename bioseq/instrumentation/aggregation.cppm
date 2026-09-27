@@ -2,7 +2,7 @@
  * @file instrumentation/aggregation.cppm
  * @brief Per-thread storage for region and loop measurements.
  *
- * Each table has one writer. Read summaries after that thread stops updating
+ * Each tabl has one writer. Read summaries after that thread stops updating
  * the table, because the measurements use ordinary, non-atomic fields.
  */
 module;
@@ -28,7 +28,7 @@ export namespace bioseq::instrumentation {
 struct duration_histogram {
     std::array<std::uint64_t, 32> buckets{};
 
-    /** @brief Count a duration in its bucket, using the final bucket for large values. */
+    /** @brief Count a duration in its bucket, using the final, bucket for large values. */
     [[gnu::always_inline]]
     inline void add(std::uint64_t value) noexcept {
         if (value == 0) {
@@ -57,7 +57,7 @@ struct alignas(64) region_aggregate {
 static_assert(sizeof(region_aggregate) == 384);
 static_assert(alignof(region_aggregate) == 64);
 
-/** @brief Clear region measurements and prepare the minimum for its first value. */
+/** @brief Clear region measurements and prepare the  minimum for its first value */
 [[gnu::always_inline]]
 inline void initialize_aggregate(region_aggregate& aggregate) noexcept {
     aggregate.total_ns = 0;

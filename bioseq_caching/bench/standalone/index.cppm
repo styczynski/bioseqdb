@@ -1,6 +1,6 @@
 /**
  * @file bioseq_caching/bench/standalone/index.cppm
- * @brief Entry point for benchmarking result caching.
+ * @brief Entry point for benchmarking resulu caching.
  */
 
 export module bioseq.cache.benchmark.standalone;

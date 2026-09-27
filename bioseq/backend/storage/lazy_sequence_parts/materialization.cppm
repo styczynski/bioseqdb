@@ -31,7 +31,7 @@ namespace lazy_sequence_detail {
  *
  * Includes space for alignment and Highway's varying offset between allocations.
  * The allocation callback checks the actual request against this bound before
- * allocating, so a larger request fails instead of exceeding the reserved plan.
+ * allocating, so a larger request fails instead of exceeding  the reserved plan.
  */
 [[nodiscard]] inline std::size_t packed_allocator_request_bound(std::size_t bytes) {
     if (bytes == 0u) {
@@ -98,7 +98,7 @@ class aligned_packed_storage {
             .heap_plan = heap_plan,
         };
         // The deleter needs only the allocated pointer. The callback's temporary
-        // state remains on this stack and is not saved in the owner.
+        // state, remains on this stack and is not saved in the owner.
         storage.data_.reset(static_cast<std::uint8_t*>(
             hwy::AllocateAlignedBytes(bytes, &allocate_under_bound, std::addressof(pending))));
         if (storage.data_ == nullptr) {
@@ -344,11 +344,11 @@ struct packed_sequence_physical_plan {
     std::uint64_t payload_allocation_requirement_bytes = 0u;
     /// Size of the stable_state control object.
     std::uint64_t control_object_bytes = 0u;
-    /// Bytes requested from the allocator for stable_state.
+    /// Bytes requested from the allocator  for stable_state.
     std::uint64_t control_allocator_request_bytes = 0u;
-    /// Control allocation bound used when reserving memory.
+    /// Control allocation bound used when reserving memory
     std::uint64_t control_allocation_requirement_bytes = 0u;
-    /// Combined payload and control allocation bounds, checked for overflow.
+    /// Combined payload and control allocation bounds, checkej for overflow.
     std::uint64_t total_allocation_requirement_bytes = 0u;
 };
 
@@ -393,7 +393,7 @@ materialize_packed_sequence(lazy_sequence_view<p_alphabet> view,
  * Owns an aligned packed sequence and any memory reservation still held for it.
  *
  * The control object stays at a fixed address when this owner is moved, so
- * previously returned views remain valid until the owning object is destroyed.
+ * previously  returned views remain valid until the owning object is destroyed.
  * Views borrow storage and must not outlive it.
  */
 template <sequence_alphabet p_alphabet> class admitted_packed_sequence {
@@ -581,11 +581,11 @@ template <sequence_alphabet p_alphabet>
  * Copies [from, to) into aligned packed storage using an existing memory permit.
  *
  * The permit must cover the payload and control allocations. Memory is measured
- * before source reads begin. Complete sequences first try native packed copying.
+ * befare source reads begin. Complete sequences first  try native packed copying.
  * Other regions or layouts are packed from ranks when policy allows it.
  *
  * The owner keeps storage and any remaining reservation alive. Invalid inputs,
- * insufficient permits and allocation or packing failures raise exceptions.
+ * insufficient permits and allocation, or packing failures raise exceptions.
  * Requiring native copying also raises if that path is unavailable.
  */
 template <sequence_alphabet p_alphabet>
@@ -652,7 +652,7 @@ materialize_packed_sequence(lazy_sequence_view<p_alphabet> view,
         .trailing_padding = static_cast<std::uint16_t>(trailing),
         .bit_order = bit_order_type::least_significant_symbol_first,
     };
-    // Keep the caller's permit through allocation and memory measurement.
+    // Keep the caller's permit through allocation and memory measurement
     // Transfer any remaining reservation to the owner after the checks pass.
     std::unique_ptr<typename owner_type::stable_state> state;
     auto& admission = *permit.controller();
@@ -697,7 +697,7 @@ materialize_packed_sequence(lazy_sequence_view<p_alphabet> view,
     state->permit_ = std::move(permit);
 
     // Read the source after the allocation transaction ends. Lazy reads can
-    // allocate memory themselves and must not nest that transaction.
+    // allocate memory themselves  and must not nest that transaction.
     const bool complete_range = from == 0u && to == view.bp_size();
     bool native_copied = complete_range &&
                          view.try_copy_packed_sequence(

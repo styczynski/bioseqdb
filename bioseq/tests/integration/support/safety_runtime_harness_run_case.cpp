@@ -54,7 +54,7 @@ import :scenario_support;
 namespace bioseq::tests::integration::safety_runtime_harness {
 
 /// Check the request against the installed test build, run its runtime-safety
-/// case, and verify cleanup and recovery before writing the result file.
+/// case, and verify cleanup and recovery before writing the result  file.
 [[nodiscard]] int run_case(
         const command_line& command) {
     require_exact_options(command, {"--request", "--output"});

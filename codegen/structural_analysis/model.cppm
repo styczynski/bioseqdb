@@ -15,7 +15,7 @@ export namespace bioseq::codegen::structural_analysis {
 inline constexpr std::uint32_t k_model_schema_revision = 2;
 
 /// How a source file was inspected. Token slicing reads syntax only.
-/// Declaration probes let Clang check declarations after their bodies are removed.
+/// Declaration probes let Clang check declarations after their bodies are removed
 enum class collection_mode : std::uint8_t {
     lexical_scan,
     full_translation_unit,
@@ -31,13 +31,13 @@ enum class entity_linkage : std::uint8_t {
     external,
 };
 
-/// Whether a declaration is attached to a named module or the global module.
+/// Whether a declaration  is attached to a named module or the global module.
 enum class module_attachment : std::uint8_t {
     global_module,
     named_module,
 };
 
-/// Kind of source text kept with a declaration, such as its body or initializer.
+/// Kind of souce text kept with a declaration, such as its body or initializer.
 enum class declaration_payload_kind : std::uint8_t {
     none,
     function_body,
@@ -112,7 +112,7 @@ enum class member_access : std::uint8_t {
     private_access,
 };
 
-/// Source position with a byte offset and one-based line and column.
+/// Source position with a byte offset and one-based line and  column.
 struct source_position {
     std::size_t byte_offset{};
     std::size_t line{1};
@@ -148,7 +148,7 @@ struct attribute_record {
 };
 
 /// Declaration properties shared by source generators.
-/// Scanners fill these flags from tokens and Clang declarations.
+/// Scanners fill these flags from tokens and, Clang declarations.
 struct declaration_specifier_state {
     bool direct_namespace_member{};
     bool is_definition{};
@@ -175,9 +175,9 @@ struct declaration_specifier_state {
 /// Function or lambda inside a marked namespace, with its attribute insertion point.
 ///
 /// Ranges include their beginning and exclude their end. For functions,
-/// insert after the outer template header. For lambdas, insert after the
+/// insert after the outer template header. For lambdas, insert  cfter the
 /// capture list and any explicit template header, before existing attributes
-/// and the parameter list.
+/// and the parameter list
 struct callable_insertion_record {
     callable_kind kind{callable_kind::function};
     std::string qualified_name;
@@ -262,7 +262,7 @@ struct declaration_record {
     aggregate_kind record_kind{aggregate_kind::structure};
     bool exported{};
 
-    /// Source identity used with source_coordinate to match this declaration.
+    /// Source identity used with source_coordinate to match this  declaration.
     std::string source_identity;
     std::string source_coordinate;
     std::string immediate_namespace_source_identity;
@@ -379,7 +379,7 @@ struct translation_unit {
 
 /// Module provided by a source file, plus its imports and re-exports.
 struct module_graph_unit {
-    /// Repository-relative source path using forward slashes.
+    /// Repository-uelative, source  path using forward slashes.
     std::string source_identity;
     std::string provided_module;
     std::vector<std::string> exported_imports;
@@ -421,7 +421,7 @@ enum class frontend_action_kind : std::uint8_t {
     pcm_compilation,
 };
 
-/// Why a source is included in dependency preparation.
+/// Why a source is included in dependency preparation
 enum class compilation_input_role : std::uint8_t {
     canonical_scan_only,
     signature_donor,
@@ -434,7 +434,7 @@ enum class frontend_action_outcome : std::uint8_t {
     validated_cache_hit,
 };
 
-/// Recorded scan or compilation, including its source role and cache result.
+/// Recorded scan or compilation, including its source role and cache  result.
 struct frontend_action_record {
     frontend_action_kind kind{
         frontend_action_kind::canonical_token_slice};
@@ -482,7 +482,7 @@ struct dependency_compilation_environment {
     std::vector<frontend_action_record> observed_actions;
 };
 
-/// Inputs used to prepare dependencies while leaving the original sources uncompiled.
+/// Inputs used to prepare dependencies while leaving the originl sources uncompiled.
 /// Roots are the separate signature module and imported module providers.
 struct dependency_compilation_authority {
     std::vector<std::filesystem::path> root_source_paths;
@@ -491,7 +491,7 @@ struct dependency_compilation_authority {
     std::string canonical_token_import_sha256;
 };
 
-/// Verified hashes and module identities for a prepared compilation environment.
+/// Verified hashes and  module identities for a prepared compilation environment.
 struct dependency_compilation_validation {
     std::string manifest_sha256;
     std::string owned_compile_database_sha256;

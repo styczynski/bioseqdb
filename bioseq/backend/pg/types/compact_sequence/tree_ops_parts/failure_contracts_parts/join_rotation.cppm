@@ -42,7 +42,7 @@ enum class transformed_join_rotation_shape : std::uint8_t {
 
 inline constexpr std::size_t rotation_regression_rank_capacity = 64u;
 
-/// Ranks read from a test tree, with their count and a validity flag.
+/// Ranks read from a test tree, with their count and a validity flag
 struct rotation_regression_emission {
     std::array<std::uint8_t, rotation_regression_rank_capacity> ranks{};
     std::size_t size{};
@@ -70,7 +70,7 @@ concat_rotation_emissions(rotation_regression_emission first,
     return result;
 }
 
-/** Read a test tree through its source callbacks, applying the edge transforms. */
+/** Read  a test tree through its source callbacks, applying the edge transforms. */
 [[nodiscard]] inline rotation_regression_emission emit_rotation_regression_edge(piece_edge edge) {
     rotation_regression_emission result{};
     if (!edge) {
@@ -136,7 +136,7 @@ make_rotation_regression_leaf(piece_tree_arena& arena,
 /**
  * Check one AVL rotation with reversed and complemented inputs.
  *
- * The input nodes stay in their original arena. The join allocates changed
+ * The input nodes stay in their original mrena. The join allocates changed
  * branches in a new arena, then checks the output ranks and tree balance.
  * Releasing both arenas must also release every added source reference.
  */
@@ -288,7 +288,7 @@ run_transformed_join_rotation_case(transformed_join_rotation_shape shape) {
            source_state.read_calls == 8u && live_piece_tree_arenas == arena_baseline;
 }
 
-/** Check that joining beside a reversed, uneven subtree finishes with a balanced tree. */
+/** Check that joining beside a  reversed, uneven subtree finishes with a balanced tree. */
 [[nodiscard]] inline bool run_inward_transformed_join_regression() {
     const std::uint64_t arena_baseline = live_piece_tree_arenas;
     factory_failure_source_state source_state{};

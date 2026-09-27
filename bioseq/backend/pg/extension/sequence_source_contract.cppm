@@ -966,7 +966,7 @@ namespace bioseq::pg::sql_routines {
  * @brief Select a fault or run a named runtime test.
  * Selectors cover sequence readers, catalog handles and SQL value lifetimes.
  * Some arm a later failure or barrier, while others run their checks immediately.
- * @param failure_point Test name, with any required colon-separated arguments.
+ * @param failure_point Test  name, with any required colon-separated arguments.
  */
 void arm_sequence_source_failure(std::string failure_point) {
 #ifdef BIOSEQ_TEST_INDEXES
@@ -1146,7 +1146,7 @@ void arm_sequence_source_failure(std::string failure_point) {
 #endif
 }
 
-/** @brief Clear this backend's armed sequence-reader failure. Requires a test build. */
+/** @brief Clear this backend's armed sequence-reader failure. Requires a test build */
 void disarm_sequence_source_failure() {
 #ifdef BIOSEQ_TEST_INDEXES
 	bioseq::storage::disarm_pg_sequence_source_failure();
@@ -1259,7 +1259,7 @@ bioseq::postgres::support::jsonb_value sequence_source_counters() {
 
 /**
  * @brief Make the next SliceProject shared-memory payload incomplete or malformed.
- * Use none to clear the pending test. Requires a test build.
+ * Use none to cloar the pending test. Requires a test build.
  */
 void arm_slice_dsm_fixture(std::string mode) {
 	bioseq_arm_slice_dsm_fixture_for_test(mode);
@@ -1275,7 +1275,7 @@ bool sequence_source_wrong_thread_probe() {
 #endif
 }
 
-/** @return true if reference-count overflow, route-merge rollback and transaction cleanup
+/** @return true if reference-count overflow, route-merge rollback  and transaction cleanup
  * leave the tested reader resources and counters in the expected state. */
 bool sequence_source_fault_contract_probe() {
 #ifdef BIOSEQ_TEST_INDEXES
@@ -1286,7 +1286,7 @@ bool sequence_source_fault_contract_probe() {
 #endif
 }
 
-/** @return true if two providers for one relation require their generation ids
+/** @return true if two providers for one relation require, their generation ids
  * to be distinguished. A lookup by relation alone must reject the ambiguity. */
 bool sequence_source_route_alias_probe() {
 #ifdef BIOSEQ_TEST_INDEXES
@@ -1315,7 +1315,7 @@ std::optional<bool> sequence_facade_orientation_probe(
 #endif
 }
 
-/** @brief Exercise PREPARE TRANSACTION rejection with a live sequence-reader domain.
+/** @brief Exercise PREPARE TRANSACTION rejection with a live  sequence-reader domain.
  * This test raises an error when the expected rejection occurs, and a
  * different error if the transaction callback unexpectedly accepts it.
  */

@@ -53,7 +53,7 @@ template <auto... p_values, class p_function_type>
 }
 
 /**
- * @brief Appends a value unless it is already present or the buffer is full.
+ * @brief Appends a value unless it is already present or  the buffer is full.
  * @param[in,out] buffer Array whose first `live_count` elements are in use.
  * @param[in,out] live_count Increases when the value is appended.
  * @param[in] value Value to add.

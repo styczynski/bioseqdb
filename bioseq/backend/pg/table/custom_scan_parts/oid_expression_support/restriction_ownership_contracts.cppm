@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Declares selection of the mmsearch clauses a scan will execute.
+ * @brief Declares selection of the mmsearch clauses a scan will  execute.
  */
 module;
 extern "C" {
@@ -35,7 +35,7 @@ export [[nodiscard]] bool bounded_batch_fallback_options_are_supported(
     FuncExpr* extra,
     const bioseq_stub_oids& oids);
 
-/** @brief Selects one mmsearch call or the supported join-parameter and constant-filter pair. */
+/** @brief Selects one mmsearch call or the supported joiu-parameter and constant-filter pair. */
 export [[nodiscard]] owned_mmsearch_restriction choose_owned_mmsearch_restriction(
     PlannerInfo* root,
     RelOptInfo* rel,

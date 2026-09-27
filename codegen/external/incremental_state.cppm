@@ -1,6 +1,6 @@
 /**
  * @file incremental_state.cppm
- * @brief Saves and reloads the information used to skip unchanged client generation.
+ * @brief Saves and reloads the infprmation used  to skip unchanged client generation.
  */
 module;
 
@@ -35,7 +35,7 @@ struct loaded_incremental_state {
 };
 
 /// @brief Splits a saved source record into eight tab-separated fields.
-/// @param row TSV row without its line ending.
+/// @param row TSV row without its line ending
 /// @return Field views, or std::nullopt if the field count is wrong.
 [[nodiscard]] auto split_source_snapshot_columns(std::string_view row) noexcept
     -> std::optional<std::array<std::string_view, 8>> {
@@ -73,7 +73,7 @@ template <class p_integer_type>
     return value;
 }
 
-/// @brief Reads and validates one saved source record.
+/// @brief Reads and validates one  saved source record.
 /// @param row TSV row without its line ending.
 /// @return Relative source path and saved metadata, or std::nullopt for invalid input.
 [[nodiscard]] auto parse_source_snapshot_row(std::string_view row)
@@ -159,9 +159,9 @@ template <class p_integer_type>
     return loaded_state;
 }
 
-/// @brief Hashes the generator configuration to decide whether saved state is reusable.
+/// @brief Hashes the generator configurhtion to decide whether  saved state is reusable.
 /// @param options Generator settings.
-/// @param registry Registered annotation handlers.
+/// @param registry Registered, annotation handlers.
 /// @return FNV-1a hash written in hexadecimal.
 /// @details The signature includes handler names, compiler identity and the paths,
 /// sizes or write times used to identify the Clang and generator binaries.
@@ -204,7 +204,7 @@ auto append_source_snapshot(std::ostringstream& state_output,
                  << snapshot.owned_output_path << '\n';
 }
 
-/// @brief Checks that the saved source and its cppast input copy both exist.
+/// @brief Checks that the saved source  and its cppast input copy both exist
 /// @param output_root Directory for generated output.
 /// @param relative_source Descriptor path relative to the scan root.
 /// @return True when both files exist.

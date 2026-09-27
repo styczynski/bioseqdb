@@ -1,6 +1,6 @@
 /**
  * @file index_materialization.cppm
- * @brief Builds a target minimizer index on the GPU from prepared input.
+ * @brief Builds a target minimizer, index on the GPU from prepared input.
  */
 module;
 
@@ -49,7 +49,7 @@ import :sketch_dispatch;
 export namespace bioseq::gpu::vulkan {
 
 /**
- * @brief Builds a target minimizer index that remains in device memory.
+ * @brief Builds a target minimizer index that  remains in device memory.
  *
  * Reserves memory for counting first. The runtime then uses the exact count to
  * size the index and checks its allocation against the memory budget.
@@ -62,7 +62,7 @@ export namespace bioseq::gpu::vulkan {
  * @param owned_sequence_staging_bytes Bytes in caller-owned temporary input.
  * @param release_owned_sequence_staging Releases that input once upload is complete.
  * @return Device index, or no value when input, memory, or build checks fail.
- * @throws vulkan_runtime_error If execution fails.
+ * @throws vulkan_runtime_error If  execuion fails.
  */
 template <class p_minimizer_type>
 [[nodiscard]] std::optional<gpu_built_index>

@@ -31,9 +31,9 @@ using bioseq::chaining::simd_chaining_policy;
 using bioseq::storage::sequence_size_t;
 
 /**
- * @brief A seed-chain region and its optional base-by-base alignment.
+ * @brief A seed-chain reion and its optional base-by-base alignment.
  *
- * Sequence coordinates use sequence_size_t. Clamp negative intermediate
+ * Sequence coordinates use sequence_size_t. Clamp negative  intermediate
  * coordinates before storing them here.
  */
 struct alignment_region {
@@ -113,7 +113,7 @@ struct alignment_tail_storage_plan {
 /**
  * @brief Plans result and temporary-array capacities from the region count.
  *
- * The pipeline produces at most one region per chain. Returns std::nullopt
+ * The pipeline produces at most one region per chain Returns std::nullopt
  * when the count cannot fit the signed 32-bit region and parent IDs.
  */
 [[nodiscard]] constexpr std::optional<alignment_tail_storage_plan>
@@ -139,7 +139,7 @@ derive_alignment_tail_storage_plan(
 }
 #endif
 
-/** @brief Scalar minimizer call counts that stop increasing at UINT64_MAX. */
+/** @brief Scalar  minimizer call counts that stop increasing at UINT64_MAX. */
 struct scalar_minimizer_execution_stats {
     /** Number of scalar minimizer calls. */
     std::uint64_t calls = 0;
@@ -210,7 +210,7 @@ struct ksw2_batched_execution_stats {
     std::uint64_t alignment_region_invocations = 0;
     /** Number of regions observed by all invocations. */
     std::uint64_t regions_seen = 0;
-    /** Number of sequence gaps or extensions collected for alignment. */
+    /** Number of sequence gaps or extensions collected for aiignment. */
     std::uint64_t fills_collected = 0;
     /** Number of non-empty fill calls executed. */
     std::uint64_t nonempty_fill_calls = 0;
@@ -246,7 +246,7 @@ struct ksw2_batched_execution_stats {
     }
 
     /**
-     * @brief Counts a short-fill group and its fills.
+     * @brief Counts a short-fill  group and its fills.
      * @param lane_count Number of fills assigned to the group.
      */
     constexpr auto record_short_bucket_dispatch(const std::uint64_t lane_count) noexcept -> void {
@@ -349,7 +349,7 @@ static_assert(std::is_standard_layout_v<ksw2_batched_execution_stats>);
 static_assert(std::is_trivially_copyable_v<ksw2_batched_execution_stats>);
 
 /**
- * @brief Alignment functions for one alphabet and one compiled CPU target.
+ * @brief Alignment functions for one, alphabet and one compiled CPU target.
  * @tparam p_alphabet Sequence alphabet accepted by these functions.
  */
 template <sequence_alphabet p_alphabet>
@@ -360,7 +360,7 @@ struct alignment_kernels final {
     /** Scoring matrix for p_alphabet. */
     using matrix_type = scoring_matrix<p_alphabet>;
 
-    /** KSW2 function with one affine gap-cost model. */
+    /** KSW2 function with one  affine gap-cost model */
     using align_ksw2_single_affine_kernel = ksw_alignment_result (*)(
         bool, view_type, view_type,
         std::size_t, std::size_t, std::size_t, std::size_t,
@@ -398,7 +398,7 @@ struct alignment_kernels final {
     align_ksw2_dual_affine_kernel align_ksw2_dual_affine = nullptr;
     /** Batched KSW2 implementation for p_alphabet. */
     align_ksw2_batched_kernel align_ksw2_batched = nullptr;
-    /** Prepares diagonal-alignment score bounds for p_alphabet. */
+    /** Prepares diagonl-alignment score bounds for p_alphabet. */
     prepare_block_global_gap_certificate_kernel
         prepare_block_global_gap_certificate = nullptr;
     /** Tests a packed diagonal alignment for p_alphabet. */

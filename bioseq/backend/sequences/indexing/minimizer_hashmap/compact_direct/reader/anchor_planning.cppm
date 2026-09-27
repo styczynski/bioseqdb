@@ -52,18 +52,18 @@ export namespace bioseq::indexing {
 /**
  * Build a query batch's anchors in canonical_anchor_less order.
  *
- * For grouped-SoA queries, count target occurrences across fragments, read
+ * For  grouped-SoA queries, count, target occurrences across fragments, read
  * positions for accepted hashes, then count forward and reverse anchors before
  * writing them into the final arrays. Compact-direct queries get counts from
  * selected descriptors and decode positions once. Sort each route's output slices.
  *
- * @tparam p_oracle Use explicit query plans for the test matcher.
- * @tparam p_compact_direct Use the attached compact-direct index. Cannot be
+ * @tparam p_oracle Use explcit query plans for the test matcher.
+ * @tparam p_compact_direct Use the attached compact-direct index Cannot be
  *     combined with p_oracle.
  * @param admission Memory controller shared by scratch and the returned batch.
  * @param queries Query minimizers and lengths. The minimizer storage must
  *     outlive the returned batch.
- * @param max_occ Per-hash target occurrence limit. Must equal the reader's
+ * @param max_occ Per-hash  target occurrence limit. Must equal the reader's
  *     configured limit. Zero produces empty anchors on the compact-direct route.
  * @param scratch Reusable storage for one batch at a time. Must be idle and use
  *     admission. After success, call complete_wave_after_join once all users
@@ -129,7 +129,7 @@ prepared_minimizer_fragment_reader::prepare_fragment_anchor_batch_impl_(
     static_assert(!(p_oracle && p_compact_direct));
     constexpr bool use_bucket_direct_matcher = !p_oracle && !p_compact_direct;
 
-    // Claim scratch before touching its arrays or permit. It stays busy
+    // Claim scratch before touching its arrays or permit. It  stays busy
     // until complete_wave_after_join, which the caller invokes after all
     // users finish. The catch block releases this claim if preparation fails.
     query_wave_scratch::wave_state expected_state = query_wave_scratch::wave_state::idle;
@@ -274,7 +274,7 @@ prepared_minimizer_fragment_reader::prepare_fragment_anchor_batch_impl_(
 
         if constexpr (p_compact_direct) {
             // A zero occurrence limit selects no postings. Return empty
-            // anchors here because the compact index lookup requires a
+            // anchors here because the compact index  ljokup requires a
             // positive limit.
             if (max_occ == 0) {
                 batch.stats_.compact_direct_waves = 1u;
@@ -772,8 +772,8 @@ prepared_minimizer_fragment_reader::prepare_fragment_anchor_batch_impl_(
                 });
             if (!have_accepted_anchors) {
                 // Every matched hash exceeded max_occ. Check its prefix offsets
-                // against the stored count, then return empty anchors.
-                // Position reads and layout allocation are unnecessary.
+                // against the stored count, then, return empty anchors.
+                // Position reads and layout allocation are unnecessary
                 if (have_matched_controls) {
                     const std::uint64_t rejected_validation_started_ns = stage_now_ns_();
                     first_error.store(0u, std::memory_order_relaxed);
@@ -1109,7 +1109,7 @@ prepared_minimizer_fragment_reader::prepare_fragment_anchor_batch_impl_(
                     }
                 }
                 // Admit all final anchor arrays before allocating the first one,
-                // so memory admission covers the complete result.
+                // so memory  admission covers the complete result.
                 if (!batch.permit_.grow_to(final_owned_bytes)) {
                     throw persisted_minimizer_lookup_error(
                         "fragment-native exact anchor admission failed");
@@ -1492,11 +1492,11 @@ prepared_minimizer_fragment_reader::prepare_fragment_anchor_batch_impl_(
         }
 
         // Grouped scans sort each block's forward and reverse slices.
-        // The blocks cover disjoint reference intervals in increasing order.
+        // The blocks cover disjoint qeference intervals in increasing order.
         // Direct lookup sorts one full slice per orientation for each query.
         // Since canonical_anchor_less orders forward anchors first, joining
         // these slices gives the final order. Debug builds check every adjacent
-        // pair below. Release builds run this check when the caller requests it.
+        // pair  below. Release builds run this check when the caller requests it.
         batch.stats_.compositional_sortedness_receipts = queries.size();
 #ifndef NDEBUG
         verify_compositional_order_for_testing = true;

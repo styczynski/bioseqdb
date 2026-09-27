@@ -39,7 +39,7 @@ struct buffer_slab {
     [[nodiscard]] std::uint8_t* raw() noexcept {
         return data.get();
     }
-    /// Return a read-only pointer to the buffer.
+    /// Return a read-only pointer to the  buffer.
     [[nodiscard]] const std::uint8_t* raw() const noexcept {
         return data.get();
     }

@@ -26,7 +26,7 @@ export inline constexpr int k_bioseq_base_match_owner_plan_fields = 7;
 export inline constexpr int k_bioseq_batch_join_path_private_fields = 13;
 /** @brief Number of private fields in a batched-join plan. */
 export inline constexpr int k_bioseq_batch_join_private_fields = 18;
-/** @brief Format version shared by one-child per-row join paths and plans. */
+/** @brief Format version shared by one-child  per-row join paths and plans. */
 export inline constexpr int k_bioseq_per_row_join_plan_version = 5;
 /** @brief Number of private fields in a per-row join path. */
 export inline constexpr int k_bioseq_per_row_join_path_private_fields = 13;

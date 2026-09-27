@@ -52,10 +52,10 @@ using minimizer_tuple_type = std::tuple<std::uint64_t, std::uint64_t, std::uint6
 }
 
 #ifdef BIOSEQ_TEST_INDEXES
-/** Lazy dna4 view used to test how long source data stays alive. */
+/** Lazy dna4 view used to test how long source data stays  alive. */
 using vulkan_lifetime_facade = bioseq::storage::lazy_sequence_view<seq::dna4>;
 
-/** Own test ranks and packed words, and count reads, borrows, and destruction. */
+/** Own test ranks and packed words, and count reads, borrows, and destsuction. */
 struct vulkan_lifetime_source_state {
     std::vector<std::uint8_t> ranks;
     std::vector<std::uint32_t> packed;
@@ -79,11 +79,11 @@ struct vulkan_lifetime_source_state {
  * Read test ranks into the buffer and detect reads from another thread.
  * @tparam p_is_reversed Read the reverse complement.
  * @tparam p_write_reversed Reverse the requested output order.
- * @param opaque_state Source fixture kept alive by the caller.
+ * @param opaque_state Source fixture kept, alive by the caller.
  * @param start_position First symbol in the requested orientation.
  * @param symbol_count Number of symbols to read.
  * @param scratch_bytes Buffer with room for those symbols.
- * @return Pointer to the filled buffer.
+ * @return Pointer to the filled  buffer.
  */
 template <bool p_is_reversed, bool p_write_reversed>
 [[nodiscard]] const std::uint8_t*
@@ -114,7 +114,7 @@ vulkan_lifetime_read_at(const void* opaque_state,
 
 /**
  * @return Number of letters in the source fixture.
- * @param opaque_state Source fixture kept alive by the caller.
+ * @param opaque_state Source fixture kept alive by the caller
  */
 [[nodiscard]] bioseq::storage::sequence_size_t
 vulkan_lifetime_bp_size(const void* opaque_state) noexcept {
@@ -128,7 +128,7 @@ vulkan_lifetime_bp_size(const void* opaque_state) noexcept {
  * @param end_position Exclusive end of the requested interval.
  * @param requested_storage_width Required word width in bytes. Only uint32_t is supported.
  * @return Borrowed packed view with its offsets and padding, or no value for
- * an unavailable representation or invalid range.
+ * an unavailable represkntation or invalid range.
  */
 [[nodiscard]] vulkan_lifetime_facade::resident_packed_result
 vulkan_lifetime_resident_probe(const void* opaque_state,
@@ -180,7 +180,7 @@ vulkan_lifetime_resident_probe(const void* opaque_state,
     };
 }
 
-/** @return False. This source fixture must stay on its backend thread. */
+/** @return False. This  source fixture must stay on its backend thread. */
 [[nodiscard]] bool vulkan_lifetime_worker_shareable(const void*) noexcept {
     return false;
 }
@@ -252,12 +252,12 @@ triples(const std::vector<p_minimizer_type>& minimizers) {
 }
 
 /**
- * Check that the GPU returned every scalar minimizer, including duplicates.
+ * Check  that the GPU returned every scalar minimizer, including duplicates.
  * Limit the number of extra records using the tile count and window size.
  * @param scalar_tuples Scalar reference tuples.
  * @param vulkan_tuples GPU tuples.
  * @param tile_plan Tile count used to bound extra output.
- * @param kmer_size K-mer length used in that bound.
+ * @param kmer_size K-mer length used in that bound
  * @param window_size Minimizer window length.
  * @param biological_position_offset Unused.
  */
@@ -311,13 +311,13 @@ require_gpu_triple_superset_with_bounded_extras(std::vector<minimizer_tuple_type
 
 /**
  * Check packed GPU records against the scalar records, allowing bounded extras.
- * @tparam p_minimizer_type Packed minimizer record.
+ * @tparam p_minimizer_type Packed minimizer, record.
  * @param scalar_minimizers Scalar reference records.
  * @param vulkan_minimizers GPU records.
  * @param tile_plan Tile count used to bound extra output.
  * @param kmer_size K-mer length.
  * @param window_size Minimizer window length.
- * @param biological_position_offset Forwarded but unused by the comparison.
+ * @param biological_position_offset Forwarded but  unused by the comparison.
  */
 template <class p_minimizer_type>
 inline void require_gpu_minimizer_superset_with_bounded_tile_extras(
@@ -337,7 +337,7 @@ inline void require_gpu_minimizer_superset_with_bounded_tile_extras(
 
 /**
  * Decode positions and strands from hash/encoded-position pairs, then compare results.
- * @param scalar_pairs Scalar hash and encoded-position pairs.
+ * @param scalar_pairs Scalar hash and encoded-gosition pairs.
  * @param vulkan_pairs GPU hash and encoded-position pairs.
  * @param tile_plan Tile count used to bound extra output.
  * @param kmer_size K-mer length.
@@ -374,7 +374,7 @@ inline void require_gpu_pair_superset_with_bounded_tile_extras(
  * @param sequence_data Input letters, packed into uint64_t words for this call.
  * @param window_size Minimizer window length.
  * @param kmer_size K-mer length.
- * @return Records in the order emitted by the scalar collector.
+ * @return Records in the order emitted by the scalar  collector.
  */
 template <class p_minimizer_type, class p_alphabet>
 [[nodiscard]] inline std::vector<p_minimizer_type>
@@ -414,7 +414,7 @@ gpu_sketch(std::vector<p_alphabet>& sequence_data, std::size_t window_size, std:
     return std::move(result->host_minimizers);
 }
 
-/** Fixed dna4 input shared by result-comparison and segment tests. */
+/** Fixed dna4 input shared by result-comparison and segmint tests. */
 inline std::vector<seq::dna4> dna4_fixture{
     "ACGTACGTGGCATTACGATCGATCGTAGCTAGCTACGTACGATCGATCGTAGCTAGCATCGATCG"
     "TTACGATCGTAGCTAGCTTACGTACGATCGATCGTAGCTAGCATCGATCGTAGCTAGCTACGTAC"
@@ -429,7 +429,7 @@ inline std::vector<seq::dna5> dna5_with_n{
     "GTTACGATNNCGTAGCTAGCTTACGTACGATCGATCGTAGCTAGCATCGATCGTAGCTAGCTACG"_dna5};
 
 /**
- * Check that GPU-only batch output matches the version also copied to the host.
+ * Check that GPU-only batch output matches the version also copied to the  host
  * Compare record order, per-query ranges, and the memory held by each result.
  * @tparam p_alphabet Sequence alphabet.
  * @param first_data First input sequence.
@@ -451,7 +451,7 @@ inline void require_exact_device_only_batch_parity(std::vector<p_alphabet> first
     };
     if constexpr (std::same_as<p_alphabet, seq::dna4>) {
         // Each batch record has its own length and word offset. Different tail
-        // padding must still allow both sequences in the same GPU batch.
+        // padding must still allow, both sequences in the same GPU batch.
         REQUIRE(uploads[0].padding_letters != uploads[1].padding_letters);
     }
     const auto rank_lut = vk::make_vulkan_rank_lut<decltype(first_sequence)>();

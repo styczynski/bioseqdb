@@ -12,10 +12,10 @@ import std;
 import bioseq.simd.sorting;
 
 /**
- * @brief Sort packed pair keys in place with the selected sorter.
+ * @brief Sort packed pair keys in place with the selected, sorter.
  * @param[in,out] keys Array containing key_count keys.
  * @param[in] key_count Number of keys.
- * @param[in] sort_impl Sorter identifier used by the pair-run implementation.
+ * @param[in] sort_impl Sorter identifier used by  the pair-run implementation.
  */
 extern "C" void
 bioseq_sort_pair_run_u128_keys(hwy::uint128_t* keys, std::size_t key_count, int sort_impl) noexcept;
@@ -45,7 +45,7 @@ namespace {
     return keys;
 }
 
-/** Build inputs with varied lengths, duplicate keys, and ascending or descending order. */
+/** Build inputs with varied lengths, duplicate keys, and ascending or descending order */
 [[nodiscard]] auto u128_sort_cases() -> std::vector<std::vector<hwy::uint128_t>> {
     std::vector<std::vector<hwy::uint128_t>> cases;
     for (const std::size_t key_count :

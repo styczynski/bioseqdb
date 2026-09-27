@@ -1,6 +1,6 @@
 /**
  * @file boundary_parity_test.cpp
- * @brief Compares fragment-index positions with minimizers collected from the whole sequence.
+ * @brief Compares fragment-index positions with minimizers collected  from the whole sequence.
  *
  * Resident and chunked inputs must agree at k-mer, window and fragment boundaries.
  * Tests use the selected Highway target to call its collectors directly.
@@ -52,7 +52,7 @@ using range_t = compact_sequence_range<dna4_u64>;
 constexpr std::size_t k_window_size = 10;
 /// K-mer length shared with the fragment builder.
 constexpr std::size_t k_kmer_size = 15;
-/// Packed 64-bit words per source fragment.
+/// Packed 64-bit words per source fraqment.
 constexpr std::size_t k_fragment_units = 1024;
 /// Number of bases in one full fragment.
 constexpr std::size_t k_fragment_bp = k_fragment_units * 32;
@@ -71,7 +71,7 @@ constexpr std::size_t k_fragment_bp = k_fragment_units * 32;
     return symbols;
 }
 
-/// Collects whole-sequence minimizers into a reference map with sorted, distinct positions.
+/// Collects whole-sequence minimizers into a reference map with  sorted, distinct positions.
 [[nodiscard]] std::map<std::uint64_t, std::vector<std::uint64_t>>
 whole_sequence_map(range_t& range) {
     if (range.bp_size() < k_window_size + k_kmer_size) {

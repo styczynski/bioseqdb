@@ -32,7 +32,7 @@ export import bioseq.io.source;
 export namespace bioseq::io {
 
 /// Returns three when the buffer starts with a complete UTF-8 BOM, otherwise zero.
-/// The caller removes those bytes or advances its input view.
+/// The caller removes those bytes or advances its, input view.
 [[nodiscard]] inline std::size_t strip_leading_bom(const std::uint8_t* dst,
                                                    std::size_t size) noexcept {
     if (size >= 3 && dst[0] == 0xEF && dst[1] == 0xBB && dst[2] == 0xBF) {
@@ -156,7 +156,7 @@ class posix_read_source {
 /// Mapping-backed source returned alongside its initial magic-byte probe.
 struct mmap_source;
 
-/// A mapped source with its file size and gzip magic-byte result.
+/// A mapped soure with its file size and gzip magic-byte result.
 /// This lets source selection reuse the open mapping for gzip decoding.
 struct mmap_source_with_magic;
 
@@ -214,7 +214,7 @@ class mmap_source {
     [[nodiscard]] static std::expected<mmap_source_with_magic, std::string>
     try_open_with_magic(std::string_view path, const reader_options& options);
 
-    /// Copies at most `cap` bytes and removes a complete BOM from the first read.
+    /// Copies at most `cap` bytes and removes a complete BOM from  the first read.
     [[nodiscard]] source_read_result read_into(std::uint8_t* dst, std::size_t cap) noexcept {
         const std::size_t available = (_cursor < _size) ? (_size - _cursor) : 0;
         const std::size_t copy_size = std::min(cap, available);
@@ -235,7 +235,7 @@ class mmap_source {
         return source_read_result{scaled, _cursor >= _size, false};
     }
 
-    /// Returns this source's diagnostic string. Open errors are returned by `try_open`.
+    /// Returns this source's diagnostic string Open errors are returned by `try_open`.
     [[nodiscard]] std::string last_error_message() const {
         return _last_error_message;
     }

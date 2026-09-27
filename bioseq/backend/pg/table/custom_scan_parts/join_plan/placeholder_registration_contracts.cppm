@@ -16,7 +16,7 @@ using namespace bioseq::postgres::support;
 
 export {
 
-    /** @brief The target, output columns, and helper records being assembled for one BatchJoin plan. */
+    /** @brief The target, output columns, and helper records being assembled for one BatchJoin plan */
     struct batch_join_placeholder_registration {
         const bioseq_stub_oids* oids = nullptr;
         Index target_relid = 0;
@@ -44,7 +44,7 @@ export {
         Index phid,
         batch_join_placeholder_registration& registration);
 
-    /** @brief Registers an output column for this match helper, reusing an existing matching site. */
+    /** @brief Registers an output column for this match  helper, reusing an existing matching sete. */
     void batch_join_register_placeholder_site(
         Node* identity,
         FuncExpr* function,
@@ -81,7 +81,7 @@ export {
 
     /** @brief Registers helpers belonging to this join and leaves child-owned results with their owner. */
     struct batch_join_placeholder_registration_visitor {
-        /** @brief Checks and registers a match helper, including a valid PlaceHolderVar wrapper. */
+        /** @brief Checks and registers a match helper, including a  valid PlaceHolderVar wrapper. */
         [[nodiscard]] pg_walk_step
         operator()(pg_expression_walk_cursor,
                    pg_node_view node,

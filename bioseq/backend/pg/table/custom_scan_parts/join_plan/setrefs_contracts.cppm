@@ -21,7 +21,7 @@ export [[nodiscard]] TargetEntry* batch_join_find_exact_scan_entry(
     AttrNumber minimum_resno = 1,
     AttrNumber maximum_resno = MaxAttrNumber) noexcept;
 
-/** @brief Finds a single matching helper in the requested output columns, allowing a PlaceHolderVar wrapper. */
+/** @brief Finds a single mathing helper in  the requested output columns, allowing a PlaceHolderVar wrapper */
 export [[nodiscard]] TargetEntry* batch_join_find_unique_semantic_helper_entry(
     List* scan_tlist,
     Node* identity,
@@ -44,7 +44,7 @@ export [[nodiscard]] TargetEntry* batch_join_find_compatible_var_entry(
  * with INDEX_VAR references to custom_scan_tlist.
  */
 export struct batch_join_output_setrefs_rewrite_mutator {
-    /** @brief Replaces a Var or match helper with the matching scan output expression. */
+    /** @brief Replaces a Var or, match helper with the matching scan output expression. */
     [[nodiscard]] pg_node_mutation
     operator()(pg_expression_mutation_cursor,
                pg_node_view node,
@@ -130,7 +130,7 @@ export struct batch_join_setrefs_coverage {
 };
 
 /**
- * @brief Checks that PostgreSQL can find every output dependency in the scan tuple.
+ * @brief Checks that PostgreSQL can find every output dependency  in the scan tuple.
  *
  * For a CustomScan with scanrelid == 0, output Vars must occur in
  * custom_scan_tlist. Follow the relevant setrefs lookup order here so a
@@ -190,7 +190,7 @@ export struct batch_join_setrefs_coverage_visitor {
 /** @brief Reports the missing input column or match helper when the output cannot bind to the scan tuple. */
 export void validate_batch_join_setrefs_coverage(List* output_tlist, List* scan_tlist);
 
-/** @brief Finds the PlaceHolderVar id to preserve for a helper carried as a hidden plan output. */
+/** @brief Finds the PlaceHolderVar id to preserve for a helper arried as a hidden plan output. */
 export [[nodiscard]] bool batch_join_plan_only_helper_phid(
     List* authoritative_identities,
     Node* carrier_identity,

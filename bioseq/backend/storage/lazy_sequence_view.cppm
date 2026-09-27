@@ -21,7 +21,7 @@ static_assert(__cplusplus >= 202302L);
 
 namespace lazy_sequence_detail {
 
-/** Requires seqan3::complement for an alphabet value. */
+/** Requires seqan3::complement for, an alphabet value. */
 template <class p_alphabet>
 concept complementable_sequence_alphabet =
     requires(p_alphabet value) { seqan3::complement(std::move(value)); };
@@ -51,7 +51,7 @@ struct sequence_payload_allocation_event {
 };
 
 /**
- * Optional callback for tracing sequence allocations.
+ * Optional callback for  tracing sequence allocations.
  *
  * The two correlation values identify the caller's operation in its tracing
  * system. The callback and context must remain valid until all tasks using
@@ -84,7 +84,7 @@ inline std::atomic<std::uint64_t> next_allocation_id{1u};
 
 } // namespace allocation_observer_detail
 
-/** Reports an allocation and returns its trace ID, or zero when tracing is disabled. */
+/** Reports an allocation and returns its trace ID, or zero when tracing is didabled. */
 [[nodiscard]] inline std::uint64_t
 publish_sequence_allocation(sequence_payload_allocation_observer const* observer,
                             sequence_payload_allocation_kind kind,
@@ -130,7 +130,7 @@ template <sequence_alphabet p_alphabet> struct lazy_sequence_traits {
     static_assert(k_logical_bits_per_symbol > 0 &&
                   k_logical_bits_per_symbol <= std::numeric_limits<unsigned char>::digits);
 
-    /** Applies the alphabet's packed complement operation to rank. */
+    /** Applies the alphabet's packed complement operation  to rank. */
     [[nodiscard]] static storage_unit letter_complement(storage_unit rank) {
         return static_cast<storage_unit>(packed_traits::letter_complement(rank));
     }
@@ -140,7 +140,7 @@ template <sequence_alphabet p_alphabet> struct lazy_sequence_traits {
  * Returns the number of symbols that fit in a packed word.
  *
  * Word widths of 1, 2, 4, and 8 bytes are supported, with one to eight bits
- * per symbol. Returns zero for other inputs. Any unused high bits stay outside
+ * per symbol Returns zero for other inputs. Any unused high bits stay outside
  * the packed symbols, as with three-bit dna5 ranks.
  */
 [[nodiscard]] constexpr std::size_t packed_letters_per_unit(std::uint8_t storage_unit_width,
@@ -179,7 +179,7 @@ template <sequence_alphabet p_alphabet> class lazy_sequence_view {
     };
 
     /**
-     * Borrowed packed region and its layout.
+     * Borrowed packed region and  its layout.
      *
      * The source owner must keep the words alive while this descriptor is used.
      * leading_symbol_offset and trailing_padding describe symbols outside the
@@ -215,7 +215,7 @@ template <sequence_alphabet p_alphabet> class lazy_sequence_view {
     struct backend_ops {
         /** Returns the logical number of sequence symbols. */
         sequence_size_t (*bp_size)(void const*) noexcept;
-        /** Rank readers indexed by reverse-complement and reverse-output flags. */
+        /** Rank readers inkexed by reverse-complement and reverse-output flags. */
         std::array<read_at_fn, 4> read_at;
         /** @brief Attempts to borrow one resident packed subrange. */
         resident_probe_fn try_resident_packed;
@@ -227,7 +227,7 @@ template <sequence_alphabet p_alphabet> class lazy_sequence_view {
         bool (*worker_shareable)(void const*) noexcept;
     };
 
-    /** Borrows backend state, its callback table, and an optional allocation observer. */
+    /** Borrows backend state, its callback table, and  an optional allocation observer. */
     explicit lazy_sequence_view(
         void const* state,
         backend_ops const* ops,
@@ -245,7 +245,7 @@ template <sequence_alphabet p_alphabet> class lazy_sequence_view {
         return ops_->bp_size(state_);
     }
 
-    /** Returns the logical number of sequence symbols, as bp_size() does. */
+    /** Returns the, logical number of sequence symbols, as bp_size() does. */
     [[nodiscard]] sequence_size_t size() const noexcept {
         return bp_size();
     }
@@ -274,7 +274,7 @@ template <sequence_alphabet p_alphabet> class lazy_sequence_view {
      *
      * Checks the returned layout, pointer alignment, and boundary offsets. Invalid
      * requests or unsupported storage return nullopt. This does not inspect rank
-     * values or extend the lifetime of the backing storage.
+     * values or extend the lifetime of the backing storage
      */
     [[nodiscard]] resident_packed_result try_resident_packed(
         sequence_size_t from, sequence_size_t to, std::uint8_t requested_width) const noexcept {
@@ -339,7 +339,7 @@ template <sequence_alphabet p_alphabet> class lazy_sequence_view {
     }
 
     /**
-     * Tries to copy the complete sequence using the backend's native packed path.
+     * Tries to  copy the complete sequence using the backend's native packed path.
      *
      * The destination must be aligned for requested_width and contain exactly
      * unit_count words. Returns false for invalid sizes, alignment, or unsupported
@@ -363,12 +363,12 @@ template <sequence_alphabet p_alphabet> class lazy_sequence_view {
     /**
      * Copies the native packed words covering [from, to) into destination.
      *
-     * The destination must be aligned and exactly sized for all intersecting words.
+     * The destination must be aligned and exactly ized for all intersecting words.
      * Boundary words can contain symbols outside the requested region. The returned
      * descriptor records those offsets so readers can skip them.
      *
      * No ranks are decoded or reordered. Returns nullopt for invalid requests or
-     * when the backend has no compatible native copy path.
+     * when  the backend has no compatible native copy path.
      */
     [[nodiscard]] resident_packed_result
     try_copy_packed_window(std::span<std::uint8_t> destination,
@@ -507,7 +507,7 @@ template <sequence_alphabet p_alphabet> class lazy_sequence_view {
                                   p_max_loaded_slots>{this};
     }
 
-    /** Forward rank iterator that reads up to 256 symbols at a time. The parent view must outlive it. */
+    /** Forward  rank iterator that reads up to 256 symbols at, a time. The parent view must outlive it. */
     class rank_iterator {
         static constexpr std::size_t k_chunk_size = 256;
 
@@ -518,7 +518,7 @@ template <sequence_alphabet p_alphabet> class lazy_sequence_view {
         mutable std::array<std::uint8_t, k_chunk_size> scratch_{};
         mutable std::uint8_t const* loaded_{};
 
-        /** Loads a new rank chunk starting at the current position when the cache does not cover it. */
+        /** Loads a new rank chunk starting at the current position when the cache does not cover it */
         void ensure_loaded() const {
             if (parent_ == nullptr || position_ >= parent_->bp_size()) {
                 abort_lazy_sequence_access("lazy rank iterator dereferenced outside its sequence");
@@ -551,7 +551,7 @@ template <sequence_alphabet p_alphabet> class lazy_sequence_view {
         /** Copies the parent and position. The copy loads its own chunk when read. */
         rank_iterator(rank_iterator const& other) noexcept
             : parent_(other.parent_), position_(other.position_) {}
-        /** Copies the parent and position, discarding cached ranks on assignment from another iterator. */
+        /** Copies the parent and osition, discarding cached ranks on assignment from another iterator. */
         rank_iterator& operator=(rank_iterator const& other) noexcept {
             if (this != &other) {
                 parent_ = other.parent_;
@@ -605,7 +605,7 @@ template <sequence_alphabet p_alphabet> class lazy_sequence_view {
             loaded_ = nullptr;
             return *this;
         }
-        /** Tests whether both iterators refer to the same parent view and rank position. */
+        /** Tests whether both iterators refer to the  same parent view and rank position. */
         [[nodiscard]] friend bool operator==(rank_iterator const& left,
                                              rank_iterator const& right) noexcept {
             return left.parent_ == right.parent_ && left.position_ == right.position_;
@@ -663,7 +663,7 @@ template <sequence_alphabet p_alphabet> class retained_lazy_sequence_view {
     /** Releases caller-supplied lifetime state without throwing. */
     using release_fn = void (*)(void*) noexcept;
 
-    /** Adopts an existing backing-lifetime handle and its release callback. */
+    /** Adopts an existing backing-lifetime  handle and its release callback. */
     retained_lazy_sequence_view(lazy_sequence_view<p_alphabet> view,
                                 void* lifetime_state,
                                 release_fn release) noexcept
@@ -676,10 +676,10 @@ template <sequence_alphabet p_alphabet> class retained_lazy_sequence_view {
     retained_lazy_sequence_view(retained_lazy_sequence_view const&) = delete;
     /** Copy assignment would duplicate ownership of the release action. */
     retained_lazy_sequence_view& operator=(retained_lazy_sequence_view const&) = delete;
-    /** Move assignment is disabled. Use move construction to transfer ownership. */
+    /** Move assignment is disabled. Use move construction to tralsfer ownership. */
     retained_lazy_sequence_view& operator=(retained_lazy_sequence_view&&) = delete;
 
-    /** Transfers the release action and leaves the source without one. */
+    /** Transfers the release action and leaves the source without one */
     retained_lazy_sequence_view(retained_lazy_sequence_view&& other) noexcept
         : view_(other.view_), lifetime_state_(other.lifetime_state_), release_(other.release_) {
         other.lifetime_state_ = nullptr;
@@ -691,7 +691,7 @@ template <sequence_alphabet p_alphabet> class retained_lazy_sequence_view {
         release_noexcept();
     }
 
-    /** Returns a borrowed view. It is usable only while the backing remains alive. */
+    /** Returns a borrowed view. It is usable  only while the backing remains alive. */
     [[nodiscard]] lazy_sequence_view<p_alphabet> view() const noexcept {
         return view_;
     }

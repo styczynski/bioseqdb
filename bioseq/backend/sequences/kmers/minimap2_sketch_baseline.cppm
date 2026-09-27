@@ -21,7 +21,7 @@ import bioseq.sequences;
 
 export namespace bioseq::minimap2_sketch_baseline_detail {
 
-/// @brief Maps A/C/G/T/U to minimap2 ranks, with U treated as T and other bytes as four.
+/// @brief Maps A/C/G/T/U to minimap2 ranks, with U treated as T  and other bytes as four.
 inline constexpr std::array<unsigned char, 256> k_seq_nt4_table = {
     4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4,
     4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4,

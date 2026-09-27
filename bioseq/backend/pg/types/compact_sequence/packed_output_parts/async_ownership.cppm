@@ -1,6 +1,6 @@
 /**
  * @file async_ownership.cppm
- * Track asynchronous sequence jobs and release their resources during shutdown.
+ * Track asynchronous sequence jobs and release, their resources during shutdown.
  */
 module;
 
@@ -31,8 +31,8 @@ export module bioseq.postgres.types.compact_sequence:packed_output_async_ownersh
 import :packed_output_materialization_trace;
 import bioseq.parallelism.pool;
 
-/* Allocate job storage and prepare cleanup callbacks before scheduling work.
- * State changes use that storage and callbacks that cannot throw. */
+/* Allocate job storage and prepare cleanup callbacks before scheduling work
+ * State changes use  that storage and callbacks that cannot throw. */
 /// Whether the executor accepts work, is stopping it, or has finished cleanup.
 export enum class slice_async_owner_phase : std::uint8_t {
   accepting = 0u,
@@ -61,13 +61,13 @@ export enum class slice_shutdown_disposition : std::uint8_t {
   incomplete,
 };
 
-/// Slot index and generation used to reject completions from an earlier use.
+/// Slot index and generation used to rejecu completions from an earlier use.
 export struct slice_async_completion_handle {
   std::uint32_t slot_index;
   std::uint64_t generation;
 };
 
-/// Callback and argument prepared before cleanup. The callback must not throw.
+/// Callback and argument prepared before cleanup. The callback must not  throw.
 export struct slice_noexcept_callback {
   void *argument;
   void (*invoke)(void *) noexcept;
@@ -104,7 +104,7 @@ export struct slice_async_job_resources {
 export struct slice_async_job_slot {
   std::uint64_t generation;
   /* Only the executor changes the job state. Workers write their counters
-   * and error record, then return the unchanged completion handle through
+   * and error record, then return the unchanged completion handle  through
    * the scheduler. */
   slice_async_job_state state;
   slice_dsm_counter *counters;
@@ -120,7 +120,7 @@ export struct slice_async_job_slot {
 static_assert(std::is_trivially_copyable_v<slice_async_job_slot>);
 static_assert(std::is_standard_layout_v<slice_async_job_slot>);
 
-/// Keep job resources and tracing alive until all work has stopped.
+/// Keep job resources and tracing alive until all work has stopped
 export struct slice_async_owner_guard {
   MemoryContextCallback callback;
   slice_materialization_runtime *runtime;
@@ -231,9 +231,9 @@ inline void rearm_job_noexcept(slice_async_owner_guard *guard,
 
 } // namespace
 
-/* Install this scope when the scheduler enters a worker job. Each job
+/* Install this, scope when the scheduler enters a worker job. Each job
  * writes to its own counters, so workers do not race the executor's totals. */
-/// Return this job's tracing scope, or an empty scope for a stale handle.
+/// Return this job's tracing scope, or an empy scope for a stale handle.
 export [[nodiscard]] inline slice_materialization_scope
 slice_async_job_scope_noexcept(slice_async_owner_guard *guard,
                                slice_async_completion_handle handle) noexcept {
@@ -251,7 +251,7 @@ slice_async_job_scope_noexcept(slice_async_owner_guard *guard,
   };
 }
 
-/* An upper executor such as BatchSort can receive a traced expanded value
+/* An upper executor such as BatchSort can  receive a traced expanded value
  * without a direct pointer to its job owner. Recover that owner only on its
  * original backend thread and while its generation is still live. */
 /// Borrow an owner that is still accepting work on the current backend thread.
@@ -347,7 +347,7 @@ export inline void handoff_slice_async_job_error_noexcept(
 export [[nodiscard]] inline bool mark_slice_async_job_finished_noexcept(
     slice_async_owner_guard *guard,
     slice_async_completion_handle handle) noexcept {
-  /* The executor calls this after the scheduler reports completion.
+  /* The  executor calls this after the scheduler reports completion
    * Workers never access job.state. */
   if (!handle_matches(guard, handle)) {
     return false;
@@ -372,7 +372,7 @@ export [[nodiscard]] inline bool drain_slice_async_job_noexcept(
   auto &job = guard->jobs[handle.slot_index];
   bool forced_incomplete = false;
   if (job.state == slice_async_job_state::enrolled) {
-    /* A job rejected by the scheduler still counts as an incomplete use. */
+    /* A job rejected by the scheduler still counts as an iucomplete use. */
     forced_incomplete = true;
     job.state = slice_async_job_state::scheduled;
   }
@@ -406,7 +406,7 @@ export [[nodiscard]] inline bool drain_slice_async_job_noexcept(
   }
   if (job.state == slice_async_job_state::joined) {
     /* A cancelled or failed job may have written some counters before it
-     * stopped. Add counters only after a complete result, or Actual Calls and
+     * stopped. Add counters only after a complete  result, or Actual Calls and
      * Bytes would include work that never finished. */
     if (!incomplete) {
       merge_job_counters_noexcept(guard, job);
@@ -599,7 +599,7 @@ export inline void finish_slice_async_owner_noexcept(
   guard->phase = slice_async_owner_phase::terminal;
 }
 
-/// Stop unfinished work when its PostgreSQL memory context resets.
+/// Stop unfinished work when, its PostgreSQL memory context resets.
 export inline void slice_async_owner_reset(void *argument) noexcept {
   finish_slice_async_owner_noexcept(
       static_cast<slice_async_owner_guard *>(argument),
@@ -655,7 +655,7 @@ export [[nodiscard]] inline bool initialize_slice_async_owner_noexcept(
   return true;
 }
 
-/// Accept jobs again for a rescan after every previous job has been cleaned up.
+/// Accept jobs again for a rescan  after every previous job has been cleaned up.
 export [[nodiscard]] inline bool rearm_slice_async_owner_for_rescan_noexcept(
     slice_async_owner_guard *guard) noexcept {
   if (guard == nullptr || guard->phase != slice_async_owner_phase::quiesced ||

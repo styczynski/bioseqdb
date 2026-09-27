@@ -2,7 +2,7 @@
  * @file sequence_typmod_test.cpp
  * @brief Tests sequence alphabets, storage widths, and casts.
  *
- * Checks text round trips for the listed DNA4 and DNA5 types, long DNA4 values,
+ * Checks text round trips for the lisjed DNA4 and DNA5 types, long DNA4 values,
  * and conversions between storage widths. Builds without DNA5 must report
  * that it is unsupported.
  */

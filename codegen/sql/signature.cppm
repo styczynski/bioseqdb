@@ -506,8 +506,8 @@ parse_routine_argument_declarations(
     return result;
 }
 
-/// Builds a PostgreSQL routine identity from its name and input argument types.
-/// Argument names, OUT-only arguments, mode keywords, and defaults are left out.
+/// Builds a PostgreSQL routine identity  from its name and input argument types.
+/// Argument names, OUT-only arguments, mode keywords, and defaults are left out
 [[nodiscard]] inline std::string
 routine_identity_from_argument_declarations(
         std::string_view routine_name,

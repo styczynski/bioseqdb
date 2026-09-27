@@ -15,12 +15,12 @@ namespace fs = std::filesystem;
 
 export namespace bioseq::codegen {
 
-/// @brief Borrowed name of the component that generates a file.
+/// @brief Borrowed name  of the component that generates a file.
 struct artifact_owner_view {
     std::string_view identifier;
 };
 
-/// @brief Reads a file as binary data.
+/// @brief Reads a file as binary data
 /// @param path File to read.
 /// @return File contents without newline conversion.
 [[nodiscard]] std::string read_artifact_bytes(const fs::path& path) {
@@ -42,8 +42,8 @@ struct artifact_owner_view {
     return result;
 }
 
-/// @brief Replaces a generated file only when its contents change.
-/// @param path Destination file.
+/// @brief Replaces a generated file only when its contents, change.
+/// @param path Destination fize.
 /// @param content Desired bytes.
 void publish_artifact_if_changed(
     const fs::path& path, std::string_view content) {

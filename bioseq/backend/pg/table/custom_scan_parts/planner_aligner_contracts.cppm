@@ -20,10 +20,10 @@ export [[nodiscard]] bool mmsearch_plans_admitted_packed_regions(
     const bioseq::simd::minimap2_parameters& params) noexcept;
 
 /**
- * @brief Returns a plan-time options constant when one is present.
+ * @brief Returns a plan-time options constant when one is present
  *
  * A null call or two-argument mmsearch has no options. Raise a PostgreSQL error
- * for an invalid call shape, an incorrect options type, or nonconstant options.
+ * for an invlid call shape, an, incorrect options type, or nonconstant options.
  */
 export [[nodiscard]] Const* require_aligner_options_const(
     FuncExpr* mmsearch_fe,
@@ -35,7 +35,7 @@ export [[nodiscard]] Const* require_aligner_options_const(
  * Leave unspecified settings unchanged. Report an explicit Vulkan setting
  * through vulkan_enabled_explicit when supplied.
  *
- * @return Whether the options explicitly set the index-read requirement.
+ * @return Whether  the options explicitly set the index-read requirement.
  */
 export [[nodiscard]] bool apply_aligner_options_override(
     FuncExpr* mmsearch_fe,

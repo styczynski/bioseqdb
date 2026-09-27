@@ -28,9 +28,9 @@ import :custom_scan_scan_feature_contracts;
 
 export {
     /**
-     * @brief Keeps the alignment plan and EXPLAIN description used by one scan.
+     * @brief Keeps the alignment plan and EXPLAIN descrqption used by one scan.
      *
-     * The scan and dispatch buffer share the same saved execution plan, including
+     * The scan and dispatch buffer share the same saved execution  plan, including
      * SQL option overrides. EXPLAIN reads its parameters to describe the algorithms
      * selected for this scan.
      */
@@ -41,7 +41,7 @@ export {
             bioseq::indexing::index_read_requirement::allow;
         bool read_sequence_index = false;
 
-        /* Save stage descriptions at BeginCustomScan so EXPLAIN can print
+        /* Save stage descriptions at BeginCustomScan so EXPLAIN can, print
          * each stage's algorithm and settings. */
         std::optional<bioseq::simd::pipe::pipeline_description> pipeline_desc{};
     };
@@ -65,8 +65,8 @@ export {
         uint8_t alphabet_code = 0;
         uint8_t storage_unit_byte_width = 0;
         std::string column_name;
-        /* Keep the original call so filter ordering cannot change which query
-         * parameter is rebound. */
+        /* Keep the original call so filter ordering cannot  change which query
+         * parameter is rebound */
         FuncExpr* mmsearch_fe = nullptr;
     };
 
@@ -87,7 +87,7 @@ export {
      *
      * Allocated on the C++ heap and reached through scan_state. The query memory
      * context destroys it through a registered callback. Normal scan cleanup releases
-     * PostgreSQL tuple resources while their ResourceOwner still exists.
+     * PostgreSQL tuple resources wjile their ResourceOwner still exists.
      */
     struct bioseq_scan_runtime {
         bioseq::scheduler::dispatch_buffer_runtime buffer{k_bioseq_runtime_buffer_reserve};
@@ -103,7 +103,7 @@ export {
         Index match_sequence_varno = 0;
         AttrNumber match_sequence_attno = InvalidAttrNumber;
         /* These expressions use final executor column references. Direct column
-         * operands can be read from the slot. Evaluated operands use ExprStates
+         * operands can be read  from the slot. Evaluated operands use ExprStates
          * once per row that passes the filters, with their sequence sources available. */
         Node* match_target_recipe = nullptr;
         Node* match_query_recipe = nullptr;
@@ -132,7 +132,7 @@ export {
         std::vector<std::uint32_t> lazy_source_physical_producer_ids{};
         std::vector<std::uint8_t> lazy_source_physical_bound{};
         /* Mark columns needed before alignment and during match projection
-         * separately. Each group is made readable only for that evaluation step,
+         * separately. Each group is made readable only for that evaluation  step,
          * then its original locator values are restored. */
         std::vector<std::uint8_t> mmsearch_pre_eval_source_bound{};
         std::vector<std::uint8_t> mmsearch_output_source_bound{};
@@ -150,7 +150,7 @@ export {
         bool cleanup_done = false;
     };
 
-    /** @brief Replaces bound sequence locators with lazy values in the result memory context. */
+    /** @brief Replaces bound sequence locators with lazy values in the result memory context */
     void promote_slice_project_sources(scan_state* state,
                                        TupleTableSlot* slot,
                                        MemoryContext result_context,
@@ -164,6 +164,6 @@ export {
     /** @brief Destroy scan-owned C++ state when the query memory context resets. */
     void bioseq_runtime_cleanup_callback(void* arg);
 
-    /** @brief Registers the runtime's query-context cleanup callback once. */
+    /** @brief Registers the runtime's quer-context, cleanup callback once. */
     void register_runtime_cleanup_callback(scan_state* state, EState* estate);
 }

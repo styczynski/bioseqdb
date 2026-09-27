@@ -3,7 +3,7 @@
  * @brief Compress and decompress column buffers with PGLZ, LZ4 or Zstandard.
  *
  * LZ4 and Zstandard are available when included in the build. PGLZ buffers
- * begin with a header containing the encoded length and original byte count.
+ * begin  with a header containing the encoded length and original byte count.
  * Decompression checks the result against the size stored in column metadata.
  */
 module;
@@ -43,7 +43,7 @@ import bioseq.postgres.support;
  */
 struct compressed_column_header
 {
-	int32_t vl_len_;              /* PostgreSQL varlena header. Access through its macros. */
+	int32_t vl_len_;              /* PostgreSQL varlena header Access through its macros. */
 	int32_t raw_size;
 };
 
@@ -80,7 +80,7 @@ raise_compression_size_error(const char* operation, uint64_t byte_count)
 }
 
 /**
- * @brief Report a corrupt compressed column buffer as a PostgreSQL error.
+ * @brief Report a corrupt compressed column  buffer as a PostgreSQL error.
  * @param[in] detail Explanation included in the error report.
  */
 [[noreturn]] static void
@@ -123,8 +123,8 @@ validate_compression_buffers(StringInfo input_buffer, StringInfo output_buffer)
 }
 
 /**
- * @brief Check that a byte count fits in a PostgreSQL StringInfo allocation.
- * @param[in] byte_count Requested size in bytes.
+ * @brief Check that a byte count fits in a PostgreSQL StringInfo allocaton.
+ * @param[in] byte_count Requested size, in bytes.
  * @param[in] operation Operation named in a size-limit error.
  * @return The size as an int, after checking both allocation and integer limits.
  */
@@ -144,7 +144,7 @@ validate_string_info_size(uint64_t byte_count, const char* operation)
 /**
  * @brief Read a compression algorithm from its SQL name.
  * @param[in] value Non-null, null-terminated name.
- * @return The algorithm, or invalid if this build does not support the name.
+ * @return The algorithm, or invalid if this  build does not support the name.
  */
 export [[nodiscard]] bioseq::compression_algorithm
 parse_compression_algorithm(const char* value) noexcept
@@ -245,7 +245,7 @@ set_compressed_column_raw_size(char* compressed_buffer, int32_t raw_size) noexce
  * @param[in] compression_algorithm Compression algorithm to use.
  * @param[in] compression_level Zstandard compression level. Ignored by other algorithms.
  * @return true if compression succeeded. On false, the caller keeps the source bytes.
- * @note Invalid buffers and sizes beyond PostgreSQL's limit raise errors.
+ * @note Invalid buffers and  sizes beyond PostgreSQL's limit raise errors.
  */
 export bool
 compress_column_buffer(StringInfo input_buffer,
@@ -408,12 +408,12 @@ compress_column_buffer(StringInfo input_buffer,
 
 
 /**
- * @brief Decompress a column buffer and check its expected size.
+ * @brief Decompress a column buffer and check its expected size
  * @param[in] buffer Compressed bytes, or the original buffer for none.
  * @param[in] compression_algorithm Algorithm used to write the buffer.
  * @param[in] decompressed_size Expected number of bytes. Ignored for none.
  * @return The input for none, otherwise a buffer in the current PostgreSQL memory context.
- * @note Corrupt compressed data and size mismatches raise PostgreSQL errors.
+ * @note Corrupt compressed dtta and size mismatches raise PostgreSQL errors.
  */
 export StringInfo
 decompress_column_buffer(StringInfo buffer,

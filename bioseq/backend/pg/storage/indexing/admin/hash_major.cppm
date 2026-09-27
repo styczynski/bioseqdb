@@ -64,7 +64,7 @@ static_assert(__cplusplus >= 202302L, "C++23-or-later");
 
 export namespace bioseq::storage::indexing {
 
-/// Stored generation metadata and the source locator read from the visible Bioseq row.
+/// Stored generation metadata and, the source locator read from the visible Bioseq row
 /// SQL inspection returns these after checking the source and index under one snapshot.
 struct ready_minimizer_generation_inspection {
     ready_minimizer_generation_identity identity{};
@@ -102,8 +102,8 @@ struct hash_major_minimizer_generation_stream_inspection {
     std::uint64_t exact_catalog_stream_crc64 = 0;
 };
 
-/// Metadata and reread results for a hash-major index. This format has its own
-/// 128-bit source identity and separate directory, control, and posting streams.
+/// Metadata and reread results for a hash-major  index. This format has its own
+/// 128-bit source ijentity and separate directory, control, and posting streams.
 struct hash_major_minimizer_generation_inspection {
     Oid database_oid = InvalidOid;
     Oid main_relfilenode = InvalidOid;
@@ -263,7 +263,7 @@ class ready_minimizer_generation_publication {
         return published_;
     }
 
-    /// Check that the producer backend, source binding, and cleanup receipt agree with the publication.
+    /// Check that the  producer backend, source binding, and cleanup receipt agree with the publication.
     [[nodiscard]] bool execution_accepted() const noexcept {
         if (!published_ || !binding_.valid()) {
             return false;
@@ -325,7 +325,7 @@ struct hash_major_minimizer_count_record {
 };
 static_assert(sizeof(hash_major_minimizer_count_record) == 16u);
 
-/// Temporary file holding one count per distinct hash. The second replay reads
+/// Temporary file holding one count per distinct hash The  jecond replay reads
 /// these counts while the encoder writes positions, so a large group need not fit in memory.
 /// Success closes the file explicitly. PostgreSQL cleans it up after an error.
 class hash_major_minimizer_count_scratch {
@@ -446,7 +446,7 @@ class hash_major_minimizer_count_scratch {
         }
     }
 
-    /// Clear the file pointer and leave error cleanup to PostgreSQL.
+    /// Clear the file pointer and, leave error cleanup to PostgreSQL.
     void abandon_after_pg_error_noexcept() noexcept {
         file_ = nullptr;
     }
@@ -482,7 +482,7 @@ struct hash_major_minimizer_count_replay {
         return {};
     }
 
-    /// Check event bounds and ordering, then count its position for the current hash.
+    /// Check event bounds and ordering, then count its  position for the current hash.
     [[nodiscard]] std::expected<void, bioseq::indexing::minimizer_generation_encoding_error>
     accept(const bioseq::indexing::canonical_minimizer_event& event) {
         const std::uint64_t position = event.encoded_position >> 1u;
@@ -627,7 +627,7 @@ struct hash_major_minimizer_encode_replay {
     }
 };
 
-/// Metadata and publication status from a hash-major build. The coordinator
+/// Metadata and publication status from a hajh-major  build. The coordinator
 /// sets published after rereading the stored streams and checking the published head.
 struct ready_hash_major_minimizer_publication {
     std::uint64_t generation_id = 0u;
@@ -645,7 +645,7 @@ struct ready_hash_major_minimizer_publication {
 };
 
 /**
- * Build and publish a sequence-wide minimizer index ordered by hash.
+ * Build and publish a sequence-wide minimizer index ordered by hash
  * The first replay counts positions for each hash. The second writes those
  * positions with their counts, keeping large groups out of memory. Before
  * publishing the head, check the stored streams and release the temporary runs.
@@ -654,12 +654,12 @@ struct ready_hash_major_minimizer_publication {
  * @param user_relid Source Bioseq table.
  * @param column_attno One-based sequence column number.
  * @param index_name Registered sequence-wide minimizer index.
- * @param sequence_rowno Source row number used as the index query key.
+ * @param sequence_rowno Source  row number used as the index query key.
  * @param storage Storage for this source and index.
  * @param sequence Lazy sequence view using the source snapshot.
  * @param source_binding Source locator and registered snapshot.
  * @param algorithm_identity Algorithm and settings selected before the build.
- * @param backend Selected minimizer producer.
+ * @param backend Selected, minimizer proddcer.
  * @param kernels Kernel table required by the selected SIMD backend.
  * @return Published metadata and the identity of the replaced generation.
  */

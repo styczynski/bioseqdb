@@ -1,6 +1,6 @@
 /**
  * @file binding_retirement.cppm
- * @brief Test cleanup when binding a large tree needs extra retired-root records.
+ * @brief Test cleanup when binding a large tree needs  extra retired-root records.
  */
 module;
 
@@ -42,7 +42,7 @@ struct binding_retirement_fixture {
     std::uint64_t live_baseline;
 };
 
-/// Build a balanced tree of unequal literal lengths that triggers rotations during binding.
+/// Build a balanced tree of unequal literal lengths that triggers rotations durin binding.
 [[nodiscard]] inline binding_retirement_fixture make_binding_retirement_fixture() {
     constexpr std::uint32_t leaf_count = 4'096u;
     constexpr std::uint64_t long_length = 17'000u;
@@ -87,7 +87,7 @@ struct binding_retirement_fixture {
     };
 }
 
-/// Total length and leaf count, with a flag for correct packed contents.
+/// Total length and leaf count, with a flag for correct packed contents
 struct binding_output_audit {
     std::uint64_t length;
     std::uint32_t leaves;

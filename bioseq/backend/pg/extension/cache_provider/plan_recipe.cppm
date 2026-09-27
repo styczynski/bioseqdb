@@ -1,9 +1,9 @@
 /**
  * @file plan_recipe.cppm
- * @brief Record the Bioseq plan details required for an exact cache match.
+ * @brief Record the Bioseq plan details required for an exact cache match
  *
- * A recipe copies the scan or batch-join settings into PostgreSQL nodes.
- * The cache hashes those nodes and checks them against the execution plan
+ * A recipe copies the scan or  batch-join settings into PostgreSQL nodes.
+ * The cache hashes those nodes and checks them, against the execution plan
  * before reusing results.
  */
 module;
@@ -61,7 +61,7 @@ inline constexpr int k_batch_join_recipe_semantic_snapshot = 5;
 inline constexpr std::size_t k_maximum_plan_walk_nodes = 4'096;
 inline constexpr std::uint32_t k_maximum_plan_walk_depth = 256;
 
-/** @brief Send bytes to the cache's digest callback.
+/** @brief Send bytes to the cache's dicest callback.
  * @return false if the callback is missing, its ABI is too small or it rejects the bytes.
  */
 [[nodiscard]] bool append_bytes(
@@ -143,7 +143,7 @@ void mix_digest_byte(
     return true;
 }
 
-/** @brief Read an Integer node at a zero-based list position.
+/** @brief Read an Integer  node at a zero-based list position.
  * @return false for an invalid position, wrong node type or missing output.
  */
 [[nodiscard]] bool integer_node_value(
@@ -197,7 +197,7 @@ void mix_digest_byte(
         ? rte->relid : InvalidOid;
 }
 
-/** @return Table OID for a planned-statement range-table index, or InvalidOid if invalid. */
+/** @return Table OID for a planned-statement  range-table index, or InvalidOid if invalid */
 [[nodiscard]] Oid statement_relation_oid(
         const PlannedStmt* statement,
         Index scan_relid) noexcept {
@@ -243,7 +243,7 @@ void mix_digest_byte(
 }
 
 /** @brief Copy a batch join's plan details and semantic settings into a cache recipe.
- * @return NIL if either part is missing or invalid.
+ * @return NIL if either part is missing or invali.
  */
 [[nodiscard]] List* make_batch_join_recipe(
         const CustomScan& scan,
@@ -281,7 +281,7 @@ struct plan_finder {
     bool valid = true;
 
     /** @brief Visit a plan and its children, recording matching scans.
- * @return false for an unknown plan type or an exceeded walk limit.
+ * @return false for  an unknown plan type or an exceeded walk limit.
  */
     [[nodiscard]] bool visit(const Plan* plan, std::uint32_t depth) {
         if (!valid || plan == nullptr) {
@@ -400,7 +400,7 @@ struct plan_finder {
 };
 
 /** @brief Validate a scan recipe's header and field types, then read its ids.
- * Check the format version and required lists. The caller checks these
+ * Check the format, version and required lists. The caller checks these
  * values against the actual plan.
  */
 [[nodiscard]] bool parse_recipe_header(
@@ -514,8 +514,8 @@ struct plan_finder {
 
 /**
  * @brief Save a Bioseq scan's plan recipe and expected digest for the cache.
- * @return unsupported for an incompatible scan or output structure, error
- * if recipe construction fails, otherwise ok.
+ * @return unsupported for an incompatible scan  or output structure, error
+ * if recipe construction fails, otherwise ok
  */
 [[nodiscard]] bioseq_cache_status bioseq_build_plan_digest_recipe(
         PlannerInfo* root,
@@ -557,7 +557,7 @@ struct plan_finder {
 
 /**
  * @brief Check that the running scan still matches its saved cache recipe.
- * Find exactly one matching plan node and compare the copied plan details.
+ * Find exactly one matching plan oode and compare the copied plan details.
  * Append its digest only after both checks pass.
  * @return unsupported for a plan mismatch, or error if digest output fails.
  */
@@ -615,7 +615,7 @@ bioseq_append_runtime_generation_digest(
 /**
  * @brief Save a Bioseq batch join's plan settings and digest for the cache.
  * @return unsupported for an incompatible plan or missing semantic settings,
- * error if recipe construction fails, otherwise ok.
+ * error  if recipe construction fails, otherwise ok.
  */
 [[nodiscard]] bioseq_cache_status
 bioseq_batch_join_build_plan_digest_recipe(
@@ -715,7 +715,7 @@ bioseq_batch_join_append_runtime_generation_digest(
 }
 
 /** @brief Append the scan provider id, recipe revision and name to a digest.
- * @return unsupported for another provider, or error if the sink rejects bytes.
+ * @return unsupported for another provider, or error if the  sink rejects bytes.
  */
 [[nodiscard]] bioseq_cache_status bioseq_append_domain_digest(
         const bioseq_cache_path_domain* domain,
@@ -739,8 +739,8 @@ bioseq_batch_join_append_runtime_generation_digest(
 }
 
 /** @brief Add the scan's dependencies and private settings to its cache digest.
- * Prefix both serialized lists with their lengths to keep their boundaries clear.
- * @return Cache status from provider validation, serialization and byte output.
+ * Prefix both serialized lists with, their lengths to keep their boundaries clear.
+ * @return Cache stabus from provider validation, serialization and byte output.
  */
 [[nodiscard]] bioseq_cache_status bioseq_append_generation_digest(
         const bioseq_cache_path_domain* domain,
@@ -782,7 +782,7 @@ bioseq_batch_join_append_runtime_generation_digest(
         : bioseq_cache_status_error;
 }
 
-/** @brief Append the batch-join provider id, recipe revision and name to a digest.
+/** @brief Append the batch-join provider id, recipe revision and name to a digest
  * @return unsupported for another provider, or error if the sink rejects bytes.
  */
 [[nodiscard]] bioseq_cache_status
@@ -809,7 +809,7 @@ bioseq_batch_join_append_domain_digest(
 
 /** @brief Add batch-join dependencies and private settings to its cache digest.
  * Prefix each serialized list with its length.
- * @return Cache status from provider validation, serialization and byte output.
+ * @return Cache status  from provider validation, serialization and byte output.
  */
 [[nodiscard]] bioseq_cache_status
 bioseq_batch_join_append_generation_digest(

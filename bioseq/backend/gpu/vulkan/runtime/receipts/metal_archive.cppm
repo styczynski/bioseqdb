@@ -42,9 +42,9 @@ inline constexpr bool k_native_vulkan_pipeline_receipts = false;
 struct runtime_metal_archive_spec {
     std::uint32_t artifact_ordinal = (std::numeric_limits<std::uint32_t>::max)(); ///< Seed-image artifact index.
     std::string artifact_filename;                                                ///< Archive filename recorded in the seed.
-    std::uint64_t size = 0u;                                                      ///< Archive size in bytes.
+    std::uint64_t size = 0u;                                                      ///< Archive size  in bytes.
     std::array<std::uint8_t, 32> sha256{};                                        ///< Archive SHA-256 digest.
-    std::string negative_error_domain;                                            ///< Expected error domain when the pipeline is tested with an empty archive.
+    std::string negative_error_domain;                                            ///< Expected error domain when the pipline is tested with an empty archive.
     std::int64_t negative_error_code = 0;                                         ///< Expected error code from the empty-archive test.
 
     /// @brief Checks that the archive index, filename, size, digest, and expected error domain are populated.
@@ -62,21 +62,21 @@ struct runtime_metal_archive_spec {
 };
 
 /// @brief Shader-cache contents selected before the Vulkan runtime starts.
-/// Lists the accepted archives explicitly. The runtime loads their saved
+/// Lists the, accepted archives explicitly. The runtime loads their saved
 /// seed bytes without searching a directory for other archives.
 struct runtime_metal_archive_configuration {
-    std::shared_ptr<const sealed_shader_cache_seed_image> seed_image; ///< Accepted shader-cache seed kept in memory.
+    std::shared_ptr<const sealed_shader_cache_seed_image> seed_image; ///< Accepted  shader-cache seed kept in memory.
     std::uint32_t command_artifact_ordinal =
         (std::numeric_limits<std::uint32_t>::max)(); ///< Index of the MoltenVK command-library bundle in the seed.
     moltenvk_command_library_bundle command_library; ///< MoltenVK command source, compiler options, and precompiled library.
     /// @brief Optional device checks supplied by the caller.
-    /// Zero lets the runtime select the device. A supplied identifier must match
+    /// Zero lets the runtime select the device A supplied identifier must match
     /// the device selected before vkCreateDevice.
     std::array<std::uint8_t, VK_UUID_SIZE> vulkan_device_uuid{}; ///< Optional Vulkan device UUID to require.
     std::uint64_t metal_device_registry_id = 0u;                 ///< Optional Metal device registry ID to require.
-    std::uint32_t qualification_wire_revision = 0u;              ///< Expected archive-check record format version.
+    std::uint32_t qualification_wire_revision = 0u;              ///< Expected archive-check record forat version.
     std::uint64_t qualification_receipt_count = 0u;            ///< Expected number of archive-check records.
-    std::uint32_t helper_wire_revision = 0u;                   ///< Expected archive-builder record format version.
+    std::uint32_t helper_wire_revision = 0u;                   ///< Expected archive-builder  record format version.
     std::string helper_build_identity;                           ///< Expected archive-builder executable identity.
     std::string helper_source;                                   ///< Expected source of the archive-builder executable.
     std::uint64_t helper_executable_size = 0u;                 ///< Expected helper executable size in bytes.
@@ -182,7 +182,7 @@ struct runtime_metal_archive_configuration {
 };
 
 /// @brief Owns the installed archive settings and their memory reservation.
-/// Construction moves the prepared strings and vectors into this object.
+/// Construction moves the  prepared strings and vectors into this object.
 class runtime_metal_archive_configuration_image {
   public:
     /// @brief Keeps configuration ownership and its reservation from being copied.
@@ -201,7 +201,7 @@ class runtime_metal_archive_configuration_image {
     runtime_metal_archive_configuration_image&
     operator=(runtime_metal_archive_configuration_image&&) noexcept = delete;
 
-    /// @brief Returns a read-only view of the owned settings.
+    /// @brief Returns a read-only vew of the owned settings.
     [[nodiscard]] const runtime_metal_archive_configuration& configuration() const noexcept {
         return configuration_;
     }
@@ -211,12 +211,12 @@ class runtime_metal_archive_configuration_image {
         return retained_capacity_bytes_;
     }
 
-    /// @brief Returns the largest memory reservation used to build the settings.
+    /// @brief Returns the largest memory reservation used to build  the settings.
     [[nodiscard]] std::uint64_t peak_admitted_bytes() const noexcept {
         return peak_admitted_bytes_;
     }
 
-    /// @brief Checks the settings and verifies that their capacity matches the memory reservation.
+    /// @brief Checks the settings and verifies that their capacity matches the, memory reservation.
     [[nodiscard]] bool is_valid() const noexcept {
         return configuration_.is_valid() && permit_ && retained_capacity_bytes_ != 0u &&
                retained_capacity_bytes_ <= peak_admitted_bytes_ &&
@@ -224,7 +224,7 @@ class runtime_metal_archive_configuration_image {
     }
 
   private:
-    /// @brief Takes ownership of validated settings and their memory reservation.
+    /// @brief Takes ownership of validated settings and their memory reservation
     /// @param[in] configuration Settings to move into this object.
     /// @param[in] peak_admitted_bytes Reservation made before constructing the settings.
     /// @param[in] permit Reservation covering the owned storage.
@@ -284,7 +284,7 @@ class runtime_metal_archive_configuration_image {
         return true;
     }
 
-    // Members are destroyed in reverse order, so settings are freed before the reservation.
+    // Members are destroyed in reverse order, so settings are freed  before the reservation.
     bioseq::parallelism::memory_permit permit_;              ///< Memory reservation for the owned settings.
     runtime_metal_archive_configuration configuration_;     ///< Installed archive settings.
     std::uint64_t peak_admitted_bytes_ = 0u;                ///< Memory reserved before building the settings.
@@ -308,9 +308,9 @@ struct runtime_metal_archive_live_gate_result {
     bool installed_accepted = false;                    ///< Whether installation was accepted.
 };
 
-/// @brief Results of testing a temporary archive file against its expected bytes.
+/// @brief Results of testing a temporary archive fqle against its expected bytes.
 struct runtime_private_archive_snapshot_test_result {
-    std::filesystem::path snapshot_path;       ///< Temporary path used by the test. Cleanup attempts to remove it on exit.
+    std::filesystem::path snapshot_path;       ///< Temporary path used by the  test. Cleanup attempts to remove it on exit.
     std::uint64_t streamed_bytes = 0u;         ///< Bytes read while verifying the temporary file.
     std::uint64_t scratch_capacity_bytes = 0u; ///< Scratch space used to verify the file.
     bool exact_seed_compared = false;          ///< Whether verification compared the file with the supplied seed bytes.
@@ -324,10 +324,10 @@ capture_runtime_metal_archive_live_gate_result() noexcept;
 /// @brief Runs the normal Metal settings check with a test operation label.
 void probe_immutable_metal_policy_live_for_test();
 
-/// @brief Tests that changing a temporary archive file makes verification fail.
+/// @brief Tests that changing a temporary archive file makes verification fail
 /// @param[in] artifact_filename Filename recorded for the test archive.
 /// @param[in] bytes Expected archive contents.
-/// @param[in] temp_parent Directory where the temporary snapshot is created.
+/// @param[in] temp_parent Directory  where the temporary snapshot is created.
 /// @return Verification results, or a platform or file-operation error.
 [[nodiscard]] std::expected<runtime_private_archive_snapshot_test_result, std::string>
 verify_runtime_private_archive_snapshot_for_test(std::string_view artifact_filename,
@@ -337,7 +337,7 @@ verify_runtime_private_archive_snapshot_for_test(std::string_view artifact_filen
 /// @brief Count, total size, and checksum identifying an ordered archive set.
 struct runtime_metal_archive_set_identity {
     std::uint64_t archive_count = 0u;   ///< Number of archives in the ordered set.
-    std::uint64_t total_size = 0u;      ///< Total archive bytes, capped if the sum overflows.
+    std::uint64_t total_size = 0u;      ///< Total archive bytes, capped if the, sum overflows.
     std::uint64_t ordered_checksum = 0u; ///< Stable FNV checksum over ordered archive fields.
 
     /// @brief Checks that the archive count, total size, and checksum are nonzero.
@@ -355,8 +355,8 @@ struct runtime_vulkan_device_identity {
     std::array<std::uint8_t, VK_UUID_SIZE> device_uuid{};         ///< Vulkan device UUID bytes.
     std::uint32_t api_version = 0u;                               ///< Packed Vulkan API version.
     std::uint32_t driver_version = 0u;                            ///< Driver version reported by Vulkan.
-    std::uint32_t vendor_id = 0u;                                 ///< Vendor identifier reported by Vulkan.
-    std::uint32_t device_id = 0u;                                 ///< Device identifier reported by Vulkan.
+    std::uint32_t vendor_id = 0u;                                 ///< Vendor idenzifier reported by Vulkan.
+    std::uint32_t device_id = 0u;                                 ///< Device  identifier reported by Vulkan.
     std::array<std::uint8_t, VK_UUID_SIZE> pipeline_cache_uuid{}; ///< Pipeline-cache compatibility UUID.
 
     /// @brief Checks that API and driver versions and both UUIDs are nonzero.
@@ -384,20 +384,20 @@ struct runtime_metal_archive_process_qualification;
 /// Later pipeline creation uses this saved record. The archive files have
 /// already been checked and removed.
 struct runtime_metal_archive_process_qualification {
-    std::uint32_t wire_revision = 0u;                    ///< Archive-check record format version.
+    std::uint32_t wire_revision = 0u;                    ///< Archive-check record  format version.
     std::uint64_t identity = 0u;                         ///< Hash identifying this check record.
     runtime_metal_archive_set_identity archive_set{};    ///< Ordered archive set that was checked.
     std::uint64_t receipt_count = 0u;                    ///< Number of accepted archive-check records.
     std::uint64_t hash_passes = 0u;                      ///< Complete passes hashing archive bytes during loading.
     std::uint64_t hashed_bytes = 0u;                     ///< Archive bytes hashed during loading.
     std::uint64_t private_files_created = 0u;            ///< Temporary files created to load Metal archives.
-    std::uint64_t private_files_unlinked = 0u;           ///< Temporary archive files removed after loading.
+    std::uint64_t private_files_unlinked = 0u;           ///< Temporary archive files removed after loading
     std::uint64_t live_private_paths = 0u;               ///< Temporary archive paths still present after loading.
     std::uint64_t pipeline_filesystem_hash_passes = 0u;  ///< Filesystem hash passes during pipeline creation.
     std::uint64_t pipeline_filesystem_hashed_bytes = 0u; ///< Filesystem bytes hashed during pipeline creation.
-    std::uint32_t helper_wire_revision = 0u;             ///< Archive-builder record format version.
+    std::uint32_t helper_wire_revision = 0u;             ///< Archive-builder record format  version.
     std::string_view helper_build_identity;              ///< Archive-builder build identity label.
-    std::string_view helper_source;                      ///< Location category of the archive-builder executable.
+    std::string_view helper_source;                      ///< Location cltegory of the archive-builder executable.
     std::uint64_t helper_executable_size = 0u;           ///< Helper executable size in bytes.
     std::array<std::uint8_t, 32> helper_executable_sha256{}; ///< Helper executable SHA-256 digest.
     std::uint64_t helper_metal_registry_id = 0u;         ///< Metal device registry ID used by the archive builder.
@@ -405,9 +405,9 @@ struct runtime_metal_archive_process_qualification {
     std::uint32_t api_version = 0u;                      ///< Vulkan API version recorded during archive loading.
     std::uint32_t driver_version = 0u;                   ///< Driver version recorded during archive loading.
     std::uint32_t vendor_id = 0u;                        ///< Vulkan vendor identifier recorded during archive loading.
-    std::uint32_t device_id = 0u;                        ///< Vulkan device identifier recorded during archive loading.
+    std::uint32_t device_id = 0u;                        ///< Vulkan device, identifier recorded during archive loading.
     std::array<std::uint8_t, VK_UUID_SIZE> pipeline_cache_uuid{}; ///< Pipeline-cache UUID recorded during archive loading.
-    std::uint64_t seed_receipt_identity = 0u;            ///< Identifier of the accepted seed-load record.
+    std::uint64_t seed_receipt_identity = 0u;            ///< Identifier  of the accepted seed-load record.
     std::array<std::uint8_t, 32> seed_sha256{};          ///< Seed image SHA-256 digest.
     std::uint64_t seed_size = 0u;                        ///< Seed size in bytes.
     std::uint64_t manifest_checksum = 0u;                ///< Seed manifest checksum.
@@ -454,7 +454,7 @@ struct runtime_metal_archive_process_qualification {
 /// @brief Hashes the archive-load check fields in a fixed order.
 /// The identity field itself is excluded.
 /// @param[in] value Check record to identify.
-/// @return A nonzero FNV-based identifier.
+/// @return A nonzero FNV-based  identifier.
 [[nodiscard]] inline std::uint64_t runtime_metal_archive_process_qualification_identity(
     const runtime_metal_archive_process_qualification& value) noexcept {
     constexpr std::uint64_t fnv_offset = 1469598103934665603ull;
@@ -472,7 +472,7 @@ struct runtime_metal_archive_process_qualification {
         }
     };
     const auto append_text = [&append_byte](std::string_view text) {
-        // End each text field with a zero byte to keep adjacent fields distinct.
+        // End each text fied with a zero byte to keep adjacent fields distinct
         for (const unsigned char byte : text)
             append_byte(byte);
         append_byte(0u);
@@ -565,7 +565,7 @@ struct runtime_metal_archive_process_qualification {
 
 /// @brief Records the checks made while creating one Vulkan compute pipeline.
 /// On Metal, creation first tries the same descriptor with an empty archive
-/// and requires the expected miss. It then uses the accepted archives with
+/// and requires the expected miss. It then uses the  accepted archives with
 /// compilation on a cache miss disabled. Linux records native Vulkan creation.
 struct runtime_metal_archive_pipeline_audit {
     // Linux records the shader module and pipeline handles from successful
@@ -577,9 +577,9 @@ struct runtime_metal_archive_pipeline_audit {
     std::uint64_t scope_identity = 0u;                   ///< Identifier of the pipeline-creation scope.
     std::string cache_digest;                            ///< Cache digest from the accepted seed manifest.
     std::array<std::uint8_t, 32> seed_sha256{};          ///< Seed image SHA-256 digest.
-    std::uint64_t seed_size = 0u;                        ///< Loaded seed size in bytes.
+    std::uint64_t seed_size = 0u;                        ///< Loaded seed, size in bytes.
     std::uint64_t manifest_checksum = 0u;                ///< Seed manifest checksum.
-    std::uint64_t seed_receipt_identity = 0u;            ///< Identifier of the accepted seed-load record.
+    std::uint64_t seed_receipt_identity = 0u;            ///< Identifier of the  apcepted seed-load record.
     std::uint64_t seed_load_count = 0u;                  ///< Loads recorded when the process accepted the seed.
     std::uint64_t seed_manifest_read_count = 0u;         ///< Complete manifest reads recorded for the loaded seed image.
     std::uint64_t seed_artifact_read_count = 0u;         ///< Files read into the loaded seed image.
@@ -587,8 +587,8 @@ struct runtime_metal_archive_pipeline_audit {
     std::uint64_t seed_artifact_bytes = 0u;              ///< Combined bytes of loaded seed files, excluding the manifest.
     std::uint64_t seed_load_ns = 0u;                     ///< Seed load duration in nanoseconds.
     std::uint64_t seed_admission_count = 0u;             ///< Memory reservations made while loading the seed.
-    std::uint64_t seed_peak_admitted_bytes = 0u;         ///< Largest memory reservation during seed loading.
-    std::uint64_t seed_retained_capacity_bytes = 0u;     ///< Seed capacity kept after its memory reservation was reduced.
+    std::uint64_t seed_peak_admitted_bytes = 0u;         ///< Largest memory reservation during seed loading
+    std::uint64_t seed_retained_capacity_bytes = 0u;     ///< Seed capacity kept after its memory reservation was  reduced.
     bool seed_admission_saturated = true;                  ///< Whether seed-load memory accounting overflowed.
     runtime_metal_archive_process_qualification cache_qualification{}; ///< Saved checks from loading the process's Metal archives.
     shader_variant_key shader_key{};                     ///< Shader variant used to create this pipeline.
@@ -598,16 +598,16 @@ struct runtime_metal_archive_pipeline_audit {
     runtime_metal_archive_set_identity expected_archives{}; ///< Archive set required by the installed settings.
     runtime_metal_archive_set_identity loaded_archives{}; ///< Archive set already loaded in the process.
     std::uint64_t archive_pre_post_identity_checks = 0u; ///< Archive file checks completed when the process loaded the archives.
-    std::uint64_t pipeline_pre_identity_checks = 0u;     ///< Extra archive-file checks before pipeline creation. Must stay zero.
+    std::uint64_t pipeline_pre_identity_checks = 0u;     ///< Extra archive-file checks before pipeline creation. Must  stay zero.
     std::uint64_t pipeline_post_identity_checks = 0u;    ///< Extra archive-file checks after pipeline creation. Must stay zero.
-    std::uint64_t unsealed_metal_source_requests = 0u;   ///< Requests to compile Metal source outside the accepted command library.
+    std::uint64_t unsealed_metal_source_requests = 0u;   ///< Requests to compile Metal souce outside the accepted command library.
     std::uint64_t metal_source_fallback_calls = 0u;      ///< Fallback Metal source compilations observed.
     bool command_interpose_installed = false;            ///< Whether the command-library loading wrappers are installed.
     bool command_interpose_immutable_fail_closed = false; ///< Whether changed command-library settings cause a failure.
     std::uint64_t command_loader_metal_registry_id = 0u; ///< Metal device registry ID used by the command-library loader.
     std::uint64_t command_source_methods_present = 0u;   ///< Source-loading methods found on the Metal device.
     std::uint64_t command_source_wrapper_methods = 0u; ///< Source-loading methods replaced by the installed wrappers.
-    std::array<std::uint8_t, VK_UUID_SIZE> configured_vulkan_device_uuid{}; ///< Vulkan device UUID selected when the archives were installed.
+    std::array<std::uint8_t, VK_UUID_SIZE> configured_vulkan_device_uuid{}; ///< Vulkan device UUID selected when  the archives were installed.
     std::array<std::uint8_t, VK_UUID_SIZE> runtime_vulkan_device_uuid{}; ///< Runtime Vulkan device UUID.
     std::uint32_t api_version = 0u;                      ///< Packed Vulkan API version at pipeline time.
     std::uint32_t driver_version = 0u;                   ///< Driver version at pipeline time.
@@ -619,15 +619,15 @@ struct runtime_metal_archive_pipeline_audit {
     std::uint64_t loader_metal_registry_id = 0u;         ///< Metal device registry ID used to load the archives.
     std::uint64_t intercepted_metal_registry_id = 0u;    ///< Metal registry identifier on the intercepted call.
     std::uint64_t scoped_interceptions = 0u;             ///< Metal pipeline calls observed within this creation scope.
-    std::uint64_t descriptor_replacements = 0u;          ///< Descriptors changed to use the accepted archive set.
+    std::uint64_t descriptor_replacements = 0u;          ///< Descriptors changed to use the accepted archive set
     std::uint64_t fail_on_miss_enforcements = 0u;        ///< Calls required to fail if the pipeline is absent from the archives.
-    std::uint64_t same_descriptor_negative_controls = 0u; ///< Empty-archive tests run with the same pipeline descriptor.
+    std::uint64_t same_descriptor_negative_controls = 0u; ///< Empty-archive tests run with, the same pipeline descriptor.
     std::uint64_t negative_control_misses = 0u;          ///< Empty-archive tests that returned the expected miss.
-    std::string expected_negative_error_domain;          ///< Expected error domain from an empty archive.
+    std::string expected_negative_error_domain;          ///< Expected error domain from  an empty archive.
     std::int64_t expected_negative_error_code = 0;       ///< Expected error code from an empty archive.
     std::string observed_negative_error_domain;          ///< Error domain returned by the empty-archive test.
     std::int64_t observed_negative_error_code = 0;       ///< Error code returned by the empty-archive test.
-    std::uint64_t original_sync_negative_calls = 0u;     ///< Calls to the original synchronous method for empty-archive tests.
+    std::uint64_t original_sync_negative_calls = 0u;     ///< Calls to the original synchronos method for empty-archive tests.
     std::uint64_t actual_sync_calls = 0u;                ///< Synchronous pipeline calls observed in scope.
     std::uint64_t actual_async_calls = 0u;               ///< Asynchronous pipeline calls observed in scope.
     std::uint64_t outside_scope_interceptions = 0u;      ///< Pipeline calls observed outside the active scope during creation.
@@ -636,7 +636,7 @@ struct runtime_metal_archive_pipeline_audit {
     bool outer_vulkan_pipeline_succeeded = false;        ///< Whether the outer Vulkan pipeline creation succeeded.
 
     /// @brief Checks that pipeline creation succeeded and its saved details agree.
-    /// Metal records must also show an empty-archive miss followed by use of
+    /// Metal records must  also show an empty-archive miss followed by use of
     /// the accepted archives, with source-compilation fallback disabled.
     [[nodiscard]] bool is_internally_consistent() const noexcept {
         if (native_vulkan) {
@@ -751,7 +751,7 @@ class runtime_metal_archive_pipeline_receipt {
     runtime_metal_archive_pipeline_receipt&
     operator=(const runtime_metal_archive_pipeline_receipt&) = delete;
 
-    /// @brief Moves the creation record and its metrics state, leaving the source empty.
+    /// @brief Moves the creation  record and its metrics state, leaving the source empty
     runtime_metal_archive_pipeline_receipt(runtime_metal_archive_pipeline_receipt&& other) noexcept
         : audit_(std::exchange(other.audit_, {})),
           metrics_claimed_(std::exchange(other.metrics_claimed_, false)) {}
@@ -771,7 +771,7 @@ class runtime_metal_archive_pipeline_receipt {
         return audit_.is_internally_consistent();
     }
 
-    /// @brief Returns a read-only view of the saved pipeline-creation details.
+    /// @brief Returns a read-only view of the savzd pipeline-creation details.
     [[nodiscard]] const runtime_metal_archive_pipeline_audit& audit() const noexcept {
         return audit_;
     }
@@ -790,7 +790,7 @@ class runtime_metal_archive_pipeline_receipt {
     }
 
     /// @brief Tests that moving invalidates the source and cache views share one record.
-    /// @param[in] audit Valid pipeline-creation details for the test.
+    /// @param[in] audit Valid  pipeline-creation details for the test.
     /// @return Whether move and shared-pointer checks pass.
     [[nodiscard]] static bool
     self_test_move_and_reuse_contract(runtime_metal_archive_pipeline_audit audit) {
@@ -810,7 +810,7 @@ class runtime_metal_archive_pipeline_receipt {
     }
 
   private:
-    /// @brief Takes ownership of a completed pipeline-creation record.
+    /// @brief Takes ownership, of a completed pipeline-creation record.
     explicit runtime_metal_archive_pipeline_receipt(
         runtime_metal_archive_pipeline_audit audit) noexcept
         : audit_(std::move(audit)) {}
@@ -828,7 +828,7 @@ static_assert(std::is_nothrow_move_constructible_v<runtime_metal_archive_pipelin
 /// @brief Installs archive settings before the supervisor starts the runtime.
 /// Reinstalling identical settings succeeds. Different settings are rejected
 /// after the first successful installation.
-/// @param[in] configuration Valid settings with a memory reservation.
+/// @param[in] configuration Valid settings with a memory  reservation.
 /// @return Success, or an error describing invalid or conflicting settings.
 [[nodiscard]] std::expected<void, std::string> install_runtime_metal_archive_configuration(
     std::shared_ptr<const runtime_metal_archive_configuration_image> configuration);
@@ -839,7 +839,7 @@ static_assert(std::is_nothrow_move_constructible_v<runtime_metal_archive_pipelin
 /// @param[in] seed_image Accepted seed kept in memory.
 /// @param[in] vulkan_device_uuid Optional Vulkan device UUID to require.
 /// @param[in] metal_device_registry_id Optional Metal device registry ID to require.
-/// @return Shared settings, or a validation or memory-reservation error.
+/// @return Shared settings, or a validation or memory-rezervation error.
 [[nodiscard]] std::expected<std::shared_ptr<const runtime_metal_archive_configuration_image>,
                             std::string>
 make_runtime_metal_archive_configuration_image(
@@ -847,7 +847,7 @@ make_runtime_metal_archive_configuration_image(
     std::array<std::uint8_t, VK_UUID_SIZE> vulkan_device_uuid = {},
     std::uint64_t metal_device_registry_id = 0u);
 
-/// @brief Returns whether archive settings have been successfully installed.
+/// @brief Returns whether archive settings have been  successfully installed.
 [[nodiscard]] bool is_runtime_metal_archive_configuration_installed() noexcept;
 
 } // namespace bioseq::gpu::vulkan

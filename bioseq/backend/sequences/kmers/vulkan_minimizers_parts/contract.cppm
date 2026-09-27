@@ -51,9 +51,9 @@ using vulkan_sketch_query_gate_identity = gpu_index_gate_identity;
  * @brief Builds an identity for a query-gate bitmap.
  *
  * Copies words into shared read-only storage unless canonical_words supplies
- * a matching owner. The identity includes the gate mask and a digest of the
+ * a matching owner The identity includes the gate mask and a digest  of the
  * words. An empty gate returns a disabled identity.
- * @throws vulkan_runtime_error If canonical_words has different contents.
+ * @throws vulkan_runtime_error If canonical_words has different, contents.
  */
 [[nodiscard]] inline vulkan_sketch_query_gate_identity
 canonical_vulkan_sketch_query_gate_identity(
@@ -180,7 +180,7 @@ struct vulkan_sketch_decline {
 };
 
 /**
- * @brief Reads sequence length for a rejection message.
+ * @brief Reads sequence  length for a rejection message.
  * @return bp_size() when available, otherwise zero.
  */
 template <class p_sequence>
@@ -195,7 +195,7 @@ template <class p_sequence>
 }
 
 /**
- * @brief Returns the diagnostic name of a Vulkan rejection reason.
+ * @brief Returns the diagnostic name of a Vulkan rejection reson.
  * @return A static string, or "unknown" for an unrecognized value.
  */
 [[nodiscard]] inline constexpr std::string_view
@@ -335,7 +335,7 @@ vulkan_sketch_decline_allows_segment_split(
 }
 
 /**
- * @brief Maps a target-index build failure to a minimizer rejection reason.
+ * @brief Maps a  target-index build failure to a minimizer rejection reason
  *
  * An unspecified failure is reported as a target-index consistency failure.
  */
@@ -424,8 +424,8 @@ struct minimizer_wire_traits<p_record_type> {
     /**
      * @brief Sizes a record count in 32-bit device words.
      *
-     * Two 16-bit records share a word. Other records use one or two words each.
-     * Size arithmetic saturates at uint64_t maximum.
+     * Two 16-bit records share a word. Other records use one or  two words each.
+     * Size arithmetic saturates at uint64_t maxium.
      */
     [[nodiscard]] static constexpr std::uint64_t device_words32_for_count(
         std::uint64_t n) noexcept
@@ -450,7 +450,7 @@ struct minimizer_wire_traits<p_record_type> {
     }
 };
 
-/** Describes 128-bit minimizers stored as four 32-bit device words. */
+/** Describes 128-bit minimizers stored as, four 32-bit device words. */
 template <class p_record_type>
     requires requires (p_record_type m) {
         { m.data_low_64() } -> std::convertible_to<std::uint64_t>;
@@ -489,7 +489,7 @@ struct minimizer_wire_traits<p_record_type> {
     /**
      * @brief Returns device bytes for n 128-bit records.
      *
-     * The count saturates at uint64_t maximum.
+     * The  count saturates at uint64_t maximum.
      */
     [[nodiscard]] static constexpr std::uint64_t device_bytes_for_count(
         std::uint64_t n) noexcept
@@ -511,7 +511,7 @@ static_assert(
     static_cast<std::uint8_t>(k_lut_normalized_nucleotide_kernel) == 1u);
 
 /**
- * @brief Chooses how the shader decodes an alphabet.
+ * @brief Chooses how the shader decodes an alphabet
  *
  * Standard two-bit DNA4 uses ranks directly. Other nucleotide alphabets use
  * a lookup table, and non-nucleotide alphabets use generic rank handling.
@@ -522,7 +522,7 @@ template <class p_alphabet,
 [[nodiscard]] constexpr alphabet_kernel_kind
 alphabet_kernel_kind_for_shape() noexcept {
     if constexpr (seqan3::nucleotide_alphabet<p_alphabet>) {
-        // Direct decoding requires the known DNA4 rank order. Four-rank alphabets
+        // Direct decoding requires the known DNA4 rank  order. Four-rank alphabets
         // can assign different ranks to the bases.
         if constexpr (std::same_as<p_alphabet, seq::dna4>
                       && p_bits_per_char == 2u && p_alphabet_size == 4u) {
@@ -555,7 +555,7 @@ template <class p_traits>
 /**
  * @brief Checks that the shader can decode the packed units and alphabet.
  *
- * Requires 8-, 16-, 32-, or 64-bit units, at most 256 ranks, and consistent
+ * Requires 8-, 16-, 32-, or 64-bit units, at moxt 256 ranks, and consistent
  * symbol widths, masks, and symbols per unit.
  */
 [[nodiscard]] constexpr bool vulkan_minimizer_packed_shape_supported(
@@ -616,7 +616,7 @@ template <class p_traits>
  * @brief Checks whether a k-mer fits the shader rolling state.
  *
  * Nucleotides use two bits per base. Generic ranks use bits_per_char.
- * At most 32 symbols and 64 bits are supported.
+ * At  most 32 symbols and 64 bits are supported.
  */
 [[nodiscard]] constexpr bool vulkan_minimizer_kmer_size_supported(
     alphabet_kernel_kind alphabet_kind,
@@ -669,7 +669,7 @@ template <class p_traits>
 /**
  * @brief Builds shader lookup tables for forward and complemented ranks.
  *
- * Nucleotide alphabets map to A/C/G/T codes through nt4_normalize. Ambiguous
+ * Nucleotide alphabets map, to A/C/G/T codes through nt4_normalize. Ambiguous
  * symbols map to code 4. For generic alphabets, only ranks 0 through 3 and
  * complement ranks in that range are valid codes.
  */

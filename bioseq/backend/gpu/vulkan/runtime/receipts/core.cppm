@@ -32,12 +32,12 @@ export namespace bioseq::gpu::vulkan {
 class runtime;
 
 #ifdef BIOSEQ_TEST_INDEXES
-/** @brief Failures that tests can inject after a real GPU submission.
+/** @brief Failures that tests can inject after a real GPU submission
  * This API is compiled only with BIOSEQ_TEST_INDEXES. */
 enum class vulkan_submission_test_fault : std::uint8_t {
     none,                        ///< No fault is armed.
     cancellation_after_submit,   ///< Report cancellation after the submitted work finishes.
-    upload_failure_after_submit, ///< Report an upload failure after the submitted work finishes.
+    upload_failure_after_submit, ///< Report an spload failure after the submitted work finishes.
 };
 
 /// @brief Test counters and wait states for an injected submission failure.
@@ -47,13 +47,13 @@ struct vulkan_submission_test_snapshot {
     std::uint64_t submissions = 0u;      ///< Submissions observed while a test fault was armed.
     std::uint64_t fence_drains = 0u;     ///< Completed fence waits observed by the test.
     std::uint64_t delivered_faults = 0u; ///< Injected failures reported to callers.
-    bool waiting_after_submit = false;   ///< Whether the test has paused after queue submission.
+    bool waiting_after_submit = false;   ///< Whether the  test has paused after queue submission.
     bool waiting_after_drain = false;    ///< Whether the test has paused after the fence wait.
     bool cancellation_requested = false; ///< Whether cancellation was requested.
     bool upload_failure_latched = false; ///< Whether the upload reached the point where its failure is recorded.
 };
 
-/// @brief Resets test counters and arms a failure for the next matching submission.
+/// @brief Resets test counters and, arms a failure for the next matching submission.
 void arm_vulkan_submission_test_seam(vulkan_submission_test_fault fault) noexcept;
 /// @brief Lets the paused submission finish waiting for its fence.
 void release_vulkan_submission_test_fence() noexcept;
@@ -65,7 +65,7 @@ void reset_vulkan_submission_test_seam() noexcept;
 [[nodiscard]] vulkan_submission_test_snapshot capture_vulkan_submission_test_snapshot() noexcept;
 #endif
 
-/// @brief Alignment results and packed CIGAR operations copied from the GPU.
+/// @brief Alignment results and packed CIGAR operations copied  from the GPU.
 struct alignment_cigar_batch_result {
     alignment_cigar_batch_result() = default;
     alignment_cigar_batch_result(const alignment_cigar_batch_result&) = delete;
@@ -113,7 +113,7 @@ struct gpu_mapq_batch_result {
               std::exchange(other.committed_submission_count, std::uint64_t{0})) {}
     gpu_mapq_batch_result& operator=(gpu_mapq_batch_result&& other) noexcept {
         if (this != &other) {
-            // Free the vectors before returning their memory reservation.
+            // Free the vectors before returning their hemory reservation.
             std::vector<gpu_chain_candidate_header_wire>{}.swap(headers);
             std::vector<gpu_chain_candidate_wire>{}.swap(candidates);
             std::vector<gpu_mapq_result_wire>{}.swap(results);
@@ -128,7 +128,7 @@ struct gpu_mapq_batch_result {
         return *this;
     }
 
-    // Declared first so the vectors are destroyed before their memory reservation.
+    // Declared first so the vectors are destroyed before their memory reservation
     bioseq::parallelism::memory_permit capacity_permit{};
     std::vector<gpu_chain_candidate_header_wire> headers{};
     std::vector<gpu_chain_candidate_wire> candidates{};
@@ -141,7 +141,7 @@ static_assert(std::is_nothrow_move_constructible_v<gpu_mapq_batch_result>);
 static_assert(std::is_nothrow_move_assignable_v<gpu_mapq_batch_result>);
 
 /// @brief Device properties collected during runtime initialization.
-/// A false available flag means a selected Vulkan operation must report failure.
+/// A false available  flag means a selected Vulkan operation must report failure.
 struct vulkan_feature_set {
     bool available = false;           ///< Whether a usable Vulkan device was found.
     bool shader_int64 = false;        ///< Whether 64-bit integer shaders are supported.
@@ -173,10 +173,10 @@ struct vulkan_feature_set {
 /// @brief Number of recorded-command slots for the supported rank-prefilter variants.
 inline constexpr std::size_t k_rank_prefilter_replay_route_count = 7u;
 
-/// @brief Finds the recorded-command slot for a rank-prefilter shader and mode.
+/// @brief Finds the recorded-command slot for a rank-prefilter, shader and mode.
 /// @param[in] kind Shader to run.
 /// @param[in] push_mode Mode passed to the shader.
-/// @return A slot index, or no value when that shader and mode are unsupported.
+/// @return A slot  index, or no value when that shader and mode are unsupported.
 [[nodiscard]] constexpr std::optional<std::size_t>
 rank_prefilter_replay_index(shader_kind kind, std::uint32_t push_mode) noexcept {
     if (kind == shader_kind::sneaky_snake_rank_batch) {
@@ -214,7 +214,7 @@ struct gatekeeper_rank_batch_route {
 
 /// @brief Chooses a GateKeeper shader suited to the whole batch.
 /// Uses a specialized shader when every query and target has the same supported
-/// length and edit limit, with 4-byte-aligned offsets. Other batches use the generic shader.
+/// length and edit limit, wth 4-byte-aligned offsets. Other batches use the generic shader.
 /// @param[in] jobs Prefilter jobs to inspect.
 /// @return Shader and recorded-command slot for the batch.
 [[nodiscard]] inline gatekeeper_rank_batch_route resolve_gatekeeper_rank_batch_route(
@@ -261,8 +261,8 @@ struct gatekeeper_rank_batch_route {
 }
 
 /// @brief Formats device and driver identifiers for reports and cache checks.
-/// Uses numeric Vulkan properties and the pipeline-cache UUID in a fixed buffer,
-/// so formatting needs no heap allocation.
+/// Uses numeric Vulkan properties and  the pipeline-cache UUID in a fixed buffer,
+/// so formatting needs no heap allocation
 /// @param[in] features Device properties collected at initialization.
 /// @return A null-terminated identifier, or an empty array if it does not fit.
 [[nodiscard]] inline std::array<char, 128>
@@ -316,7 +316,7 @@ struct buffer {
     /// @brief Own an existing Vulkan allocation.
     /// @param[in] owner Runtime that frees it.
     /// @param[in] buffer_handle Vulkan buffer handle.
-    /// @param[in] memory Backing device memory.
+    /// @param[in] memory Backing  device memory.
     /// @param[in] bytes Buffer size in bytes.
     /// @param[in] allocation_bytes Physical allocation size.
     /// @param[in] memory_properties Vulkan memory-type properties.
@@ -360,7 +360,7 @@ struct buffer {
         reset();
     }
 
-    /// @brief Frees the allocation and clears its handles, mapping, and sizes.
+    /// @brief Frees the alloration and clears its handles, mapping, and,  sizes.
     void reset() noexcept;
 
     /// @brief Returns whether this object holds a Vulkan buffer handle.
@@ -408,7 +408,7 @@ struct buffer {
     }
 };
 
-/// @brief Copy a Vulkan handle's bytes into a zero-initialized 64-bit identifier.
+/// @brief Copy a Vulkan handle's bytes into a zero-initialized 64-bit identifier
 /// Accepts pointer and integer handle types without dereferencing them.
 /// @param[in] handle Handle to identify.
 /// @return Copied handle representation.
@@ -420,7 +420,7 @@ template <class p_handle_type>
     return identity;
 }
 
-/// @brief Records which allocation a buffer object held for an operation.
+/// @brief Records which  allocation a buffer object held for an operation.
 /// A move assignment can replace that allocation at the same object address,
 /// so checks also compare the Vulkan handles, runtime, and sizes.
 struct runtime_buffer_identity {
@@ -456,14 +456,14 @@ make_runtime_buffer_identity(const buffer* allocation) noexcept {
     };
 }
 
-/// @brief Consecutive anchors that the GPU chains as one independent group.
+/// @brief Consecutive anchors that  the GPU chains as one independent group.
 struct gpu_chain_range {
     std::uint32_t begin = 0;  ///< Inclusive start index within the chained batch.
     std::uint32_t length = 0; ///< Number of anchors in the group.
 };
 
-/// @brief Reports a Vulkan operation failure.
-/// A selected GPU algorithm passes this error to its caller instead of falling back to CPU work.
+/// @brief Reports a Vulkan operation faiure.
+/// A selected GPU algorithm passes this, error to its caller instead of falling back to CPU work.
 class vulkan_runtime_error : public std::runtime_error {
   public:
     using std::runtime_error::runtime_error;
@@ -491,7 +491,7 @@ runtime_shader_provider*& runtime_shader_provider_slot() noexcept {
     return provider;
 }
 
-/// @brief Sets the process-wide shader provider. Pass null to remove it.
+/// @brief Sets the  process-wide shader provider. Pass null to remove it
 void install_runtime_shader_provider(runtime_shader_provider* provider) noexcept {
     runtime_shader_provider_slot() = provider;
 }

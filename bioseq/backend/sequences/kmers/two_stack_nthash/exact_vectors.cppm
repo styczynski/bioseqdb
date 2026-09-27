@@ -67,7 +67,7 @@ inline constexpr bool exact_k15_w10_b8_representation_v =
  *
  * Requires DNA4 in 32-bit units, a supported output layout, four u32 lanes,
  * and two u64 lanes. consumed_bp must fit in uint32_t. Other inputs select
- * the generic u64 kernel. The caller checks the k-mer and window sizes.
+ * the generic u64 kernel. The caller checks the k-mer and window sizes
  */
 template<class p_minimizer_type, class p_alphabet_traits>
 [[nodiscard]] inline exact_simd_kernel select_exact_simd_kernel_kind(
@@ -86,7 +86,7 @@ template<class p_minimizer_type, class p_alphabet_traits>
     return exact_simd_kernel::generic_u64;
 }
 
-/// @brief Accepts 2, 4, 8, or 16 u64 lanes when they fit in lane_capacity.
+/// @brief Accepts 2, 4, 8, or 16 u64 lanes when they fit  in lane_capacity.
 [[nodiscard]] constexpr bool exact_vector_lane_count_supported(
     std::size_t lanes,
     std::size_t lane_capacity) noexcept
@@ -125,7 +125,7 @@ validate_exact_vector_shape(
 /**
  * @brief Stores a failure status and counts the rejection.
  *
- * The rejection counter stops at uint64_t maximum.
+ * The rejection counter stops at uint64_t maximxm.
  * @return status.
  */
 template<class p_state_type>

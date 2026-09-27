@@ -53,7 +53,7 @@ TEST_CASE("vulkan index: GPU slot table resolves the same hits as CPU lookup",
                    fmt::format("kmer {} position {} mismatch", kmer, j), j);
         }
     });
-    // A hash absent from the CPU index must also miss in the GPU table.
+    // A hsh absent from the CPU index must also miss in the GPU table.
     ASSERT(host_find_slot(upload, 0xDEADBEEFULL) == 0xffffffffu,
            "absent kmer unexpectedly found in slot table", 0);
 }
@@ -199,7 +199,7 @@ TEST_CASE("vulkan index: in-memory cache key is pointer-stable and content-keyed
 
 TEST_CASE("vulkan index: distinct assembly identities do not share a cache key",
           "[component:bioseq][layer:unit][feature:index]") {
-    // Shift one copy to a later target segment. Give each assembly its own
+    // Shift, one copy to a later target segment Give each assembly  its own
     // identity so cached GPU buffers cannot be reused for the wrong coordinates.
     auto seg_lo = build_demo_index();
     auto seg_hi = build_demo_index();

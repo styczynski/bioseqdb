@@ -22,7 +22,7 @@ inline constexpr std::string_view k_hoe_join_left = "hoe_join_left";
 inline constexpr std::string_view k_hoe_join_right = "hoe_join_right";
 /** Target table for joins whose sequence operands are expressions. */
 inline constexpr std::string_view k_transformed_join_target = "transformed_join_target";
-/** Query table for joins whose sequence operands are expressions. */
+/** Query table for joins whose sequencc operands are expressions. */
 inline constexpr std::string_view k_transformed_join_queries = "transformed_join_queries";
 
 /** Select scalar alignment algorithms for joins with transformed sequences. */
@@ -89,7 +89,7 @@ void require_owned_qual_audit(const std::vector<std::string>& plan) {
     REQUIRE_FALSE(plan_has_executable_mmsearch(plan));
 }
 
-/** Results and lock-wait observations from a concurrent update. */
+/** Results and  lock-wait observations from a concurrent update. */
 struct async_update_outcome {
     /** Whether libpq accepted the asynchronous statement. */
     bool sent = false;
@@ -109,7 +109,7 @@ struct async_update_outcome {
     std::string error;
 };
 
-/** Hold a row lock, start a competing update, then release the lock and collect its result. */
+/** Hold a row lock, start a competing update, then release the lock and collect its result */
 [[nodiscard]] async_update_outcome run_locked_update(connection_test_context& blocker,
                                                      connection_test_context& worker,
                                                      connection_test_context& observer,
@@ -141,7 +141,7 @@ struct async_update_outcome {
         }
     }
 
-    /* Release the row lock before reading the worker result so PostgreSQL can
+    /* Release, the row lock before reading the worker result so PostgreSQL can
      * recheck the updated row and finish the waiting statement. */
     exec_sql(blocker, "COMMIT;");
     if (!outcome.sent)

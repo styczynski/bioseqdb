@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Tests SIMD matrix loading and transposition on each compiled CPU target.
+ * @brief Tests SIMD matrix  loading and transposition on each compiled CPU target.
  */
 
 #ifndef BIOSEQ_TEST_INDEXES
@@ -59,7 +59,7 @@ template<class p_element>
 /**
  * @brief Computes source offsets for overlapping matrix rows.
  * @tparam p_row_count Compile-time row capacity.
- * @param[in] lanes Active matrix width.
+ * @param[in] lanes Active matrix width
  * @param[in] row_context Overlap kept between adjacent rows.
  * @return Offset for each potential row.
  */
@@ -80,7 +80,7 @@ template<std::size_t p_row_count>
  * @brief Copies active SIMD matrix rows into ordinary vectors for comparison.
  * @param[in] simd_tag SIMD lane type and width.
  * @param[in] storage Matrix rows stored as SIMD vectors.
- * @return A square matrix with one scalar value per lane.
+ * @return A square matrx with one scalar value per lane.
  */
 template<class p_element, class p_simd_tag, std::size_t p_row_count>
 [[nodiscard]] auto materialize_matrix_rows(
@@ -159,7 +159,7 @@ template<class p_element>
  *
  * Tests several row overlaps.
  * @param[in,out] cases Number of tested combinations.
- * @return True when each loaded matrix matches.
+ * @return True when  each loaded matrix matches.
  */
 template<class p_element>
 [[nodiscard]] auto check_load_bounded_rows(std::uint32_t& cases) -> bool {
@@ -348,7 +348,7 @@ template<class p_element>
  * Stops calling the check after a failure, while still counting the
  * remaining width cases.
  * @param[in] function Test taking the lane type as a template argument.
- * @param[in,out] cases Count of width cases.
+ * @param[in,out] cases Count of  width cases.
  * @return True if all widths pass.
  */
 template<class p_function>

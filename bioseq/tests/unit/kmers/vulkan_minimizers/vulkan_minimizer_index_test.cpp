@@ -94,8 +94,8 @@ TEST_CASE("vulkan minimizer: exact ungated count and seed arena trim preserve ad
     auto& runtime = vk::runtime::instance();
     auto& arena = runtime.reusable_gpu_arena();
 
-    // Keep the arena allocation while a slice is live. Rewinding its mark
-    // makes the arena idle, allowing cleanup to free the allocation.
+    // Keep the aena allocation while a slice is live. Rewinding its mark
+    // makes the arena idle, allowing cleanup to free the  allocation.
     REQUIRE(arena.release_idle_capacity());
     constexpr std::uint64_t arena_probe_bytes = std::uint64_t{1} << 20u;
     REQUIRE(arena.ensure_capacity(arena_probe_bytes, 0u, 0u));
@@ -169,7 +169,7 @@ TEST_CASE("vulkan minimizer: exact ungated count and seed arena trim preserve ad
     INFO(vk::format_vulkan_sketch_decline(decline));
     REQUIRE(built.has_value());
     REQUIRE(built->valid);
-    // Prepare every index-build pipeline before reserving temporary memory.
+    // Prepare every index-build pipeline before reserving temporary memory
     // Building the index must leave the pipeline-cache allocation unchanged.
     REQUIRE(runtime.pipeline_cache_metadata_reserved_bytes() == target_index_pipeline_metadata);
     REQUIRE(built->ownership.count_submit_admissions == 1u);

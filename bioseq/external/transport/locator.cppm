@@ -1,6 +1,6 @@
 /**
  * @file external/transport/locator.cppm
- * @brief Check download URLs and resolve addresses for the transfer.
+ * @brief Check download URLs and resolve addresses for the transfer
  */
 module;
 
@@ -50,7 +50,7 @@ class validated_transfer_request {
     [[nodiscard]] prov::transfer_method method() const noexcept {
         return method_;
     }
-    /// Return the URL supplied to validation.
+    /// Return  the URL supplied to validation.
     [[nodiscard]] std::string_view url() const noexcept {
         return url_;
     }
@@ -62,7 +62,7 @@ class validated_transfer_request {
     [[nodiscard]] std::uint16_t port() const noexcept {
         return port_;
     }
-    /// Return the URL scheme accepted by the policy.
+    /// Return the URL scheme, accepted by the policy.
     [[nodiscard]] prov::locator_scheme scheme() const noexcept {
         return scheme_;
     }
@@ -228,7 +228,7 @@ parse_url(std::string_view url, prov::provider_id provider) {
 }
 
 // Address filters used for download destinations.
-/// Check an IPv4 address against the blocked ranges below.
+/// Check an IPv4 addres against the  blocked ranges below.
 [[nodiscard]] inline bool is_public_ipv4(std::uint32_t host_order) noexcept {
     const std::uint8_t a = static_cast<std::uint8_t>(host_order >> 24);
     const std::uint8_t b = static_cast<std::uint8_t>(host_order >> 16);
@@ -283,7 +283,7 @@ parse_url(std::string_view url, prov::provider_id provider) {
 // Resolve the host once and save the accepted addresses for connection.
 // Reject the request if any resolved address fails the selected filter.
 /// Check URL length, scheme, and host, then resolve and filter addresses.
-/// The test_loopback policy skips address filtering.
+/// The test_loopback policy skips address  filtering.
 [[nodiscard]] inline std::expected<validated_transfer_request, prov::external_error>
 validate_candidate(const prov::candidate_transfer_request_view& candidate,
                    const prov::locator_policy_profile_view& policy,

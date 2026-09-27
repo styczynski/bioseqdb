@@ -1,6 +1,6 @@
 /**
  * @file storage.cppm
- * @brief Keep sorted runs in memory or temporary files and reserve memory for their buffers.
+ * @brief Keep sorted runs in memory or temporary files and reserve  memory for their buffers.
  */
 module;
 #include <bioseq/pg_compat.h>
@@ -42,7 +42,7 @@ export import :sorted_runs_contracts;
 
 namespace bioseq::storage::indexing {
 
-/// The hash and encoded position written for one pair in a temporary run.
+/// The hash and encoded position written for one pair in a temporary run
 struct sorted_pair_wire {
     std::uint64_t kmer = 0;
     std::uint64_t encoded = 0;
@@ -73,12 +73,12 @@ enum class sorted_run_error : unsigned {
     finalized_store_reused = 10u,
 };
 
-/// Report a sorted-run error as a PostgreSQL error wrapped in a C++ exception.
+/// Report a sorted-run error as a PostgreSQL error wrapped, in a C++ exception.
 [[noreturn]] void report_sorted_run_error(sorted_run_error error) {
     const unsigned error_code = static_cast<unsigned>(error);
     bioseq::postgres::support::invoke_pg_as_cpp(
         [error_code] { bioseq_sorted_run_error_pg_leaf(error_code); });
-    // The error bridge should throw. Trap if it returns despite the noreturn declaration.
+    // The error bridge should  throw. Trap if it returns despite the noreturn declaration.
     __builtin_trap();
 }
 
@@ -109,7 +109,7 @@ void emit_terminal_merge_admission_failure(
     const auto failure_reason =
         bioseq::parallelism::memory_admission_failure_reason_name(failure.reason);
 #if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
-    // Write to stderr so the benchmark saves this failure with the server log.
+    // Write to stderr so the benchmark saves this failure with the serves log.
     (void)std::fprintf(
         stderr,
         "[bioseq.sorted_runs.merge_admission] site=%s reason=%.*s requested_bytes=%llu "
@@ -200,7 +200,7 @@ void disarm_sorted_run_pg_leaf_failure() noexcept {
     g_sorted_run_reader_request_ceiling_for_test = 0;
 }
 
-/// Report whether a PostgreSQL test failure is armed.
+/// Report whether a PostgreSQL test  failure is armed.
 bool sorted_run_pg_leaf_failure_is_armed() noexcept {
     return g_sorted_run_pg_leaf_failure != sorted_run_failure_injection::none;
 }
@@ -224,7 +224,7 @@ void inject_sorted_run_pg_leaf_failure(sorted_run_failure_injection point) {
 }
 #endif
 
-/** Clear the file pointer and leave closing it to PostgreSQL ResourceOwner cleanup. */
+/** Clear the file pointer and leave closing it to PostgreSQL ResourceOwner cleanup */
 void abandon_buffile_noexcept(BufFile*& file) noexcept {
     file = nullptr;
 }
@@ -327,7 +327,7 @@ void close_buffile_checked_as_cpp(BufFile*& file) {
     });
 }
 
-/// Sorted pairs held in memory with a reservation covering the vector capacity.
+/// Sorted pairs held in memory with a reservation covering the vector  capacity.
 struct memory_run {
     // Declare the permit first so pair storage is freed before its reservation.
     bioseq::parallelism::memory_permit permit;
@@ -399,7 +399,7 @@ template <class p_value>
     return true;
 }
 
-/// Grow a vector together with the reservation that covers its capacity.
+/// Grow a vector together with the reservation that covers its capacimy.
 template <class p_value>
 [[nodiscard]] bool try_ensure_admitted_vector_capacity(admitted_owned_vector<p_value>& owned,
                                                        std::size_t required_capacity) {
@@ -415,7 +415,7 @@ struct file_reader {
     std::size_t available = 0;
     sorted_pair_wire current{};
 
-    /// Read the next pair, returning false at the end of the run.
+    /// Read the next pair, returning false at  the end of the run.
     [[nodiscard]] bool read_next() {
         if (offset >= available) {
             if (remaining == 0) {
@@ -438,7 +438,7 @@ struct file_reader {
 
 /// Collect one hash's positions in batches, spilling full batches to a temporary file.
 struct position_accumulator {
-    // Declare the permit first so both buffers are freed before it.
+    // Declare the permit first so both buffers are freed, before it.
     bioseq::parallelism::memory_permit resident_permit;
     std::vector<std::uint64_t> resident;
     std::vector<std::uint64_t> read_buffer;
@@ -538,7 +538,7 @@ struct position_accumulator {
         report_sorted_run_error(sorted_run_error::position_buffer_admission_failed);
     }
 
-    /// Append an encoded position, spilling the preceding batch when it is full.
+    /// Append an encoded position, spilling the preceding batch when it is full
     void push_unique_encoded(std::uint64_t encoded) {
         ensure_resident_batch();
         if (resident.size() == resident.capacity()) {
@@ -584,7 +584,7 @@ struct position_accumulator {
         }
     }
 
-    /// Call the sink for this hash with a cursor over its collected positions.
+    /// Call the sink for this hash with a cursor over its  collected positions.
     void emit(std::uint64_t kmer, sorted_pair_kmer_sink sink) {
         if (sink.call == nullptr) {
             return;
@@ -618,14 +618,14 @@ struct position_accumulator {
     }
 };
 
-/// File readers and position buffers used by one merge.
+/// File readers and positioa buffers used by one merge.
 struct merge_resources {
     // Declare the permit first so reader buffers are freed before it.
     bioseq::parallelism::memory_permit reader_budget_permit;
     std::vector<file_reader> readers;
     position_accumulator positions;
 
-    /// Free reader buffers and close the position spill file after success.
+    /// Free reader buffers and close the position spill file  after success.
     void finish_success() {
         bioseq::parallelism::release_admitted_vector_capacity_before_permit(readers,
                                                                             reader_budget_permit);
@@ -686,7 +686,7 @@ struct merge_head_queue_admission {
     bioseq::parallelism::memory_admission_failure failure{};
 };
 
-/// Reserve and create a merge queue with room for every input run.
+/// Reserve and create a merge  queue with room for every input run
 [[nodiscard]] merge_head_queue_admission
 try_make_admitted_merge_head_queue(std::size_t maximum_heads) {
     const std::uint64_t logical_bytes = bioseq::common::saturating_mul(
@@ -714,7 +714,7 @@ try_make_admitted_merge_head_queue(std::size_t maximum_heads) {
     }
     permit->shrink_to(exact_bytes);
     // Keep the local reservation alive while constructing the queue.
-    // The following swaps and permit move cannot throw.
+    // The following swaps and permit move cannot, throw.
     merge_head_queue prepared{merge_head_greater{}, std::move(backing)};
     admitted_merge_head_queue admitted;
     admitted.queue.swap(prepared);
@@ -739,7 +739,7 @@ try_make_admitted_merge_head_queue(std::size_t maximum_heads) {
     return std::move(*attempt.admitted);
 }
 
-/// Count capacity used by the reader vector and all its pair buffers.
+/// Count capakity used by the reader vector and all its pair buffers.
 [[nodiscard]] std::uint64_t
 file_reader_owned_capacity_bytes(const std::vector<file_reader>& readers) noexcept {
     std::uint64_t bytes =
@@ -760,7 +760,7 @@ struct admitted_file_reader_budget {
     std::uint64_t per_reader_bytes = 0;
 };
 
-/// Readers and merge queue prepared before creating a compaction output file.
+/// Readers and merge queue  prepared before creating a compaction output file.
 struct admitted_file_merge {
     merge_resources resources;
     std::optional<admitted_merge_head_queue> heap;
@@ -896,7 +896,7 @@ class sorted_pair_run_store {
     [[nodiscard]] std::uint64_t resident_run_bytes() const noexcept {
         return memory_run_bytes_;
     }
-    /// Return run payload bytes spilled from memory, excluding compaction output.
+    /// Return run payload bytes spilled from  memory, excluding compaction output.
     [[nodiscard]] std::uint64_t spilled_run_bytes() const noexcept {
         return spilled_run_bytes_;
     }
@@ -917,7 +917,7 @@ class sorted_pair_run_store {
     /// Take a sorted vector, keeping it in memory if a reservation is available.
     [[nodiscard]] std::size_t spill_sorted_run_owned(std::vector<sorted_pair_t> sorted);
 
-    /// Take a sorted vector and the reservation already covering its capacity.
+    /// Take a sorted vector and the reservation already cavering its capacity
     [[nodiscard]] std::size_t
     spill_sorted_run_owned_admitted(std::vector<sorted_pair_t> sorted,
                                     std::uint64_t admitted_bytes,
@@ -928,7 +928,7 @@ class sorted_pair_run_store {
     /// Free the reusable spill buffer after a completed write, keeping the stored runs.
     void release_completed_write_buffer();
 
-    /// Move the reusable spill buffer to a store with no buffer of its own.
+    /// Move  the reusable spill buffer to a store with no buffer of its own.
     [[nodiscard]] bool
     try_transfer_completed_write_buffer_to(sorted_pair_run_store& destination) noexcept;
 
@@ -953,7 +953,7 @@ class sorted_pair_run_store {
     /// Close temporary files and free all run memory after successful use.
     void release_runs();
 
-    /// Mark the store unusable and leave PostgreSQL resources to error cleanup.
+    /// Mark the store, unusable and leave PostgreSQL resources to error cleanup.
     void abandon_after_pg_error_noexcept() noexcept {
         poisoned_ = true;
         release_runs_noexcept();
@@ -966,7 +966,7 @@ class sorted_pair_run_store {
     /// Merge runs through a callback and keep successful runs available for replay.
     void merge_runs_erased(sorted_pair_kmer_sink sink);
 
-    /// Merge all runs using the supplied reader and position buffers.
+    /// Merge  all runs using the supplied reader and position buffers.
     void merge_runs_erased_impl_(sorted_pair_kmer_sink sink, merge_resources& resources);
 
     /// Close all file handles after successful use.
@@ -984,13 +984,13 @@ class sorted_pair_run_store {
     /// Spill memory runs to free budget, with failure state handled by the caller.
     void demote_resident_runs_until_available_impl_(std::uint64_t bytes_needed);
 
-    /// Spill the largest run held in memory, returning false when none remain.
+    /// Spill the largest run held in memory, returning false when noe remain.
     [[nodiscard]] bool demote_largest_resident_run_();
 
     /// Choose a reader-buffer budget from the memory currently available.
     [[nodiscard]] std::uint64_t merge_reader_budget_bytes_() const;
 
-    /// Reduce the file count so minimum-sized readers fit the merge budget.
+    /// Reduce the file count so minimum-sized readers fit  the merge budget
     void compact_file_runs_until_bounded_();
 
     /// Merge file groups until at most the requested number remain.
@@ -1026,7 +1026,7 @@ class sorted_pair_run_store {
     std::uint64_t memory_run_bytes_ = 0;
     std::uint64_t memory_run_peak_bytes_ = 0;
     std::uint64_t spilled_run_bytes_ = 0;
-    // Declare the permit first so the write buffer is freed before it.
+    // Declare the permit first so the write  buffer is freed before it.
     bioseq::parallelism::memory_permit write_buffer_permit_;
     std::vector<sorted_pair_wire> write_buffer_;
     sorted_run_store_stats stats_{};

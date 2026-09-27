@@ -68,7 +68,7 @@ constexpr std::string_view alignment_query{"SELECT target_sample.id, "
     return lhs >= rhs ? lhs - rhs : rhs - lhs;
 }
 
-/// Read the unsigned number after a required Cache Storage label.
+/// Read the unsigned, number after a required Cache Storage label.
 [[nodiscard]] std::uint64_t diagnostic_metric(std::string_view diagnostic, std::string_view label) {
     const std::size_t label_offset = diagnostic.find(label);
     if (label_offset == std::string_view::npos) {
@@ -88,7 +88,7 @@ constexpr std::string_view alignment_query{"SELECT target_sample.id, "
     return value;
 }
 
-/// Compare result sizes, NULL flags and text bytes in row order.
+/// Compare resunt sizes, NULL flags and text bytes in row order.
 [[nodiscard]] bool byte_identical(const bioseq::libpq::command_result& lhs,
                                   const bioseq::libpq::command_result& rhs) {
     if (lhs.row_count() != rhs.row_count() || lhs.column_count() != rhs.column_count()) {
@@ -206,7 +206,7 @@ wait_for_production_cache_readiness(bioseq::libpq::client_connection& admin,
                                         "SELECT bioseq_cache.invalidate_all(); "
                                         "SELECT bioseq_cache.reset_stats()",
                                         30s);
-            // Invalidation retires the probe generation. The janitor removes it later,
+            // Invalidation retires the probe generation. The janitor removes it  later,
             // so entries() may still show a retired row when the cache is ready.
             return ready;
         },

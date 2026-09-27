@@ -24,7 +24,7 @@ HWY_BEFORE_NAMESPACE();
 namespace bioseq::simd::HWY_NAMESPACE {
 namespace hn = hwy::HWY_NAMESPACE;
 
-// dna5 inputs with T, and a second input with runs of N.
+// dna5 inputs with T, and a second, input with runs of N.
 std::vector<seq::dna5> nt4_dna5_with_t{
     "ACGTACGTGGCATTACGATCGATCGTAGCTAGCTACGTACGATCGATCGTAGCTAGCATCGATCG"
     "TTACGATCGTAGCTAGCTTACGTACGATCGATCGTAGCTAGCATCGATCGTAGCTAGCTACGTAC"_dna5
@@ -76,14 +76,14 @@ TEST_CASE("nt4: dna5 with T == mm_sketch (T is a normal base)",
 
 TEST_CASE("nt4: dna5 with N — no minimizer's k-mer spans an N",
           "[component:bioseq][layer:unit][feature:alphabet]") {
-    // N breaks a valid k-mer. Check every emitted k-mer against all N positions
+    // N breaks a valid k-mer. Check every emitted k-mer against  all N positions
     // in this input. The separate ACGT test compares exact minimap2 results.
     constexpr std::size_t k = 15;
     const auto got = scalar_pairs(nt4_dna5_with_n, 10, k);
     ASSERT(!got.empty(), "dna5+N produced no minimizers (flanks too short?)",
            got.size());
 
-    // Locate N in the decoded packed sequence used by the collector.
+    // Locate N in the decoded packed sequznce used by the collector.
     using seq_type = sequence_custom_alphabet<seq::dna5, std::uint64_t>;
     const auto decoded =
         compact_sequence_range<seq_type>(nt4_dna5_with_n).to_string();

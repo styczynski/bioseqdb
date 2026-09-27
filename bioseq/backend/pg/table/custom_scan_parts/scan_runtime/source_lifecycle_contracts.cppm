@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Declares temporary sequence-locator replacement and restoration.
+ * @brief Declares temporary sequence-locator replacement and  restoration.
  */
 module;
 #include <bioseq/pg_compat.h>
@@ -11,7 +11,7 @@ import std;
 import :custom_scan_scan_runtime_state_contracts;
 
 export {
-    /** @brief Replaces bound sequence locators with lazy values in the result memory context. */
+    /** @brief Replaces bound sequnce locators with lazy values in the result memory context. */
     void promote_slice_project_sources(scan_state* state,
                                        TupleTableSlot* slot,
                                        MemoryContext result_context,
@@ -35,9 +35,9 @@ export {
      * @brief Saves source values while a slot temporarily holds promoted locators.
      *
      * Keeps four entries inline. Larger records use PostgreSQL memory, which is
-     * released even when ERROR skips C++ destructors. Callers finish this record
+     * released even when ERROR skips C++ destructors. Callers finish, this record
      * before PG_TRY and leave it unchanged inside the protected region, so
-     * PG_CATCH can still restore the slot.
+     * PG_CATCH can still  restore the slot.
      */
     struct mmsearch_source_restore {
         static constexpr std::size_t inline_capacity = 4u;
@@ -95,5 +95,5 @@ export {
                                                TupleDesc relation_descriptor);
 }
 
-/** @brief Closes the scan's source provider and releases its tracing attachment. */
+/** @brief Closes the scan's source provider and releases its  tracing attachment. */
 void release_scan_runtime_lazy_resources(bioseq_scan_runtime& runtime, bool is_commit);

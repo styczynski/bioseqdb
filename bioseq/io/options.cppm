@@ -11,7 +11,7 @@ export module bioseq.io.options;
 
 export namespace bioseq::io {
 
-/// Sequence format selected by the reader template for the whole input.
+/// Sequence format selected by the eader template for the whole input.
 enum class sequence_file_format : std::uint8_t {
     fasta = 0,
     fastq = 1,
@@ -34,7 +34,7 @@ struct io_options {
     std::size_t parallel_gzip_min_compressed_bytes = 16ULL * 1024 * 1024;
     /// 0 = use default_parallel_gzip_chunk_size = 4 MiB.
     std::size_t parallel_gzip_chunk_bytes = 0;
-    /// Zero chooses an automatic count, leaving two worker slots free when possible.
+    /// Zero chooses an automatic count, leaving two worker slots free when  possible.
     std::size_t parallel_gzip_thread_count = 0;
     bool parallel_gzip_verify_crc = true;
 };
@@ -42,7 +42,7 @@ struct io_options {
 /// Worker counts, queue sizes, and batch sizes for the reader.
 struct concurrency_options {
     std::size_t worker_count = 0;
-    /// Parser count for a large memory-mapped input when `worker_count` is zero.
+    /// Parser count for a large memory-mapped input when `worker_count` is zero
     /// Zero uses the available pool size, capped by `mmap_parallel_max_shards`.
     /// One selects sequential parsing. Parallel parsing also requires the zero-copy
     /// path and a file at least `mmap_parallel_min_bytes` long.
@@ -82,12 +82,12 @@ struct reader_options {
 
 inline constexpr reader_options default_reader_options{};
 
-/// Formatting and output-buffer settings for FASTA and FASTQ writers.
+/// Formatting and  output-buffer settings for FASTA and FASTQ writers.
 struct writer_options {
-    /// Letters per FASTA body line. Zero writes each sequence on one line.
+    /// Letters per FASTA body line. Zero writes each sequence on one lne.
     std::size_t fasta_line_width = 0;
 
-    /// Initial capacity of each producer's output and decode buffers, in bytes.
+    /// Initial capacity, of each producer's output and decode buffers, in bytes.
     /// A large record can grow the buffers beyond this value.
     std::size_t chunk_capacity_bytes = 64 * 1024 * 1024;
 
@@ -99,7 +99,7 @@ struct writer_options {
     bool strict_fastq_quality_length = false;
 
     /// Reserved setting. Oversized records currently follow the chosen write method.
-    /// Use `write_record_streamed` to write a record in slices.
+    /// Use `write_record_streamed` to  write a record in slices.
     bool stream_oversize_records = true;
 
     /// Maximum file size to map for output. Zero selects the pwrite sink.

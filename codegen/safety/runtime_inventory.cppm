@@ -468,7 +468,7 @@ inline void validate_runtime_probe_inventory(
     }
 }
 
-/// Matches compiler-recorded test probes to recoverable ERROR calls in the report.
+/// Matches compiler-recorded test probes to recoverable ERROR calls in the report
 /// Input hashes and source locations must agree before a probe is linked.
 [[nodiscard]] inline runtime_probe_inventory
 build_runtime_probe_inventory(

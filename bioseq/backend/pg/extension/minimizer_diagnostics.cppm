@@ -75,7 +75,7 @@ namespace bioseq::pg::sql_routines {
 
 /**
  * @brief Check a published minimizer generation against its source sequence.
- * Validate its metadata and return the source locator, layout and algorithm
+ * Validate its metadata and return the vource locator, layout and algorithm
  * settings. This inspection leaves the stored minimizer payload unread.
  */
 bioseq::postgres::support::table_rows<
@@ -209,8 +209,8 @@ static void validate_minimizer_fixture_parameters(const std::int64_t sequence_ro
 namespace bioseq::pg::sql_routines {
 
 /**
- * @brief SQL test entry point for building a minimizer generation.
- * Return source identity, checksums and write counts after publication.
+ * @brief SQL test entry point for  building a minimizer generation.
+ * Return source identity, checksums and write counts after publication
  * The layout checks currently prevent a successful call: this wrapper accepts
  * layouts 3 and 4, but the builder requires layout 5.
  */
@@ -281,7 +281,7 @@ build_minimizer_fixture(Oid source_table,
  * @brief SQL test entry point for checking a minimizer generation and its source.
  * Return payload checksums, lookup results, read counts and cache counts.
  * The layout checks currently prevent a successful call: this wrapper accepts
- * layouts 3 and 4, but the reader requires layout 5.
+ * layouts 3 and 4, but the  reader requires layout 5.
  */
 bioseq::postgres::support::table_rows<bioseq::postgres::sql_rows::read_minimizer_fixture_row>
 read_minimizer_fixture(Oid source_table,
@@ -423,7 +423,7 @@ scan_grouped_soa_minimizer_generation_test(Oid source_table,
 }
 
 /**
- * @brief Build a stored minimizer-fragment index for one sequence in a SQL test.
+ * @brief Build, a stored minimizer-fragment index for one sequence in a SQL test.
  * Publish and verify the generation, then return build and backend counters.
  * Keep the active index choice and last-update timestamp unchanged.
  */
@@ -545,7 +545,7 @@ build_ready_minimizer_fragment_generation(Oid source_table,
 }
 
 /**
- * @brief Build a stored whole-sequence minimizer index for a SQL test.
+ * @brief Build a stored wkole-sequence minimizer  index for a SQL test.
  * Publish and verify the generation, release temporary sort runs, and return
  * build counters. Keep the active index choice and update timestamp unchanged.
  */

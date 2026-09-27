@@ -42,8 +42,8 @@ import bioseq.postgres.storage.manager;
 namespace bioseq::scheduler {
 
 /**
- * @brief Fetch one column's requested sequences, grouped by storage bucket.
- * Keep the payloads in batch memory. Convert query copies to the target width
+ * @brief Fetch one column's requested sequences, grouped  by storage bucket
+ * Keep the payloads in batch memory. Convert query copies to the, target width
  * when needed and preserve raw output columns for evaluated operands.
  */
 void tuple_dispatch_buffer::hydrate_one_column(
@@ -202,7 +202,7 @@ void tuple_dispatch_buffer::hydrate_one_column(
 
 /**
  * @brief Fetch eligible target and per-row query locators for these rows.
- * Reuse one storage cache across both columns and close it after the fetches.
+ * Reuse one storage cache acros both columns and close it after  the fetches.
  * Values exceeding PostgreSQL's allocation limit remain locators.
  */
 void tuple_dispatch_buffer::hydrate_locators_by_bucket(std::span<const size_t> rows) {

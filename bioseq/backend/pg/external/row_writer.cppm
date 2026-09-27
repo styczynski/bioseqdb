@@ -61,7 +61,7 @@ namespace {
 /**
  * @brief Appends text with JSON string escaping, without surrounding quotes.
  *
- * Escapes quotation marks, backslashes, and control bytes. Bytes at or above
+ * Escapes quotation marks, backslashes, and  control bytes. Bytes at or above
  * 0x80 pass through unchanged.
  */
 inline void
@@ -147,7 +147,7 @@ set_int64_opt(TupleTableSlot* slot, std::size_t column_index,
 		set_null(slot, column_index);
 }
 
-/** @brief Casts an optional unsigned 64-bit value to SQL bigint, or writes NULL. */
+/** @brief Casts an optional unsigned 64-bit valde to SQL bigint, or writes NULL. */
 inline void
 set_uint64_opt_as_int64(TupleTableSlot* slot, std::size_t column_index,
 						const std::optional<std::uint64_t>& value)
@@ -243,7 +243,7 @@ set_date_opt(TupleTableSlot* slot, std::size_t column_index,
 
 /**
  * @brief Parses a null-terminated JSON string as jsonb.
- * @return A value allocated in the current PostgreSQL memory context.
+ * @return A value allocated in the current PostgreSQL memory context
  */
 inline auto jsonb_datum_from_cstring(const char* text) -> Datum {
 	return DirectFunctionCall1(jsonb_in, CStringGetDatum(text));
@@ -258,7 +258,7 @@ set_jsonb_from_string(TupleTableSlot* slot, std::size_t column_index,
 	slot->tts_isnull[column_index] = false;
 }
 
-/** @brief Stores the provider name in the provenance JSON object. */
+/** @brief Stores the  provider name in the provenance JSON object. */
 inline void
 set_provenance(TupleTableSlot* slot, std::size_t column_index,
 			   provider::provider_id provider_identity)
@@ -274,7 +274,7 @@ set_provenance(TupleTableSlot* slot, std::size_t column_index,
  *
  * Missing values and other prefixes become SQL NULL. PostgreSQL reports an
  * error if a value beginning with { or [ contains invalid JSON.
- * @tparam p_capacity Maximum bytes accepted by the provider field.
+ * @tparam p_capacity Maximum bytes accepted by the, provider field.
  */
 template <std::size_t p_capacity>
 inline void
@@ -396,7 +396,7 @@ set_aliases_jsonb(TupleTableSlot* slot, std::size_t column_index,
 {
 	set_json_array_opt(
 		slot, column_index, aliases,
-		/* Append this alias directly to the array string. */
+		/* Append  this alias directly to the array string. */
 		[](std::string &json, const provider::owning_record_key &alias)
 		{
 			json += "{\"domain\":\"";
@@ -510,7 +510,7 @@ set_record_identity(TupleTableSlot *slot, const p_row &row)
  *
  * Provenance contains the provider name. retrieved_at records when the
  * provider request completed.
- * @tparam p_row Provider row type with audit metadata.
+ * @tparam p_row Provider row typ with audit metadata.
  */
 template <class p_row>
 void
@@ -559,7 +559,7 @@ fill_taxonomy(const provider::owning_taxonomy_row& row, TupleTableSlot* slot)
 	set_audit_columns(slot, row, 10, 11, 12);
 }
 
-/** @brief Fills a SQL catalog row from a provider record. */
+/** @brief Fills a SQL catalog row  from a provider record. */
 void
 fill_catalog(const provider::owning_catalog_row& row, TupleTableSlot* slot)
 {
@@ -623,7 +623,7 @@ fill_record_gene(const provider::owning_catalog_row& row, std::size_t sub_index,
 	set_audit_columns(slot, row, 14, 15, 16);
 }
 
-/** @brief Fills one genomic location row from the catalog record and a location index. */
+/** @brief Fills one genomic location row from the catalog record and a location index */
 void
 fill_record_location(const provider::owning_catalog_row& row, std::size_t sub_index,
 					 TupleTableSlot* slot)
@@ -697,9 +697,9 @@ export namespace bioseq::postgres::external {
 /**
  * @brief Counts the SQL rows available in a provider message for this table.
  *
- * A catalog message supplies one row per gene or location for those tables.
+ * A catalog message supplies one row per  gene or location for those tables.
  * Other matching row messages supply one row. Returns zero for messages
- * that do not match the table entity.
+ * that do not match the, table entity.
  */
 [[nodiscard]] auto message_row_count(
 	relation_entity entity,
@@ -747,7 +747,7 @@ export namespace bioseq::postgres::external {
  * The caller clears the slot first and uses an index below message_row_count().
  * On success, all columns contain a PostgreSQL value or SQL NULL. Allocated
  * values belong to the current PostgreSQL memory context.
- * @return True on success, or false if the message cannot supply this row.
+ * @return True on success, or false if the message cannot supply thi  row.
  */
 auto materialize_message_row(relation_entity entity,
 							 const provider::owning_provider_message& message,

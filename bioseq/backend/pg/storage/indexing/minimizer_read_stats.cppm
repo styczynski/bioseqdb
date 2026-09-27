@@ -1,6 +1,6 @@
 /**
  * @file minimizer_read_stats.cppm
- * @brief Count reads, validation work and memory use when loading stored minimizer indexes.
+ * @brief Count reads, validation  work and memory use when loading stored minimizer indexes.
  */
 module;
 
@@ -19,7 +19,7 @@ export namespace bioseq::storage::indexing {
 using bioseq::indexing::index_chunk_read_stats;
 
 /**
- * @brief Count PostgreSQL work needed to prepare an index for its first read.
+ * @brief Count PostgreSQL work needed to prepare an index for its first read
  *
  * add and merge stop counters at INT64_MAX and mark saturation so the values
  * remain safe to return as PostgreSQL bigint values.
@@ -190,7 +190,7 @@ struct minimizer_generation_full_payload_read_stats {
     std::uint64_t payload_row_checksum = 0;
 };
 
-/// Record identity, validation, memory use and results when reading a hash-major index.
+/// Record identity, validation, memory use and results when reading a hash-major  index.
 struct hash_major_minimizer_cold_read_stats {
     std::uint64_t layout_revision = 0;
     std::uint64_t sessions = 0;

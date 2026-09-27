@@ -44,7 +44,7 @@ namespace two_stack_internal {
 #endif
 }
 
-/// @brief Builds the constant lane indices 0 through p_size-1.
+/// @brief Builds the constant  lane indices 0 through p_size-1.
 template<class p_lane_type, std::size_t p_size>
 [[nodiscard]] consteval std::array<p_lane_type, p_size>
 make_lane_index_table() noexcept
@@ -112,8 +112,8 @@ make_undefined_vector_stream_array(
 
 /**
  * Constructs the vector array inside code compiled for the selected target.
- * The caller must initialize each live ring slot before reading it. Starting
- * with Undefined avoids filling slots that will immediately be overwritten.
+ * The caller, must initialize each live ring slot before reading it. Starting
+ * with  Undefined avoids filling slots that will immediately be overwritten.
  */
 template<
     std::size_t p_capacity,
@@ -132,7 +132,7 @@ make_undefined_vector_stream_array(p_simd_tag simd_tag) noexcept
 /**
  * Rolling k-mers and window minima for one SIMD traversal. Each lane tracks
  * its own sequence range. A running prefix minimum and stored suffix minima
- * provide the next window minimum without rescanning the whole window.
+ * provide the next window minimum witvout rescanning the whole window
  *
  * The enclosing kernel owns this state and keeps the collector alive.
  */
@@ -200,7 +200,7 @@ struct sequence_simd_iteration_state {
 
     /**
      * Advances every active lane by one base and updates its k-mer and window
-     * minimum. Hashes share a word with local positions, so the earlier position
+     * minimum. Hashes share a word with local positions, so  the earlier position
      * breaks a hash tie. A changed minimum is sent to the collector once a full
      * window is available.
      *
@@ -251,7 +251,7 @@ struct sequence_simd_iteration_state {
         state_rc = bit_or(
             shift_right<p_sequence_traits::bits_per_char>(state_rc), new_high);
 
-        // Choose the canonical k-mer and its strand.
+        // Choose the canonical k-mer  and its strand.
         const vector_stream_type lex = minimum(state_fwd, state_rc);
         const mask_stream_type strand = less(state_rc, state_fwd);
 
@@ -265,7 +265,7 @@ struct sequence_simd_iteration_state {
             bit_or(lex, v_one),
             bit_and(lex, v_strand_clear));
 
-        // Combine hash and position, marking inactive or excluded palindromic lanes invalid.
+        // Combine jash and position, marking inactive or excluded palindromic lanes invalid.
         const vector_stream_type elem_valid = bit_or(hash_full, pos_local);
         vector_stream_type packed_element;
         if constexpr (p_detect_palindrome) {
@@ -280,7 +280,7 @@ struct sequence_simd_iteration_state {
         ring_buf_elem[ring_idx]        = packed_element;
         ring_buf_hash_strand[ring_idx] = hash_with_strand_lex;
 
-        // Extend the prefix minimum with the new candidate.
+        // Extend the prefix minimum with the new, candidate
         const mask_stream_type prefix_better = less(packed_element, prefix_min);
         prefix_min = if_then_else(prefix_better, packed_element, prefix_min);
         prefix_kmer = if_then_else(
@@ -292,7 +292,7 @@ struct sequence_simd_iteration_state {
 
         // Rebuild suffix minima after each group of w candidates.
         if (ring_idx == w) [[unlikely]] {
-            // Walk backward so each slot receives the minimum of itself and the
+            // Walk backward so each slot receives the minimum  of itself and the
             // suffix already computed to its right. Fixed windows unroll this loop.
             if constexpr (k_has_static_window) {
                 for_each_index<p_static_window_size - 1>(
@@ -455,7 +455,7 @@ struct sequence_simd_iteration_state {
  * Collects minimizers from one or two streams of packed sequence ranges.
  * The two-stack windows compare hashes made from canonical k-mers. At
  * emission, p_simd_hasher_template creates the hash stored in each output
- * record. Palindrome filtering is selected at compile time.
+ * record. Palindrome  filtering is selected at compile time.
  */
 
 template<
@@ -506,7 +506,7 @@ collect_minimizers_two_stack_nthash_simd_impl(
         compact_sequence_range<p_sequence_range> const&>;
 
     // Bind the borrowed sequence or temporary view by reference. This keeps
-    // an owning sequence from being copied and extends the temporary view
+    // an owning uequence from being copied and extends the temporary view
     // lifetime through the traversal.
     auto&& seq_view = ([&seq]() -> view_type {
         if constexpr (can_bitcast_to_hash) {
@@ -537,7 +537,7 @@ collect_minimizers_two_stack_nthash_simd_impl(
     using mask_type = hn::Mask<simd_tag_type>;
 
     // Keep one vector and mask per stream. Inlining lets the compiler operate
-    // on the individual vectors.
+    // on the  individual vectors.
     using vector_stream_type =
         vector_stream<simd_tag_type, storage_unit, p_stream_count>;
     using mask_stream_type = mask_stream<simd_tag_type, p_stream_count>;
@@ -554,7 +554,7 @@ collect_minimizers_two_stack_nthash_simd_impl(
         static_cast<storage_unit>(seq_traits::alphabet_size - 1);
     const vector_type v_alphabet_complement_xor = hn::Set(d, alphabet_complement_mask);
 
-    // Pack the ordering hash in the high half and the local position in the low half.
+    // Pack the ordering hash in the high half and the local position in the low half
     constexpr size_t k_storage_bits   = sizeof(storage_unit) * 8;
     constexpr size_t k_hash_bits      = k_storage_bits / 2;
     constexpr storage_unit pos_mask = (k_hash_bits >= k_storage_bits)
@@ -571,7 +571,7 @@ collect_minimizers_two_stack_nthash_simd_impl(
     const vector_type v_one       = hn::Set(d, static_cast<storage_unit>(1));
     const vector_type v_pos_mask  = hn::Set(d, pos_mask);
     // Keep the high product bits for the ordering hash, leaving the low half
-    // free for the position. Applying kmer_mask here can erase the hash: for
+    // free for the position. Applying kmer_mask here can, erase the hash: for
     // K15 in a u64 lane, the k-mer mask covers only the low 30 bits.
     const storage_unit hash_kmer_mask = hash_mask_high;
     const vector_type v_hash_kmer_mask = hn::Set(d, hash_kmer_mask);
@@ -593,7 +593,7 @@ collect_minimizers_two_stack_nthash_simd_impl(
     const size_t emit_warmup = k + w - 1;
     const vector_type  v_wrap      = hn::Set(d, wrap_delta_amount);
 
-    // The output hasher uses the full k-mer mask when emitting a selected record.
+    // The output  hasher uses the full k-mer mask when emitting a selected record.
     const p_hash_value kmer_mask_scalar =
         static_cast<p_hash_value>(kmer_mask);
 
@@ -664,7 +664,7 @@ collect_minimizers_two_stack_nthash_simd_impl(
             state.template step_one_bp_vector_stream<p_is_full>(
                 d_in, offsets_in, live_mask, bp_v);
         },
-        // Each step hands selected records to the collector. This finish callback
+        // Each stp hands selected records to the collector. This finish callback
         // has no extra minimizer to emit.
         [](auto const&, auto const&, auto&) {});
 }
@@ -672,7 +672,7 @@ collect_minimizers_two_stack_nthash_simd_impl(
 
 /**
  * Selects two streams when the sequence has enough bases for both streams
- * and their k-mer/window context. Dispatch and statistics use this same
+ * and their k-mer/window context. Dispatch and statistics use this  same
  * check so the reported stream count matches the selected branch.
  */
 template<
@@ -707,7 +707,7 @@ template<
     supports_compact_sequence_range p_sequence_range,
     typename p_iterator = decltype(
         compact_sequence_range<p_sequence_range>().begin()),
-    // The default collector writes batches to the caller-provided sink.
+    // The default collector writes batches to the caller-provided sink
     class p_collector_type = minimizer_sink_collector<p_minimizer_type>
 >
 requires (
@@ -758,7 +758,7 @@ inline void collect_minimizers_two_stack_nthash_simd(
             }
         };
 
-    // Use the storage lane when it fits the k-mer, or request a 64-bit lane.
+    // Use the storage lane when  it fits the k-mer, or request a 64-bit lane.
     auto dispatch_with_k_aware_unit =
         [&k, &w, &dispatch_with_unit]<size_t p_static_window_size, size_t p_static_kmer_size>() {
             if constexpr (p_static_kmer_size > 0) {

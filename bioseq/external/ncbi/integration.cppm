@@ -1,6 +1,6 @@
 /**
  * @file external/ncbi/integration.cppm
- * @brief Client name and live request checks for generated NCBI code.
+ * @brief Client name and live request checks for generated NCBI code
  */
 module;
 

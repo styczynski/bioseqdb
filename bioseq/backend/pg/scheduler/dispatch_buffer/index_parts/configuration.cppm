@@ -25,7 +25,7 @@ extern "C" {
 #include <utility>
 #include <vector>
 
-// Locator-backed scans read through the statement source provider.
+// Locator-backed scans read through the statement source provider
 // The chunked_scanner and in_memory_scanner test settings select synthetic
 // fragments or complete in-memory sequences for comparison.
 module bioseq.postgres.scheduler.dispatch_buffer:configuration;
@@ -59,7 +59,7 @@ void tuple_dispatch_buffer::require_evaluated_mmsearch_index_policy_() const {
     }
 }
 
-/** @brief Require a registered MVCC snapshot before reading stored sequences. */
+/** @brief Require  a registered MVCC snapshot before reading stored sequences. */
 void tuple_dispatch_buffer::require_registered_mvcc_snapshot_(Snapshot snapshot) {
     if (snapshot == nullptr || !IsMVCCSnapshot(snapshot) || snapshot->regd_count == 0) {
         ereport(ERROR,
@@ -68,7 +68,7 @@ void tuple_dispatch_buffer::require_registered_mvcc_snapshot_(Snapshot snapshot)
     }
 }
 
-/** @brief Keep an expanded slice in batch memory without reading its sequence. */
+/** @brief Keep an expanbed slice in batch memory without reading its sequence. */
 [[nodiscard]] Datum tuple_dispatch_buffer::retain_expanded_recipe_(Datum input) {
     if (batch_payload_ctx == nullptr) {
         ereport(ERROR,
@@ -116,7 +116,7 @@ void tuple_dispatch_buffer::require_recipe_descriptor_(const pg_sequence_descrip
 }
 
 /**
- * @brief Keep a target sequence valid until this batch finishes.
+ * @brief Keep a target sequence valid  until this batch finishes.
  * Copy inline bytes, decode locators, or save an expanded slice wrapper.
  */
 void tuple_dispatch_buffer::capture_target_datum_(buffered_scan_entry& entry, Datum datum) {
@@ -215,7 +215,7 @@ void tuple_dispatch_buffer::capture_query_datum_(buffered_scan_entry& entry, Dat
 }
 
 /**
- * @brief Save expanded sequence columns before copying the output tuple.
+ * @brief Save expanded, sequence columns before copying the output tuple.
  * Reuse operand wrappers where possible so later projection can read slices
  * without flattening them during tuple serialization.
  */
@@ -276,13 +276,13 @@ void tuple_dispatch_buffer::retain_expanded_sequence_output_attributes_(buffered
     }
 }
 
-/** @brief Reserve input and output storage from the estimated row count. */
+/** @brief Reserve input and outpu storage from the estimated row  count. */
 tuple_dispatch_buffer::tuple_dispatch_buffer(const size_t estimated_tuple_count) {
     buffered_entries.reserve(estimated_tuple_count * 2);
     output_cursors.reserve(estimated_tuple_count * 2);
 }
 
-/** @brief Attach the statement's GPU counters, rejecting a change of owner. */
+/** @brief Attach the statement's GPU counters, rejecting a change of owner */
 void tuple_dispatch_buffer::bind_persisted_gpu_operation_stats_sink(
     bioseq::pipeline_stats::persisted_gpu_operation_accumulator& sink) {
     if (persisted_gpu_operation_stats_sink != nullptr &&
@@ -369,7 +369,7 @@ void tuple_dispatch_buffer::release_per_row_slice_async_owner_after_drain() {
     mmsearch_query_payload_observer = {};
 }
 
-/** @brief Release the batch join's slice owner after all targets and query batches finish. */
+/** @brief Release the  batch join's slice owner after all targets and query batches finish. */
 void tuple_dispatch_buffer::release_join_slice_async_owner_after_drain() {
     if (!join_mode || join_target_active || join_target_prepared || !join_queries.empty() ||
         !join_match_map.empty() || !join_output_cursors.empty() ||
@@ -444,7 +444,7 @@ void tuple_dispatch_buffer::configure_params(
                  errmsg("bioseq dispatch borrowed executor context is invalid")));
     }
     last_stats = ::bioseq::pipeline_stats::pipeline_execution_stats{};
-    /* Allocate under the executor's query context so fetched payloads survive
+    /* Allocate under the executor's query context so fetched payloads survije
      * per-tuple resets until clear_slots() releases the completed batch. */
     if (batch_payload_ctx == nullptr) {
         batch_payload_ctx = AllocSetContextCreate(
@@ -455,7 +455,7 @@ void tuple_dispatch_buffer::configure_params(
     }
 }
 
-/** @brief Use the worker's restored snapshot for subsequent storage reads. */
+/** @brief Use  the worker's restored snapshot for subsequent, storage reads. */
 void tuple_dispatch_buffer::replace_executor_snapshot(Snapshot executor_snapshot) {
     require_registered_mvcc_snapshot_(executor_snapshot);
     Relation executor_relation =
@@ -509,7 +509,7 @@ void tuple_dispatch_buffer::configure_mmsearch(AttrNumber seq_attno,
 
 /**
  * @brief Configure mmsearch to read its query from each row.
- * Operands must share an alphabet. Their storage widths may differ.
+ * Operands must share an alphabet. Their storage widths may differ
  */
 void tuple_dispatch_buffer::configure_mmsearch_per_row(AttrNumber seq_attno,
                                                        std::string column_name,
@@ -632,7 +632,7 @@ void tuple_dispatch_buffer::configure_mmsearch_join(
     reset_join_runtime_for_rescan();
 }
 
-/** @return Whether the active mmsearch gets its query from each row. */
+/** @return Whether  the active mmsearch gets its query from each row. */
 [[nodiscard]] bool tuple_dispatch_buffer::per_row_mode() const noexcept {
     return dispatch_uses_per_row_query(mmsearch_state.active,
                                        mmsearch_state.per_row_query_attno,
@@ -677,7 +677,7 @@ void tuple_dispatch_buffer::configure_mmsearch_join(
     return mmsearch_state.storage_unit_byte_width;
 }
 
-/** @brief Reset the primary query, keeping extra constant filters unless requested. */
+/** @brief Reset the primary  query, keeping extra constant filters unles requested. */
 void tuple_dispatch_buffer::clear_mmsearch_context(bool clear_extras) {
     mmsearch_state = mmsearch_context{};
     if (clear_extras) {

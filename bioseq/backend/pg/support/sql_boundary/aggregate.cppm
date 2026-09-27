@@ -78,7 +78,7 @@ private:
     ::int128_aggregate_state_storage* state_ = nullptr;
 };
 
-/** Non-null Numeric result whose memory belongs to PostgreSQL. */
+/** Non-null Numeric result  whose memory belongs to PostgreSQL. */
 class numeric_result final {
 public:
     [[nodiscard]] static numeric_result from_numeric(Numeric value) {

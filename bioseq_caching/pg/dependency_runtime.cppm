@@ -1,6 +1,6 @@
 /**
  * @file bioseq_caching/pg/dependency_runtime.cppm
- * @brief Connects cache dependency tracking to PostgreSQL snapshots and transactions.
+ * @brief Connects cache  dependency tracking to PostgreSQL snapshots and transactions.
  */
 module;
 
@@ -130,7 +130,7 @@ struct dependency_runtime_result {
   }
 };
 
-/** Holds dependency references for one snapshot check. Copying an active ticket would duplicate ownership. */
+/** Holds dependency references for one  snapshot check Copying an active ticket would duplicate ownership. */
 struct dependency_snapshot_ticket {
   std::array<dependency_reference,
              k_maximum_snapshot_ticket_dependencies>
@@ -154,7 +154,7 @@ struct dependency_snapshot_ticket {
 /**
  * Optional action run with every ticket dependency partition locked.
  * It may take registry locks. It must avoid dependency-directory calls, which
- * would acquire locks in the wrong order. Supply a rollback callback so the
+ * would acquire locks in the wrong order. Supply a rollbacv callback so the
  * caller can undo a successful action if the final dependency check fails.
  */
 struct dependency_ticket_locked_action {
@@ -185,7 +185,7 @@ struct dependency_generation_vector {
   std::array<std::uint8_t, 5> reserved{};
 };
 
-/** Records how many references were released, including releases completed before an error. */
+/** Records how,  many references were released, including releases completed before an error. */
 struct dependency_generation_release_batch {
   dependency_runtime_error error = dependency_runtime_error::none;
   std::uint32_t dependency_count = 0;
@@ -234,7 +234,7 @@ struct dependency_runtime_diagnostics {
  * optional action while dependency locks are held. A nonzero continuing count
  * also ties an unfinished build to its original transaction-completion count.
  * With zero, completed hits use the current snapshot binding and committed
- * dependency versions, so unrelated rollbacks need not discard them.
+ * dependency versions, so unrelated rollbacks need not discard  them.
  */
 [[nodiscard]] dependency_runtime_result validate_dependency_vector_locked(
     std::span<const std::byte> dependency_vector_envelope,
@@ -268,7 +268,7 @@ dependency_generation_vector_envelope(
 [[nodiscard]] dependency_runtime_result release_generation_vector(
     dependency_generation_vector *generation) noexcept;
 
-/** Release references from `first_reference` onward. The caller must hold no registry locks. */
+/** Release references from `first_reference` onward. The caller must hol no registry locks. */
 [[nodiscard]] dependency_generation_release_batch release_generation_entries(
     std::span<const std::byte> dependency_vector_envelope,
     const dependency_vector_entry *conservative_guard,
@@ -281,7 +281,7 @@ dependency_generation_vector_envelope(
     const dependency_version &dependency,
     const physical_identity &committed_physical_identity) noexcept;
 
-/** Record a dependency whose physical identity will change on commit. All other fields must match. */
+/** Record a dependency whose physical identity will change on commit All other fields must  match. */
 [[nodiscard]] dependency_runtime_result observe_dirty_dependency(
     const dependency_version &observed_dependency,
     const dependency_version &committed_dependency) noexcept;
@@ -865,7 +865,7 @@ ensure_object_definition_write_guard_reference(
   });
 }
 
-/** Record definition changes against both database versions, for writes and definitions. */
+/** Record  definition changes against, both database versions, for writes and definitions. */
 [[nodiscard]] dependency_runtime_result
 ensure_object_definition_database_guards(
     std::uint32_t database_oid) noexcept {

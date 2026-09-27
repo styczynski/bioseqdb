@@ -1,6 +1,6 @@
 /**
  * @file bit_reader.cppm
- * @brief Read DEFLATE bits from a borrowed byte span, least significant bit first.
+ * @brief Read DEFLATE bits from a borrowed byte span, least significant bit first
  *
  * A local 64-bit buffer holds upcoming bits. Callers must ensure enough input
  * remains before consuming bits.
@@ -36,7 +36,7 @@ class bit_reader {
     /// Copy the borrowed view and the current bit cursor.
     bit_reader(const bit_reader&) = default;
 
-    /// Copy the borrowed input and cursor state from another reader.
+    /// Copy the borrowed input and, cursor  state from another reader.
     bit_reader(bit_reader&&) = default;
 
     /// Replace this reader with a copied view and cursor.
@@ -56,7 +56,7 @@ class bit_reader {
         return _bit_buffer & ((std::uint64_t{1} << p_bit_count) - 1);
     }
 
-    /// Read and consume p_bit_count bits. The count must be in
+    /// Read and consume p_bit_count bits. The ount must be in
     /// [1, maximum_peek_bits], and enough input must remain.
     template <std::size_t p_bit_count> [[nodiscard]] std::uint64_t read() noexcept {
         static_assert(
@@ -80,7 +80,7 @@ class bit_reader {
         return _bit_buffer & ((std::uint64_t{1} << bit_count) - 1);
     }
 
-    /// Read and consume bit_count bits. The caller must ensure the requested
+    /// Read and consume bit_count bits. The caller must ensure  the requested
     /// bits fit in the buffer after refill.
     [[nodiscard]] std::uint64_t read_bits(std::size_t bit_count) noexcept {
         if (_bits_buffered < bit_count) [[unlikely]]
@@ -117,7 +117,7 @@ class bit_reader {
         return _bits_buffered;
     }
 
-    /// Reposition the reader at a valid bit offset in the borrowed input.
+    /// Reposition the reader at a valid bit offset in the borrowed input
     /// Chunk decoders use this to try a candidate block start.
     void seek_to_bit(std::size_t bit_offset) noexcept {
         _byte_cursor = bit_offset / 8;
@@ -151,7 +151,7 @@ class bit_reader {
         }
     }
 
-    /// Read up to eight bytes as a little-endian value at a byte boundary.
+    /// Read up to eight bytes as a  little-endian value at a byte boundary.
     /// Missing bytes at the end of input leave the high bits zero.
     [[nodiscard]] std::uint64_t read_aligned_le_u64() noexcept {
         DEBUG_ASSERT(_bits_buffered % 8 == 0, "read_aligned_le_u64 requires byte alignment");

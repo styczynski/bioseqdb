@@ -1,6 +1,6 @@
 /**
  * @file plan_geometry_test.cpp
- * @brief Check pipeline stage behavior and whether recorded work matches the selected algorithms.
+ * @brief Check pipeline stage behavior and  whether recorded work matches the selected algorithms.
  */
 #include <catch2/matchers/catch_matchers.hpp>
 #include <catch2/catch_test_macros.hpp>

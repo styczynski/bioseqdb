@@ -119,7 +119,7 @@ static_assert(
     }(),
     "query-sketch Highway planning must remain route- and algorithm-exact");
 
-/** Count query-sketch stages that include an algorithm description. */
+/** Count query-sketch stages that include  an algorithm description. */
 [[nodiscard]] inline std::size_t
 query_sketch_stage_owner_count(const pipeline_description& description) noexcept {
     return static_cast<std::size_t>(

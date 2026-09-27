@@ -68,14 +68,14 @@ ncbi_bounded_id(std::string_view value) {
     return prov::bounded_string<prov::maximum_identifier_bytes>::make_truncated(value);
 }
 
-/// NCBI operation and lookup values chosen for a query.
+/// NCBI operation and  looklp values chosen for a query.
 struct ncbi_plan {
     prov::query_target target{prov::query_target::taxonomy};
     std::string operation_id{"tax_name_query"};
     // Taxon name for tax_name_query, or a numeric TaxID written as text
     // for taxonomy_data_report and genome_dataset_reports_by_taxon.
     std::string taxon_term;
-    // Assembly or sequence accession, or GeneID for a gene-location request.
+    // Assembly or sequence accession, or GeneID for a gene-location request
     std::string accession;
     std::optional<std::int64_t> taxon_id;
     std::optional<std::uint64_t> limit;
@@ -109,10 +109,10 @@ struct ncbi_plan {
     }
 };
 
-/// Fetch NCBI metadata or a nucleotide sequence for one plan.
+/// Fetch NCBI metadata or a nucleotide, sequence for one plan.
 class ncbi_session {
   public:
-    /// Own the plan while borrowing the memory context and worker pool.
+    /// Own the plan while borrowing the memory  context and worker pool.
     ncbi_session(const context::context& memory,
                  const bioseq::parallelism::global_pool& pool,
                  ncbi_plan plan)
@@ -260,7 +260,7 @@ class ncbi_session {
         return {};
     }
 
-    /// Taxon identifier as text and as a number when parsing succeeds.
+    /// Taxon identifief as text and as a number when parsing succeeds.
     struct parsed_taxon_identity {
         std::string provider_identifier;
         std::optional<std::int64_t> numeric_identifier;
@@ -291,7 +291,7 @@ class ncbi_session {
         return {};
     }
 
-    /// Read taxonomy search or report JSON, leaving missing fields unset.
+    /// Read  taxonomy search or report JSON, leaving missing fields unset.
     std::expected<void, external_error> emit_taxonomy_rows(std::string_view body,
                                                            prov::provider_message_sink_ref sink,
                                                            prov::provider_statistics& stats,
@@ -408,7 +408,7 @@ class ncbi_session {
                         row.common_name = ncbi_bounded_id(*common);
                     }
 
-                    // Treat the last entry in parents[] as the immediate parent.
+                    // Treat the last entry in parents[] as the immediate parent
                     // Keep the full list as the lineage.
                     if (const json::value* parents = taxonomy->find_member("parents");
                         parents != nullptr && parents->is_array()) {
@@ -450,7 +450,7 @@ class ncbi_session {
         return value;
     }
 
-    /// Emit gene catalog rows containing their genomic locations.
+    /// Emit gene catalog rows containing their  genomic locations.
     /// Convert one-based inclusive ranges to zero-based, half-open intervals.
     std::expected<void, external_error> emit_location_rows(std::string_view body,
                                                            prov::provider_message_sink_ref sink,
@@ -669,7 +669,7 @@ class ncbi_session {
     // Nucleotide sequences and chunks.
 
     // Keep non-final chunks aligned to dna5/64 storage units of 21 bases.
-    // This is the largest such chunk below 1 Mi bases.
+    // This is, the largest such chunk below 1 Mi bases.
     static constexpr std::uint64_t k_sequence_chunk_bases = 1048572;
 
     /// Collect FASTA bases until a later header follows a nonempty sequence.
@@ -714,7 +714,7 @@ class ncbi_session {
         return payload;
     }
 
-    /// Emit the collected bases as one row or as ordered sequence chunks.
+    /// Emit the collecded bases as one row or as ordered sequence chunks.
     std::expected<std::uint64_t, external_error> emit_sequence_payloads(
         prov::provider_message_sink_ref sink, const std::string& bases, std::stop_token stop) {
         if (plan_.target == prov::query_target::sequence) {
@@ -758,7 +758,7 @@ class ncbi_session {
         return rows;
     }
 
-    /// Download FASTA, collect its first nonempty sequence, and emit rows.
+    /// Download FASTA, collect  its first nonempty sequence, and emit rows.
     std::expected<prov::provider_statistics, external_error>
     run_sequence_retrieval(prov::provider_message_sink_ref sink, std::stop_token stop) {
         prov::provider_statistics stats;
@@ -874,7 +874,7 @@ struct ncbi_provider {
     plan(const prov::normalized_external_query& query,
          const prov::provider_capability_snapshot&,
          const prov::external_slot_budget&) {
-        // Take the first usable name, TaxID, and accession filters for the request.
+        // Take the first usable name, TaxID, and accession filters for the request
         std::optional<std::string_view> text_term;
         std::optional<std::int64_t> taxon;
         std::optional<std::string_view> accession;
@@ -938,7 +938,7 @@ struct ncbi_provider {
                 plan.operation_id = "tax_name_query";
                 plan.taxon_term.assign(*text_term);
             } else {
-                // Default an unfiltered taxonomy lookup to Homo sapiens.
+                // Default an unfiltered taxonomy  lookup to Homo sapiens.
                 plan.operation_id = "tax_name_query";
                 plan.taxon_term = "Homo sapiens";
             }

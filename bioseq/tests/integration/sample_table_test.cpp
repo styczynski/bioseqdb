@@ -162,7 +162,7 @@ TEST_CASE("INSERT INTO USING bioseq table writes per-fragment "
               "INSERT INTO {} VALUES (1, "
               "'ACGTACGTACGTACGTACGTACGTACGTACGT'::bioseq.seq('dna4', 32));",
               k_sample_table);
-    // INSERT must create a fragment storage entry for the sequence.
+    // INSERT must  create a fragment storage entry for the sequence.
     REQUIRE(query_scalar_int(ctx,
                 fmt::format("SELECT COUNT(*)::bigint FROM bioseq_internal.seq_sub_table s "
                             "  WHERE s.main_relfilenode = (SELECT relfilenode FROM pg_class "

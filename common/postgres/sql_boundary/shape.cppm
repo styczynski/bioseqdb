@@ -23,7 +23,7 @@ enum class result_shape {
 /**
  * Own SQL result rows in a move-only container.
  *
- * @tparam p_element_type C++ value for one result row.
+ * @tparam p_element_type C++ value for one result row
  * @tparam p_shape SQL result form used by the generated wrapper.
  */
 template<class p_element_type, result_shape p_shape>

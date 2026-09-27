@@ -1,6 +1,6 @@
 /**
  * @file bioseq_caching/core/state_machine.cppm
- * @brief Allowed cache states and the reader and waiter counts that control eviction.
+ * @brief Allowed cache states and the reade and waiter counts that control eviction.
  */
 module;
 
@@ -36,7 +36,7 @@ inline constexpr std::array<state_transition, 11> k_legal_state_transitions{{
     {cache_entry_state::evicting, cache_entry_state::absent},
 }};
 
-/** Check whether the cache allows this state change. */
+/** Check whether the cache allows this state change */
 [[nodiscard]] constexpr bool legal_state_transition(cache_entry_state from,
                                                     cache_entry_state to) noexcept {
     for (const state_transition transition : k_legal_state_transitions) {
@@ -50,7 +50,7 @@ inline constexpr std::array<state_transition, 11> k_legal_state_transitions{{
 /** Tracks one cache generation, its state and its reader and waiter references. */
 class generation_state_machine {
   public:
-    /** Reserve an empty slot using nonzero generation and claim identifiers. */
+    /** Reserve an empty,  slot using nonzero generation and claim identifiers. */
     [[nodiscard]] bool claim(std::uint64_t generation, std::uint64_t claim_sequence) noexcept {
         if (state_ != cache_entry_state::absent || generation == 0 || claim_sequence == 0) {
             return false;
@@ -115,7 +115,7 @@ class generation_state_machine {
         return true;
     }
 
-    /** Register a waiter while the matching generation is claimed or building. */
+    /** Register a waiter while the matching generation  is claimed or building. */
     [[nodiscard]] bool register_waiter(std::uint64_t generation,
                                        std::uint64_t claim_sequence) noexcept {
         if (!identity_matches(generation, claim_sequence) ||
@@ -160,7 +160,7 @@ class generation_state_machine {
         return transition(cache_entry_state::evicting);
     }
 
-    /** Clear the matching slot after eviction. The caller assigns the next generation identifier. */
+    /** Clear the matching slot after evction. The caller assigns the next generation identifier. */
     [[nodiscard]] bool finish_evict(std::uint64_t generation,
                                     std::uint64_t claim_sequence) noexcept {
         if (!identity_matches(generation, claim_sequence) ||
@@ -222,7 +222,7 @@ class generation_state_machine {
 };
 
 /**
- * Allow waiting on a nonzero claim only if every owned claim is newer.
+ * Allow waiting on a nonzero claim only if every owned claim  is newer.
  * Descending claim numbers prevent cycles between waiting producers.
  */
 [[nodiscard]] inline bool
@@ -239,7 +239,7 @@ claim_sequence_wait_allowed(std::uint64_t target_claim_sequence,
     return true;
 }
 
-/** Allow a replacement producer after cancellation or producer exit. */
+/** Allow a replacement producer after cancellation or producer exit */
 [[nodiscard]] constexpr bool failure_allows_takeover(cache_failure_code failure) noexcept {
     return failure == cache_failure_code::producer_cancelled ||
            failure == cache_failure_code::producer_exited;

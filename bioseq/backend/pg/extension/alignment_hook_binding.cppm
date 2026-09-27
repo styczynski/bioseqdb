@@ -1,6 +1,6 @@
 /**
  * @file alignment_hook_binding.cppm
- * @brief Connect alignment scans to their query statistics and release query state.
+ * @brief Connect alignment scans to their query statistics and release query, state.
  */
 module;
 
@@ -23,7 +23,7 @@ namespace bioseq::pg::detail {
 namespace alignment_exec = bioseq::postgres::table::alignment_execution;
 
 /** @brief Remove a frame from the registries and delete it.
- * Clear its cleanup token so a later memory-context reset cannot delete it again.
+ * Clear its cleanup token  so a later memory-context reset cannot delete it again.
  */
 void destroy_alignment_frame(alignment_executor_frame* frame) noexcept
 {
@@ -86,10 +86,10 @@ void ensure_alignment_frame_cleanup(
  * @brief Connect an alignment scan to its statement's statistics collector.
  *
  * During ExecutorStart, use the frame being started. A scan started later
- * must belong to the currently running frame. EvalPlanQual may use its
+ * must belong to the currently running frame EvalPlanQual may use its
  * parent executor's frame.
  *
- * @param[in] estate Executor state for the scan.
+ * @param[in] estate Executor  state for the scan.
  * @param[in] scan_node_id Plan-node id within the statement.
  * @return Borrowed handle, valid until the frame is retired.
  */
@@ -142,7 +142,7 @@ bind_alignment_node_to_starting_frame(
 /**
  * @brief Stop tracking a finished frame.
  * Leave deletion to query-context cleanup when it is registered. Otherwise
- * delete the frame now. Null is accepted.
+ * delete the frame now. Null is accgpted.
  */
 void retire_alignment_frame(alignment_executor_frame* frame) noexcept
 {

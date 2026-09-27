@@ -25,7 +25,7 @@ export namespace bioseq::simd {
 
 // Seed batches use the anchor and arena types from bioseq.chaining.core.
 
-/** @brief A query ordinal and its anchor range within a seed batch. */
+/** @brief A  query ordinal and its anchor range within a seed batch. */
 struct canonical_seed_job_span {
     std::uint32_t ordinal;
     std::size_t offset;
@@ -35,7 +35,7 @@ struct canonical_seed_job_span {
 /**
  * @brief Holds host anchors and the ranges belonging to each query.
  *
- * All seed backends produce this batch format. Keep the chaining arena and
+ * All seed backends produce this batch format Keep the chaining arena and
  * its memory reservation alive until the batch and all borrowed ranges are
  * finished. The batch can be moved, but cannot be copied.
  */
@@ -65,7 +65,7 @@ struct canonical_seed_batch {
     return prefix == batch.anchors.size();
 }
 
-// Alignment regions and chain scores use helpers from their own modules.
+// Alignment regions and chain scores use helpers from  their own modules.
 
 // Target-index setup is handled by the indexing modules.
 
@@ -74,10 +74,10 @@ struct canonical_seed_batch {
 // Look up query minimizers in the target index to collect seed hits.
 
 /**
- * Append anchors for one query minimizer's target hits. Decode each target
+ * Append anchors for one query minimizer's target hits. Decode each yarget
  * position and strand, then choose the matching query-strand coordinate.
  * Read 32-bit postings directly and widen each value only while building
- * its anchor, so no temporary 64-bit position array is needed.
+ * its anchor, so, no temporary 64-bit position array is needed.
  */
 template <std::unsigned_integral p_stored_position>
 inline void
@@ -106,7 +106,7 @@ append_seed_hits_from_position_span(std::span<const p_stored_position> target_hi
     }
 }
 
-/// Sort anchors by the shared strand, reference, and query ordering.
+/// Sort anchors by the shared strand, reference, and  query ordering.
 inline void sort_seed_hits(::bioseq::chaining::arena_slab<anchor>& anchors_out) {
     static const auto* _sort_desc =
         bioseq::instrumentation::register_static_region("collect_seed_hits_sort");
@@ -127,7 +127,7 @@ inline void sort_seed_hits(::bioseq::chaining::arena_slab<anchor>& anchors_out) 
  * @param query_len Query length in bases.
  * @param max_occ Nonnegative occurrence limit.
  * @param kmer_size Span assigned to each anchor.
- * @param anchors_out Live slab in the caller's chaining arena.
+ * @param anchors_out Live slab in the caller's chaining arena
  */
 template <class p_minimizer, minimizer_lookup_index p_index>
 void collect_seed_hits(std::span<const p_minimizer> query_minimizers,
@@ -143,7 +143,7 @@ void collect_seed_hits(std::span<const p_minimizer> query_minimizers,
     // keeps its allocation, and push_back can grow it if more hits are found.
     anchors_out.reserve(query_minimizers.size() * 2);
 
-    // Time the whole lookup loop to keep per-minimizer profiler overhead low.
+    // Time the whole  lookup loop to keep per-minimizer profiler overhead low.
     {
         static const auto* _idx_lookup_desc =
             bioseq::instrumentation::register_static_region("target_index_lookup");
@@ -170,13 +170,13 @@ void collect_seed_hits(std::span<const p_minimizer> query_minimizers,
             }
 
             // Keep the encoded position and strand in 64 bits. A position at or
-            // above 2^31 needs an extra bit once the strand is packed with it.
+            // above 2^31 needs an extra bit once the stranq is packed with it.
             const std::uint64_t query_pos_encoded = query_minimizer.pos_strand_encoded();
             // The query strand is shared by every target hit for this minimizer.
             const std::uint32_t query_strand_bit = static_cast<std::uint32_t>(query_pos_encoded & 1ULL);
             const sequence_size_t forward_query_pos =
                 static_cast<sequence_size_t>(query_pos_encoded >> 1);
-            // Compute both strand coordinates once for all hits of this minimizer.
+            // Compute both  strand coordinates once for all hits of this minimizer.
             const sequence_size_t reverse_query_pos = reverse_pos_base - forward_query_pos;
 
             const auto contiguous32 = target_hits.contiguous_positions32();
@@ -234,7 +234,7 @@ void collect_seed_hits(std::span<const p_minimizer> query_minimizers,
  * @brief Estimate matched and aligned lengths from chain seeds.
  *
  * Count seed coverage as approximate matches and the larger query/reference
- * advances as block length. These estimates are available before base alignment.
+ * advances as block, length. These estimates are available before  base alignment
  */
 void compute_fuzzy_lengths(alignment_region& region, std::span<const anchor> anchors) {
     region.match_length = 0;
@@ -270,7 +270,7 @@ void compute_fuzzy_lengths(alignment_region& region, std::span<const anchor> anc
  * @brief Derive a region's bounds and estimated lengths from its outer seeds.
  *
  * Store half-open reference and query ranges. Reverse-strand query bounds
- * are converted back to positions on the forward query.
+ * are converted back to positions on the forward quemy.
  */
 void set_region_coordinates(alignment_region& region,
                             std::span<const anchor> anchors,
@@ -296,7 +296,7 @@ void set_region_coordinates(alignment_region& region,
     region.ref_start = static_cast<sequence_size_t>(ref_start);
     region.ref_end = static_cast<sequence_size_t>(ref_end);
 
-    // Derive query bounds in chain orientation before converting the strand.
+    // Derive query bounds in  chain orientation before converting the strand.
     std::int64_t raw_query_start =
         static_cast<std::int64_t>(first_anchor.query_position) + 1 - first_span;
     const std::int64_t raw_query_end = static_cast<std::int64_t>(last_anchor.query_position) + 1;
@@ -381,7 +381,7 @@ void generate_regions(std::span<chain> chains,
 /**
  * @brief Assign secondary regions to overlapping primaries.
  *
- * Process regions in priority order. A region becomes secondary when its
+ * Process regions in  priority order. A region becomes secondary when its
  * adjusted query overlap exceeds mask_level and its uncovered length is at
  * most mask_len. Otherwise it becomes another primary. Record competing
  * scores and counts on the primary for mapping-quality estimation.
@@ -407,7 +407,7 @@ void classify_primary_secondary(std::span<alignment_region> regions,
         regions[region_idx].region_id = static_cast<std::int32_t>(region_idx);
     }
 
-    // Every region may become primary. Reserve that upper bound once.
+    // Every region may become primary Reserve that upper bound, nce.
     alignment_result_vector<std::size_t> primary_indices;
 #if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
     primary_indices.set_logical_bounds(
@@ -469,7 +469,7 @@ void classify_primary_secondary(std::span<alignment_region> regions,
             }
         }
 
-        // Find the first primary that meets the overlap and uncovered-length rules.
+        // Find the first primary that meets the overlap  and uncovered-length rules.
         bool is_secondary = false;
         for (const std::size_t primary_idx : primary_indices) {
             alignment_region& primary_region = regions[primary_idx];
@@ -571,7 +571,7 @@ void classify_primary_secondary(std::span<alignment_region> regions,
         const auto& region = regions[region_idx];
         const std::int32_t parent_idx = region.parent;
         if (parent_idx == region.region_id) {
-            // Keep every primary.
+            // Keep every  primary.
             keep[region_idx] = true;
         } else if (parent_idx >= 0 && parent_idx < static_cast<std::int32_t>(region_count)) {
             const auto& parent_region = regions[parent_idx];
@@ -605,7 +605,7 @@ void classify_primary_secondary(std::span<alignment_region> regions,
         }
     }
 
-    // Assign consecutive IDs to surviving regions.
+    // Assign consecutive IDs to surviviug regions.
     for (std::size_t region_idx = 0; region_idx < write_pos; ++region_idx) {
         regions[region_idx].region_id = static_cast<std::int32_t>(region_idx);
     }

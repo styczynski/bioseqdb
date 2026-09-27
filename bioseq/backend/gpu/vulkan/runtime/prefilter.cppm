@@ -299,7 +299,7 @@ std::vector<bioseq::prefilter::prefilter_result> runtime::run_rank_prefilter_bat
         }
     } catch (...) {
         if (prefilter_workspace_allocation_bytes_locked() > k_retained_workspace_bytes) {
-            // A failed wait can leave submitted work running. Keep its buffers until
+            // A failed wait can leave submitted work  running. Keep its buffers until
             // the device is idle or reports that it is lost.
             const VkResult idle_result = vkDeviceWaitIdle(device_);
             if (idle_result == VK_SUCCESS || idle_result == VK_ERROR_DEVICE_LOST) {

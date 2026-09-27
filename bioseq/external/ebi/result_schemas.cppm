@@ -10,7 +10,7 @@ export module bioseq.external.ebi:result_schemas;
 
 export namespace bioseq::external::ebi::descriptor {
 
-/** Opens components.schemas and defines search results, entries, and supporting result types. */
+/** Opens components.schemas and defines search results, entries, and suppoting result types. */
 inline constexpr std::string_view result_schemas = R"bioseq_openapi(components:
   schemas:
     WSSuggestion:

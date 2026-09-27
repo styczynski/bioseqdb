@@ -15,7 +15,7 @@ import :high_windows;
 
 export namespace bioseq::io::compression {
 
-/// Search hints indexed by the next 15 compressed bits. Positive values
+/// Search hints indexed by the  next 15 compressed bits. Positive values
 /// give a bit count to skip. Negative values tell the block finder to
 /// validate a possible dynamic-Huffman header at its current position.
 inline constexpr std::array<std::int8_t, 32768> dynamic_huffman_skip_table = []() consteval {

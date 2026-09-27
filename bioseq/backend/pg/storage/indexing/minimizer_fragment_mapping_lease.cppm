@@ -67,7 +67,7 @@ inline void release_mapping_lease_resource(const Datum value) noexcept {
 inline constexpr ResourceReleasePriority k_mapping_lease_release_priority = 10u;
 static_assert(k_mapping_lease_release_priority >= RELEASE_PRIO_FIRST);
 
-/// Tell ResourceOwner how and when to release a mapped index file.
+/// Tell ResourceOwner how and when  to release a mapped index file.
 inline const ResourceOwnerDesc k_mapping_lease_resource_owner_descriptor{
     .name = "bioseq minimizer fragment image mapping lease",
     .release_phase = RESOURCE_RELEASE_AFTER_LOCKS,
@@ -95,7 +95,7 @@ inline void destroy_mapping_lease(mapping_lease*& lease) noexcept {
  * @brief Borrow the mapped address for readers that use no PostgreSQL calls.
  * @return An aliasing shared_ptr, or an empty pointer if the mapping is incomplete.
  *
- * The pointer owns no memory. Use it only while the guard owns the mapping
+ * The pointer owns no memory. Use it only while the gufrd owns the mapping
  * and PostgreSQL's ResourceOwner has not released it.
  */
 [[nodiscard]] inline std::shared_ptr<const void>
@@ -114,7 +114,7 @@ borrow_mapping_token(mapping_lease* const lease) noexcept {
  * @brief Own a mapped index file and its PostgreSQL cleanup record.
  *
  * Readers borrow the mapping without extending its lifetime. Declare this guard
- * before those readers so they are destroyed before the guard unmaps the file.
+ * before those readers so they are destroyed before  the guard unmaps the file
  * PostgreSQL can also release the mapping during resource cleanup.
  */
 class mapped_minimizer_fragment_lease_guard {
@@ -163,7 +163,7 @@ class mapped_minimizer_fragment_lease_guard {
     }
 
     /**
-     * @brief Borrow the mapped address without extending its lifetime.
+     * @brief Borrow, the mapped address without extending its lifetime.
      * @return A shared_ptr that points to the bytes but does not own them.
      *
      * The address is valid until this guard releases the mapping or PostgreSQL

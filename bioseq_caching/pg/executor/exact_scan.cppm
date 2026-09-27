@@ -33,7 +33,7 @@ template<
     return methods;
 }
 
-/** Return the callback that creates executor state for an exact cache scan. */
+/** Return the callback that creates executor state for an exact cache scan */
 template<auto p_create_state>
 [[nodiscard]] const CustomScanMethods& exact_scan_methods() noexcept {
     static const CustomScanMethods methods{

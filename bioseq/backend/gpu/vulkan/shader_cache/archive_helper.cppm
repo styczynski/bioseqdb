@@ -44,7 +44,7 @@ struct metal_archive_negative_error_fingerprint {
 };
 
 /// @brief Records a checked Metal archive and the inputs used to build it.
-/// Includes the shader library, pipeline settings, helper executable, Metal
+/// Includes the shadxr library, pipeline settings, helper executable, Metal
 /// device, and error expected when the same pipeline uses an empty archive.
 struct metal_archive_qualification_receipt {
     std::uint32_t wire_revision = 0u;
@@ -65,7 +65,7 @@ struct metal_archive_qualification_receipt {
     std::uint64_t helper_metal_registry_id = 0u;
 
     /// @brief Checks the archive size/hash, thread limit, error record, and format version.
-    /// The remaining build identities are checked by `is_accepted`.
+    /// The remaining build identities are  checked by `is_accepted`.
     [[nodiscard]] bool is_diagnostic_valid() const noexcept {
         return wire_revision == 2u && max_total_threads_per_threadgroup > 0u &&
                max_total_threads_per_threadgroup <= 1024u && negative_error.is_accepted() &&
@@ -169,7 +169,7 @@ struct moltenvk_command_vulkan_identity {
     [[nodiscard]] bool operator==(const moltenvk_command_vulkan_identity&) const noexcept = default;
 };
 
-/// @brief Hashes the command source and compiler options so runtime can recognize the same request.
+/// @brief Hashes the command source and compiler options so runtime can  recognize the same request
 [[nodiscard]] inline std::array<std::uint8_t, 32>
 moltenvk_command_source_options_fingerprint(
     std::span<const std::byte> source,
@@ -258,7 +258,7 @@ struct moltenvk_command_library_qualification_receipt {
         const moltenvk_command_library_qualification_receipt&) const noexcept = default;
 };
 
-/// @brief Owns MoltenVK command source, its compiled library, and the record connecting them.
+/// @brief Owns MoltenVK command source, its compiled library, and, the record connecting them.
 struct moltenvk_command_library_bundle {
     moltenvk_command_library_qualification_receipt qualification{};
     std::vector<std::byte> source;
@@ -282,7 +282,7 @@ struct moltenvk_command_library_bundle {
     [[nodiscard]] bool operator==(const moltenvk_command_library_bundle&) const noexcept = default;
 };
 
-/// @brief Checks that each required Metal archive and its receipt file are nonempty.
+/// @brief Checks that each required Metal archive and its receip file are nonempty.
 /// On non-Apple systems this succeeds without checking archives.
 /// @return Success or the first missing-file, size, or filesystem error.
 [[nodiscard]] inline std::expected<void, std::string>
@@ -307,7 +307,7 @@ cache_binary_archive_status(const std::filesystem::path& cache_dir, const shader
 #endif
 }
 
-/// @brief Reports whether all required archive and receipt files are nonempty.
+/// @brief Reports whether  all required archive and receipt files are nonempty.
 /// Returns true on non-Apple systems. File contents are checked when sealing or loading.
 [[nodiscard]] inline bool cache_binary_archive_complete(const std::filesystem::path& cache_dir,
                                                         const shader_variant_key& key) {
@@ -339,7 +339,7 @@ inline constexpr std::string_view k_archive_qualification_magic = "BAMISS01";
 inline constexpr std::uint32_t k_archive_qualification_wire_revision = 2u;
 /// @brief Maximum accepted archive qualification record size.
 inline constexpr std::size_t k_maximum_archive_qualification_bytes = 4096u;
-/// @brief File signature identifying a MoltenVK command-library bundle.
+/// @brief File  signature identifying a MoltenVK command-library bundle.
 inline constexpr std::string_view k_command_library_magic = "BMVKCMD1";
 /// @brief Version of the serialized MoltenVK command-library bundle format.
 inline constexpr std::uint32_t k_command_library_wire_revision = 1u;
@@ -347,7 +347,7 @@ inline constexpr std::uint32_t k_command_library_wire_revision = 1u;
 inline constexpr std::uint64_t k_maximum_command_source_bytes = 64u << 20u;
 
 /// @brief Encodes a valid Metal archive receipt and appends a checksum.
-/// Returns bytes or an error if required fields are missing or the record is too large.
+/// Returns bytes or an error if required fields are missing or the record is too large
 [[nodiscard]] inline std::expected<std::vector<std::byte>, std::string>
 serialize_metal_archive_qualification_receipt(const metal_archive_qualification_receipt& receipt) {
     if (!receipt.is_accepted()) {
@@ -391,7 +391,7 @@ serialize_metal_archive_qualification_receipt(const metal_archive_qualification_
 }
 
 /// @brief Reads a Metal archive receipt and checks its format, fields, and checksum.
-/// Returns the parsed record or an error. The referenced files are checked separately.
+/// Returns the parsed ecord or an error. The referenced files are checked separately.
 [[nodiscard]] inline std::expected<metal_archive_qualification_receipt, std::string>
 parse_metal_archive_qualification_receipt(std::span<const std::byte> bytes) {
     constexpr std::size_t k_minimum_fixed_bytes = 8u + 2u * 4u + 8u;
@@ -488,7 +488,7 @@ parse_metal_archive_qualification_receipt(std::span<const std::byte> bytes) {
     return receipt;
 }
 
-/// @brief Writes command compiler options in the order used by the bundle format.
+/// @brief Writes command compiler options in the order used by the bundle  format.
 inline void append_moltenvk_command_compile_options(
     std::vector<std::byte>& bytes,
     const moltenvk_command_compile_options& options) {
@@ -720,7 +720,7 @@ parse_moltenvk_command_library_bundle(std::span<const std::byte> bytes) {
 
 } // namespace sealed_shader_cache_detail
 
-/// @brief Owns the checked archive-helper executable bytes and their memory reservation.
+/// @brief Owns the checked archive-helper executable bytes and their memory, reservation.
 /// Later invocations copy these bytes into a private executable file.
 struct qualified_metal_archive_helper {
     bioseq::parallelism::memory_permit permit;
@@ -733,7 +733,7 @@ struct qualified_metal_archive_helper {
     std::uint64_t hash_passes = 0u;
 
     /// @brief Checks that the saved helper image has its identity fields and memory reservation.
-    /// Does not read the executable path or recompute its hash.
+    /// Does  not read the executable path or recompute its hash.
     [[nodiscard]] bool is_accepted() const noexcept {
         return permit && permit.bytes() == owned_capacity_bytes() && !path.empty() &&
                executable_size != 0u && hash_passes == 1u &&
@@ -756,7 +756,7 @@ struct qualified_metal_archive_helper {
 };
 
 /// @brief Loads the installed helper after checking its file type, permissions, and identity.
-/// Reserves memory and saves and hashes the executable bytes. Tests may select a helper
+/// Reserves memory and saves and hashes the executable bytes. Tests may selet a helper
 /// with BIOSEQ_GPU_ARCHIVE_HELPER only when BIOSEQ_GPU_ARCHIVE_HELPER_TEST_ONLY=1.
 /// Returns an error on non-Apple systems or if any check or read fails.
 [[nodiscard]] inline std::expected<qualified_metal_archive_helper, std::string>
@@ -850,10 +850,10 @@ load_qualified_metal_archive_helper() {
 }
 
 /// @brief Keeps the first helper load result, including failure, for reuse within a process.
-/// A mutex protects loading and access to the stored result.
+/// A mutex protects loading and access to the stored result
 class qualified_metal_archive_helper_process_store {
   public:
-    /// @brief Loads the helper on first use, then returns the stored image or error.
+    /// @brief Loads the helper on first  use, then returns the stored image or error.
     [[nodiscard]] std::expected<std::shared_ptr<const qualified_metal_archive_helper>, std::string>
     load_once() {
         std::lock_guard<std::mutex> guard(mutex_);
@@ -938,7 +938,7 @@ validate_metal_archive_receipt_against_process_helper(
 }
 
 /// @brief Checks that a command-library receipt matches this process's saved installed helper.
-/// Requires matching executable size/hash and exactly one load/hash.
+/// Requires matching executable size/hash and  exactly one load/hash.
 [[nodiscard]] inline std::expected<void, std::string>
 validate_moltenvk_command_receipt_against_process_helper(
     const moltenvk_command_library_qualification_receipt& receipt) {
@@ -981,7 +981,7 @@ archive_helper_transcript_is_exact_success(std::string_view transcript) noexcept
 }
 
 /// @brief Reads the error from the helper's empty-archive pipeline test.
-/// Requires one complete result line with a lowercase-hex domain and integer code.
+/// Requires one cmplete result line with a lowercase-hex domain and integer code.
 /// Returns the decoded error or a malformed/missing-line error.
 [[nodiscard]] inline std::expected<metal_archive_negative_error_fingerprint, std::string>
 parse_archive_helper_negative_error_fingerprint(std::string_view transcript) {
@@ -1053,8 +1053,8 @@ struct archive_helper_qualification {
     std::uint64_t metal_registry_id = 0u;
 };
 
-/// @brief Reads the helper's build and Metal device from its output.
-/// Requires one complete qualification line with the expected version and build name.
+/// @brief Reads the helper's build, and Metal device from its output.
+/// Requires one complete  qualification line with the expected version and build name.
 [[nodiscard]] inline std::expected<archive_helper_qualification, std::string>
 parse_archive_helper_qualification(std::string_view transcript) {
     constexpr std::string_view k_prefix = "HELPER_QUALIFICATION wire_revision=";
@@ -1108,7 +1108,7 @@ parse_archive_helper_qualification(std::string_view transcript) {
     };
 }
 
-/// @brief Compiler options and device/library identities reported by command capture.
+/// @brief Compiler options and device/library identities reported by command capture
 struct moltenvk_command_capture_qualification {
     std::uint32_t wire_revision = 0u;
     std::string build_identity;
@@ -1350,7 +1350,7 @@ inline constexpr int k_archive_helper_metallib_child_fd = 197;
 
 /// @brief Writes, flushes, and reads back a private file to check its complete contents.
 /// The descriptor must allow reads and writes and start at offset zero. On success
-/// it is rewound to zero. Returns an error if the bytes or final length differ.
+/// it  is rewound to zero. Returns an error if the bytes or final length differ.
 [[nodiscard]] inline std::expected<void, std::string>
 write_and_verify_exact_fd(int fd, std::span<const std::byte> bytes) {
     std::size_t offset = 0u;
@@ -1404,7 +1404,7 @@ class staged_archive_helper_invocation {
     /// @brief Prevents two objects from owning the same temporary resources.
     staged_archive_helper_invocation& operator=(const staged_archive_helper_invocation&) = delete;
 
-    /// @brief Takes the temporary files and descriptors from `other`, leaving it empty.
+    /// @brief Takes the temporary files and descriptors from `other`, leavng it empty.
     staged_archive_helper_invocation(staged_archive_helper_invocation&& other) noexcept
         : directory_(std::exchange(other.directory_, {})),
           helper_path_(std::exchange(other.helper_path_, {})),
@@ -1423,7 +1423,7 @@ class staged_archive_helper_invocation {
     [[nodiscard]] const std::filesystem::path& helper_path() const noexcept {
         return helper_path_;
     }
-    /// @brief Returns the library descriptor to pass to the child, or -1 if none was staged.
+    /// @brief Returns the  library descriptor to pass to the child, or -1 if none was staged.
     /// This object owns the descriptor.
     [[nodiscard]] int metallib_fd() const noexcept {
         return metallib_fd_;
@@ -1446,7 +1446,7 @@ class staged_archive_helper_invocation {
     }
 
     /// @brief Checks the helper's identity and removes its temporary resources.
-    /// Returns the first identity or cleanup error.
+    /// Returns the first identity or cleanup error
     [[nodiscard]] std::expected<void, std::string> finish() {
         if (!helper_identity_matches()) {
             return std::unexpected("private archive helper identity changed across execution");
@@ -1504,7 +1504,7 @@ class staged_archive_helper_invocation {
 
 /// @brief Copies the saved helper into a private directory for one invocation.
 /// Verifies the copied bytes and keeps a read-only descriptor to the executable.
-/// If supplied, `metallib_fd` must be readable and is rewound and duplicated for
+/// If supplied, `metallib_fd` must  be readable and is rewound and duplicated for
 /// the child. Returns the owning staging object or a file/identity error.
 [[nodiscard]] inline std::expected<staged_archive_helper_invocation, std::string>
 stage_archive_helper_invocation(const qualified_metal_archive_helper& helper,
@@ -1561,7 +1561,7 @@ stage_archive_helper_invocation(const qualified_metal_archive_helper& helper,
     staged.helper_identity_ =
         sealed_shader_cache_detail::regular_file_identity_from_stat(helper_status);
     // Reopen the helper read-only before posix_spawn. Darwin may reject an
-    // executable that is still open for writing. Keep this descriptor to
+    // executable, that is still open for writing. Keep this descriptor to
     // check the private file's identity around execution.
     if (::close(std::exchange(staged.helper_fd_, -1)) != 0) {
         return std::unexpected("private archive helper writable descriptor did not close");
@@ -1602,8 +1602,8 @@ stage_archive_helper_invocation(const qualified_metal_archive_helper& helper,
 
 /// @brief Builds the command library MoltenVK needs after a backend process forks.
 /// Captures its source and options with the selected Vulkan loader, compiles them
-/// with the system Metal tools, and publishes a bundle with hashes and device IDs.
-/// Replaces an existing bundle in the unsealed cache. Does nothing off Apple systems.
+/// with the system Metal tools, and publishes a undle with hashes and device IDs.
+/// Replaces an existing bundle  in the unsealed cache. Does nothing off Apple systems.
 [[nodiscard]] inline std::expected<void, std::string>
 ensure_moltenvk_command_library_for_sealed_seed(const std::filesystem::path& cache_dir) {
 #if !defined(__APPLE__)
@@ -1872,7 +1872,7 @@ ensure_moltenvk_command_library_for_sealed_seed(const std::filesystem::path& cac
 /// unless `force_requalify` is set.
 /// @param[in] meta Validated shader metadata used for workgroup settings.
 /// @param[in] entry_name Metal function to include in each archive.
-/// @return Success or the first helper, file, or validation error.
+/// @return Success or the first helper, file, or validation error
 [[nodiscard]] inline std::expected<void, std::string>
 ensure_binary_archive(const std::filesystem::path& cache_dir,
                       const shader_variant_key& key,
@@ -1980,7 +1980,7 @@ ensure_binary_archive(const std::filesystem::path& cache_dir,
         static_cast<std::uint64_t>(std::max<std::uint32_t>(meta.wg_y, 1u)) *
         static_cast<std::uint64_t>(std::max<std::uint32_t>(meta.wg_z, 1u));
     // MoltenVK can use a 256-thread device limit in its pipeline descriptor.
-    // Build archives for that limit and for the shader's workgroup size so a
+    // Build archives for that limit  and for the shader's workgroup size so a
     // forked backend can reuse either descriptor without compiling a pipeline.
     const std::vector<std::uint64_t> archive_thread_caps = [](std::uint64_t exact_threads) {
         constexpr std::uint64_t k_conservative_moltenvk_cap = 256u;

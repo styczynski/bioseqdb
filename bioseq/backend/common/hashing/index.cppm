@@ -80,7 +80,7 @@ inline constexpr std::uint64_t k_splitmix64_second_multiplier =
 
 /**
  * @brief Computes an FNV-1a hash of the supplied bytes.
- * @param[in] bytes Bytes to hash, in order.
+ * @param[in] bytes Bytes to hash, in  order.
  * @param[in] offset_basis Initial seed, using the standard FNV-1a value by default.
  * @return 64-bit hash.
  */
@@ -135,7 +135,7 @@ inline constexpr std::uint64_t k_splitmix64_second_multiplier =
  * @brief Maps a 64-bit value through SplitMix64.
  *
  * Adds the SplitMix64 increment before mixing. This function has no stored
- * state, so the same input always produces the same output.
+ * state, so the same input alays produces the same output
  */
 [[nodiscard, gnu::always_inline]] inline std::uint64_t splitmix64(
     std::uint64_t value) noexcept {
@@ -150,7 +150,7 @@ inline constexpr std::uint64_t k_splitmix64_second_multiplier =
 /**
  * @brief Generates a repeatable sequence of 64-bit SplitMix64 values.
  *
- * The seed determines the sequence. Each call advances the stored state
+ * The seed determines the sequence. Each  call advances the stored state
  * with unsigned wraparound. Concurrent calls need external synchronization.
  *
  * @code{.cpp}
@@ -356,7 +356,7 @@ private:
 
 public:
     /**
-     * @brief Appends bytes to the hash without adding a length or separator.
+     * @brief Appends bytes to the, hash without adding a length or separator.
      *
      * Fills any pending block first, then processes complete 64-byte blocks
      * directly from the input. Keeps the remaining bytes for the next call.

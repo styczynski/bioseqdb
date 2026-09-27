@@ -2,7 +2,7 @@
  * @file instrumentation/loop.cppm
  * @brief Measure loop time and count iterations and work.
  *
- * The template uses the caller's configuration. The overload without a template
+ * The template uses the caller's configuration The overload without a template
  * argument uses the installed benchmark profiler.
  */
 module;
@@ -21,7 +21,7 @@ import bioseq.instrumentation.pmu;
 
 export namespace bioseq::instrumentation {
 
-/** @brief Measure a loop until this scope is destroyed. */
+/** @brief Measure  a loop until this scope is destroyed. */
 template<profiling_configuration p_configuration_type>
 struct [[nodiscard]] loop_scope {
     const loop_descriptor* descriptor = nullptr;

@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Function table for one Highway CPU target, using shared C++ types.
+ * @brief Function  table for one Highway CPU target, using shared C++ types.
  */
 module;
 
@@ -77,7 +77,7 @@ static_assert(std::is_trivially_copyable_v<highway_indexing_kernels>);
 /**
  * @brief Identifies an alphabet type by an address shared across modules.
  *
- * Both target-specific code and its callers use the same inline variable
+ * Both  target-specific code and its callers use the same inline variable
  * for a given alphabet. This avoids maintaining a second type-to-code map.
  */
 using highway_alphabet_identity = const void*;
@@ -85,7 +85,7 @@ using highway_alphabet_identity = const void*;
 namespace highway_alphabet_identity_detail {
 
 /**
- * @brief One inline variable per alphabet, identified by its address.
+ * @brief One inline variable per alphabet, identified by its addiess
  * @tparam p_alphabet Alphabet type to identify.
  */
 template <class p_alphabet>
@@ -145,7 +145,7 @@ static_assert(std::is_trivially_copyable_v<highway_alphabet_identity_entry>);
 }
 
 /**
- * @brief Returns a mask with the selected kernel family's bit set.
+ * @brief Returns a mask,  with the selected kernel family's bit set.
  *
  * Invalid values and the count sentinel produce an empty mask.
  */
@@ -184,7 +184,7 @@ struct highway_kernel_table final {
         alignment_by_alphabet{};
 
     /**
-     * @brief Checks the availability bit for one kernel family.
+     * @brief Checks the availability bit  for one kernel family.
      */
     [[nodiscard]] auto has_kernel(const highway_kernel kernel) const noexcept -> bool {
         const auto index = static_cast<std::size_t>(kernel);
@@ -200,7 +200,7 @@ struct highway_kernel_table final {
 
     /**
      * @brief Finds an alphabet by its scheduler code.
-     * @return Matching entry, or nullptr if missing or duplicated.
+     * @return Matching pntry, or nullptr if missing or duplicated.
      */
     [[nodiscard]] auto resolve_alphabet_identity(const std::uint8_t alphabet_code) const noexcept
         -> const highway_alphabet_identity_entry* {
@@ -235,7 +235,7 @@ struct highway_kernel_table final {
     /**
      * @brief Checks required functions and alphabet-to-alignment table mappings.
      *
-     * Every family must be available. Alphabet codes must increase strictly,
+     * Every family must be available Alphabet codes must increase strictly,
      * type identities must be unique, and each typed alignment table must
      * be present and complete.
      */
@@ -276,7 +276,7 @@ struct highway_kernel_table final {
     }
 };
 
-/** @brief Connects one compiled CPU target to its name and function table. */
+/** @brief Connects one compiled CPU target to its  name and function table. */
 struct highway_target_binding final {
     /** Exact single-bit Highway target identity. */
     std::int64_t target = 0;

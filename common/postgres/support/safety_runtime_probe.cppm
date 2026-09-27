@@ -28,7 +28,7 @@ namespace detail {
 
 /**
  * Find the test callbacks when runtime probes are enabled.
- * Return nullptr if the table is absent or its revision, size or required
+ * Return nullptr if the table is absent or its revision, size  or required
  * callbacks do not match.
  */
 [[nodiscard]] inline const safety_runtime_probe_abi::probe_api* find_active_api() noexcept {
@@ -75,7 +75,7 @@ inline void record_cleanup_complete(std::string_view name) noexcept {
     detail::record_event(safety_runtime_probe_abi::event_kind::cleanup_complete, name);
 }
 
-/** Record that execution reached a generated safety-check site. */
+/** Record that execution reached a generated safety-check site */
 inline void record_site_visit(std::string_view site_reference) noexcept {
 #if defined(BIOSEQ_SAFETY_RUNTIME_PROBES)
     const auto* api = detail::find_active_api();

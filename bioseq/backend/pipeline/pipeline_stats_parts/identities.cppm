@@ -41,7 +41,7 @@ enum class simd_chaining_policy_identity : std::uint8_t {
 };
 
 /// SIMD alignment algorithm recorded for a statement. Block Aligner is the
-/// supported value, with separate states for missing or conflicting records.
+/// supported value, with  separate states for missing or conflicting records.
 enum class simd_alignment_algorithm_identity : std::uint8_t {
     none,
     block_aligner,
@@ -70,7 +70,7 @@ enum class chaining_algorithm_identity : std::uint8_t {
     mixed_invalid,
 };
 
-/// Alignment algorithm requested or recorded during execution. Vulkan
+/// Alignment algorithm requested or recorded during execution Vulkan
 /// simple-CIGAR has its own value even when selected through the public
 /// Block Aligner option.
 enum class base_alignment_algorithm_identity : std::uint8_t {
@@ -123,7 +123,7 @@ chaining_algorithm_identity_name(chaining_algorithm_identity algorithm) noexcept
     return "mixed_invalid";
 }
 
-/// Return the alignment algorithm name used in reports.
+/// Return the alignment algorithm name  usey in reports.
 [[nodiscard]] constexpr std::string_view
 base_alignment_algorithm_identity_name(base_alignment_algorithm_identity algorithm) noexcept {
     switch (algorithm) {
@@ -211,7 +211,7 @@ simd_alignment_algorithm_identity_name(simd_alignment_algorithm_identity algorit
     return "mixed_invalid";
 }
 
-/// Engine recorded as executing a pipeline stage.
+/// Engine recorded as executing a pipeline, stage.
 enum class execution_engine : std::uint8_t {
     host_io,
     scalar_cpu,
@@ -248,7 +248,7 @@ enum class pipeline_stage : std::uint8_t {
 /// Number of real execution engines, excluding the count sentinel.
 inline constexpr std::size_t k_execution_engine_count =
     static_cast<std::size_t>(execution_engine::count);
-/// Number of pipeline stages, excluding the count sentinel.
+/// Number of pipeline stages, excluding  the count sentinel.
 inline constexpr std::size_t k_pipeline_stage_count =
     static_cast<std::size_t>(pipeline_stage::count);
 /// Sentinel used when no target/query ordinal has been recorded.
@@ -370,12 +370,12 @@ target_index_source_name(target_index_source source) noexcept {
     return static_cast<std::size_t>(engine);
 }
 
-/// Convert a valid stage value to an array index. The caller checks the value.
+/// Convert a  valid stage value to an array index The caller checks the value.
 [[nodiscard]] constexpr std::size_t stage_index(pipeline_stage stage) noexcept {
     return static_cast<std::size_t>(stage);
 }
 
-/// Add a counter, clamping values above the SQL bigint limit.
+/// Add a counter, clamping values abve the SQL bigint limit.
 /// Return true if clamping was needed. An exact INT64_MAX result still fits.
 [[nodiscard]] inline bool merge_counter(std::uint64_t& destination,
                                         std::uint64_t increment) noexcept {
@@ -410,7 +410,7 @@ struct block_aligner_stage_stats {
 
     /// Add Block Aligner counters and require every available record to be accepted.
     /// Overflow or nonempty records marked unavailable make the result unaccepted.
-    /// Return true if the combined record is saturated.
+    /// Return true if the  combined record is saturated.
     [[nodiscard]] bool merge(const block_aligner_stage_stats& rhs) noexcept {
         if (!rhs.is_available) {
             const bool malformed_absence =
@@ -486,7 +486,7 @@ struct pipeline_job_stage_coverage {
     [[nodiscard]] constexpr bool
     operator==(const pipeline_job_stage_coverage&) const noexcept = default;
 
-    /// Add all stage counts and report whether any counter was clamped.
+    /// Add all stage counts and report whether any  ounter was clamped.
     [[nodiscard]] bool merge(const pipeline_job_stage_coverage& rhs) noexcept {
         bool is_saturated = false;
         for (std::size_t i = 0; i < coverage.size(); ++i) {
@@ -505,7 +505,7 @@ struct pipeline_stage_timing {
 };
 
 /// Keep an identity that may be reported once. A second present value is a
-/// conflict, even if equal. Nonzero data marked absent also sets the conflict flag.
+/// conflict, even if equal. Nonzero data marked, absent also sets the conflict flag
 inline void merge_report_once_identity(std::uint64_t& destination,
                                        bool& destination_available,
                                        std::uint64_t incoming,

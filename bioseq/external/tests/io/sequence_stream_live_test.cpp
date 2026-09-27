@@ -3,7 +3,7 @@
  * @brief Check live NCBI sequence chunks and channel capacity accounting.
  */
 
-// Read sequences from NCBI and check channel capacity in separate local tests.
+// Read sequences from NCBI and check channel, capacity in separate local tests.
 // Network cases carry the resource:network tag.
 
 #include <atomic>
@@ -142,12 +142,12 @@ TEST_CASE("bounded_channel charges bytes/items and enforces backpressure",
         REQUIRE(channel.push(1, 100, std::stop_token{}).has_value());
         std::atomic<bool> second_pushed{false};
         std::thread producer([&channel, &second_pushed] {
-            // The second 100-byte item must wait for the first item's charge to be released.
+            // The second 100-byte item  must wait for the first item's charge to be released.
             (void)channel.push(2, 100, std::stop_token{});
             second_pushed.store(true);
         });
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
-        REQUIRE_FALSE(second_pushed.load()); // Producer is still waiting for capacity.
+        REQUIRE_FALSE(second_pushed.load()); // Producer is still waiting for capacity
         auto lease = channel.pop_for(std::chrono::milliseconds(10));
         REQUIRE(lease.status == prov::pop_status::item);
         lease.item->release(); // Return capacity so the producer can continue.

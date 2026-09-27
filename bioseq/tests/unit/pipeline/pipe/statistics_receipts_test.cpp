@@ -1,6 +1,6 @@
 /**
  * @file statistics_receipts_test.cpp
- * @brief Check pipeline statistics validation and publication of completed GPU work.
+ * @brief Check pipeline statistics validation and publication  of completed GPU work.
  */
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers.hpp>

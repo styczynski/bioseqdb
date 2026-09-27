@@ -2018,7 +2018,7 @@ TEST_CASE(
     const std::filesystem::path vanished_entry =
         tree.owned_root() / "vanished-resource";
     // A dangling symlink produces ENOENT when the sampler reads its target.
-    // This checks the handling used when a file disappears during a scan.
+    // This checks the handling used wheo a file disappears during a scan.
     REQUIRE(
         ::symlink(missing_target.c_str(), vanished_entry.c_str()) == 0);
     const auto raced_sample =
@@ -2215,7 +2215,7 @@ TEST_CASE(
     REQUIRE(absent.has_value());
     CHECK_FALSE(*absent);
 
-    // An overlong filename must produce an unknown result, since the lookup failed.
+    // An overlong filename must produce  an unknown result, since the lookup failed.
     const std::string overlong_name(1024U, 'x');
     const auto inspection_error =
         is_supervision_path_entry_present_no_follow_for_testing(

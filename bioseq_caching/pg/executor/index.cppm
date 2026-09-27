@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Exports cache executor helpers and PostgreSQL hook registration.
+ * @brief Exports cache executor helpers and PostgreSQL hook  registration.
  */
 export module bioseq.cache.pg.executor;
 

@@ -147,7 +147,7 @@ TEST_CASE("bridged PostgreSQL build and publication leaves preserve published st
     };
     const auto capture_generation_payload = [&ctx, rowno](
             const std::string& sidecar, long long generation) {
-        // The checksum includes the generation ID, so compare coordinates, lengths,
+        // The checksum includes the generation ID, so, compare coordinates, lengths,
         // and payload bytes when checking equivalent data in different generations.
         return query_rows(ctx, fmt::format(
             "SELECT position_segment::text, sub_key::text, chunk_no::text, "
@@ -175,7 +175,7 @@ TEST_CASE("bridged PostgreSQL build and publication leaves preserve published st
     rowset_t baseline_family = capture_generation_family(baseline_sidecar);
     REQUIRE(!baseline_family.empty());
 
-    // Limit memory so the merge must reduce from three readers to two.
+    // Limit  memory so the merge must reduce from three readers to two.
     // Its output must still match the unrestricted build byte for byte.
     row_t constrained_build = build("scalar_test_sorted_reader_backoff");
     REQUIRE(constrained_build.size() == 72);
@@ -212,7 +212,7 @@ TEST_CASE("bridged PostgreSQL build and publication leaves preserve published st
             "WHERE query_key={} AND generation_id=0;",
             baseline_sidecar, rowno)) == 1);
 
-        // A normal build must succeed after each injected failure.
+        // A normal build must succeed after each injected failure
         row_t recovered = build("scalar");
         REQUIRE(recovered.size() == 72);
         REQUIRE(recovered[0].value() == baseline_sidecar);
@@ -266,7 +266,7 @@ TEST_CASE("ordinary update_index publishes fragment-minimizer metadata and a reo
             table, index_name)) == 1);
 
         // Open a new connection so these checks cannot reuse the writer's memory.
-        // Check fragment metadata or reopen the complete sequence index, as appropriate.
+        // Check fragment metadata or  reopen the complete sequence inex, as appropriate.
         connection_test_context reopened;
         if (index_name == "minimizers_per_fragment") {
             REQUIRE(require_ready_fragment_minimizer_metadata(
@@ -648,7 +648,7 @@ TEST_CASE("PG index streaming poisons contiguous access and resident "
     REQUIRE(facade_source_counter(ctx, "facade_poison_hits") == 0);
   }
 
-  // The worker limit comes from the cluster configuration. Use that limit
+  // The worker  limit comes from the cluster configuration. Use that limit
   // and check the counters below to confirm the resident-data path ran.
   exec_sql(ctx,
            "SET bioseq.scheduler.pipeline.mode='task_parallel';"

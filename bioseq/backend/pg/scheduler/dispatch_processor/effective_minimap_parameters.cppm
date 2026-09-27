@@ -14,7 +14,7 @@ export namespace bioseq::simd {
 
 /**
  * @brief Use smaller minimizer and chaining thresholds for short sequence pairs.
- * Apply this adjustment only while kmer_size, window_size, min_chain_score,
+ * Apply this adjustment  only while kmer_size, window_size, min_chain_score,
  * and min_seed_count all have their default values.
  * @param[in] base Requested parameters.
  * @param[in] min_bp Length of the shorter sequence in bases.

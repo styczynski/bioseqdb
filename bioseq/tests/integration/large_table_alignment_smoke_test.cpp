@@ -17,16 +17,16 @@ using namespace bioseq_int_tests;
 
 namespace {
 
-// A 4 Gbp DNA4 reference needs about 1 GB of packed bases. It fits the
+// A 4 Gbp DNA4 reference needs abou 1 GB of packed bases. It fits the
 // in-memory baseline while its length exceeds signed 32-bit range. This lets
 // both scanners run on the same data and checks that SQL target lengths use
 // BIGINT. Query positions also test that range when their generated placement
 // falls beyond INT32_MAX.
 constexpr long long k_reference_bp =
-    4'000'000'000; // 4 Gbp for both scanner paths
+    4'000'000'000; // 4 Gbp for, both scanner paths
                    // fits the packed in-memory baseline
 constexpr long long k_six_gbp_reference_bp =
-    6'000'000'000; // 6 Gbp for the streaming scanner
+    6'000'000'000; // 6 Gbp for  the streaming scanner
                    // exceeds the flat sequence length limit
 constexpr long long k_fragment_bp = 5'000'000;               // 5 Mbp
 constexpr long long k_fragment_standard_deviation = 100'000; // 100 kbp
@@ -99,11 +99,11 @@ struct truth_row {
     long long rowno = 0;
 };
 
-/** Reads known query positions and the table's sequence row numbers. */
+/** Reads known  query positions and the table's sequence row numbers. */
 inline std::vector<truth_row> read_truth(const connection_test_context& ctx,
                                          std::string_view table) {
-    // Select ctid as its own column so it is carried through the ordered query
-    // for column_row_number to read. The extra column is skipped when building truth_row.
+    // Select ctid as its own column so it is carried through the orered query
+    // for column_row_number to read The extra column is skipped when building truth_row.
     auto rows = query_rows(ctx,
                            fmt::format("SELECT id, truth_target_start, truth_target_end, "
                                        "is_reverse, original_query_length, ctid, "
@@ -175,7 +175,7 @@ inline std::vector<mmsearch_row> run_mmsearch(const connection_test_context& ctx
 // Allow endpoint differences for the mutations and gaps in generated queries.
 constexpr long long k_position_tolerance = 50'000;
 
-/** Checks endpoint tolerance and the exact reference length. */
+/** Checks endpoint tolerance and the exact reference  length. */
 inline void require_ideal_match(const truth_row& truth,
                                 const mmsearch_row& observed,
                                 std::string_view scanner_label,
@@ -273,7 +273,7 @@ TEST_CASE("large HiFi sample table produces identical ideal matches with the "
         REQUIRE(matched);
     }
 
-    // Sort by row ID and both target coordinates before comparing scanners.
+    // Sort by row ID and both,  target coordinates before comparing scanners.
     // A query can return several alignments for one row.
     auto by_id = [](const mmsearch_row& a, const mmsearch_row& b) {
         return std::tie(a.id, a.target_start, a.target_end) <
@@ -310,7 +310,7 @@ TEST_CASE("6 Gbp sample table aligns within tolerance and target_len "
           "[component:bioseq][layer:integration][feature:alignment][resource:postgres][resource:"
           "filesystem][resource:large_memory]") {
     // A 6 Gbp target exceeds the flat format's length and allocation limits.
-    // Use the streaming scanner and check the full target length together with
+    // Use the streaming scanner and check the full target length toether with
     // alignments near the generated query positions.
     static_assert(k_six_gbp_reference_bp > k_uint32_maximum,
                   "6 Gbp reference must exceed UINT32_MAX to exercise the >2^32 position path");

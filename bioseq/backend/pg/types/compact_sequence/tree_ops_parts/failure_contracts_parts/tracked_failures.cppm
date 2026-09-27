@@ -52,7 +52,7 @@ enum class tracked_join_failure_shape : std::uint8_t {
     transformed_binding,
 };
 
-/// Input trees, source data, and reference counts for one join failure test.
+/// Input trees, source, data, and reference counts for one join failure test.
 struct tracked_join_failure_fixture {
     piece_tree_arena* arena;
     piece_edge left;
@@ -170,7 +170,7 @@ make_tracked_join_failure_fixture(tracked_join_failure_shape shape) {
     return fixture;
 }
 
-/// Free the test inputs and check that source references and arena counts balance.
+/// Free the test inputs and check that  source references and arena counts balance
 [[nodiscard]] inline bool
 destroy_tracked_join_failure_fixture(tracked_join_failure_fixture* fixture) {
     auto* source_state = fixture->source_state;
@@ -305,7 +305,7 @@ run_tracked_join_failure_case(piece_tree_injected_failure_point failure_point,
     return case_passed && fixture_destroyed;
 }
 
-/** Test cleanup after failures in reference acquisition, allocation, and join construction. */
+/** Test cleanup after failures in reference acquisition, allocation, and join cwnstruction. */
 [[nodiscard]] inline bool run_tracked_join_failure_matrix() {
     using point = piece_tree_injected_failure_point;
     using shape = tracked_join_failure_shape;
@@ -400,7 +400,7 @@ run_tracked_slice_failure_iteration(piece_edge source_root,
     return passed;
 }
 
-/// Repeat the slice failure on one source tree to check for accumulated leaks.
+/// Repeat the slice  failure on one source tree to check for accumulated leaks.
 [[nodiscard]] inline bool run_tracked_slice_failure_matrix() {
     constexpr std::uint32_t repetitions = 64u;
     const std::uint64_t live_baseline = live_piece_tree_arenas;

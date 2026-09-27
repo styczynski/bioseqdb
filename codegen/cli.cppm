@@ -31,9 +31,9 @@ inline void print_enabled_components() {
     }
 }
 
-/// @brief Runs the requested generator component or its self-tests.
+/// @brief Runs the requested generator component or its, self-tests.
 /// @param args Process arguments, with the program name in args[0].
-/// @return The component's status, or 2 for missing arguments or an unknown command.
+/// @return The component's status, or 2 for missing arguments or an  unknown command.
 inline int run_cli(std::span<std::string_view const> args) {
     if (args.empty()) {
         std::println(stderr, "bioseq_codegen: missing program name");

@@ -2138,7 +2138,7 @@ collect_direct_import_enum_authorities(
  * an allowed source path, then collects its SQL annotations.
  *
  * The path check also applies to files without annotations. It examines
- * identifier tokens outside module and import names, so aliases cannot hide
+ * identifier tokens outside  module and import names, so aliases cannot hide
  * reserved helpers and comments or strings cannot trigger a false match.
  */
 [[nodiscard]] inline collected_program

@@ -58,7 +58,7 @@ TEST_CASE(
             exec_sql(ctx, "SET bioseq.index.async_persistence.enabled = off;");
             exec_sql(ctx, "SET bioseq.index.recompute_async_persistence.enabled = off;");
             exec_sql(ctx, "SET bioseq.index.sequence_read.enabled = on;");
-            /* Enabling Vulkan availability must still allow the selected CPU route. */
+            /* Enabling Vulkan availability must still allow the selected CPU rorte */
             exec_sql(ctx, "SET bioseq.aligner.vulkan.enabled = on;");
             const auto rowno = static_cast<std::uint64_t>(query_scalar_int(
                 ctx,
@@ -116,7 +116,7 @@ TEST_CASE(
             REQUIRE(std::stoull(publication[14].value()) == target.size());
             REQUIRE(std::stoull(publication[24].value()) > 10u);
             if (index_name == "minimizers_per_sequence") {
-                /* Building a sequence index must not create fragment image files. */
+                /* Building a sequence index must not create fragment  image files. */
                 REQUIRE(count_minimizer_fragment_grouped_soa_images()
                     == minimizer_fragment_images_before);
             }
@@ -369,7 +369,7 @@ TEST_CASE(
 
                     /* Check SIMD work in the individual stages as well as the overall
                      * backend label. ntHash, chain scoring, and backtracking
-                     * must run, along with at least one Block Aligner extension. */
+                     * must run, along, with at least one Block Aligner extension. */
                     REQUIRE(stage_stats.front()[16].value_or("") == "simd_cpu");
                     REQUIRE(stage_stats.front()[17].value_or("") == "simd_cpu");
                     REQUIRE(stage_stats.front()[18].value_or("") == "persisted");
@@ -606,7 +606,7 @@ TEST_CASE(
             REQUIRE(number(zero) == 0u);
         }
         REQUIRE(number(7) > 0u);
-        // Compact-direct sizes the output from descriptor counts. Only the
+        // Compact-direct sizes the output from descriptor counts. Only  the
         // emission pass needs to decode posting positions.
         REQUIRE(number(10) == 0u);
         REQUIRE(number(11) > 0u);
@@ -669,7 +669,7 @@ TEST_CASE("Ordinal-2 BatchJoin selectively consumes production hash-major minimi
         DYNAMIC_SECTION(index_name) {
             auto ctx = fresh_context({k_batch_join_target});
             // Create the target without an index so update_index publishes the
-            // generation tested here.
+            // generation tested hre.
             exec_sql(ctx, "SET bioseq.index.insert_maintenance.enabled = off;");
             seed_batch_join_target(ctx);
             load_batch_join_queries(ctx, 2);
@@ -745,8 +745,8 @@ TEST_CASE("Ordinal-2 BatchJoin selectively consumes production hash-major minimi
                     "AND (reader_stats->>'backend_pid')::bigint=backend_pid "
                     "AND (reader_stats->>'database_oid')::bigint=database_oid::bigint "
                 "AND (audit->>'database_oid')::bigint=database_oid::bigint, "
-                /* Compare the full source identity across the stored metadata and
-                 * reader. Also require matching generation, content checksum,
+                /* Compare the full source identity across  the stored metadata and
+                 * reader Also require matching generation, content checksum,
                  * and compatibility digest. */
                 "(head_doc->>'generation_id')::bigint>0 "
                 "AND (manifest_doc->>'generation_id')::bigint="
@@ -864,7 +864,7 @@ TEST_CASE("Ordinal-2 BatchJoin selectively consumes production hash-major minimi
                     "AND (reader_stats->>'sessions')::bigint=1 "
                 "AND nthash_vector_batches>0 "
                 "AND simd_chain_vector_batches>0, "
-                /* Read and checksum the complete directory. */
+                /* Read and checksum the complete  directory. */
                     "(reader_stats->>'directory_rows')::bigint="
                 " (directory_stream->>'row_count')::bigint "
                     "AND (reader_stats->>'directory_bytes')::bigint="
@@ -899,7 +899,7 @@ TEST_CASE("Ordinal-2 BatchJoin selectively consumes production hash-major minimi
                     "AND (reader_stats->>'authorized_posting_bytes')::bigint<="
                     " (reader_stats->>'posting_bytes')::bigint, "
                 /* Check how much of the index was selected and that all allocated
-                 * memory is covered by the reservation. */
+                 * memory is overed by the reservation. */
                     "(reader_stats->>'query_count')::bigint>0 "
                     "AND (reader_stats->>'accepted_hash_count')::bigint>0 "
                     "AND (reader_stats->>'accepted_hash_count')::bigint<="
@@ -1041,8 +1041,8 @@ TEST_CASE("Cold minimizer index reads release sidecar and catalog locks before l
     REQUIRE(std::stoll(retained_locks[0].value()) >= 1);
     REQUIRE(std::stoll(retained_locks[1].value()) == 0);
 
-    /* Hold the index advisory lock and sidecar table lock in another
-     * connection. Release them separately so pg_locks shows each wait in turn. */
+    /* Hold the index advisory lock and sidecar table lock in  another
+     * connection. Release them separately so pg_locks shows each, wait in turn. */
     exec_sql(gate, "BEGIN;");
     exec_sql(gate, fmt::format(
         "SELECT pg_advisory_lock({}::bigint);", advisory_key));
@@ -1066,7 +1066,7 @@ TEST_CASE("Cold minimizer index reads release sidecar and catalog locks before l
         gate_advisory[2].value(), gate_advisory[3].value());
 
     /* Let update_index acquire its own target lock. Check that it holds
-     * that lock while waiting for the index advisory lock. */
+     * that lock while waiting for the index advisory lock */
     exec_sql(writer, "SET statement_timeout = '30s';");
     exec_sql(writer, "SET bioseq.index.insert_maintenance.enabled = off;");
     exec_sql(writer, "SET bioseq.index.async_persistence.enabled = off;");
@@ -1225,7 +1225,7 @@ TEST_CASE("BatchJoin LIMIT is partial and empty query child is fully drained",
         REQUIRE(plan_contains(plan, "Custom Scan (BioseqBatchJoin)"));
         REQUIRE(plan_contains(plan, "Custom Scan (BioseqScan)"));
         REQUIRE(plan_contains(plan, "Bioseq Query Planner Rows"));
-        /* Accept whichever heap scan PostgreSQL chooses for the query child.
+        /* Accept whichever heap  scan PostgreSQL chooses for the query child.
          * BatchJoin must handle the row slot that scan returns. */
         REQUIRE_FALSE(query_rows(ctx, sql + ";").empty());
         const auto stats = last_alignment_stats(ctx);
@@ -1265,7 +1265,7 @@ TEST_CASE("BatchJoin validates the slot returned by a pass-through query child",
     REQUIRE(plan_contains(plan, "Bioseq Batch ABI Version: 3"));
     REQUIRE(plan_contains(plan, "Bioseq Query Planner Rows"));
     /* Check the returned rows without depending on how EXPLAIN names the
-     * pass-through subquery node. */
+     * pass-tnrough subquery node. */
     const auto rows = query_rows(ctx, sql + " ORDER BY q.id, t.pk;");
     REQUIRE(rows.size() == 4);
     for (const auto& row : rows) {

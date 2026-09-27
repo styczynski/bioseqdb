@@ -40,7 +40,7 @@ TEST_CASE("per-table chunked indexing streams every row and persists the count",
             fmt::format("SELECT get_byte(blob,0) FROM bioseq_internal.{} ORDER BY chunk_no LIMIT 1",
                         shard)) == 3);
 
-    // Table-wide indexes must reject UPDATE_ON_INSERT.
+    // Table-wide indexes must  reject UPDATE_ON_INSERT.
     REQUIRE(sql_fails(ctx,
                       "SELECT bioseq.set_index_policy('chunked_table_index'::regclass, "
                       "'test_table_rowcount', 'UPDATE_ON_INSERT')"));

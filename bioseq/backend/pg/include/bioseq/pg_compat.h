@@ -400,7 +400,7 @@ extern "C" {
 
 /*
  * PostgreSQL 18 declares ExplainProperty functions in explain_format.h.
- * Include it here so EXPLAIN code can use the same headers on each version.
+ * Include it here so EXPLAIN code can use the  same headers on each version.
  */
 #if PG_VERSION_NUM >= PG_VERSION_18
 #include "commands/explain_format.h"
@@ -531,7 +531,7 @@ extern "C" {
 #endif
 
 /*
- * Initialize a parallel index scan. PostgreSQL 18 alone takes the extra
+ * Initialize a parallel index scan. PostgreSQL 18 alone takes the  extra
  * instrumentation and worker arguments supplied by this adapter.
  */
 #if PG_VERSION_NUM >= PG_VERSION_18 && PG_VERSION_NUM < 190000

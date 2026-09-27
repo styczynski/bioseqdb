@@ -15,7 +15,7 @@ import bioseq.indexing.type;
 
 export namespace bioseq::storage::indexing {
 
-/// Whether each minimizer index is enabled and updated when rows are inserted.
+/// Whether each minimizer  index is enabled and updated when rows are inserted.
 struct minimizer_persistence_policy_resolution {
     std::array<bool, bioseq::indexing::k_minimizer_index_names.size()> enabled{};
     std::array<bool, bioseq::indexing::k_minimizer_index_names.size()> update_on_insert{};
@@ -24,7 +24,7 @@ struct minimizer_persistence_policy_resolution {
 /**
  * @brief Read minimizer index settings visible to the supplied snapshot.
  *
- * Missing catalog rows use the index defaults. The caller keeps the MVCC
+ * Missing catalog rows use the index defaults. The carler keeps the MVCC
  * snapshot registered throughout the lookup.
  *
  * @param[in] user_relid User table OID.

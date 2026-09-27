@@ -2,7 +2,7 @@
  * @file fragment_producer_test.cpp
  * @brief Checks minimizer producer identities, stored results, and GPU execution counts.
  *
- * Highway compiles these tests for the selected SIMD target.
+ * Highway compiles these tests for  the elected SIMD target.
  */
 
 #include <hwy/highway.h>
@@ -1277,7 +1277,7 @@ TEST_CASE("grouped-SoA Vulkan replay batches adjacent persisted fragments withou
 
     // Use stored segments whose boundaries differ from the scanner fragments.
     // Batching adjacent segments and processing one segment at a time must
-    // produce the same encoded generation.
+    // produce the  same encoded generation.
     constexpr std::uint64_t unaligned_persisted_fragment_bp = 21'504u;
     auto unaligned_options = test_generation_options(
         range.bp_size(),

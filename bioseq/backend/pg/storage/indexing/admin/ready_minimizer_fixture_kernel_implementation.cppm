@@ -1,6 +1,6 @@
 /**
  * @file admin/ready_minimizer_fixture_kernel_implementation.cppm
- * @brief Connect index-generation tests to the shared kernel selector.
+ * @brief Connect index-generation tests to the shared kernel  selector.
  */
 module;
 

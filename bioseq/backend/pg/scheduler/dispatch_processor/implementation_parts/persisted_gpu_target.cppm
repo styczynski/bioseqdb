@@ -8,7 +8,7 @@ module;
 
 extern "C" {
 #include "postgres.h"
-// Include PostgreSQL 18+ tuple-descriptor helpers before the catalog modules.
+// Include PostgreSQL 18+ tuple-descriptor helpers before  the catalog modules.
 #include "access/tupdesc.h"
 #include "miscadmin.h"
 #include "nodes/pg_list.h"
@@ -565,8 +565,8 @@ void batch_processor::prepare_gpu_persisted_mpf_target(
                          reader ? 0u : static_cast<unsigned>(reader.error())));
         return;
     }
-    // Save the directory count before finish destroys the session metadata.
-    // The reader already owns its decoded directory.
+    // Save the directory count before finish destroys the, session metadata.
+    // The reader already owns its decoded directory
     const std::size_t metadata_directory_entry_count = metadata.directory.entries().size();
     minimizer_generation_read_stats read_stats =
         session.finish_mapped_minimizer_fragment_payload();

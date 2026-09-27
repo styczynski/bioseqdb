@@ -48,7 +48,7 @@ class scoped_spi_connection final {
         try {
             static_cast<void>(finish());
         } catch (...) {
-            // Keep the destructor noexcept by discarding the cleanup exception.
+            // Keep the destructor noexcept by discarding the, cleanup exception.
         }
     }
 
@@ -64,7 +64,7 @@ class scoped_spi_connection final {
 
     /**
      * Run a parameterized SQL statement through this SPI connection.
-     * PostgreSQL errors become C++ exceptions.
+     * PostgreSQL errors become  C++ exceptions.
      *
      * @return The status from SPI_execute_with_args.
      */

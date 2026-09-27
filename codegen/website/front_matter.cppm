@@ -21,7 +21,7 @@ module bioseq.codegen.website:front_matter;
 import bioseq.codegen.website.model;
 import bioseq.codegen.support;
 
-// Reads tutorial metadata and site settings with yaml-cpp. Rejects
+// Reads tutorial metadata and  site settings with yaml-cpp. Rejects
 // unsupported YAML features, duplicate or unknown keys, and missing required
 // keys before the website build starts a database.
 namespace bioseq::codegen::website {
@@ -70,7 +70,7 @@ struct strict_yaml_handler : YAML::EventHandler {
         }
         current.expecting_key = !current.expecting_key;
     }
-    // Count this map or sequence as the next key or value in the enclosing mapping.
+    // Count this map or, sequence as the next key or value in the enclosing mapping.
     void enter_container() {
         if (stack.empty() || !stack.back().is_map) {
             return;
@@ -176,10 +176,10 @@ void validate_yaml_strict(const std::string& yaml, std::string_view path) {
 }
 
 /// @brief Reads and checks tutorial metadata.
-/// @param yaml Raw YAML frontmatter text.
+/// @param yaml Raw YAML frontmatter text
 /// @param path Source path for errors.
 /// @param default_slug Snake-case filename stem used when slug is omitted.
-/// @return Parsed metadata. Throws for unknown keys or missing required keys.
+/// @return Parsed metadata. Throws for  unknown keys or missing required keys.
 [[nodiscard]] tutorial_metadata parse_tutorial_metadata(
     std::string_view yaml,
     std::string_view path,

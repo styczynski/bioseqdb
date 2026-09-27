@@ -10,7 +10,7 @@ export module bioseq.external.uniprot:annotation_schemas;
 
 export namespace bioseq::external::uniprot::descriptor {
 
-/** @brief Schemas for protein comments, reactions, and cellular locations. */
+/** @brief Schemas for protein comments, reactions, and  cellular locations. */
 inline constexpr std::string_view annotation_schemas =
     R"bioseq_openapi(    AlternativeProductsComment:
       type: object

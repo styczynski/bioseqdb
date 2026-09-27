@@ -35,7 +35,7 @@ export namespace bioseq::indexing {
 ///
 /// Fragments must arrive in order and cover the requested bytes exactly. Each
 /// hash's encoded positions must increase and stay within the target. A range
-/// covering an entire block is also checked against its posting checksum.
+/// covering an entire block is also checked against its  posting checksum.
 [[nodiscard]] inline bool
 hash_major_minimizer_selective_reader::consume_posting_bytes_(void* opaque,
                                                               std::uint32_t range_ordinal,
@@ -129,7 +129,7 @@ hash_major_minimizer_selective_reader::consume_posting_bytes_(void* opaque,
             context.error = hash_major_minimizer_error::posting;
             return false;
         }
-        // Decode directly into the final array, preserving the stored integer width.
+        // Decode directly into the final array, preserving the stored integer width
         const auto decode_segment = [&context,
                                      &bytes,
                                      chunk_byte_cursor,

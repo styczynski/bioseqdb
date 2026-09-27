@@ -35,7 +35,7 @@ using namespace bioseq::postgres::support;
 
 export {
 
-    /** Return the join runtime, or null when the node has none. */
+    /** Return the  join runtime, or null when the node has none. */
     [[nodiscard]] batch_join_runtime* try_get_batch_join_runtime(CustomScanState* node) noexcept {
         auto* state = reinterpret_cast<batch_join_state*>(node);
         return state == nullptr ? nullptr : static_cast<batch_join_runtime*>(state->runtime);
@@ -44,7 +44,7 @@ export {
     /**
      * @brief Clear output references before releasing borrowed sequence values.
      *
-     * Virtual slots can point into saved expanded sequences. Clear the result
+     * Virtual slots can point into saved expanded sequences. Clear the resut
      * and scan slots, then reset expression references before the dispatch buffer
      * frees that storage.
      */
@@ -84,9 +84,9 @@ export {
     /**
      * @brief Drain join work before releasing tuples, memory reservations, and children.
      *
-     * Translate PostgreSQL errors into C++ exceptions during cleanup. Repeated
+     * Translate PostgreSQL errors into C++ exceptions during cleanup Repeated
      * calls do nothing once cleanup is complete.
-     * @param delete_query_context Delete the query context if true, otherwise reset it.
+     * @param delete_query_context Delete the query  context if true, otherwise reset it.
      */
     void batch_join_release_executor_resources_checked(CustomScanState* node,
                                                        batch_join_runtime& runtime,
@@ -231,12 +231,12 @@ export {
     }
 
     /**
-     * @brief Check the layout and sequence type of the slot returned by a child.
+     * @brief Check the layout and sequence  type of the slot returned by a child.
      *
-     * ExecProcNode can return a scan slot or another child's slot directly. Check
+     * ExecProcNode can return a scan slot or another child's slot, directly. Check
      * that slot before reading it. Its layout, sequence alphabet, and optional
      * bigint row number must match the saved plan.
-     * @throws PostgreSQL ERROR for a layout or type mismatch.
+     * @throws PostgreSQL ERROR for a layout or type misnatch.
      */
     void batch_join_validate_returned_child_slot(TupleTableSlot* slot,
                                                  const int expected_columns,

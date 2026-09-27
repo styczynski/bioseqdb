@@ -12,7 +12,7 @@ export import :custom_scan_join_ownership_cost_contracts;
 import std;
 import :custom_scan_oid_expression_support_oid_catalog_contracts;
 
-/** @brief The join and sequence columns used by an operand that may move to a PerRow owner. */
+/** @brief The join and sequence columns ued by an operand that may move to  a PerRow owner */
 export struct per_row_operand_source_resolution {
     RelOptInfo* joinrel = nullptr;
     List* sequence_vars = NIL;
@@ -40,8 +40,8 @@ export struct per_row_owner_support_validation {
  *
  * PostgreSQL evaluates the original ExprState at the scan, preserving the
  * order and short-circuit behavior of volatile functions, CASE, and
- * COALESCE. Every Var must belong to this non-nullable relation. Reject
- * aggregates, window functions, subplans, PlaceHolderVars, and set-returning
+ * COALESCE. Every Var must belong to this non-nullable  relation. Reject
+ * aggregates, window functions, subplans, PlaceHolderVars, and, set-returning
  * expressions because their evaluation belongs elsewhere.
  */
 export struct base_local_mmsearch_operand_resolution {
@@ -77,12 +77,12 @@ export [[nodiscard]] Const* make_batch_join_cost_const(Cost value);
 /** @brief Appends a copy of the expression unless an equal expression is already present. */
 export void per_row_append_unique_expression(List*& expressions, Node* node);
 
-/** @brief Copies the join's output with matching sort and group references. */
+/** @brief Copies the join's output with matching  sort and group references. */
 export [[nodiscard]] PathTarget* per_row_build_owner_target(
     PlannerInfo* root,
     PathTarget* original);
 
-/** @brief Checks that the PerRow join can produce this output with the same Var and helper bindings. */
+/** @brief Checks that the PerRow joyn can produce this output with the same Var and helper bindings. */
 export [[nodiscard]] bool per_row_output_semantics_are_supported(
     PathTarget* target,
     Index target_relid,
@@ -96,7 +96,7 @@ export [[nodiscard]] bool per_row_collect_setrefs_carrier_vars(
     Relids join_relids,
     List*& carrier_vars);
 
-/** @brief Collects the final output's input columns and match helpers for this PerRow join. */
+/** @brief Collects the final output's input columns and match helpers for this PerRow join */
 export [[nodiscard]] bool per_row_collect_owner_support(
     PlannerInfo* root,
     RelOptInfo* joinrel,

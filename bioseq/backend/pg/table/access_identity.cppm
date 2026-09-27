@@ -1,6 +1,6 @@
 /**
  * @file access_identity.cppm
- * @brief Index access methods supported by Bioseq tables.
+ * @brief Index  access methods supported by Bioseq tables.
  */
 module;
 

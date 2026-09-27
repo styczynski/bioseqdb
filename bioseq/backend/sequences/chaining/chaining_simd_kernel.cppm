@@ -4,7 +4,7 @@
  *
  * Highway generates an entry point for each supported CPU target from this
  * module. The imported modules prepare anchors, score possible predecessors,
- * and follow the chosen predecessors to produce chains.
+ * and follow  the chosen predecessors to produce chains.
  */
 module;
 
@@ -143,7 +143,7 @@ void run_simd_chaining(
 }  // namespace chaining_simd_detail
 
 /**
- * @brief Chain sorted anchors using SIMD on the selected CPU target.
+ * @brief Chain orted anchors using SIMD on  the selected CPU target.
  *
  * Both scoring and backtracking use SIMD. Invalid settings, unsupported CPU
  * targets, and inputs too large for the scratch arrays raise an error.
@@ -154,8 +154,8 @@ void run_simd_chaining(
  * @param chains_out Receives chain descriptors in arena storage.
  * @param reordered_anchors_out Receives anchors grouped in chain order.
  * @param stats Optional counters, reset at the start of this call.
- * @param aggregate_stats Collect a shorter set of counters when stats is supplied.
- * @throws simd_chaining_runtime_error If the settings, CPU target, or scratch size are unsupported.
+ * @param aggregate_stats Collect a shorter, set of counters when stats is supplied.
+ * @throws simd_chaining_runtime_error If the settings, CPU target, or scratch size are unsupported
  */
 void chain_anchors_simd(
     std::span<const anchor> anchors,
@@ -243,7 +243,7 @@ void chain_anchors_simd(
                 ++stats->policy.bounded_batch_approximate_calls;
                 break;
             default:
-                // The earlier policy check rejects every value outside these two cases.
+                // The earlier policy check rejects every value outside these  two cases.
                 chaining_simd_detail::reject(
                     stats,
                     simd_chaining_status::invalid_policy,

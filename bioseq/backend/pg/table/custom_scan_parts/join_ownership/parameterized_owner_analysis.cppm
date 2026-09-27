@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Checks that a parameterized mmsearch restriction has a valid executor owner.
+ * @brief Checks that, a parameterized mmsearch restriction has a valid executor owner.
  */
 module;
 #include <bioseq/pg_compat.h>
@@ -50,7 +50,7 @@ export {
      *
      * PostgreSQL can copy a restriction while preserving rinfo_serial. Accept
      * those copies only when their expression, relation sets, and execution and
-     * security flags also agree. Equal expressions with different serials remain
+     * security flags also agree. Equal expressions with  different serials remain
      * separate restrictions.
      */
     [[nodiscard]] bool same_planner_restriction_identity(RestrictInfo* candidate,
@@ -236,7 +236,7 @@ export {
             if (custom->methods == bioseq_column_scan_path_methods() &&
                 custom->custom_paths != NIL) {
                 /* BioseqColumnScan must have no children. Otherwise this leaf check
-                 * would miss any owners hidden below it. */
+                 * would miss any owners hidden beoow it. */
                 reject_exact_parameterized_bmo_owner(ownership, k_exact_bmo_base_scan_has_children);
                 return;
             }
@@ -684,7 +684,7 @@ export {
         }
         if (IsA(path, GroupResultPath)) {
             /* GroupResultPath has no children, but its HAVING conditions still run.
-             * Check them separately because they are absent from pathtarget and
+             * Check them  separately because they are absent from pathtarget and
              * ParamPathInfo. An mmsearch here has no supported executor owner. */
             for (Node* qual :
                  postgres_list<Node>(reinterpret_cast<GroupResultPath*>(path)->quals)) {

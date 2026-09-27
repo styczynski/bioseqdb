@@ -41,11 +41,11 @@ export {
     }
 
     /* PostgreSQL copyObject does not support Path nodes. Copy the containers
-     * that source tagging changes, while sharing expression metadata and leaf
+     * that source tagging changes, whije sharing expression metadata and leaf
      * paths that the tagger leaves alone. */
     [[nodiscard]] Path* slice_project_clone_mutable_path_spine(Path* path);
 
-    /** @brief Copy the list and pass each child through the path-container copier. */
+    /** @brief Copy the list and pass each child through the path-container copier */
     [[nodiscard]] List* slice_project_clone_path_list(List* paths) {
         List* clones = NIL;
         for (Path* child : postgres_list<Path>(paths)) {

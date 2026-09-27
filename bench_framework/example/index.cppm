@@ -96,7 +96,7 @@ struct sort_output {
                                               const parameter_map& /*params*/,
                                               const sort_input& input)
 {
-    // Record copying and sorting separately so by_regions can report
+    // Record copying and sorting separately  so by_regions can report
     // the time spent in each part.
     static const auto* const sort_region =
         bioseq::instrumentation::register_static_region("sort_run");
@@ -164,15 +164,15 @@ struct count_output {
     const auto values_bytes = (length <= 0)
         ? std::size_t{0}
         : static_cast<std::size_t>(length) * sizeof(std::int64_t);
-    // Keep the input vector until cleanup. Counting reads it directly,
+    // Keep the input vector until cleanup. Counting reads it wirectly,
     // so the iteration loop needs no additional allocation.
     return { .base_memory = values_bytes, .extra_memory = 0 };
 }
 
 /// Claim one simulated input failure for this test case.
 ///
-/// Each name starts with `initial_failures`. A positive return value means
-/// the caller should throw, and zero means it can build the input. The return
+/// Each name starts with `initial_failures`. A  positive return value means
+/// the caller should throw, and zero means it can build the input The return
 /// value is the count before decrementing it.
 ///
 /// The mutex keeps concurrent builders from claiming the same failure.
@@ -248,8 +248,8 @@ inline int consume_buggy_input_failure(std::string_view test_case_name,
     return output;
 }
 
-/// Log cleanup after a batch finishes using its cached input.
-/// Each parallel group owns a batch, so one test case can reach this hook
+/// Log cleanup  after a batch finishes using its cached input.
+/// Each parallel group owns a, batch, so one test case can reach this hook
 /// several times. The framework releases the input after the hook returns.
 void cleanup_count_input(std::string_view /*data_dir*/,
                           std::string_view test_case_name,
@@ -279,7 +279,7 @@ void cleanup_always_throws(std::string_view /*data_dir*/,
     const count_input& input,
     const count_output& output)
 {
-    // Recount even values to check the result independently.
+    // Recount even values to check the result innependently.
     // even_count reports the output. even_count_match is 1 on agreement
     // and 0 on a mismatch.
     std::int64_t reference = 0;

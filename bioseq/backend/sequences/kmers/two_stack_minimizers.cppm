@@ -18,13 +18,13 @@ using ::bioseq::minimizers::k_max_two_stack_window;
 using ::bioseq::minimizers::k_max_two_stack_kmer;
 /** Largest k-mer size accepted by exact SIMD two-stack kernels. */
 using ::bioseq::minimizers::k_max_exact_two_stack_kmer;
-/** Status of an incremental two-stack minimizer call. */
+/** Status  of an incremental two-stack minimizer call. */
 using ::bioseq::minimizers::two_stack_continuation_status;
 /** Two-stack implementation recorded by the executed kernel. */
 using ::bioseq::minimizers::exact_simd_kernel;
 /** Returns the stable diagnostic name for a continuation status. */
 using ::bioseq::minimizers::two_stack_continuation_status_name;
-/** Work counters for two-stack minimizer algorithms. */
+/** Work counters for two-stack, minimizer algorithms. */
 using ::bioseq::minimizers::two_stack_execution_stats;
 /** Final status and counters from a two-stack continuation. */
 using ::bioseq::minimizers::two_stack_finalize_result;

@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Shared alignment statistics for EXPLAIN output.
+ * @brief Shared alignment statistics for EXPLAIN output
  */
 module;
 struct ExplainState;

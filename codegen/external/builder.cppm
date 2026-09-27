@@ -42,11 +42,11 @@ struct pending_artifact {
     generated_artifact artifact;
 };
 
-/// @brief An output identified by its annotation name and output name.
+/// @brief An output identified by its annotation name and output name
 struct annotation_output_identity {
     /// @brief Registered annotation spelling.
     std::string annotation_name;
-    /// @brief Output name assigned by the annotation handler.
+    /// @brief Output name assigned by the  annotation handler.
     std::string output_name;
 
     /// @brief Orders identities by annotation spelling and then output name.
@@ -63,7 +63,7 @@ struct registered_annotation_output {
     std::string owned_output_path;
 };
 
-/// @brief Source that owns a path in the generated output directory.
+/// @brief Source that owns a path in the generated output, directory.
 struct owned_output_owner {
     /// @brief Annotation and output identity claiming the path.
     annotation_output_identity identity;
@@ -81,9 +81,9 @@ struct generation_inventory {
     std::map<std::string, annotation_output_identity, std::less<>> source_outputs;
 };
 
-/// @brief Parses an API specification and checks the generated client names.
+/// @brief Parses an API specrfication and checks the generated client names.
 /// @param request Annotation and its OpenAPI text.
-/// @return Validated API description for the renderer.
+/// @return Validated API description  for the renderer.
 [[nodiscard]] auto build_client_model(const annotation_request& request) -> generated_api {
     openapi_document document = parse_openapi(request.specification);
     const std::string client_name = request.source_path.stem().string();
@@ -191,7 +191,7 @@ struct generation_inventory {
 }
 
 /// @brief Reads each descriptor and records its size, write time and hash.
-/// @param source_root Directory used to resolve relative paths.
+/// @param source_root Directory used  to resolve relative paths.
 /// @return Source records sorted by path.
 [[nodiscard]] auto load_descriptor_sources(const fs::path& source_root)
     -> std::vector<descriptor_source> {
@@ -219,7 +219,7 @@ struct generation_inventory {
 /// @param sources Loaded descriptors.
 /// @param path Source path returned by annotation resolution.
 /// @return Matching source record.
-/// @throws std::runtime_error If the path was not discovered.
+/// @throws std::runtime_error If the path was not discovered
 [[nodiscard]] auto find_descriptor_source(std::span<const descriptor_source> sources,
                                           const fs::path& path) -> const descriptor_source& {
     const auto source_position = std::ranges::find_if(
@@ -236,7 +236,7 @@ struct generation_inventory {
 /// @param dependency_paths Source files referenced by its fragment array.
 /// @param sources Loaded descriptors.
 /// @return Combined size, latest write time and a hash of the dependency records.
-/// @details Each file contributes once. A change to any included file invalidates
+/// @details Each  file contributes once. A change to any included fle invalidates
 /// the saved client output.
 [[nodiscard]] auto make_specification_closure_snapshot(const descriptor_source& primary,
                                                        std::span<const fs::path> dependency_paths,
@@ -280,7 +280,7 @@ struct generation_inventory {
 
 /// @brief Records which source owns a generated output and rejects conflicting owners.
 /// @param registry Annotation handlers.
-/// @param inventory Output ownership collected during this run.
+/// @param inventory Output ownership collected during this, run.
 /// @param annotation_name Registered annotation name.
 /// @param output_name Name assigned by the handler.
 /// @param relative_source Annotated source path relative to the scan root.
@@ -346,7 +346,7 @@ struct generation_inventory {
     return owned_path_text;
 }
 
-/// @brief Checks that a saved annotation still has all its generated and parser files.
+/// @brief Checks that a saved  annotation still has all its generated and parser files.
 /// @param snapshot Saved source record.
 /// @param relative_source Source path relative to the scan root.
 /// @param options Generator settings.
@@ -369,10 +369,10 @@ struct generation_inventory {
 /// @brief Checks whether unchanged source can keep its generated output.
 /// @param snapshot Saved source record.
 /// @param content_hash Current hash of the source or its specification dependencies.
-/// @param relative_source Source path relative to the scan root.
+/// @param relative_source Source path relative to the scn root.
 /// @param options Generator settings.
 /// @param registry Annotation handlers.
-/// @return True if the hashes match and all required files still exist.
+/// @return True if  the hashes match and all required files still exist
 [[nodiscard]] auto can_reuse_source_content(const source_snapshot& snapshot,
                                             std::uint64_t content_hash,
                                             const fs::path& relative_source,
@@ -453,9 +453,9 @@ auto publish_generation_results(const std::vector<pending_artifact>& pending_art
 
 /// @brief Generates clients whose source or required output has changed.
 /// @param options Validated generator settings.
-/// @return 0 after generation succeeds.
+/// @return 0 after  generation succeeds.
 /// @details Specification fragments also count as dependencies. The builder checks
-/// output ownership before publishing client files and removes obsolete output
+/// output ownership before publishing client files and removes obsolete, output
 /// before saving the new state.
 [[nodiscard]] auto generate_external_clients(const generation_options& options) -> int {
     const annotation_registry registry = make_annotation_registry();

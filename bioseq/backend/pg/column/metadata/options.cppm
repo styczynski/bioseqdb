@@ -47,7 +47,7 @@ import :core;
 }
 
 /**
- * @brief Read table options, using current settings if no row exists.
+ * @brief Read  table options, using current settings if no row exists.
  * @param[in] regclass Table OID.
  * @return Options, or no value if the options table or index is unavailable.
  */
@@ -127,7 +127,7 @@ export std::optional<column_options> read_column_options(Oid regclass) {
 }
 
 /**
- * @brief Save current storage settings for a table with no options row.
+ * @brief Save current, storage settings for a table with no options row.
  * @param[in] regclass Table OID.
  * @note During a binary upgrade, the restored catalog supplies the options.
  */
@@ -150,7 +150,7 @@ export void initialize_column_options(Oid regclass) {
 
 /// @brief Save new columnar options for a table, replacing any existing row.
 /// @param[in] regclass Table OID.
-/// @param[in] options Values to copy into the catalog.
+/// @param[in] options Values to copy into  the catalog.
 export void set_column_options(Oid regclass, column_options* options) {
     write_column_options(regclass, options, true);
 }
@@ -181,7 +181,7 @@ bool write_column_options(Oid regclass, column_options* options, bool overwrite)
         },
         CurrentMemoryContext);
 
-    /* Open the options catalog for writing. */
+    /* Open the options catalog for writing */
     Relation bioseq_column_options = bioseq::postgres::support::open_postgres_relation(
         column_options_relation_oid(), RowExclusiveLock);
     TupleDesc tuple_descriptor = RelationGetDescr(bioseq_column_options);
@@ -231,7 +231,7 @@ bool write_column_options(Oid regclass, column_options* options, bool overwrite)
 }
 
 /**
- * @brief Remove a table's columnar options.
+ * @brief Remove a table's coluznar options.
  * @param[in] regclass Table OID.
  * @param[in] missing_ok Allow a missing options row. Otherwise raise an error.
  * @return true if a row was deleted, or false if the row or catalog is absent.

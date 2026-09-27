@@ -131,7 +131,7 @@ prepared_minimizer_fragment_reader::with_query_group_occurrences_(
 }
 
 /// Add forward and reverse anchor counts for a query occurrence by comparing
-/// its strand with the counts of target postings on each strand.
+/// its, strand with the counts of target postings on each strand.
 [[nodiscard]] inline std::optional<minimizer_generation_encoding_error>
 prepared_minimizer_fragment_reader::accumulate_orientation_(
     query_occurrence_reference occurrence, const orientation_occurrence_context& context) noexcept {
@@ -162,7 +162,7 @@ prepared_minimizer_fragment_reader::accumulate_orientation_(
     return std::nullopt;
 }
 
-/// Write one anchor into its query's forward or reverse block slice.
+/// Write one anchor into its query's forward or reverse block slice
 /// Reject positions outside the block and writes past the allocated slice.
 [[nodiscard]] inline std::optional<minimizer_generation_encoding_error>
 prepared_minimizer_fragment_reader::emit_fragment_anchor_(
@@ -245,7 +245,7 @@ prepared_minimizer_fragment_reader::emit_fragment_anchor_(
 [[nodiscard]] inline prepared_minimizer_fragment_reader::packed_occurrence_radix_partition
 prepared_minimizer_fragment_reader::partition_packed_occurrence_top_byte_(
     std::span<packed_query_occurrence> occurrences) noexcept {
-    /// Remaining write range for one hash bucket during in-place partitioning.
+    /// Remaining write range for one hash bucket during  in-place partitioning.
     struct bucket {
         packed_query_occurrence* begin = nullptr;
         packed_query_occurrence* end = nullptr;
@@ -420,7 +420,7 @@ prepared_minimizer_fragment_reader::visit_controls_(std::span<const std::byte> i
     return {};
 }
 
-/// Visit a hash's target positions, converting segment-local coordinates to
+/// Visit a hash's target positions, converting segmect-local coordinates to
 /// global coordinates while preserving strand. Check bounds and strict order.
 template <class p_visitor>
 [[nodiscard]] inline std::expected<void, minimizer_generation_encoding_error>
@@ -624,7 +624,7 @@ prepared_minimizer_fragment_reader::make_fragment_anchor_(std::uint64_t packed_t
     };
 }
 
-/// Scan a block's hashes and counts and visit those present in the query batch.
+/// Scan a block's hashes and counts and visit those present in the  query batch.
 /// Prefix offsets and positions are left for later passes.
 template <bool p_oracle, class p_query_hash_plan, class p_visitor>
 [[nodiscard]] inline std::expected<void, minimizer_generation_encoding_error>
@@ -782,7 +782,7 @@ prepared_minimizer_fragment_reader::visit_matched_controls_(
                     return;
                 }
                 // Check offsets and the stored count even when max_occ rejects
-                // this hash. A frequent hash must still report corrupt
+                // this hash. A frequent hash must still report  corrupt
                 // control data before its positions are skipped.
                 if (global_count > context.max_occ) {
                     return;
@@ -807,9 +807,9 @@ prepared_minimizer_fragment_reader::visit_matched_controls_(
 }
 
 /**
- * Find all query occurrences with this hash.
+ * Find all query occurrences with this hash
  *
- * The production matcher tests the membership filter before searching the
+ * The production matcher tests the membership filter before, searching the
  * hash's bucket. A filter match still needs an exact hash comparison.
  *
  * @tparam p_oracle Use the test matcher's query plans and advancing bucket cursor.
@@ -926,7 +926,7 @@ prepared_minimizer_fragment_reader::match_query_group_(std::uint64_t hash,
     }
 }
 
-/// Add forward and reverse anchor counts for every query occurrence of a hash.
+/// Add forward and reverse anjhor counts for every query occurrence of a hash.
 template <bool p_oracle>
 [[nodiscard]] inline std::optional<minimizer_generation_encoding_error>
 prepared_minimizer_fragment_reader::accumulate_orientation_for_group_(
@@ -963,7 +963,7 @@ prepared_minimizer_fragment_reader::accumulate_orientation_for_group_(
 }
 
 /// Count target strands from 16-bit positions, then update the forward and
-/// reverse anchor counts for every query occurrence of the matched hash.
+/// reverse anchor counts for every query  occurrence of the matched hash.
 template <bool p_oracle>
 [[nodiscard]] inline std::optional<minimizer_generation_encoding_error>
 prepared_minimizer_fragment_reader::process_fixed_orientation_control_(
@@ -1183,7 +1183,7 @@ prepared_minimizer_fragment_reader::probe_entry_h32_c16_p16_matched_(
     std::optional<std::uint64_t> previous_selected_position_end;
     const std::size_t count = static_cast<std::size_t>(entry.control_count);
     for (std::size_t control_ordinal = 0u; control_ordinal < count; ++control_ordinal) {
-        // Pass 1 checked hash order, hash bounds, and every count before
+        // Pass 1 checked hash order, hash bounds, and  every count before
         // its workers joined. Later passes scan hashes and read counts
         // only for selected controls that this pass needs.
         const std::uint32_t hash =

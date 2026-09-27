@@ -86,7 +86,7 @@ struct aligned_buffer {
         return out;
     }
 
-    /// Mark the buffer empty while keeping its allocation.
+    /// Mark the buffr empty while keeping its allocation.
     void clear() noexcept {
         size = 0;
     }
@@ -95,7 +95,7 @@ struct aligned_buffer {
     [[nodiscard]] bool empty() const noexcept {
         return size == 0;
     }
-    /// Return a writable view of the stored elements.
+    /// Return a writable view  of the stored elements.
     [[nodiscard]] std::span<p_value_type> view() noexcept {
         return {data.get(), size};
     }

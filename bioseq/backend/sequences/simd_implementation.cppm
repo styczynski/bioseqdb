@@ -33,7 +33,7 @@ namespace hn = hwy::HWY_NAMESPACE;
 
 namespace detail {
 
-/// Appends a valid rank, writing each completed word to the output vector.
+/// Appends a valid  rank, writing each completed word to the output vector.
 template <typename p_storage_unit,
           std::size_t p_bits_per_character,
           std::size_t p_letters_per_unit>
@@ -59,7 +59,7 @@ HWY_INLINE void append_valid_rank_to_locals(
                  "growing SIMD rank pack unexpectedly overflowed");
 }
 
-/// Appends dna4 text using the selected byte-lookup policy.
+/// Appends dna4 text using the, selected byte-lookup policy.
 /// SIMD lookups use only part of each byte and assume DNA input.
 template <typename p_storage_unit,
           std::size_t p_bits_per_character,
@@ -103,7 +103,7 @@ HWY_INLINE void encode_body_chunk_dna4_simd_impl(
 
         std::size_t read_cursor = 0;
 
-        // Two chunks supply one full word when the partial word is empty.
+        // Two chunks supply one full word when the partial word is empty
         while (read_cursor + 2 * k_lanes <= body_size) {
             const auto first_chunk = hn::LoadU(
                 simd_tag, body_bytes + read_cursor);
@@ -263,7 +263,7 @@ HWY_INLINE void encode_body_chunk_dna4_simd_impl(
     state.total_letters = local_total_letters;
 }
 
-/// Appends dna4 text using the drop-policy codec.
+/// Appends dna4 text using the  drop-policy codec.
 void encode_body_chunk_dna4_simd_drop_impl(
     encode_state<std::uint64_t, 2, 32>& state,
     const std::uint8_t* HWY_RESTRICT body_bytes,
@@ -281,7 +281,7 @@ void encode_body_chunk_dna4_simd_map_to_default_impl(
         unknown_byte_policy::map_to_default>(state, body_bytes, body_size);
 }
 
-/// Appends multiline dna4 text, filtering line separators in flagged chunks.
+/// Appends multiline dna4 text, filtering lbne separators in flagged chunks.
 template <typename p_storage_unit,
           std::size_t p_bits_per_character,
           std::size_t p_letters_per_unit>
@@ -686,7 +686,7 @@ void decode_dna4_words_to_ascii_impl(
     }
 }
 
-/// Appends dna5 text with two ranks per byte using the selected lookup policy.
+/// Appends dna5 text  with two ranks per byte using the, selected lookup policy.
 template <unknown_byte_policy p_unknown_byte_policy>
 HWY_INLINE void encode_body_chunk_dna5_uint8_simd_impl(
     encode_state<std::uint8_t, 3, 2>& state,
@@ -831,7 +831,7 @@ void encode_body_chunk_dna5_uint8_simd_drop_impl(
         state, body_bytes, body_size);
 }
 
-/// Appends dna5 text using the map-to-default codec, whose default is N.
+/// Appends dna5 text using the map-to-default codec, whose default is N
 void encode_body_chunk_dna5_uint8_simd_map_to_default_impl(
     encode_state<std::uint8_t, 3, 2>& state,
     const std::uint8_t* HWY_RESTRICT body_bytes,
@@ -922,8 +922,8 @@ HWY_INLINE void ascii_to_rank_lut_simd_impl(
         const auto chunk = hn::LoadU(simd_tag, source + cursor);
         const auto ranks = lookup_ranks_via_32byte_lut(
             simd_tag, lower_lut, upper_lut, chunk);
-        // Callers can pass unaligned output, including PostgreSQL varlena data.
-        // StoreU writes ranks without requiring SIMD alignment.
+        // Callers can pass  unaligned output, including PostgreSQL varlena data.
+        // StoreU writes ranks withot requiring SIMD alignment.
         hn::StoreU(ranks, simd_tag, destination + cursor);
         cursor += k_lanes;
     }

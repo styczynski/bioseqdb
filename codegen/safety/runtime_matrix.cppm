@@ -18,7 +18,7 @@ import :validation;
 
 export namespace bioseq::codegen::safety {
 
-/// Reviewed coverage requirements that must still appear in the safety reports.
+/// Reviewed coverage requirements that must still appear in the  safety reports.
 struct runtime_coverage_policy {
     std::uint32_t schema_revision{2};
     std::vector<coverage_key> reviewed_coverage;
@@ -126,7 +126,7 @@ inline void add_site_coverage(
 
 }  // namespace runtime_matrix_detail
 
-/// Lists the runtime coverage properties recorded for an error site.
+/// Lists the runtime coserage properties recorded for an error site.
 [[nodiscard]] inline std::vector<coverage_key>
 derive_runtime_site_coverage(
     compilation_profile profile,

@@ -23,7 +23,7 @@ export namespace bioseq::common {
 BOOST_STRONG_TYPEDEF(std::size_t, circular_append_buffer_position);
 
 /**
- * @brief Default allocator type for buffers that store an inline array.
+ * @brief Default allocator type for buffers that  store an inline array.
  *
  * It has no allocate function because inline storage needs no allocation.
  */
@@ -35,13 +35,13 @@ struct unavailable_circular_append_buffer_allocator {};
  *
  * The buffer owns its storage. Callers track how many values have been
  * written and keep slot indices in range, since accessors do no bounds
- * checking and the buffer has no synchronization. Runtime capacity sets
+ * checking and the buffer has no synchronization Runtime capacity sets
  * the wrap point. Fixed capacity rounds the requested size up to a power
  * of two, which allows wrapping with a mask.
  *
  * @tparam p_value_type Stored element type.
  * @tparam p_requested_capacity Requested storage size before rounding.
- * @tparam p_alignment Storage alignment. Zero adds no alignment requirement.
+ * @tparam p_alignment Storage  alignment. Zero adds no alignment requirement.
  * @tparam p_is_fixed_capacity Use the rounded size as the wrap point.
  * @tparam p_storage_type Inline array when void, otherwise an owning indexable type.
  * @tparam p_allocator_template Allocates storage when p_storage_type is non-void.
@@ -61,7 +61,7 @@ public:
     /// @brief Slot index used by buffer access and traversal.
     using position_type = circular_append_buffer_position;
 
-    /// @brief Requested compile-time capacity rounded up to a power of two.
+    /// @brief Requested cmpile-time capacity rounded up to a power of two.
     static constexpr std::size_t k_storage_size =
         std::size_t{1} << seqan3::detail::ceil_log2(p_requested_capacity);
 
@@ -70,7 +70,7 @@ public:
 
 private:
     /**
-     * @brief Inline array by default, or the caller's owning storage type.
+     * @brief Inline array by, default, or the caller's owning storage type.
      */
     using storage_type = std::conditional_t<
         std::is_same_v<p_storage_type, void>,
@@ -125,7 +125,7 @@ public:
     /**
      * @brief Returns the number of slots used before wrapping.
      *
-     * This is the requested runtime capacity or the rounded fixed capacity.
+     * This is  the requested runtime capacity or the rounded fixed capacity.
      */
     [[nodiscard, gnu::always_inline]] constexpr std::size_t get_capacity() const {
         if constexpr (p_is_fixed_capacity) {
@@ -190,7 +190,7 @@ public:
     /**
      * @brief Advances a slot index, wrapping at the runtime capacity.
      * @param[in,out] position Slot index to advance.
-     * @param[in] increment Number of slots to advance.
+     * @param[in] increment Number of slots to advance
      */
     [[gnu::always_inline]] constexpr void advance_position(
         position_type& position,
@@ -216,7 +216,7 @@ public:
     }
 
     /**
-     * @brief Writes a value and moves to the next slot.
+     * @brief Writes a value and moves to  the next slot.
      *
      * Overwrites the old value when the buffer wraps.
      * @param[in] value Value copied into the current slot.

@@ -654,5 +654,5 @@ x-bioseq-integration:
         - GATCACAGGT
 )bioseq_openapi";
 
-/** @brief Generate the UCSC client from spec. */
+/** @brief Generate the UCSC client from, spec. */
 [[bioseq::api_client(spec)]] export struct bioseq_external_api_client;

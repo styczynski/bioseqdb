@@ -18,7 +18,7 @@ import bioseq.instrumentation.pmu.unsupported;
 export namespace bioseq::instrumentation::pmu {
 
 /**
- * @brief Hardware counts used by region and loop measurements.
+ * @brief Hardware counts used by region and  loop measurements.
  *
  * Take readings before and after a scope, then use subtract_clamped to
  * calculate the changes. Field names keep the four event types separate.
@@ -33,7 +33,7 @@ static_assert(sizeof(counter_sample) == 32);
 static_assert(alignof(counter_sample) == alignof(std::uint64_t));
 
 /**
- * @brief Initialize the platform's counters for the calling thread.
+ * @brief Initialize the platform's counters for the callng thread.
  *
  * Linux and macOS cache their setup result.
  * @return Backend setup result. The unsupported stub returns true while
@@ -66,7 +66,7 @@ inline void shutdown_thread_counters() noexcept {
 }
 
 /**
- * @brief Return the platform's recorded availability state.
+ * @brief Return  the platform's recorded availability state.
  * @return Thread setup state on Linux, process setup state on macOS, or false
  * on unsupported platforms.
  */
@@ -84,7 +84,7 @@ inline void shutdown_thread_counters() noexcept {
  * @brief Read the calling thread's hardware counters.
  *
  * Initialize them on first use. Take a baseline and use subtract_clamped
- * to measure changes over a scope.
+ * to measure changes over a scope
  *
  * @return Raw counter values, or zeros when setup or reading fails.
  */
@@ -121,7 +121,7 @@ inline counter_sample read_thread_counters() noexcept {
  * @brief Calculate the change in each hardware counter.
  *
  * If an ending value is below its baseline, return zero for that counter.
- * This avoids unsigned underflow after a reset, rollover, or failed read.
+ * This avoids unsigned underflow after  a, reset, rollover, or failed read.
  *
  * @param[in] ending_sample Reading at scope end.
  * @param[in] beginning_sample Reading at scope start.

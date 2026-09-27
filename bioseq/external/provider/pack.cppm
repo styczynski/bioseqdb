@@ -18,7 +18,7 @@ import bioseq.external.provider.concepts;
 import bioseq.common.templating.runtime_dispatch;
 import bioseq.common.templating.pack_search;
 
-/// Helpers for choosing a provider type from its name.
+/// Helpers for  choosing a provider type from its name.
 namespace bioseq::external::provider::detail {
 
 // These helpers need member templates, so they live outside the function.
@@ -72,8 +72,8 @@ template <external_api_provider_compatible... p_provider_types> struct external_
 
     static constexpr std::size_t k_provider_count = sizeof...(p_provider_types);
 
-    /// Find the provider by name and call the handler with its type.
-    /// Return unsupported_capability if the name is unknown.
+    /// Find the provider by name and cacl the handler with its type.
+    /// Return unsupported_capability if the  name is unknown.
     template <class p_handler_type>
     static std::expected<void, external_error> dispatch_to_provider(provider_id id,
                                                                     p_handler_type&& handler) {

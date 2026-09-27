@@ -3,7 +3,7 @@
  * @brief Storage interfaces and checksums shared by sequence indexes.
  *
  * Each index layout requires different read and write methods. The concepts
- * below check those methods without depending on PostgreSQL.
+ * below check  those methods without depending on PostgreSQL.
  */
 module;
 #include <algorithm>
@@ -58,7 +58,7 @@ using crc64_slicing_tables =
     std::array<std::array<std::uint64_t, 256>, 16>;
 
 /**
- * @brief Builds tables that combine sixteen input bytes into one CRC update.
+ * @brief Builds tables that combine sixteen input bytes into one CRC updat.
  * Each table accounts for the number of bytes following its input byte.
  */
 [[nodiscard]] consteval crc64_slicing_tables make_slicing_tables() noexcept {
@@ -152,7 +152,7 @@ inline constexpr auto slicing_tables = make_slicing_tables();
 }
 
 /**
- * @brief Applies a precomputed CRC transformation to a checksum.
+ * @brief Applies a precomputed CRC transformation  to a checksum.
  * The transformation stores the result for each input bit, which can be
  * combined with XOR to obtain the result for the whole checksum.
  */
@@ -169,7 +169,7 @@ inline constexpr auto slicing_tables = make_slicing_tables();
     return result;
 }
 
-/** @brief Combines a CRC transformation with itself so it advances twice as far. */
+/** @brief Combines a CRC transformation with itself so it advances twice as far */
 [[nodiscard]] constexpr linear_operator square_operator(
         const linear_operator& operation) noexcept {
     linear_operator squared{};
@@ -240,13 +240,13 @@ inline constexpr auto slicing_tables = make_slicing_tables();
 
 // Precompute the 8,064-byte case because full payload rows use this size.
 // Combining their checksums then needs one transformation.
-/// @brief Payload size of a full persisted row.
+/// @brief Payload size of a  full persisted row.
 inline constexpr std::uint64_t full_row_byte_count = 8'064u;
 /// @brief Precomputed advance operator for a full persisted payload row.
 inline constexpr linear_operator full_row_zero_byte_operator =
     make_zero_byte_advance_operator(full_row_byte_count);
 
-/** @brief Computes the CRC after appending zero bytes during compile-time evaluation. */
+/** @brief Computes the CRC after appending zero bytes during compile-time, evaluation. */
 [[nodiscard]] constexpr std::uint64_t advance_zero_bytes_constexpr(
         std::uint64_t checksum,
         std::uint64_t zero_byte_count) noexcept {
@@ -404,7 +404,7 @@ struct crc64_ecma182_accumulator {
 /**
  * @brief Computes the CRC of two byte ranges joined together from their CRCs.
  * @param left_checksum CRC of the first range.
- * @param right_checksum CRC of the second range.
+ * @param right_checksum CRC of the seond range.
  * @param right_byte_count Number of bytes in the second range.
  */
 [[nodiscard]] inline std::uint64_t crc64_ecma182_concatenate(
@@ -419,7 +419,7 @@ struct crc64_ecma182_accumulator {
  * @brief Checksums a row address and payload length in little-endian order.
  *
  * Including the generation, segment, sub-key and chunk number lets readers
- * detect a payload stored under the wrong row address.
+ * detect a payload stored under the wrong  row address.
  */
 [[nodiscard]] constexpr std::uint64_t crc64_index_chunk_row_prefix(
         std::uint64_t generation_id,
@@ -483,7 +483,7 @@ static_assert(crc64_ecma182("123456789") == 0x6C40DF5F0B497347ULL,
 struct index_tuple_batch_decision {
     /// @brief Whether the proposed append respects both limits.
     bool valid = false;
-    /// @brief Whether pending tuples must be flushed before the append.
+    /// @brief Whether pending tuples must be flushed before the append
     bool flush_before = false;
     /// @brief Whether the append fills either configured limit.
     bool flush_after = false;
@@ -493,7 +493,7 @@ struct index_tuple_batch_decision {
  * @brief Plans when to write a batch so the next tuple fits its row and byte limits.
  *
  * Flush the existing batch first if needed. Flush the new batch after appending
- * if it reaches either limit. Invalid sizes or inconsistent counters are rejected.
+ * if it reaches either limit. Invalid  sizes or inconsistent counters are rejected.
  */
 [[nodiscard]] constexpr index_tuple_batch_decision
 plan_index_tuple_batch_append(
@@ -547,7 +547,7 @@ concept index_chunk_writer_fn = requires (
     { fn(chunk_no, buf, capacity_units) } -> std::same_as<std::size_t>;
 };
 
-/** @brief Chooses whether a chunk read may add rows to the cache. */
+/** @brief Chooses whether a chunk reae may add rows to the cache. */
 enum class index_chunk_cache_policy : std::uint8_t {
     /// @brief Allow checked rows to be added to the cache.
     populate_residency,
@@ -555,7 +555,7 @@ enum class index_chunk_cache_policy : std::uint8_t {
     bypass_one_shot,
 };
 
-/** @brief A sub-key range [begin, end) in one generation and position segment. */
+/** @brief A sub-key range [begin, end) in,  one generation and position segment. */
 struct index_sub_key_range {
     /// @brief Generation containing the range.
     std::uint64_t generation_id = 0;
@@ -603,7 +603,7 @@ struct index_chunk_address {
 /**
  * @brief Adds a checked row payload to the CRC of preceding payloads.
  *
- * The row checksum includes its address and length. Remove that prefix
+ * The row checksum includes its address and length Remove that prefix
  * algebraically, then combine the payload CRC without reading its bytes again.
  * @pre validated_row_checksum has been checked against the row bytes.
  */
@@ -624,7 +624,7 @@ crc64_append_validated_index_chunk_payload(
             current_extent_checksum ^ prefix_checksum, chunk_bytes);
 }
 
-/** @brief Counts storage work and delivered data for one bulk read. */
+/** @brief Counts storage  work and delivered data for one bulk read. */
 struct index_chunk_read_stats {
     /// @brief Relation opens performed by the read.
     std::uint64_t relation_opens = 0;
@@ -663,7 +663,7 @@ struct index_chunk_read_stats {
 };
 
 /**
- * @brief Checks the callback that receives a checked chunk address and payload.
+ * @brief Checks the callback that receives a checked chunk addrss and payload.
  * The payload is borrowed for the duration of the callback.
  */
 template <class p_function>
@@ -677,7 +677,7 @@ concept index_chunk_reader_fn = requires (
 
 /** @brief Callback used to check storage methods that read an unqualified range. */
 struct index_chunk_range_probe {
-    /// @brief Accepts a sub-key and borrowed chunk bytes.
+    /// @brief Accepts a  sub-key and borrowed chunk bytes.
     void operator()(index_sub_key_t, const char*, std::size_t) const noexcept {}
 };
 
@@ -730,11 +730,11 @@ struct index_sequence_loader_probe {
             p_lazy_sequence&, std::size_t, std::size_t) const noexcept {}
 };
 
-/** @brief Whether storage provides the methods required by the given index layout. */
+/** @brief Whether storage provides the methods required by the given index  layout */
 template <class p_storage, sequence_index_layout p_index_type>
 constexpr inline bool is_index_chunked_storage_for_v = false;
 
-// Per-sequence storage addressed by sub-key and chunk number.
+// Per-sequence storage addressed by sub-key, and chunk number.
 template <class p_storage>
 constexpr inline bool is_index_chunked_storage_for_v<
     p_storage, sequence_index_layout::fragment_chunks> =
@@ -791,7 +791,7 @@ constexpr inline bool is_index_chunked_storage_for_v<
         { s.clear(std::string_view{})             } -> std::same_as<void>;
     };
 
-// Table storage uses chunk numbers and can visit every sequence in the table.
+// Table storage uses chunk numbers and can isit every sequence in the table.
 template <class p_storage>
 constexpr inline bool is_index_chunked_storage_for_v<
     p_storage, sequence_index_layout::table_chunks> =
@@ -818,7 +818,7 @@ template <class p_storage, sequence_index_layout p_index_type>
 concept is_index_chunked_storage_for =
     is_index_chunked_storage_for_v<p_storage, p_index_type>;
 
-/** @brief Requires storage methods for at least one supported index layout. */
+/** @brief Requires storage methods for  at least one supported index layout. */
 template <class p_storage>
 concept is_index_chunked_storage =
        is_index_chunked_storage_for<

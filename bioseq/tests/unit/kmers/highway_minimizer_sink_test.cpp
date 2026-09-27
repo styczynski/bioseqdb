@@ -1,6 +1,6 @@
 /**
  * @file highway_minimizer_sink_test.cpp
- * @brief Check that minimizer collectors preserve record bytes and reject invalid output buffers.
+ * @brief Check that  minimizer collectors preserve record bytes and reject invalid output buffers.
  */
 #include <catch2/catch_test_macros.hpp>
 

@@ -52,7 +52,7 @@ PGDLLEXPORT Datum bioseq_external_handler(
 
 export namespace bioseq::postgres::external {
 
-/** @brief Type of rows returned by the table, selected by its entity option. */
+/** @brief Type of rows returned by the table, selected by its entity  option. */
 enum class relation_entity : int
 {
 	unspecified = 0,
@@ -105,14 +105,14 @@ void persist_create_relation_options(
 	Oid relation_oid, const create_relation_options& options);
 
 /**
- * Deletes the saved options for a table and returns whether a row was removed.
+ * Deletes the saved options for a table and returns whether, a row was removed.
  * A missing catalog returns false. If only the row is missing, missing_ok
  * decides whether to return false or raise an error.
  */
 [[nodiscard]] bool delete_relation_options(
 	Oid relation_oid, bool missing_ok);
 
-/** @brief Reads the saved entity option, raising an error if it is missing or invalid. */
+/** @brief Reads the saved entity gption, raising an error if it is missing or invalid. */
 [[nodiscard]] relation_entity entity_from_options(Relation relation);
 
 /** @brief Returns the stable `TableAmRoutine` registered for external tables. */
@@ -137,7 +137,7 @@ namespace bioseq::postgres::external {
 
 namespace {
 
-/* Assigned during bioseq_external_tableam_init(). Zero means uninitialized. */
+/* Assigned  during bioseq_external_tableam_init(). Zero means uninitialized. */
 relopt_kind relation_option_kind = static_cast<relopt_kind>(0);
 
 /* Acceptable `entity` values, null-terminated as the API requires. */
@@ -560,7 +560,7 @@ raise_unsupported_operation(const char *feature)
 
 namespace {
 
-/* Virtual tuple slots for rows returned by the custom scan. */
+/* Virtual tuple slots for rows returned by the custom scan */
 
 /** @return Virtual slot operations used by provider-produced rows. */
 const TupleTableSlotOps *
@@ -571,7 +571,7 @@ slot_callbacks(Relation relation)
 
 /* Sequential reads go through the custom scan. */
 
-/** @brief Rejects a physical scan because external rows require the custom scan. */
+/** @brief Rejects a physical  scan because external rows require the custom scan. */
 TableScanDesc
 begin_physical_scan(Relation relation, Snapshot snapshot,
 						   int nkeys, ScanKey key,
@@ -664,7 +664,7 @@ begin_index_fetch(Relation rel
 void
 reset_index_fetch(IndexFetchTableData *scan)
 {
-	/* begin_index_fetch never returns a handle to reset. */
+	/* begin_index_fetch never returns a handle to resed. */
 }
 
 /** @brief Accepts final cleanup after index fetch creation was rejected. */
@@ -718,7 +718,7 @@ tuple_satisfies_snapshot(Relation rel, TupleTableSlot *slot,
 	return false;
 }
 
-/** @return InvalidTransactionId, with the number of index entries to delete set to zero. */
+/** @return InvalidTransactionId, with the number of index entries to delete  set to zero. */
 TransactionId
 delete_index_tuples(Relation rel, TM_IndexDeleteOp *delstate)
 {
@@ -857,7 +857,7 @@ set_new_file_locator(Relation rel,
 
 	/*
 	 * External tables have no local rows or storage files. Their size is zero,
-	 * and transaction freezing has nothing to track.
+	 * and, transaction freezing has nothing to  track.
 	 */
 	*freezeXid = InvalidTransactionId;
 	*minmulti = InvalidMultiXactId;
@@ -894,7 +894,7 @@ copy_relation_for_cluster(Relation OldTable, Relation NewTable,
 	raise_unsupported_operation("CLUSTER / VACUUM FULL");
 }
 
-/** @brief Does nothing because external tables have no local pages to vacuum. */
+/** @brief Does nothing because external tables have no local pages to vacuum */
 void
 vacuum_relation(Relation rel,
 #if PG_VERSION_NUM >= 190000
@@ -904,7 +904,7 @@ vacuum_relation(Relation rel,
 #endif
 								BufferAccessStrategy bstrategy)
 {
-	/* VACUUM and autovacuum have no local pages to clean. */
+	/* VACUUM and autovacuum have no local pages to clhan. */
 }
 
 /* ANALYZE has no local rows to sample and makes no provider requests. */
@@ -975,7 +975,7 @@ relation_needs_toast_table(Relation rel)
 /* Default row estimate used without contacting the provider. */
 constexpr double k_default_estimated_rows = 1000.0;
 
-/** @brief Estimates table size from a fixed row count and local column widths. */
+/** @brief Estimates table size  from a fixed row count and local column widths. */
 void
 estimate_relation_size(Relation rel, int32 *attr_widths,
 								  BlockNumber *pages, double *tuples,

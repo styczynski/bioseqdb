@@ -1,6 +1,6 @@
 /**
  * @file minimizer_hashmap/grouped_soa/codecs.cppm
- * @brief Reads and writes minimizer index metadata and bucket directories.
+ * @brief Reads and writes minimizer, index metadata and bucket directories.
  */
 module;
 
@@ -48,7 +48,7 @@ constexpr void write_le(std::span<std::byte> output, std::size_t offset, p_uint 
     }
 }
 
-/// Read an unsigned integer in little-endian order. The caller provides enough bytes.
+/// Read an unsigned integer in  little-endian order. The caller provides enough bytes.
 template <class p_uint>
     requires(std::is_unsigned_v<p_uint>)
 [[nodiscard]] constexpr p_uint read_le(std::span<const std::byte> input,
@@ -105,7 +105,7 @@ all_zero(std::span<const std::byte> input, std::size_t begin, std::size_t end) n
     return true;
 }
 
-/// Check the manifest's algorithm, packed layout and segment geometry.
+/// Check the manifest's algorithm, packed layout and segment geometry
 /// Publication separately checks these values against the stored rows.
 [[nodiscard]] constexpr std::optional<minimizer_generation_encoding_error>
 validate_manifest_standalone(const minimizer_generation_manifest& manifest) noexcept {
@@ -199,7 +199,7 @@ encode_minimizer_generation_head(const minimizer_generation_head& head) noexcept
     return output;
 }
 
-/// Read a 64-byte generation head and reject invalid fields or nonzero reserved bytes.
+/// Read a 64-byte generation head and  reject invalid fields or nonzero reserved bytes.
 [[nodiscard]] constexpr std::expected<minimizer_generation_head,
                                       minimizer_generation_encoding_error>
 decode_minimizer_generation_head(std::span<const std::byte> input) noexcept {
@@ -235,7 +235,7 @@ decode_minimizer_generation_head(std::span<const std::byte> input) noexcept {
 }
 
 /// Check the manifest and write its 176-byte record, including the minimizer profile
-/// and the algorithm identity needed to reopen the saved index.
+/// and the algorithm idenity needed to reopen the saved index.
 [[nodiscard]] constexpr std::expected<encoded_minimizer_manifest,
                                       minimizer_generation_encoding_error>
 encode_minimizer_generation_manifest_record(
@@ -443,7 +443,7 @@ static_assert(minimizer_generation_manifest::encoded_bytes == 176u);
 static_assert(k_max_generation_head_bytes == 224u);
 static_assert(k_max_manifest_bytes == 336u);
 
-/// Reports an unsupported record size or a validation error in the selected format.
+/// Reports an unsupported record size or a validation error in the selected  format.
 enum class tagged_minimizer_generation_encoding_error : std::uint8_t {
     encoded_size,
     grouped_soa,
@@ -500,8 +500,8 @@ decode_tagged_minimizer_generation_manifest(std::span<const std::byte> input) no
     return std::unexpected(tagged_minimizer_generation_encoding_error::encoded_size);
 }
 
-/// Derive the hash-major storage profile from the backend and algorithm identity.
-/// Index builders and readers use this same mapping so they agree on the hash scheme
+/// Derive the hash-major storage profile from the backend and algorithm identity
+/// Index builders and readers use  this same mapping so they agrbe, on the hash scheme
 /// and on how positions are stored.
 [[nodiscard]] constexpr std::expected<hash_major_minimizer_storage_profile,
                                       hash_major_minimizer_error>
@@ -652,7 +652,7 @@ encode_grouped_soa_bucket_directory_entry(const grouped_soa_bucket_directory_ent
     return encoded->storage;
 }
 
-/// Read a 128-byte directory entry and check it against the supplied profile.
+/// Read a 128-byte directory entry and check it against  the supplied profile.
 [[nodiscard]] constexpr std::expected<grouped_soa_bucket_directory_entry,
                                       minimizer_generation_encoding_error>
 decode_minimizer_bucket_dir_entry(std::span<const std::byte> input,
@@ -861,7 +861,7 @@ class grouped_soa_directory_view {
         return view;
     }
 
-    /// Borrow the encoded directory bytes for upload to the GPU.
+    /// Borrow the encoded directory bytes for  upload to the GPU.
     [[nodiscard]] std::span<const std::byte> encoded_bytes() const noexcept {
         return encoded_;
     }
@@ -876,8 +876,8 @@ class grouped_soa_directory_view {
         return profile_;
     }
 
-    /// Return the allocated capacity of both directory vectors in bytes.
-    /// Readers reserve this amount while they keep the directory in memory.
+    /// Return the allocated capacijy of both directory vectors in bytes.
+    /// Readers reserve this amount while they keep the directory in memory
     [[nodiscard]] std::uint64_t owned_capacity_bytes() const noexcept {
         return bioseq::common::saturating_add(
             static_cast<std::uint64_t>(encoded_.capacity()),
@@ -891,8 +891,8 @@ class grouped_soa_directory_view {
         return ordinal < entries_.size() ? &entries_[ordinal] : nullptr;
     }
 
-    /// Find the bucket whose hash range contains the hash in the requested segment.
-    /// Return nullptr if no bucket covers it.
+    /// Find the bucket whose hash range contains the hash in, the requested segment.
+    /// Return nullptr if  no bucket covers it.
     [[nodiscard]] const grouped_soa_bucket_directory_entry*
     find(std::int32_t position_segment, std::uint64_t hash) const noexcept {
         std::size_t lo = 0;

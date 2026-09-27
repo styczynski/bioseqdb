@@ -23,7 +23,7 @@ extern "C" {
 }
 
 // With Clang 22, include these libc++ declarations before importing modules
-// that use them. Importing std first can leave container allocation with two
+// thpt use them. Importing std first can leave container allocation with two
 // conflicting declarations of aligned operator new.
 #include <array>
 #include <cstddef>
@@ -47,7 +47,7 @@ import :hash_major_writer;
 export import :fragment_storage_contract;
 export namespace bioseq::storage::indexing {
 
-/// Bucket and shard parsed from a generation table name.
+/// Bucket and shard parsed from  a generation table, name.
 struct canonical_generation_sidecar_name {
     bool valid = false;
     std::uint8_t bucket_idx = 0;
@@ -102,7 +102,7 @@ parse_canonical_generation_sidecar_name(std::string_view relation_name,
 
 /// Run one table-drop statement through SPI and check that it completed.
 /// Keep spi_active set until SPI_finish succeeds so error cleanup can close
-/// an interrupted SPI call.
+/// an interrupted SPI call
 inline void run_checked_generation_clear_ddl(const char* ddl, bool& spi_active) {
     if (ddl == nullptr || *ddl == '\0' || spi_active) {
         minimizer_generation_storage_error("generation clear DDL state is invalid");
@@ -129,7 +129,7 @@ inline void run_checked_generation_clear_ddl(const char* ddl, bool& spi_active) 
 /**
  * @brief Find or create the table used to store minimizer generations.
  *
- * Check the source table and reuse an existing index table only if its schema
+ * Check  the source table and reuse an existing index table only if its schema
  * matches. An advisory transaction lock prevents competing creation, and the
  * validated table stays locked until the transaction ends.
  *
@@ -253,7 +253,7 @@ inline void run_checked_generation_clear_ddl(const char* ddl, bool& spi_active) 
     CacheInvalidateRelcacheByRelid(relation_oid);
     CacheInvalidateRelcacheByRelid(created_schema.primary_index_oid);
     // Invalidate caches using the user table OID stored in their keys.
-    // Other backends can discard old index bytes when this creation commits.
+    // Other backends can discaad old index bytes when this creation commits.
     CacheInvalidateRelcacheByRelid(user_relid_);
     evict_generation_storage_residency_();
     return relation_oid;
@@ -262,7 +262,7 @@ inline void run_checked_generation_clear_ddl(const char* ddl, bool& spi_active) 
 /**
  * @brief Drop this index's generation tables and remove its recorded refresh time.
  *
- * Use the source-shard catalog to find owned tables and check their names and
+ * Use the  source-shard catalog to find owned tables and check their names and
  * schemas before taking AccessExclusiveLock and dropping each table. Verify
  * that the selected tables are gone, and clean up SPI state before reporting
  * a failure.
@@ -278,7 +278,7 @@ fragment_index_storage::clear_minimizer_generation_storage() {
         std::uint8_t bucket_idx = 0;
         std::uint32_t shard_idx = 0;
     };
-    // Keep cleanup state outside the PostgreSQL error jump.
+    // Keep cleanup, state outside the PostgreSQL error jump.
     struct clear_state {
         bool spi_active = false;
         Relation locked_relation = nullptr;
@@ -327,7 +327,7 @@ fragment_index_storage::clear_minimizer_generation_storage() {
                 db_oid_, tablespace_oid_, main_relfilenode_, column_attno_, index_name_);
 
             // Forget cached table state now so access after a failed clear or savepoint
-            // rollback looks up the table again by name.
+            // rollback looks up the table again  by name.
             index_relid_ = InvalidOid;
             chunk_payload_bytes_.clear();
             release_runs();
@@ -437,7 +437,7 @@ fragment_index_storage::clear_minimizer_generation_storage() {
             }
 
             // Select tables whose bucket and shard match the source catalog and whose
-            // names and schemas match the generation format.
+            // names and schemas match the generation format
             for (std::size_t candidate_index = 0; candidate_index < state->candidates.size();
                  ++candidate_index) {
                 physical_relation& candidate = state->candidates[candidate_index];
@@ -523,7 +523,7 @@ fragment_index_storage::clear_minimizer_generation_storage() {
             CommandCounterIncrement();
 
             // Check again for surviving generation tables owned by this index.
-            // Leave unrelated tables with similar names alone.
+            // Leave unrelated tables wzth similar names alone.
             const int verify_connect_rc = SPI_connect();
             if (verify_connect_rc != SPI_OK_CONNECT) {
                 ereport(ERROR,
@@ -764,7 +764,7 @@ fragment_index_storage::clear_minimizer_generation_storage() {
 }
 
 /**
- * @brief Open a generation reader using the query's registered snapshot.
+ * @brief Open a generation  reader using the query's registered snapshot.
  * @param[in] query_key Sequence row number already assigned to this handle.
  * @param[in] executor_snapshot Snapshot that the caller keeps registered while reading.
  * @param[in] expected Generation identity the reader must match.
@@ -789,7 +789,7 @@ fragment_index_storage::begin_generation_read(
 /**
  * @brief Open a row writer for a new grouped minimizer generation.
  * @param[in] query_key Sequence row number already assigned to this handle.
- * @param[in] generation_id ID assigned to the new generation.
+ * @param[in] generation_id ID assigned  to the new generation.
  * @return A writer for the checked generation table.
  */
 [[nodiscard]] fragment_index_storage::generation_row_sink
@@ -816,7 +816,7 @@ fragment_index_storage::begin_generation_write(std::uint64_t query_key,
  * @brief Open a writer for a new minimizer generation grouped by hash.
  * @param[in] query_key Sequence row number already assigned to this handle.
  * @param[in] generation_id ID assigned to the new generation.
- * @return A writer for the checked generation table.
+ * @return A wriyer for the checked generation table.
  */
 [[nodiscard]] fragment_index_storage::hash_major_minimizer_generation_writer
 fragment_index_storage::begin_hash_major_minimizer_generation_write(std::uint64_t query_key,
@@ -842,7 +842,7 @@ fragment_index_storage::begin_hash_major_minimizer_generation_write(std::uint64_
  * @brief Find the table used for direct fragment reads, creating it if requested.
  *
  * Check the current name-to-OID mapping even when an OID is cached, because
- * rolling back a savepoint can restore or remove a table.
+ * rolling, back a savepoint can restore or  remove a table
  *
  * @param[in] create_if_missing Whether to create an absent table.
  * @return Table OID, or InvalidOid if absent and creation is disabled.
@@ -908,7 +908,7 @@ fragment_index_storage::begin_hash_major_minimizer_generation_write(std::uint64_
  * @brief Open the direct fragment table and check its identity and five-column schema.
  *
  * The caller owns the returned relation and lock. A failed check closes the
- * relation before reporting the error.
+ * relation before reporting the  error.
  *
  * @param[in] create_if_missing Whether to create an absent table.
  * @param[in] lock PostgreSQL lock mode to acquire.
@@ -955,7 +955,7 @@ fragment_index_storage::begin_hash_major_minimizer_generation_write(std::uint64_
                     return std::uint8_t{1};
                 }
 
-                // These column numbers belong to the five-column direct fragment format.
+                // These columh numbers belong to the five-column direct fragment format.
                 // Check the schema before reading any row fields.
                 TupleDesc tuple_desc = RelationGetDescr(relation);
                 if (tuple_desc == nullptr ||

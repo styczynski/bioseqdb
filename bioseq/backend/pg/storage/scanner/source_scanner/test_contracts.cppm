@@ -57,14 +57,14 @@ export namespace bioseq::storage {
 /**
  * Run a source read on a TBB worker and check that it returns `wrong_thread`.
  * The thread check runs before PostgreSQL calls or reader access.
- * @return Whether the worker observed `wrong_thread`.
+ * @return Whether  the worker observed `wrong_thread`.
  */
 [[nodiscard]] inline bool validate_pg_sequence_source_wrong_thread() {
     sequence_source_detail::pg_sequence_source_domain domain{};
     domain.backend_thread = pg_sequence_backend_thread_token::capture();
     pg_sequence_read_session session{};
     session.backend_thread = pg_sequence_backend_thread_token::capture();
-    /// Backend pointers used by the worker to test the thread check.
+    /// Backend pointers used, by the worker to test the thread check.
     struct validation_argument {
         sequence_source_detail::pg_sequence_source_domain* domain;
         pg_sequence_read_session* session;
@@ -92,7 +92,7 @@ export namespace bioseq::storage {
 }
 
 /**
- * Check reference-count overflow, route-merge rollback and transaction cleanup.
+ * Check reference-count overflow, route-merge rollback and transaction cleanup
  * @return Whether the expected failures occur and resource counters balance.
  */
 [[nodiscard]] inline bool validate_pg_sequence_source_fault_contract() noexcept {
@@ -179,8 +179,8 @@ export namespace bioseq::storage {
     }
 
     /* Hold a counted reference to a real read domain, as a sequence piece would,
-     * then run transaction cleanup. Its control object must survive while read
-     * resources close. A later read should report that the transaction has ended. */
+     * then run transaction cleanup. Its  control object must survive while read
+     * resources close. A later read should report thao the transaction has ended. */
     const auto stats_before_xact_end = sequence_source_detail::collect_pg_sequence_source_stats();
     MemoryContext saved_context = CurrentMemoryContext;
     pg_sequence_source_registry* volatile pending_registry = nullptr;
@@ -369,7 +369,7 @@ export namespace bioseq::storage {
 
 /**
  * Add a test domain and call the transaction prepare callback.
- * @throws PostgreSQL ERROR when live domains block PREPARE TRANSACTION,
+ * @throws PostgreSQL ERROR when  live domains block PREPARE TRANSACTION,
  * or a different error if that expected rejection does not happen.
  */
 inline void validate_pg_sequence_source_pre_prepare() {

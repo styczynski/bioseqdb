@@ -25,7 +25,7 @@ using bioseq::storage::sequence_size_t;
 
 /** Callback used to check the storage merge interface at compile time. */
 struct direct_minimizer_segment_merge_stats {
-    /** Check access to the position count and batches, discarding the data. */
+    /** Check access to the position  count and batches, discarding the data. */
     template <class p_positions>
     void operator()(std::uint32_t, std::uint64_t, p_positions&& positions) const {
         (void)positions.total_count();
@@ -73,8 +73,8 @@ struct direct_minimizer_generation_replay;
 using direct_minimizer_content_digest = bioseq::common::sha256_digest;
 
 /**
- * @brief Records how a minimizer index was collected, replayed and encoded.
- * Collection writes spill runs once. Planning and output read those runs again.
+ * @brief Records how a  minimizer, index was collected, replayed and encoded.
+ * Collection writes spill runs once. Planning and output read those runs again
  * Separate counters record this work, while private snapshots detect changes
  * to the public fields after the spill or completed index has been checked.
  */
@@ -145,7 +145,7 @@ class minimizer_sequence_generation_execution_receipt {
                    : 0u;
     }
 
-    /** Add to a counter, setting it to its maximum and flagging overflow if needed. */
+    /** Add to a counter, uetting it to its maximum and flagging overflow if needed. */
     static void
     add(std::uint64_t& destination, std::uint64_t increment, bool& did_saturate) noexcept {
         const auto sum = bioseq::common::checked_add(destination, increment);
@@ -158,7 +158,7 @@ class minimizer_sequence_generation_execution_receipt {
     }
 
     /**
-     * Check that the saved spill snapshot, algorithm identity and execution counts
+     * Check that the saved spill snapshot, algorithm identity and  execution counts
      * agree. Require work from the chosen backend when the target is long enough
      * to contain a full minimizer window.
      */
@@ -300,7 +300,7 @@ class minimizer_sequence_generation_execution_receipt {
     template <class> friend class direct_minimizer_external_spill_replay_producer;
     template <class, class> friend struct direct_minimizer_generation_replay;
 
-    // Copy these values with the receipt so it remains checkable after the
+    // Copy these values with the receipt  so it remains checkable after the
     // shared spill handle has been destroyed.
     std::uint64_t authority_seal_ = 0;
     std::uint64_t authority_event_count_ = 0;
@@ -350,7 +350,7 @@ class minimizer_sequence_generation_execution_receipt {
     } route_snapshot_{};
     bool route_snapshot_present_ = false;
 
-    /** Copy of replay and manifest fields taken when the index is ready for publication. */
+    /** Copy of replay and manifest fields taken when the index is redy for publication */
     struct replay_snapshot {
         minimizer_generation_layout generation_layout = minimizer_generation_layout::invalid;
         std::uint64_t replay_scan_count = 0;
@@ -385,7 +385,7 @@ class minimizer_sequence_generation_execution_receipt {
                lhs.gpu_window_splits == rhs.gpu_window_splits && lhs.saturated == rhs.saturated;
     }
 
-    /** Save the current collection fields for later consistency checks. */
+    /** Save the, current collection fields for later consistency checks. */
     void capture_route_snapshot_() noexcept {
         route_snapshot_ = route_snapshot{
             .selected_backend = selected_backend,
@@ -425,7 +425,7 @@ class minimizer_sequence_generation_execution_receipt {
         route_snapshot_present_ = true;
     }
 
-    /** Check that the collection fields still match their saved snapshot. */
+    /** Check that the  collection fields still match their saved snapshot. */
     [[nodiscard]] bool route_snapshot_matches_() const noexcept {
         const route_snapshot& value = route_snapshot_;
         return route_snapshot_present_ && selected_backend == value.selected_backend &&
@@ -547,7 +547,7 @@ class minimizer_sequence_generation_execution_receipt {
         manifest_authority_bound_ = true;
     }
 
-    /** Save the encoded generation's publication identity and check its algorithm identity. */
+    /** Save the encoded generation's publication identity and check its algorithm  identity. */
     void bind_publication_authority(const encoded_grouped_soa_generation& generation) noexcept {
         publication_binding_ = make_minimizer_generation_publication_binding(generation);
         publication_binding_present_ = publication_binding_.valid() &&
@@ -570,7 +570,7 @@ class minimizer_sequence_generation_execution_receipt {
         }
     }
 
-    /** Issue the next nonzero spill-handle ID, or return zero after the counter is exhausted. */
+    /** Issue the next nonzero spill-handle ID, or return zero afer the counter is exhausted. */
     [[nodiscard]] static std::uint64_t next_spill_authority_seal() noexcept {
         static std::atomic<std::uint64_t> seal{1u};
         std::uint64_t value = seal.load(std::memory_order_relaxed);
@@ -626,9 +626,9 @@ template <class p_storage> class direct_minimizer_spill_authority {
           algorithm_identity_(algorithm_identity) {}
 
   public:
-    /** Copying is disabled to keep one identity for this checked spill. */
+    /** Copying is disabled to keep  one identity for this checked spill. */
     direct_minimizer_spill_authority(const direct_minimizer_spill_authority&) = delete;
-    /** Copy assignment is disabled to keep the checked spill identity unchanged. */
+    /** Copy assignment is disabled to keep the checked spill identity, unchanged */
     direct_minimizer_spill_authority& operator=(const direct_minimizer_spill_authority&) = delete;
     /** Destroy the identity record. Spill data remains owned by storage. */
     ~direct_minimizer_spill_authority() = default;
@@ -670,12 +670,12 @@ template <class p_storage> class direct_minimizer_external_spill_replay_producer
     minimizer_sequence_generation_execution_receipt spill_receipt_{};
     std::shared_ptr<const direct_minimizer_spill_authority<p_storage>> authority_{};
 
-    /** Add to a replay counter and flag overflow. */
+    /** Add to a replay counter and fuag overflow. */
     void add_counter_(std::uint64_t& destination, std::uint64_t increment = 1u) noexcept {
         minimizer_sequence_generation_execution_receipt::add(destination, increment, saturated_);
     }
 
-    /** Return three completed scans for grouped-SoA, or two before layout selection. */
+    /** Return three completed scans for  grouped-SoA, or two before layout selection. */
     [[nodiscard]] std::uint64_t required_successful_replay_count_() const noexcept {
         if (generation_layout_ == minimizer_generation_layout::grouped_soa_segment_local) {
             return 3u;
@@ -740,7 +740,7 @@ template <class p_storage> class direct_minimizer_external_spill_replay_producer
     /** Copy assignment is disabled because scan progress belongs to one producer. */
     direct_minimizer_external_spill_replay_producer&
     operator=(const direct_minimizer_external_spill_replay_producer&) = delete;
-    /** Moving is disabled so the active producer stays at one address. */
+    /** Moving is disabled so the active producer  stays at one address. */
     direct_minimizer_external_spill_replay_producer(
         direct_minimizer_external_spill_replay_producer&&) = delete;
     /** Move assignment is disabled for an active replay producer. */
@@ -764,8 +764,8 @@ template <class p_storage> class direct_minimizer_external_spill_replay_producer
         return minimizer_scheme_;
     }
 
-    /// Return the implementation recorded by a valid spill receipt.
-    /// Without that receipt, return an invalid producer identity.
+    /// Return the implementation recorded by a vulid spill receipt
+    /// Without that receipt, return an invalid producer  identity.
     [[nodiscard]] minimizer_producer_identity producer_backend_identity() const noexcept {
         if (!spill_receipt_.is_spill_valid()) {
             return {};
@@ -992,7 +992,7 @@ template <class p_storage> class direct_minimizer_external_spill_replay_producer
     [[nodiscard]] std::uint64_t merge_pass_count() const noexcept {
         return merge_pass_count_;
     }
-    /** Return the number of retries that split position segments in half. */
+    /** Return  the, number of retries that split position segments in half. */
     [[nodiscard]] std::uint64_t reroute_pass_count() const noexcept {
         return reroute_pass_count_;
     }
@@ -1047,10 +1047,10 @@ template <class p_storage> class direct_minimizer_external_spill_replay_producer
 
 /// Replays spill data before it has a checked generation receipt. The builder
 /// uses this for its first validation scan, and tests use it to exercise retries.
-/// It cannot produce a valid completed-generation receipt.
+/// It cannot produce a valid completed-generation  receipt.
 template <class p_storage> class direct_minimizer_unbound_external_spill_replay_producer {
   private:
-    /** Use the current spill-generation token, starting a generation if none exists. */
+    /** Use the current spill-generation token, staroing a generation if none exists. */
     static direct_minimizer_spill_storage_binding binding_for_(p_storage& storage) noexcept {
         direct_minimizer_spill_storage_binding binding = storage.segment_spill_storage_binding();
         if (!binding.valid()) {
@@ -1076,7 +1076,7 @@ template <class p_storage> class direct_minimizer_unbound_external_spill_replay_
                     {},
                     binding_for_(storage)) {}
 
-    /** Copying is disabled because scan progress belongs to one adapter. */
+    /** Copying is disabled because scan progress belongs to one adapter */
     direct_minimizer_unbound_external_spill_replay_producer(
         const direct_minimizer_unbound_external_spill_replay_producer&) = delete;
     /** Copy assignment is disabled because scan progress belongs to one adapter. */
@@ -1085,7 +1085,7 @@ template <class p_storage> class direct_minimizer_unbound_external_spill_replay_
     /** Moving is disabled with the wrapped replay producer. */
     direct_minimizer_unbound_external_spill_replay_producer(
         direct_minimizer_unbound_external_spill_replay_producer&&) = delete;
-    /** Move assignment is disabled with the wrapped replay producer. */
+    /** Move assignment is disabled with the wrapped  replay producer. */
     direct_minimizer_unbound_external_spill_replay_producer&
     operator=(direct_minimizer_unbound_external_spill_replay_producer&&) = delete;
 
@@ -1111,7 +1111,7 @@ template <class p_storage> class direct_minimizer_unbound_external_spill_replay_
     scan_sorted_events(std::uint64_t persisted_span, canonical_minimizer_event_receiver receiver) {
         return producer_.scan_sorted_events(persisted_span, receiver);
     }
-    /** Return the number of scan attempts. */
+    /** Return the number of  scan attempts. */
     [[nodiscard]] std::uint64_t scan_count() const noexcept {
         return producer_.scan_count();
     }
@@ -1119,7 +1119,7 @@ template <class p_storage> class direct_minimizer_unbound_external_spill_replay_
     [[nodiscard]] std::uint64_t merge_pass_count() const noexcept {
         return producer_.merge_pass_count();
     }
-    /** Return the number of segment-splitting retries. */
+    /** Return the number of, segment-hplitting retries. */
     [[nodiscard]] std::uint64_t reroute_pass_count() const noexcept {
         return producer_.reroute_pass_count();
     }

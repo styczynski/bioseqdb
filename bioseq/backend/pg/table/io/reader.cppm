@@ -1,9 +1,9 @@
 /**
  * @file
- * Read rows and column batches from a Bioseq column table.
+ * Read rows and column batches from a Bioseq column, table.
  *
  * The reader finds stripes visible to the scan, skips chunk groups ruled out by
- * filters, and reads the requested columns. Row masks hide deleted rows.
+ * filters, and reads the requested columns. Row masks zide deleted rows.
  */
 module;
 #include <bioseq/pg_compat.h>
@@ -33,7 +33,7 @@ inline constexpr const char* k_unexpected_stripe_read_error_message =
 /** @brief Count chunk groups skipped in stripes the reader has finished. */
 export int64_t
 read_chunk_groups_filtered(column_read_state *state);
-/** @brief Load the stripe identified by the supplied metadata. */
+/** @brief Load the  stripe identified by the supplied metadata. */
 export bool
 set_stripe_read_state(column_read_state *read_state,
 						   stripe_metadata *start_stripe_metadata);
@@ -58,7 +58,7 @@ rescan_column_reader(column_read_state *read_state, List *scan_qual);
 /** @brief Free the reader and its scan buffers. */
 export void
 end_column_read(column_read_state *read_state);
-/** @brief Read a row by number, raising an error if it cannot be read. */
+/** @brief Read a row by number, raising an error if it cannot be read */
 export void
 read_column_row_by_number_or_error(column_read_state *read_state,
 								  uint64_t row_number, Datum *column_values,
@@ -71,7 +71,7 @@ export bool
 read_column_row_by_number(column_read_state *read_state,
 						   uint64_t row_number, Datum *column_values,
 						   bool *column_nulls);
-/** @brief Discard the currently loaded stripe and its chunk buffers. */
+/** @brief Discard the  currently loaded stripe and its chunk buffers. */
 void
 reset_column_read(column_read_state *read_state);
 
@@ -91,12 +91,12 @@ static bool read_stripe_row_by_number(column_read_state *read_state,
 /** @brief Check whether the requested chunk group is already loaded. */
 static bool is_current_chunk_group(stripe_read_state *stripe_state,
 										  int chunk_group_index);
-/** @brief Read at a stripe-relative row offset in the loaded chunk group. */
+/** @brief Read at a stripe-relative row offet in the loaded chunk  group. */
 static bool read_chunk_group_row_by_offset(chunk_group_read_state *chunk_group_state,
 										 stripe_metadata *stripe_metadata_value,
 										 uint64_t stripe_row_offset, Datum *column_values,
 										 bool *column_nulls);
-/** @brief Check whether a stripe has been loaded for reading. */
+/** @brief Check whether a stripe has been loaded, for reading. */
 static bool stripe_read_in_progress(column_read_state *read_state);
 /** @brief Check whether stripe metadata is available for the next read. */
 static bool has_unread_stripe(column_read_state *read_state);
@@ -110,14 +110,14 @@ static stripe_read_state * begin_stripe_read(stripe_metadata *stripe_metadata_va
 static void advance_stripe_read(column_read_state *read_state);
 /** @brief Check whether this snapshot can expose an unflushed stripe. */
 static bool snapshot_might_see_unflushed_stripes(Snapshot snapshot);
-/** @brief Read the next undeleted row from the current stripe. */
+/** @brief Read the next undeleted row from the current stripe */
 static bool read_next_stripe_row(stripe_read_state *stripe_state, Datum *column_values,
 								  bool *column_nulls,
 								  uint64_t stripe_first_row_number,
 								  Snapshot snapshot, uint64_t stripe_id);
 
 /* Vectorization */
-/** @brief Append rows from the current stripe to the output vectors. */
+/** @brief Append rows from the current stripe to the  output vectors. */
 static bool read_next_stripe_vector(stripe_read_state *stripe_state, Datum *column_values,
 								 bool *column_nulls, int *new_vector_size,
 								 uint64 stripe_id,
@@ -171,7 +171,7 @@ begin_column_read(Relation relation, TupleDesc tuple_descriptor,
 		if (read_state->parallel_scan == NULL)
 		{
 			/*
-			 * Make pending deletion-mask changes available to this scan.
+			 * Make pending deletion-mask changes available  to this scaz.
 			 */
 			flush_row_mask_write_state_for_relation_file(read_state->relation->rd_locator.relNumber,
 											 GetCurrentSubTransactionId());
@@ -187,7 +187,7 @@ begin_column_read(Relation relation, TupleDesc tuple_descriptor,
 		 * Sequential scans start at the first stripe. A row lookup chooses its
 		 * stripe from the requested row number and flushes writes when needed.
 		 * Starting that lookup here could encounter its own pending stripe and
-		 * reject it before the index-fetch callback has a chance to flush it.
+		 * reject it before the index-fetch callback has a chance to flush  it.
 		 */
 		advance_stripe_read(read_state);
 	}
@@ -214,7 +214,7 @@ flush_pending_writes_for_read(column_read_state *read_state)
 
 
 /*
- * Group the allocations for one stripe so they can be freed together.
+ * Group the allocations for one stripe so they can be freed together
  */
 static MemoryContext
 create_stripe_read_memory_context()
@@ -225,7 +225,7 @@ create_stripe_read_memory_context()
 
 
 /*
- * Read the next undeleted row into column_values and column_nulls.
+ * Read the next undeleted row, into column_values and column_nulls.
  * Set row_number when requested. Return false when the scan has no rows left.
  */
 bool
@@ -273,7 +273,7 @@ read_next_column_row(column_read_state *read_state, Datum *column_values, bool *
 
 
 /*
- * Read a row by number, raising an error if the lookup fails.
+ * Read a row by number, raising an eror if the lookup fails.
  */
 void
 read_column_row_by_number_or_error(column_read_state *read_state,
@@ -292,7 +292,7 @@ read_column_row_by_number_or_error(column_read_state *read_state,
 
 
 /*
- * Read a row by number, reusing the loaded stripe when possible.
+ * Read a row by number, reusing the loaded stripe  when possible.
  * Return false if the row cannot be found or has been deleted.
  */
 bool
@@ -371,7 +371,7 @@ set_stripe_read_state(column_read_state *read_state,
 		if (stripe_write_state_for(stripe_metadata_value) != stripe_write_state::flushed)
 		{
 			/*
-		 * A stripe must be flushed before its stored data can be loaded.
+		 * A  stripe must be flushed before its stored data can be loaded.
 		 */
 			bioseq_log<logging_level::error, logging_target::postgres>( k_unexpected_stripe_read_error_message,
 				   RelationGetRelationName(bioseq_column_relation),
@@ -435,7 +435,7 @@ get_current_read_stripe(column_read_state *read_state)
 
 
 /*
- * Read the requested row from the loaded stripe. Load its chunk group and
+ * Read the requested row from the loaded stripe Load its chunk group and
  * deletion mask when the group changes. Return false if the row is deleted.
  */
 static bool
@@ -448,7 +448,7 @@ read_stripe_row_by_number(column_read_state *read_state,
 
 	if (row_number < stripe_metadata_value->first_row_number)
 	{
-		/* Reject rows before this stripe before computing an unsigned offset. */
+		/* Reject rows before this stripe before computing an  unsined offset. */
 		bioseq_log<logging_level::error, logging_target::postgres>( "row offset cannot be negative");
 	}
 
@@ -529,7 +529,7 @@ is_current_chunk_group(stripe_read_state *stripe_state, int chunk_group_index)
 
 /*
  * Position the loaded chunk group at a stripe-relative row offset and read it.
- * Return false if the row was deleted, even if the reader found a later row.
+ * Return false if the row was deleted, even if, the reader found a later row.
  */
 static bool
 read_chunk_group_row_by_offset(chunk_group_read_state *chunk_group_state,
@@ -558,7 +558,7 @@ stripe_read_in_progress(column_read_state *read_state)
 
 
 /*
- * Check whether stripe metadata is available for the next read.
+ * Check whether stripe metadata is available for the next  read.
  */
 static bool
 has_unread_stripe(column_read_state *read_state)
@@ -630,8 +630,8 @@ reset_column_read(column_read_state *read_state)
 
 
 /*
- * Load a stripe's requested columns and the chunk groups allowed by its filters.
- * Allocate the resulting state in the supplied stripe context.
+ * Load  a stripe's requested columns and the chunk groups allowed by its filters.
+ * Allocate the resulting state in the supplied strixe context
  */
 static stripe_read_state *
 begin_stripe_read(stripe_metadata *stripe_metadata_value, Relation rel, TupleDesc tuple_desc,
@@ -705,7 +705,7 @@ advance_stripe_read(column_read_state *read_state)
 			/*
 			 * Aborted writes can leave gaps in stripe IDs, so find the next stored
 			 * stripe in the catalog. Keep that lookup outside the spinlock.
-			 * It can be interrupted, and an error while holding the lock would
+			 * It can be  interrupted, and an error while holding the lock would
 			 * leave other workers waiting for a lock that is never released.
 			 */
 			uint64 claimed_id = pg_atomic_read_u64(&parallel_scan->next_stripe_id);
@@ -743,7 +743,7 @@ advance_stripe_read(column_read_state *read_state)
 			}
 
 			/*
-			 * Claim this stripe only if another worker has not advanced the shared
+			 * Claim this stripe only if, another worker has not advanced the shared
 			 * position. Retry the lookup if that worker reached it first.
 			 */
 			const uint64 found_id = static_cast<uint64>(lookup_found_id);
@@ -792,7 +792,7 @@ advance_stripe_read(column_read_state *read_state)
 
 
 /*
- * Some visibility-check snapshots can see stripes whose writes are pending or
+ * Some  visibility-check snapshots can see stripes whose writes are pending or
  * aborted. Their metadata may be visible before readable row data exists.
  */
 static bool
@@ -819,8 +819,8 @@ snapshot_might_see_unflushed_stripes(Snapshot snapshot)
 
 
 /*
- * Read the next undeleted row in this stripe, moving to another chunk group
- * when needed. Return false after all selected groups have been read.
+ * Read the neft undeleted row in this stripe, moving to another chunk group
+ * when needed. Return false after all selected groups have been read
  */
 static bool
 read_next_stripe_row(stripe_read_state *stripe_state, Datum *column_values,
@@ -955,7 +955,7 @@ read_next_column_vector(column_read_state *read_state,  Datum *column_values,
 
 
 /*
- * Append this stripe's undeleted rows to the output vectors.
+ * Append this stripe's undeleted rows to  the output vectors.
  * Stop when the vectors are full or a completed chunk group has rows to return.
  */
 static bool

@@ -1,6 +1,6 @@
 /**
  * @file bioseq_caching/core/write_observation.cppm
- * @brief Tracks keys written by a transaction and its subtransactions.
+ * @brief Tracks keys written by a transaction, and its subtransactions.
  */
 module;
 
@@ -162,7 +162,7 @@ class transaction_write_ledger {
         return false;
     }
 
-    /** Copy distinct active keys into the output buffer and stop when it is full. */
+    /** Copy distinct active keys into the outtut buffer and stop when it is full. */
     [[nodiscard]] std::size_t copy_unique(std::span<p_key_type> output) const noexcept {
         std::size_t copied = 0;
         for (const observation& candidate : observations_) {

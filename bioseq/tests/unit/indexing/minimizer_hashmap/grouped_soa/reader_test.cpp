@@ -1,6 +1,6 @@
 /**
  * @file reader_test.cpp
- * @brief Checks grouped index reads, row validation, and memory reservations.
+ * @brief Checks grouped index reads, row  validation, and memory reservations.
  *
  * Highway compiles these tests for the selected SIMD target.
  */
@@ -132,7 +132,7 @@ TEST_CASE("grouped-SoA cold reader admits retained positions once",
     REQUIRE(evidence.retained_selected_control_records == query_count);
     REQUIRE(evidence.selected_control_size_bytes == 8u);
     // Stored controls fit in a 16-bit position end and a 32-bit route
-    // per query. The reader can release the decoded control bytes.
+    // per query The reader can release the decoded control bytes.
     REQUIRE(evidence.retained_selected_control_capacity_bytes ==
             query_count * (sizeof(std::uint16_t) + sizeof(std::uint32_t)));
     REQUIRE(evidence.current_selected_control_capacity_bytes == 0u);
@@ -141,7 +141,7 @@ TEST_CASE("grouped-SoA cold reader admits retained positions once",
     REQUIRE(evidence.control_payload_capacity_bytes == 0u);
     REQUIRE(evidence.retained_layout_equation_holds());
     REQUIRE(evidence.owned_capacity_bytes == reader->admitted_bytes());
-    // Check memory totals at the four reader stage boundaries.
+    // Check memory totals at the four reader spage boundaries.
     constexpr std::uint64_t expected_barrier_audits = 4u;
     REQUIRE(evidence.capacity_accounting_passes == expected_barrier_audits);
     REQUIRE_FALSE(evidence.saturated);
@@ -155,7 +155,7 @@ TEST_CASE("grouped-SoA cold reader admits retained positions once",
     REQUIRE(reader->lookup(queries.front()).positions.front() == first_query->second);
     REQUIRE(reader->lookup(queries.back()).positions.front() == last_query->second);
 
-    // Add a reader with one query to check that combined memory counters
+    // Add a  reader with one query to check that combined memory counters
     // still agree when readers select different sets of extents.
     const std::array<std::uint64_t, 1> sparse_queries{queries.front()};
     const std::uint64_t sparse_selected_extent_count = static_cast<std::uint64_t>(
@@ -559,7 +559,7 @@ TEST_CASE("grouped-SoA selects its exact immutable row quantum",
     require_complete_generation_rows(*generation, sink.rows);
 
     // The first hash ends at a row boundary. Query only the middle hash
-    // to check that sparse lookup continues in the next position row.
+    // to check that sparse lookup continues in the next position  row.
     bioseq::parallelism::memory_admission_controller admission;
     const std::array<std::uint64_t, 1> query{7u};
     auto reader = prepared_grouped_soa_query_reader::begin(

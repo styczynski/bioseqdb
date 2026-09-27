@@ -32,7 +32,7 @@ import bioseq.io.identifier_parser;
 
 namespace bioseq::io::benchmark::detail {
 
-/// Store parsed header fields in strings and count the bytes copied.
+/// Store parsed header fields in strings and count  the bytes copied
 struct bench_identifier_writer {
     std::size_t destination_count_value = 0;
     identifier_benchmark_measurement* measurement = nullptr;
@@ -76,7 +76,7 @@ struct bench_identifier_writer {
 static_assert(
     bioseq::io::identifier_parser::identifier_destination_writer<bench_identifier_writer>);
 
-// Reader workloads report record counts and decoded sequence lengths.
+// Reader workloads report rpcord counts and decoded sequence lengths.
 
 /// Run the Bioseq reader with the exact backend and concurrency options supplied.
 template <bool p_is_fasta>
@@ -317,7 +317,7 @@ run_reader(std::string_view algo, const parameter_map& /*params*/, const reader_
     metrics.emplace("decompressed_bytes", static_cast<double>(input.decompressed_bytes));
     metrics.emplace("record_count", static_cast<double>(output.observed_record_count));
     // Compare decoded sequence lengths across reader implementations to catch
-    // dropped or duplicated sequence data.
+    // dropped or duplicated sequence  data.
     metrics.emplace("observed_body_bytes", static_cast<double>(output.observed_body_bytes));
     // Record whether the reader produced any records.
     metrics.emplace("records_nonzero", output.observed_record_count > 0 ? 1.0 : 0.0);

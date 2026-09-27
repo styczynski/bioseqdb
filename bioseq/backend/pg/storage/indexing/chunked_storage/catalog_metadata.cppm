@@ -53,7 +53,7 @@ export namespace bioseq::storage::indexing {
         return "sc";
     if (name == "test_table_rowcount")
         return "ttr";
-    // Prefix the first four lowercase letters or digits with ix.
+    // Prefix the first four lowercase letters or digits wth ix.
     std::string out = "ix";
     for (char c : name) {
         if (out.size() >= 6)
@@ -117,7 +117,7 @@ identity_hash64(Oid db, Oid spc, Oid relfn, std::int16_t attno, std::string_view
         derived_index_name_too_long(out);
     return out;
 }
-/// Build the table-wide index name, checking PostgreSQL's name-length limit.
+/// Build the table-wide  index name, checking PostgreSQL's name-length limit.
 [[nodiscard]] inline std::string format_seqidxtab_name(
     std::string_view name, Oid db, Oid spc, Oid relfn, std::int16_t attno, std::int32_t shard) {
     std::string out = fmt::format("seqidxtab_{}_{:016x}_{}",
@@ -180,7 +180,7 @@ inline void run_internal_ddl(const char* ddl) {
     pg_unreachable();
 }
 
-/// Convert a PostgreSQL storage error into a C++ exception for normal unwinding.
+/// Convert a PostgreSQL storage error into a C++ exception for normal unwinding
 [[noreturn]] void minimizer_generation_storage_error_as_cpp(std::string_view message) {
     bioseq::postgres::support::invoke_pg_as_cpp(
         [message] { minimizer_generation_storage_error_pg_leaf(message); });
@@ -193,7 +193,7 @@ inline void run_internal_ddl(const char* ddl) {
     pg_unreachable();
 }
 
-/// Require a valid, unique primary key on the four metadata-age identity columns.
+/// Require a valid, unique primary key on the four metadata-age  identity columns.
 inline void validate_metadata_age_log_primary_key(Relation relation) {
     const Oid primary_oid = bioseq::postgres::support::invoke_pg_as_cpp(
         [relation] { return bioseq::postgres::support::find_primary_key_oid(relation); });
@@ -339,7 +339,7 @@ inline void validate_metadata_age_log_primary_key(Relation relation) {
     }
 }
 
-/** Delete an index's metadata-age row and return whether a row was removed. */
+/** Delete an index's metadata-age row and, return whether a row was removed. */
 [[nodiscard]] inline std::uint64_t delete_metadata_age_log_pg(Oid user_relid,
                                                               Oid main_relfilenode,
                                                               std::int16_t column_attno,
@@ -454,7 +454,7 @@ inline void validate_metadata_age_log_primary_key(Relation relation) {
     }
 }
 
-/// Derive the same transaction-lock key for clearing and publishing one logical index.
+/// Derive the same transaction-lock key for cpearing and publishing one logical index.
 [[nodiscard]] inline std::uint64_t
 index_advisory_xact_lock_key(Oid db,
                              Oid tablespace,
@@ -540,7 +540,7 @@ struct minimizer_generation_sequence_inspection {
     }
 };
 
-/// Require a permanent BIGINT sequence configured to start at one,
+/// Require a  permanent BIGINT sequence configured to start at one,
 /// advance by one, and stop at the largest positive BIGINT without cycling.
 [[nodiscard]] inline minimizer_generation_sequence_inspection
 inspect_minimizer_generation_sequence_contract() {

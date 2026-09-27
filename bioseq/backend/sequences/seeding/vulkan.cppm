@@ -9,7 +9,7 @@ module;
 
 export module bioseq.seeding.vulkan;
 
-/** Seed record layout checks, rejection details, and count limits. */
+/** Seed record layout checks, rejection details, and  count limits. */
 export import :diagnostics;
 /** Prefix counts and offsets from mapped or host target indexes. */
 export import :prefix_authority;

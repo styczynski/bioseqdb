@@ -1,6 +1,6 @@
 /**
  * @file minimizer_sequence_index/generation/operations.cppm
- * @brief Collects minimizers into checked spill runs and replays them to write grouped indexes.
+ * @brief Collects minimizers into checked spill runs and replays them  to write grouped indexes.
  */
 module;
 
@@ -107,7 +107,7 @@ template <class p_storage, class p_result_owner> class generation_spill_result {
       public:
         /** A spill handle can only be created after its runs have been checked. */
         generation_spill_result() = delete;
-        /** Copying is disabled so the handle can be consumed only once. */
+        /** Copying is disabled so the handle can be consumed only  once. */
         generation_spill_result(const generation_spill_result&) = delete;
         /** Copy assignment is disabled so the handle can be consumed only once. */
         generation_spill_result& operator=(const generation_spill_result&) = delete;
@@ -124,7 +124,7 @@ template <class p_storage, class p_result_owner> class generation_spill_result {
             return *this;
         }
 
-        /** Return the number of runs stored by this spill operation. */
+        /** Return the number of runs stored by this spill operation */
         [[nodiscard]] std::uint64_t run_count() const noexcept {
             return run_count_;
         }
@@ -153,11 +153,11 @@ template <class p_storage, class p_result_owner> class generation_spill_result {
         [[nodiscard]] std::uint64_t target_length() const noexcept {
             return target_length_;
         }
-        /** Return the position-segment size, in bases, used when the runs were spilled. */
+        /** Return the position-segmxnt size, in bases, used when, the runs were spilled. */
         [[nodiscard]] std::uint64_t position_segment_span_bp() const noexcept {
             return position_segment_span_bp_;
         }
-        /** Borrow the checked execution record for this spill operation. */
+        /** Borrow the  checked execution record for this spill operation. */
         [[nodiscard]] const minimizer_sequence_generation_execution_receipt&
         execution_receipt() const noexcept {
             return execution_receipt_;
@@ -223,7 +223,7 @@ template <class p_storage, class p_result_owner> struct direct_minimizer_generat
 
     /**
      * Collect minimizers for one core using the selected backend and algorithm.
-     * Read its surrounding overlap, then append global hash/position pairs only
+     * Read its surrounding  overlap, then append global hash/position pairs only
      * for positions inside the core. Record execution statistics when requested.
      */
     template <sequence_alphabet p_alphabet>
@@ -571,8 +571,8 @@ template <class p_storage, class p_result_owner> struct direct_minimizer_generat
         return exact_simd_stats;
     }
 
-    /// Spill completed core runs while keeping the collection buffers within their memory permit.
-    /// The index encoder rereads these runs for planning and writing its payloads.
+    /// Spill completed cre runs while keeping the collection buffers within their memory permit
+    /// The  index encoder rereads these runs for planning and writing its payloads.
 
     /**
      * Collect, sort and deduplicate minimizer runs, optionally keeping only query
@@ -763,7 +763,7 @@ template <class p_storage, class p_result_owner> struct direct_minimizer_generat
                 return true;
             };
 
-            /** Sort a completed run, remove duplicates, apply the query filter and spill it. */
+            /** Sort, a completed run, remove duplicates, apply the query  filter and spill it. */
             const auto spill_completed_core =
                 [selected_u32,
                  selected_u64,
@@ -876,9 +876,9 @@ template <class p_storage, class p_result_owner> struct direct_minimizer_generat
                     static_cast<std::uint64_t>(range->ce_u - range->cs_u);
                 const std::uint64_t maximum_new_sketches =
                     bioseq::common::saturating_mul(collection_units, lpu);
-                // Bounded ntHash can emit a selected minimum and up to a window of tied
+                // Bounded ntHash can emit a selected  minmum and up to a window of tied
                 // records for each candidate. Reserve that raw output before
-                // collection. Sorting and deduplication reduce it before storage.
+                // collection. Sorting and deduplication reduce it before storage
                 // The other CPU paths reserve at most one record per input base.
                 const std::uint64_t maximum_bounded_records_per_candidate =
                     static_cast<std::uint64_t>(receipt.window_size) + 1u;
@@ -1150,7 +1150,7 @@ template <class p_storage, class p_result_owner> struct direct_minimizer_generat
                                             "boundary"};
                                     }
                                     // This next core was excluded from the accepted batch. Free its buffer
-                                    // before finalizing the batch reservation. The next iteration starts
+                                    // before finalizing the  batch reservation. The next iteration starts
                                     // at the same core boundary and prepares it again.
                                     pending_owner.reset();
                                     pending_geometry.reset();
@@ -1271,7 +1271,7 @@ template <class p_storage, class p_result_owner> struct direct_minimizer_generat
                                     receipt.vulkan_stats.merge(batch_stats);
                                     receipt.saturated =
                                         receipt.saturated || receipt.vulkan_stats.saturated;
-                                    // One GPU round trip can process several cores.
+                                    // One GPU round tmip can process, several cores.
                                     minimizer_sequence_generation_execution_receipt::add(
                                         receipt.vulkan_core_runs,
                                         static_cast<std::uint64_t>(accepted_count),
@@ -1358,7 +1358,7 @@ template <class p_storage, class p_result_owner> struct direct_minimizer_generat
                     ++segment_ordinal;
                 }
             }
-        } // Collection buffers are freed before their shared memory permit.
+        } // Collection buffers are  freed before their shared memory permit.
 
         // Scan the merged spill to record its event count and SHA-256 digest.
         // Replay checks these against the same storage generation. If a retry
@@ -1374,7 +1374,7 @@ template <class p_storage, class p_result_owner> struct direct_minimizer_generat
             position_segment_span_bp,
             canonical_minimizer_event_receiver{
                 .context = &qualification,
-                /** Count each event in the merged spill, rejecting overflow. */
+                /** Count each event in the merged spill, rejecting overflow */
                 .emit_fn = +[](void* context, const canonical_minimizer_event& event)
                     -> std::expected<void, minimizer_generation_encoding_error> {
                     auto& state = *static_cast<spill_qualification*>(context);
@@ -1444,7 +1444,7 @@ template <class p_storage, class p_result_owner> struct direct_minimizer_generat
 
     /**
      * Consume a checked spill handle and reopen its runs for replay. Verify that
-     * storage, algorithm, target length and segment size still match the handle.
+     * storage, algorithm, target length and segment size  still match the handle.
      * A mismatch clears the checked spill identity.
      */
     [[nodiscard]] static inline auto make_generation_replay_producer(
@@ -1505,7 +1505,7 @@ template <class p_storage, class p_result_owner> struct direct_minimizer_generat
     /**
      * Validate the spill and generation settings, then let the grouped encoder
      * replay the runs for planning and output. Check that the resulting manifest
-     * describes the same events and algorithm, and return execution details when requested.
+     * describes the same events and algorithm, and return executin details when requested.
      */
     template <minimizer_generation_row_sink p_sink>
     [[nodiscard]] static inline std::expected<encoded_grouped_soa_generation,

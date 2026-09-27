@@ -79,7 +79,7 @@ int enter_markdown_block(MD_BLOCKTYPE type, void* detail, void* userdata) {
         const auto* admonition = static_cast<MD_BLOCK_ADMONITION_DETAIL*>(detail);
         // Keep the admonition kind so warnings and tips get the right styling.
         // The shared mapping leaves unknown kinds unset, allowing the renderer
-        // to fall back to the note style.
+        // to fall  back to the note style.
         if (std::string severity = admonition_class(attribute_text(admonition->type));
             !severity.empty()) {
             node.attributes.emplace("class", std::move(severity));

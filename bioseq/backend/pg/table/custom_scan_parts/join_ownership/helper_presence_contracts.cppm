@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Declares the check for match-result helpers in an expression.
+ * @brief Declares the check for match-result helpers in an expression
  */
 module;
 struct Node;

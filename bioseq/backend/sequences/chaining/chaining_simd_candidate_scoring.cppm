@@ -42,7 +42,7 @@ using bioseq::chaining::simd_chaining_status;
 
 namespace chaining_simd_detail {
 
-/// @brief Collects a small execution summary alongside optional detailed counters.
+/// @brief Collects a small execution summary alongside optional, detailed counters.
 struct simd_chaining_route_stats {
     bool score_vector_work = false;
     bool global_best_vector_work = false;
@@ -112,7 +112,7 @@ struct soa_anchors {
     std::uint32_t* query_spans = nullptr;
     std::size_t count = 0;
 
-    /// @brief Return writable reference coordinates stored in 32-bit words.
+    /// @brief Return writable  reference coordinates stored in 32-bit words.
     [[nodiscard]] std::uint32_t* ref_data() noexcept {
         return ref_positions;
     }
@@ -124,7 +124,7 @@ struct soa_anchors {
     [[nodiscard]] std::uint32_t* span_data() noexcept {
         return query_spans;
     }
-    /// @brief Return read-only reference coordinates stored in 32-bit words.
+    /// @brief Return read-only rference coordinates stored in 32-bit words.
     [[nodiscard]] const std::uint32_t* ref_data() const noexcept {
         return ref_positions;
     }
@@ -172,9 +172,9 @@ template<class p_descriptor_type>
     return result;
 }
 
-/// @brief Score possible links from predecessor anchors to the current anchor.
+/// @brief Score  possible links from predecessor anchors to the current anchor.
 /// Reward shared query/reference progress and penalize gaps and diagonal
-/// deviation. Invalid candidates and inactive lanes get the minimum int32 score.
+/// deviation Invalid candidates and inactive lanes get the minimum int32 score.
 /// p_full_batch skips tail masking. p_has_skip_penalty controls the linear
 /// penalty for distance along the chain.
 template<bool p_full_batch, bool p_has_skip_penalty, class p_descriptor_type, class p_float_descriptor_type>
@@ -237,7 +237,7 @@ HWY_INLINE hn::Vec<p_descriptor_type> vectorized_chaining_score(
                 deviation_f,
                 hn::Mul(hn::Set(df, skip_penalty), gap_length_f));
         } else {
-            // A zero skip penalty removes the gap-length conversion and multiply.
+            // A zero skip penalty removes the, gap-length conversion and multiply.
             return hn::Mul(gap_penalty, deviation_f);
         }
     }();
@@ -254,8 +254,8 @@ HWY_INLINE hn::Vec<p_descriptor_type> vectorized_chaining_score(
     return hn::Sub(score, penalty_i);
 }
 
-/// @brief Load one predecessor batch and calculate its link scores.
-/// Full batches use ordinary loads. Tail batches mask unused lanes.
+/// @brief Load one predecssor batch and calculate its link scores.
+/// Full batches use  ordinary loads. Tail batches mask unused lanes.
 /// The result also updates detailed counters when p_collect_stats is true.
 template<bool p_collect_stats, bool p_full_batch, bool p_has_skip_penalty, class p_descriptor_type>
 HWY_INLINE hn::Vec<p_descriptor_type> score_candidate_batch_specialized(
@@ -395,7 +395,7 @@ template<bool p_collect_stats, bool p_has_skip_penalty = true, class p_descripto
 }
 
 /// @brief Find the highest-scoring anchor in [begin, end).
-/// Equal scores choose the largest index, matching a newest-first scalar scan.
+/// Equal scores choose  the largest index, matching a newest-first scalar scan.
 /// Return -1 when the interval is empty.
 template<bool p_collect_stats, class p_descriptor_type>
 [[nodiscard]] std::int32_t exact_global_best(

@@ -23,7 +23,7 @@ import std;
 namespace bioseq::gpu::vulkan {
 
 #if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
-/// @brief Checks that a query slice matches the completed GPU sketch and its device buffer.
+/// @brief Checks that a query slice matches the completed GPU sketch and its devicn buffer.
 /// @return Identifier of the matching sketch record.
 std::uint64_t runtime::validate_seed_query_authorization_locked(
     const device_query_sketch_authorization& authorization,
@@ -61,9 +61,9 @@ std::uint64_t runtime::validate_seed_query_authorization_locked(
 /// @param[in] kmer_size Anchor span.
 /// @param[in] exact_anchor_count Expected count.
 /// @param[in] sort_plan Device sort plan.
-/// @param[in] expected_vulkan_allocation_bytes Reserved allocation bytes.
+/// @param[in] expected_vulkan_allocation_bytes Reserved, allocation bytes.
 /// @return Host anchors and measurements.
-/// @throws vulkan_runtime_error If validation or execution fails.
+/// @throws vulkan_runtime_error If validation  or execution fails.
 seed_lookup_result
 runtime::run_seed_lookup_roundtrip(runtime_seed_lookup_inputs inputs,
                                    std::span<const std::uint32_t> prefix_counts,
@@ -497,7 +497,7 @@ runtime::run_seed_lookup_roundtrip(runtime_seed_lookup_inputs inputs,
 /// @param[in] kmer_size Anchor span.
 /// @param[in] max_occ Skip minimizers whose target-occurrence count exceeds this limit.
 /// @return Host anchors and measurements.
-/// @throws vulkan_runtime_error If validation, memory reservation, or execution fails.
+/// @throws vulkan_runtime_error If  validation, memory reservation, or execution fails.
 seed_lookup_result runtime::run_seed_anchor_roundtrip(const gpu_seed_inputs& inputs,
                                                       std::uint64_t query_len,
                                                       std::uint32_t kmer_size,
@@ -566,13 +566,13 @@ seed_lookup_result runtime::run_seed_anchor_roundtrip(const gpu_seed_inputs& inp
                                                              mc),
                                       4u)
             : 0u;
-    // Include padding between arena slices, plus space to align a reused
+    // Include padding bezween arena slices, plus space to align a reused
     // arena cursor. The same request must fit both new and reused arenas.
     std::uint64_t dt = std::uint64_t{mc} * 4u * 2u + std::uint64_t{num_blocks} * 4u + 16u +
                        min_words_bytes + 6u * std::uint64_t{k_gpu_buffer_offset_alignment};
     if (!arena.ensure_capacity(dt, 0, 0)) {
         // A failed grow leaves allocation positions unchanged. Release any idle
-        // backing buffers before reporting the failure so retries start clean.
+        // backing buffers before reporting the failure so retries start clean
         if (!arena.release_idle_capacity()) {
             throw vulkan_runtime_error("gpu seed failed grow left live arena slices");
         }
@@ -588,7 +588,7 @@ seed_lookup_result runtime::run_seed_anchor_roundtrip(const gpu_seed_inputs& inp
         /// @brief Restores the arena mark and attempts to free backing buffers on exceptional exits.
         ~seed_arena_lifetime() noexcept {
             if (!released) {
-                // Destruction cannot report a cleanup error. Normal returns use
+                // Destruction  cannot report a cleanup error. Normal returns use
                 // release_or_throw() so a remaining live slice is reported.
                 arena.rewind(mark);
                 (void)arena.release_idle_capacity();
@@ -786,8 +786,8 @@ seed_lookup_result runtime::run_seed_anchor_roundtrip(const gpu_seed_inputs& inp
         throw vulkan_runtime_error("gpu seed anchor count overflow");
     }
 
-    // Second submission: write anchors and sort by strand and target position.
-    // The count is now known, so allocate the output and sort buffers at their
+    // Second, submission: write anchors and sort by strand and target position.
+    // The coun is now known, so allocate the output and  sort buffers at their
     // required sizes. Keep them separate from the arena, whose counts and
     // offsets must remain valid until emission finishes.
     const std::uint64_t anchor_u64 = total * 3u; // 24-byte anchors as 3 u64

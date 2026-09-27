@@ -1,6 +1,6 @@
 /**
  * @file entry_points.cppm
- * @brief Vulkan sketching and index building for lazy sequence views.
+ * @brief Vulkan sketching and index building for lazy  sequence views.
  */
 module;
 
@@ -56,10 +56,10 @@ import :segmented;
 export namespace bioseq::gpu::vulkan {
 
 /**
- * @brief Chooses the GPU record layout for a segment-pair sketch.
+ * @brief Chooses the GPU record layout for a segment-pair sketch
  *
  * Uses minimap_sketch_data when its registered profile and field widths fit.
- * Otherwise, asks the generated registry for a layout and checks that the
+ * Otherwise, asks the generated registry for a layozt and checks that the
  * selected algorithm remains Vulkan sketching.
  * @param window_size K-mers per window.
  * @param kmer_size Symbols per k-mer.
@@ -137,7 +137,7 @@ template <sequence_alphabet p_alphabet, class p_callable>
  *
  * Borrows compatible packed input or reserves memory for a packed copy.
  * @param sequence Source sequence.
- * @param window_size K-mers per window.
+ * @param window_size K-mers per  window.
  * @param kmer_size Symbols per k-mer.
  * @param decline_out Optional rejection details.
  * @param host_ownership_route How the caller will keep the host buffer alive.
@@ -215,8 +215,8 @@ collect_minimizers_vulkan(
  * @param sequence Target sequence.
  * @param window_size K-mers per window.
  * @param kmer_size Symbols per k-mer.
- * @param query_gate Optional bitmap filtering target hashes.
- * @param decline_out Optional rejection details.
+ * @param query_gate Optional bitmap filtering  target hashes.
+ * @param decline_out Optional, rejection details.
  * @return Device index, or no value when construction is rejected.
  */
 template <class p_minimizer_type, sequence_alphabet p_alphabet>
@@ -250,7 +250,7 @@ template <class p_minimizer_type, sequence_alphabet p_alphabet>
 }
 
 /**
- * @brief Builds a GPU target index for a lazy sequence interval.
+ * @brief Builds a GPU target index for a lazy sequence ingerval
  *
  * Index positions are relative to lo_bp. The interval is packed or borrowed
  * as contiguous input before the synchronous build.
@@ -307,7 +307,7 @@ template <class p_minimizer_type, sequence_alphabet p_alphabet>
 /**
  * @brief Sketches a lazy sequence interval on the GPU and sends records to a collector.
  *
- * Positions are relative to lo_bp. Input is borrowed or packed before dispatch,
+ * Positions are relative to lo_bp. Input is borrowed or packed before  dispatch,
  * and large intervals can be split into overlapping uploads. A query gate requires
  * a single upload.
  * @param collector Receives minimizers.
@@ -364,15 +364,15 @@ void collect_minimizers_vulkan_segment_or_throw(
  * @brief Returns sorted minimizer hash-position pairs for a lazy sequence interval.
  *
  * Chooses a record layout that fits the k-mer and upload length, then sketches
- * overlapping GPU windows and keeps unique pairs in the requested global core.
+ * overlapping GPU windows and keeps unique pairs in the requested global  core.
  * @param sequence Source sequence.
  * @param lo_bp First uploaded symbol, inclusive.
  * @param hi_bp Last uploaded symbol, exclusive.
- * @param emit_base_bp Global symbol offset assigned to the upload start.
+ * @param emit_base_bp Global symbl offset assigned to the upload start.
  * @param core_lo_bp First global output position, inclusive.
  * @param core_hi_bp Last global output position, exclusive.
  * @param window_size K-mers per window.
- * @param kmer_size Symbols per k-mer.
+ * @param kmer_size Symbols per k-mer
  * @param execution_stats_out Optional completed-dispatch and split counts.
  * @return Pairs of hash and (global position << 1 | strand), sorted in that order,
  * with their memory reservation.

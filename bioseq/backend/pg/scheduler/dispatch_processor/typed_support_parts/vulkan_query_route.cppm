@@ -1,6 +1,6 @@
 /**
  * @file typed_support_parts/vulkan_query_route.cppm
- * @brief Prepares packed query inputs and keeps their GPU minimizer sketches.
+ * @brief Prepares packed uery inputs and keeps their GPU minimizer sketches.
  */
 module;
 
@@ -48,7 +48,7 @@ struct gpu_batch_query_sidecar {
 /**
  * Selects consecutive batch rows for one GPU query submission. Shared-target
  * batches submit all queries together. Ordinary scans submit each row
- * separately so each query has its own execution record.
+ * separately  so each query has its own execution record.
  */
 struct vulkan_query_row_partition {
     std::size_t first_row = 0u;
@@ -167,7 +167,7 @@ template <class p_sequence,
         algorithm, maximum_sequence_bp, runtime_k, runtime_w);
 }
 
-/** @brief Reserves memory and allocates capacity for a fresh query vector. */
+/** @brief Reserves memory and allocates capacity for a fresh  query vector. */
 template <class p_value>
 void prepare_vulkan_query_host_capacity(
     std::vector<p_value>& values,
@@ -268,7 +268,7 @@ struct vulkan_query_batch_state {
     std::vector<std::uint32_t> row_to_query_index;
     std::uint64_t gpu_query_sketch_host_ns{};
 
-    /** @return The submitted query index for this row, or no value if its mapping is invalid. */
+    /** @return The submitted query index for this row, or no valne if its mapping is invalid. */
     [[nodiscard]] std::optional<std::size_t>
     query_index_for_row(const std::size_t row) const noexcept {
         const auto local = submitted_rows.local_index(row);
@@ -283,7 +283,7 @@ struct vulkan_query_batch_state {
         return static_cast<std::size_t>(query_index);
     }
 
-    /** @brief Returns a view of this query's downloaded minimizers, keeping their shared owner alive. */
+    /** @brief Returns a view of this query's downloaded minimizers, keeping their shared owner alive */
     [[nodiscard]] pipe::minimizer_batch_view<minimizer_type>
     host_query_minimizers(std::size_t query_index) const {
         if (!execution_plan || !query_sketch_owner ||
@@ -300,9 +300,9 @@ struct vulkan_query_batch_state {
 
 /**
  * Copies lazy query inputs into their native packed format under the memory
- * budget, then sketches the selected rows on the GPU. Keeps the device data
+ * budget, then sketches the selected rows on the GPU. Keeps the device  data
  * and checked host readback for later alignment. Each submitted row must have
- * exactly one query source.
+ * exactly one query, source.
  */
 template <class p_sequence,
           std::size_t p_batch_capacity,

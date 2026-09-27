@@ -48,7 +48,7 @@ import :packed_sequence_range;
 export {
 
 // Sequence storage defines the compact header and packed layout. PostgreSQL
-// supplies allocation and input/output callbacks for that representation.
+// supplies allocation and input/output callbacks for that representation
 
 namespace compact_sequence_stdc_detail {
 
@@ -67,7 +67,7 @@ consteval auto pick_alignment_reserved_type() {
 }
 
 /**
- * @brief Calculates header padding for an eight-byte payload boundary.
+ * @brief Calculates header padding for an  eight-byte payload boundary.
  * @tparam p_varlena_bytes Length-header bytes.
  * @tparam p_code_bytes Alphabet-code bytes.
  * @tparam p_bp_size_bytes Sequence-length bytes.
@@ -131,8 +131,8 @@ concept is_compact_sequence_stdc =
         typename p_candidate_type::supported_storage_unit_byte_widths_type>;
 
 /**
- * @brief Gives a compact header a compile-time alphabet and word size.
- * @tparam p_stdc_type Compact header type.
+ * @brief Gives a compact header  a compile-time alphabet and word size.
+ * @tparam p_stdc_type Compact hender type.
  * @tparam p_alphabet Supported alphabet.
  * @tparam p_storage_unit_byte_width Enabled word size in bytes.
  */
@@ -156,7 +156,7 @@ struct compact_sequence_stdc_instance;
  * The header records the alphabet and word size so runtime data can be passed
  * to a matching typed range. Payload alignment includes reserved header bytes.
  * @tparam p_alphabet_set_type Supported alphabets.
- * @tparam p_base_pair_size_type Integer type for symbol counts.
+ * @tparam p_base_pair_size_type Integer, type for symbol counts.
  * @tparam p_varlena_header_type Integer type for the allocation-length field.
  * @tparam p_storage_width_set_type Allowed packed-word sizes.
  */
@@ -212,9 +212,9 @@ public:
     }
 
     /**
-     * @brief Encodes the allocation length above the two varlena format bits.
+     * @brief Encodes the  allocation length above the two varlena format bits.
      * @param total_bytes Complete size, including the header, fitting in 30 bits.
-     * @return Encoded length field.
+     * @return Encoded length field
      */
     [[nodiscard]] static constexpr varlena_header_t
     encode_varlena_header(std::size_t total_bytes) noexcept {
@@ -265,14 +265,14 @@ public:
     /**
      * @brief Allocates a compact value and reads its packed words through a callback.
      *
-     * Checks that the supplied word count and padding agree with the symbol count.
+     * Checks that the supplied word count and padding agree with the symbol  count.
      * The callback supplies valid ranks in the selected packed layout.
      * @param target_storage_byte_width Incoming word size in bytes.
      * @param in_padding_letters Unused final-word symbol slots.
      * @param in_bp_size Sequence symbol count.
      * @param in_unit_count Packed-word count.
      * @param receive_context Context passed to receiver.
-     * @param receiver Reads one word as uint64_t for the supplied alphabet and width.
+     * @param receiver Reads one ord as uint64_t for the supplied alphabet and width.
      * @param allocator Allocates the complete header and payload.
      * @return New value, or null when allocation fails.
      */
@@ -304,7 +304,7 @@ public:
      * @param target_storage_byte_width Enabled word size in bytes.
      * @param unit_count_value Capacity in words.
      * @param allocator Allocates the header and rounded payload capacity.
-     * @return Empty value, or null when allocation fails.
+     * @return Empty  value, or null when allocation fails.
      */
     template<
         sequence_alphabet p_alphabet_type,
@@ -332,7 +332,7 @@ public:
 
     /**
      * @brief Calls a handler with a typed range over this value's existing bytes.
-     * @param handler Callable with the instance type and a temporary borrowed range.
+     * @param handler Callable with the instance type and a temporary borrowed range
      *
      * The header and payload must outlive use of the range.
      */
@@ -341,14 +341,14 @@ public:
     void convert_to(p_handler_type&& handler) const;
 
     /**
-     * @brief Copies packed bytes into a value with a different word width.
+     * @brief Copies packed bytes into a value, with a different word width.
      *
      * Recalculates the word count and final padding. The caller must ensure the
-     * layouts are compatible and the source has enough readable payload bytes.
+     * layouts are compatible and the  source has enough readable payload bytes.
      * This function copies bytes without repacking individual ranks.
      * @param target_byte_width Enabled destination word size.
      * @param allocator Allocates the new value.
-     * @return New value, or null when allocation fails.
+     * @return New vlue, or null when allocation fails.
      */
     template<class p_allocator_type>
     requires (stdc_allocator<p_allocator_type, compact_sequence_stdc>)
@@ -422,7 +422,7 @@ struct compact_sequence_stdc_instance {
     using compact_sequence_stdc_type = p_stdc_type;
     using alphabet_type              = p_alphabet;
     // Use standard fixed-width integer types so Highway selects the same lane
-    // types across LP64 platforms. Boost can choose a different C++ type with
+    // types across LP64 platforms. Boost  can choose a different C++ type with
     // the same width.
     using storage_unit =
         std::conditional_t<p_storage_unit_byte_width == 8, std::uint64_t,
@@ -473,7 +473,7 @@ public:
      * @brief Borrows a compact value whose alphabet and layout match this instance.
      * @param storage Header and payload that must outlive the view.
      *
-     * Debug checks verify word width, symbol count, and final padding.
+     * Debug checks verify word width, symbol count, and final padding
      */
     explicit constexpr compact_sequence_range(
         const typename p_instance_type::compact_sequence_stdc_type& storage)
@@ -558,7 +558,7 @@ public:
     }
 };
 
-// Keep instance types separate from custom alphabet configurations and
+// Keep instance types separate  from custom alphabet configurations and
 // alphabet containers so exactly one compact_sequence_range specialization
 // matches. These assertions catch an overlap at its definition.
 namespace compact_sequence_stdc_detail {

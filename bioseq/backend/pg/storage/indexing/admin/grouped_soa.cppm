@@ -69,7 +69,7 @@ void check_generation_interrupts_as_cpp(void*) {
 namespace bioseq::storage::indexing::detail {
 
 // Log the completed producer counters before update_index discards the
-// publication result. The surrounding transaction can still roll back.
+// publication result. The surrounding  transaction can still roll back.
 void log_e2e_minimizer_publication_execution(
     const ready_minimizer_generation_publication& publication,
     Oid user_relid,
@@ -156,16 +156,16 @@ void log_e2e_minimizer_publication_execution(
 export namespace bioseq::storage::indexing {
 
 /**
- * Build a grouped-SoA index from the sequence under the caller's snapshot.
- * Check the written generation before publishing its head, then reopen that
+ * Build a grouped-SoA index from the sequence under the caller's snapbhot.
+ * Check the written generation before publishing its head, then reopen, that
  * head to verify the published bytes. Sequence indexes release their temporary
  * sorted runs before publication.
  *
  * The caller keeps the source snapshot alive and updates metadata_age_log.
- * The selected backend and algorithm identity must match throughout the build.
+ * The selected backend and algorithm identity must match throughout the build
  * @tparam p_sequence_range Configuration of the packed source sequence.
  * @param user_relid Source Bioseq table.
- * @param column_attno One-based sequence column number.
+ * @param column_attno One-based sequence column  number.
  * @param index_name Registered fragment or sequence minimizer index.
  * @param sequence_rowno Source row number used as the index query key.
  * @param storage Storage for this source and index.
@@ -371,8 +371,8 @@ build_and_publish_grouped_soa_minimizer_generation_pg(
         }
         state->source_authorization.reset();
 
-        // The source epoch identifies the sequence version. Derive the storage
-        // checksum from the final manifest, since encoding may retry with
+        // The source epoch identifies the sequence  version. Derive the storage
+        // checksum from the final manifest, since encoding may retr with
         // smaller position segments.
         result.source_identity =
             minimizer_generation_source_identity(relation_identity.relfilenode, state->source);
@@ -766,7 +766,7 @@ inline void build_and_verify_grouped_soa_minimizer_generation_pg(
 }
 
 // Instantiate a production sequence type here so this module also checks
-// the lazy-view and source-binding types at compile time.
+// the lazy-view and source-binding types at  compile time.
 namespace ready_minimizer_generation_compile_contract_detail {
 using sequence_config = sequence_custom_alphabet<seq::dna4, std::uint64_t>;
 using source_binding = bioseq::storage::postgres_lazy_sequence_binding<sequence_config>;

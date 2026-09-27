@@ -1,6 +1,6 @@
 /**
  * @file common/durable_file_io/cleanup.cppm
- * @brief Remove temporary file names after checking which file they refer to.
+ * @brief Remove, temporary file names after checking which file they refer to.
  */
 module;
 
@@ -57,7 +57,7 @@ namespace bioseq::common::durable_file_io::detail {
 
 /**
  * Remove a temporary name if it still refers to the expected inode.
- * The test hook runs before the last identity check. Callers must keep other
+ * The test hook runs before the last  identity check. Callers must keep other
  * writers from changing the name between fstatat and unlinkat, since those
  * checks and removal are separate operations.
  */

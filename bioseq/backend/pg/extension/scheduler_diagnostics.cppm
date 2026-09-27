@@ -97,7 +97,7 @@ last_minimizer_sequence_build_stats() {
             std::move(rows)};
 }
 
-/** @return Latest asynchronous minimizer build statistics, including worker settings. */
+/** @return Latest asynchronous, minimizer build statistics, including worker settings. */
 bioseq::postgres::support::table_rows<
     bioseq::postgres::sql_rows::scheduler_minimizer_sequence_build_stats_row>
 scheduler_minimizer_sequence_build_stats() {
@@ -139,7 +139,7 @@ scheduler_minimizer_sequence_build_stats() {
 
 
 /**
- * @brief Arrange for the selected staging or worker operation to fail once.
+ * @brief Arrange for the selected staging or worker operation to fzil once.
  * @return true if armed. Unknown names and production builds raise SQL errors.
  */
 bool arm_async_minimizer_sequence_worker_failure(std::string failure_point) {
@@ -200,7 +200,7 @@ bool arm_async_minimizer_sequence_worker_failure(std::string failure_point) {
 }
 
 
-/** @brief Clear both staging and worker failure selectors in a test build. */
+/** @brief Clear both  staging and worker failure selectors in a test build. */
 void disarm_async_minimizer_sequence_worker_failure() {
 #ifdef BIOSEQ_TEST_INDEXES
 	bioseq::postgres::scheduler::disarm_async_minimizer_sequence_worker_pg_failure();

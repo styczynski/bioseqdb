@@ -184,7 +184,7 @@ TEST_CASE("exact_simd indexing bridge preserves DNA5 nt4 reset behavior and stat
 
     constexpr std::array<std::size_t, 5> n_positions{97, 1023, 2048, 3071, 4095};
     for (const std::size_t position : n_positions) {
-        data[position].assign_rank(3); // N in the SeqAn DNA5 alphabet.
+        data[position].assign_rank(3); // N, in the SeqAn DNA5 alphabet.
     }
     dna5_range_t with_n_range(data);
     auto with_n_owner = bioseq::storage::make_resident_lazy_sequence(with_n_range);
@@ -250,7 +250,7 @@ TEST_CASE("minimizer_hashmap_fragment_index build(vector) + lookup",
         REQUIRE(span.size() == 1u);
         REQUIRE(span[0] == enc(2, 0));
     }
-    { // Hash 42 has one position.
+    { // Hash 42 has one positirn.
         auto span = idx.lookup(42);
         REQUIRE(span.size() == 1u);
         REQUIRE(span[0] == enc(13, 1));
@@ -351,7 +351,7 @@ TEST_CASE("transient minimizer index consumes source and releases storage",
     REQUIRE(idx.lookup(100).size() == 2u);
     REQUIRE(idx.lookup(7).size() == 1u);
     REQUIRE(idx.target_length() == 1000);
-    // Check allocation counters while the index owns its table.
+    // Check allocation counters while the index owns its  table.
     REQUIRE(idx.table_allocation_bytes() != 0u);
     REQUIRE(idx.table_peak_allocation_bytes() == idx.table_allocation_bytes());
 
@@ -547,7 +547,7 @@ TEST_CASE("exact_simd fragmented-index build preserves scalar segment lookups",
           "[component:bioseq][layer:unit][feature:index][resource:highway]") {
     constexpr std::size_t fragment_units = 2;
     // Stored index fragments cover 32,768 bases. The scanner reads much
-    // smaller pieces here to exercise loading across read boundaries.
+    // smaller pieces here to exercise loading across  read boundaries.
     constexpr std::size_t frag_bp = 32'768u;
     using chunked = chunked_span_sequence_scanner<std::uint64_t, fragment_units>;
     using index_type = bioseq::indexing::minimizers_per_fragment_index<fake_fragment_storage<>>;

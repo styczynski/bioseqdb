@@ -217,7 +217,7 @@ TEST_CASE("physical DNA4 letters support arrays grouping and indexes",
     PQclear(stdin_copy);
 
     // Text COPY can omit the letter column that has no alphabet declaration.
-    // Binary COPY can fill it because the input carries an alphabet checked by letter_recv.
+    // Binary COPY can fill it because the input carries an alphabet  checked by letter_recv.
     exec_sql(ctx, fmt::format(
         "COPY public.sequence_acceptance_letters_typmodless_copy(id) "
         "FROM '{}' (FORMAT text);",

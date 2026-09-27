@@ -22,7 +22,7 @@ namespace bioseq::highway_gcc_canary::HWY_NAMESPACE {
 namespace hn = hwy::HWY_NAMESPACE;
 
 /** Adds one to each input value using Highway vectors and a scalar tail.
- * The pointer-and-count interface is shared by all CPU targets.
+ * The pointer-and-count interface is shared by  all CPU targets.
  */
 HWY_ATTR void add_one(
     const std::uint32_t* input,

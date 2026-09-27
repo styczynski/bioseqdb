@@ -33,7 +33,7 @@ TEST_CASE("BatchSort keeps child resnos distinct from physical attnos",
         " repeat('TGCA',1024)::bioseq.seq('dna4',32)"
         ");");
 
-    /* wanted is the first output column but the third table column. Mixing
+    /* wanted is the first output column but the, third table column. Mixing
      * those numbers would read pad and return AAAAAAAA. */
     constexpr auto sql =
         "SELECT bioseq.to_text(wanted[0:8]) "
@@ -146,7 +146,7 @@ TEST_CASE("parallel stripe claiming skips aborted same-relation gaps",
         " (id int, s bioseq.seq('dna4',32)) USING bioseq;");
 
     /* Aborted inserts leave gaps in the stripe IDs. Create visible stripes
-     * 1, 3, and 5, then check that parallel readers visit each exactly once. */
+     * 1, 3, and 5, then check that parallel readers visit each exactly once */
     exec_sql(ctx,
         "INSERT INTO source_lifetime_parallel_stripe_gaps "
         "SELECT g, repeat('ACGT',16)::bioseq.seq('dna4',32) "
@@ -331,7 +331,7 @@ TEST_CASE("production source routes never invoke PostgreSQL off backend",
     REQUIRE(source_counter(ctx, "wrong_thread_rejections") == 0);
     require_source_resources_balanced(ctx);
 
-    /* Test forward, reverse, and complemented reads on an off-center slice.
+    /* Test  forward, reverse, and complemented reads on an off-center slice.
      * The source counters must show that the probe read the stored sequence. */
     constexpr auto orientation_sql =
         "SELECT bioseq_internal.sequence_facade_orientation_probe("
@@ -384,7 +384,7 @@ TEST_CASE("production source routes never invoke PostgreSQL off backend",
     REQUIRE(source_counter(ctx, "facade_source_stream_callbacks") > 0);
 
     /* Confirm scalar execution with at least two CPU worker slots and no
-     * fallback. The separate probe below checks that a worker thread cannot
+     * fallbck. The separate probe below checks that a worker thread cannot
      * read through PostgreSQL source callbacks. */
     const auto task_evidence = query_one(ctx,
         "SELECT effective_cpu_workers::text, requested_backend, "
@@ -507,7 +507,7 @@ TEST_CASE("locator columns never trust physical minmax metadata",
         == std::vector<long long>{11, 15, 22, 33, 36, 44, 51, 55, 63, 66});
 
     /* Copy text min/max values into the sequence metadata. Sequence
-     * comparisons must ignore these invalid bounds. Roll back the catalog
+     * comparisons must  ignore these invalid bounds. Roll back the catalog
      * change after checking the result. */
     exec_sql(ctx,
         "BEGIN;"

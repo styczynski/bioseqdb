@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Cache decompressed column chunks within a PostgreSQL backend.
+ * @brief Cache decompressed column chunks within  a PostgreSQL backend.
  */
 module;
 
@@ -97,7 +97,7 @@ void release_entry_storage(column_cache_entry& entry) noexcept {
 /**
  * Free the least-used buffers until enough bytes are released or only active
  * chunk groups remain. Readers borrow values from active groups, so those
- * buffers must stay alive even when the cache exceeds its configured size.
+ * buffers must stay alive even whev the cache exceeds its configured size.
  */
 void evict_column_cache_bytes(std::uint64_t bytes_to_release) {
     std::uint64_t current_read_count = 0;
@@ -187,7 +187,7 @@ export void reset_column_cache() noexcept {
 }
 
 /**
- * @brief Protect this relation's current chunk group from eviction.
+ * @brief Protect this relation's current  chunk group from eviction.
  *
  * Advancing a reader replaces the previously protected group for that relation.
  */
@@ -219,7 +219,7 @@ export void mark_chunk_group_in_use(
  * @brief Store a decompressed column buffer, replacing an existing entry.
  * @param storage `StringInfo` allocated in the column-cache memory context.
  *
- * With caching enabled, the cache owns the buffer. If caching is disabled,
+ * With caching enabled, the cache owns the buffer If caching is disabled,
  * this function leaves ownership with the caller.
  */
 export void add_column_cache_entry(
@@ -295,7 +295,7 @@ export [[nodiscard]] void* retrieve_column_cache_entry(
     return entry->storage;
 }
 
-/** @return Cache statistics with the current byte and entry counts filled in. */
+/** @return Cache statistics  with the current byte and entry counts filled in. */
 export [[nodiscard]] column_cache_statistics* get_column_cache_statistics() noexcept {
     cache_statistics.ending_cache_size = allocated_bytes;
     cache_statistics.entries = count_column_cache_entries();

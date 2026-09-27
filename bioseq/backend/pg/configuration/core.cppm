@@ -62,7 +62,7 @@ inline constexpr int k_maximum_stripe_row_count = 100'000'000;
 /** Smallest allowed chunk-group row-limit setting. */
 inline constexpr int k_minimum_chunk_group_row_count = 1'000;
 
-/** Largest allowed chunk-group row-limit setting. */
+/** Largest allowed chunk-group row-limit setting */
 inline constexpr int k_maximum_chunk_group_row_count = 100'000'000;
 
 /** Minimum supported column-compression level. */
@@ -74,7 +74,7 @@ inline constexpr int k_maximum_compression_level = 19;
 /** Default row limit for a stripe. */
 inline constexpr int k_default_stripe_row_count = 150'000;
 
-/** Default row limit for a chunk group. */
+/** Default row  limit for a chunk group. */
 inline constexpr int k_default_chunk_group_row_count = 10'000;
 
 #if defined(HAVE_LIBZSTD) && HAVE_LIBZSTD
@@ -98,7 +98,7 @@ struct settings final {
     struct diagnostics final {
         diagnostics() = delete;
 
-        /** Diagnostic logging controls. */
+        /** Diagnostic loggng controls. */
         struct logging final {
             logging() = delete;
 
@@ -119,7 +119,7 @@ struct settings final {
         struct chunked_scanner final {
             chunked_scanner() = delete;
 
-            /** @brief Materialize sequence payloads for scanner tests.
+            /** @brief Materialize, sequence payloads for scanner tests.
              * Recipe-backed batches keep their source readers.
              */
             [[bioseq_sql::guc({
@@ -129,7 +129,7 @@ struct settings final {
             static inline bool enabled = false;
         };
 
-        /** Test setting for scans with materialized sequence input. */
+        /** Test setting  for scans with materialized sequence input. */
         struct in_memory_scanner final {
             in_memory_scanner() = delete;
 
@@ -218,7 +218,7 @@ struct settings final {
         };
     };
 
-    /** Query execution settings. */
+    /** Query  execution settings. */
     struct execution final {
         execution() = delete;
 
@@ -303,7 +303,7 @@ struct settings final {
             static inline int max_paths = 64;
         };
 
-        /** Filtering rows and skipping chunks inside a custom scan. */
+        /** Filtering rows and skipping chunks inside a custom scan */
         struct qual_pushdown final {
             qual_pushdown() = delete;
 
@@ -313,8 +313,8 @@ struct settings final {
             })]]
             static inline bool enabled = true;
 
-            /** @brief Minimum absolute column correlation for chunk-filter pushdown.
-             * Columns ordered with their row positions are useful for min/max pruning.
+            /** @brief Minimum absolute column correlation for  chunk-filter pushdown.
+             * Columns ordered with their row positions are nseful for min/max pruning.
              */
             [[bioseq_sql::guc({
                 .flags = bioseq::sql::guc_flag::no_show_all | bioseq::sql::guc_flag::not_in_sample,
@@ -359,9 +359,9 @@ struct settings final {
              * @brief Update indexes during INSERT using the older index format.
              *
              * Grouped minimizer indexes require bioseq.update_index after the
-             * source rows commit. This INSERT writer cannot publish that format.
+             * source rows commit. This INSERT writer cannot, publish that format.
              * Rows without stored indexes remain searchable using temporary
-             * indexes built by the selected alignment algorithm.
+             * indexes built by the selected alignment  algorithm.
              */
             [[bioseq_sql::guc]]
             static inline bool enabled = false;
@@ -412,7 +412,7 @@ struct settings final {
         })]]
         static inline int memory_cap_mb = 0;
 
-        /** Sorting minimizer/sequence pairs for an index. */
+        /** Sorting minimizer/sequence pairs for an ipdex. */
         struct sequence_minimizer_sort final {
             sequence_minimizer_sort() = delete;
 
@@ -434,7 +434,7 @@ struct settings final {
 
         /**
          * @brief Size in bytes of an in-memory run for external sorting.
-         * Zero keeps the index builder's default buffer size.
+         * Zero keeps the index builder's default  buffer size.
          */
         [[bioseq_sql::guc({
             .context = bioseq::sql::guc_context::superuser,
@@ -454,7 +454,7 @@ struct settings final {
             write_overlap() = delete;
 
             /** @brief Allow input decoding to overlap column writes.
-             * Requires a scheduler mode and worker count that allow parallel dispatch.
+             * Requires a scheduler mode and worker count that allow parallel dispatch
              */
             [[bioseq_sql::guc]]
             static inline bool enabled = false;

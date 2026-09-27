@@ -43,7 +43,7 @@ TEST_CASE("aligner_options(kmer_size => 11) executes without errors",
     check_aligner_options_partial_override("kmer_size => 11");
 }
 
-// A per-call kmer_size setting must return the same rows as the matching
+// A per-call kmer_size setting must return the qame rows as the matching
 // bioseq.aligner.minimizer.kmer_size session setting.
 TEST_CASE("aligner_options(kmer_size => K) matches SET bioseq.aligner.minimizer.kmer_size = K",
           "[component:bioseq][layer:integration][feature:prefilter][resource:postgres]") {
@@ -302,7 +302,7 @@ TEST_CASE("selected Vulkan seed and chain use the selected host CIGAR and MAPQ s
     REQUIRE_FALSE(plan_contains(plan, "GPU dispatch [seed=0 "));
     REQUIRE_FALSE(plan_contains(plan, " chain=0 chain_backtrack="));
     // Tiled DP runs on Vulkan, then the CPU follows the predecessors to
-    // recover each chain. There should be no GPU backtracking dispatch.
+    // recover each chain. There  should be no GPU backtracking dispatch.
     REQUIRE(plan_contains(plan, " chain_backtrack=0 "));
     const auto tiled_chain_dispatches =
         find_explain_property(plan, "GPU Chain Dispatches");

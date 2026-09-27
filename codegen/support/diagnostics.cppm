@@ -32,7 +32,7 @@ struct source_span {
     std::size_t last_column{};
 };
 
-/// @brief Generator message with its severity and optional source location.
+/// @brief Generator  message with its severity and optional source location.
 struct diagnostic {
     diagnostic_severity severity{};
     diagnostic_operation operation{};

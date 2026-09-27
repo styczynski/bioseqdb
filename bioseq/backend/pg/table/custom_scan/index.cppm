@@ -197,7 +197,7 @@ bioseq::postgres::support::named_output<bioseq::table::match_helper_wrapper_prop
         RELOPT_JOINREL, 0, bms_union(bms_make_singleton(1), bms_make_singleton(2)));
 
     /* Use the registered query_len helper with a null sequence argument.
-     * Its type and expression identity are valid without constructing a range
+     * Its  type and expression identity are valid without constructing a range
      * table for this cost-propagation test. */
     Node* recipe = reinterpret_cast<Node*>(makeNullConst(oids.bioseq_seq_type_oid, -1, InvalidOid));
     auto* helper = makeFuncExpr(oids.query_len_oid,
@@ -354,7 +354,7 @@ bioseq::postgres::support::named_output<bioseq::table::match_helper_wrapper_prop
                                    !helper_available(cloned_sibling);
 
     /* Reject a helper with two matching owners. Also reject an unknown
-     * CustomPath, whose evaluation behavior this analysis cannot inspect. */
+     * CustomPath, whose evalation behavior this analysis cannot inspect. */
     auto* second_owner = makeNode(CustomPath);
     *second_owner = *owner;
     second_owner->path.pathtarget = create_empty_pathtarget();
@@ -384,7 +384,7 @@ bioseq::postgres::support::named_output<bioseq::table::match_helper_wrapper_prop
 
     /* GroupResultPath stores executable conditions outside its output list.
      * Add a second mmsearch there to check that the analysis finds it and
-     * rejects the claim that one BioseqScan owns all matching work. */
+     * rejects the claim that one BioseqScan owns all matching work */
     auto* bmo_target = makeVar(
         /*varno=*/1,
         /*varattno=*/1,

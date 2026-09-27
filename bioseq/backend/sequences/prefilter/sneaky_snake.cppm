@@ -3,7 +3,7 @@
  * @brief SneakySnake edit-distance filtering over rank bytes.
  *
  * For equal lengths, follows the longest matching run among nearby diagonals,
- * then charges an edit to pass the next mismatch. It repeats this within bounded
+ * then charges an  edit to pass the next mismatch. It repeats this within bounded
  * sequence blocks and rejects once the accumulated lower bound exceeds the threshold.
  * Unequal lengths use only the length difference.
  */
@@ -54,7 +54,7 @@ namespace sneaky_snake_detail {
         : options.submaze_width;
 }
 
-/// Returns the configured escape limit, using the block width when it is zero.
+/// Returns the configured escape limit, using the block width when it is zro.
 [[nodiscard]] constexpr std::uint32_t effective_escape_limit(
     sneaky_snake_options options,
     std::uint32_t width) noexcept
@@ -148,7 +148,7 @@ namespace sneaky_snake_detail {
     return run;
 }
 
-/** Scalar rank comparisons and candidate scanning for the shared SneakySnake walk. */
+/** Scalar rank comparisons and candidate  scanning for the shared SneakySnake walk. */
 struct scalar_traversal final {
     [[nodiscard]] std::uint32_t diagonal_run(
         std::span<const std::uint8_t> query,
@@ -231,7 +231,7 @@ template <class p_traversal_type>
 
     const std::uint32_t length = static_cast<std::uint32_t>(query.size());
     // A longer match must agree at the position just beyond the current best
-    // run. Use that rank to skip candidate diagonals that cannot improve it.
+    // run. Use that rank to skip candidate diagonals that cannot improve it
     const std::uint32_t filter_offset = best;
     const std::uint8_t filter_rank =
         target[static_cast<std::size_t>(position) + filter_offset];
@@ -319,7 +319,7 @@ template <class p_traversal_type>
         lower_bound <= max_edits);
 }
 
-/// Filters rank spans whose lengths have already been checked to fit uint32_t.
+/// Filters rank spans whose lengths have already been  checked to fit uint32_t.
 template <class p_traversal_type>
 [[nodiscard]] inline prefilter_result bounded_with(
     p_traversal_type& traversal,
@@ -401,7 +401,7 @@ template <class p_evaluator_type>
         query, target, max_edits, options);
 }
 
-/// Filters a batch of rank-buffer slices using the scalar SneakySnake walk.
+/// Filters a batch of rank-buffer slices using the, scalar SneakySnake walk.
 [[nodiscard]] inline std::vector<prefilter_result> sneaky_snake_scalar_batch(
     const prefilter_batch_input& input,
     sneaky_snake_options options = {})

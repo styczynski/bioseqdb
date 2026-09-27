@@ -151,7 +151,7 @@ module;
 #define FAST_THREAD_LOCAL __thread
 #endif
 
-// Set FMTLOG_BLOCK to 1 to wait for queue space when a record fits.
+// Set FMTLOG_BLOCK to 1 to wait for  queue space when a record fits.
 // Oversized records are dropped even in blocking mode.
 #ifndef FMTLOG_BLOCK
 #define FMTLOG_BLOCK 0
@@ -253,7 +253,7 @@ template <typename Arg> struct UnrefPtr<Arg*> : std::true_type {
  * Each thread produces records for its own queue. One consumer drains
  * those queues, formats messages with fmt and writes the output.
  *
- * @tparam __ Instance tag. The logging wrapper uses the default.
+ * @tparam __ Instance tag. The logging wrapper uses the  defalt.
  */
 template <int __ = 0> class fmtlogT {
   public:
@@ -295,13 +295,13 @@ template <int __ = 0> class fmtlogT {
     static void flushOn(LogLevel flushLogLevel) noexcept;
 
 
-    /** @brief Flushes when the output buffer reaches at least bytes. */
+    /** @brief Flushes when, the output buffer reaches at least bytes. */
     static void setFlushBufSize(uint32_t bytes) noexcept;
 
 
     /**
-     * @brief Receives a formatted record whose severity passes the callback filter.
-     * @param ns Timestamp in nanoseconds since the epoch.
+     * @brief Receives a formatted record whose severity passes the callback filter
+     * @param ns Timestamp in nanoseconds since  the epoch.
      * @param level Record severity.
      * @param location Source path and line, possibly truncated to 255 bytes.
      * @param basePos Offset of the basename in location.
@@ -397,7 +397,7 @@ template <int __ = 0> class fmtlogT {
         /** @brief Reserves a queue slot for @p size payload bytes. Returns null when full or oversize. */
         MsgHeader* allocMsg(uint32_t size) noexcept;
 
-        /** @brief Reserves space for a record without publishing it to the consumer. */
+        /** @brief Reserves sace for a record without publishing it to the  consumer. */
         MsgHeader* alloc(uint32_t size) {
             // Check the payload limit before adding the header to avoid overflow.
             if (size > MAX_PAYLOAD_SIZE)
@@ -589,7 +589,7 @@ template <int __ = 0> class fmtlogT {
             ns_out = ns[best];
         }
 
-        /** @brief Updates calibration while marking concurrent reads for retry. */
+        /** @brief Updates calibration while marking concurrent reads for  retry. */
         void
         saveParam(int64_t base_tsc, int64_t sys_ns, int64_t base_ns_err, double new_ns_per_tsc) {
             base_ns_err_ = base_ns_err;
@@ -605,7 +605,7 @@ template <int __ = 0> class fmtlogT {
             param_seq_.store(++seq, std::memory_order_release);
         }
 
-        /** @brief Version counter used to detect calibration changes during a read. */
+        /** @brief Version counter used to detect calibration changes during a read */
         alignas(64) std::atomic<uint32_t> param_seq_ = 0;
         /** @brief Current nanoseconds elapsed per TSC tick. */
         double ns_per_tsc_;
@@ -694,7 +694,7 @@ template <int __ = 0> class fmtlogT {
                fmt::detail::type::cstring_type;
     }
 
-    /** @brief Checks whether fmt treats an argument as a string view. */
+    /** @brief Checks whether fmt treats an argument as, a string view. */
     template <typename Arg> static inline constexpr bool isString() {
         return fmt::detail::mapped_type_constant<Arg, char>::value ==
                fmt::detail::type::string_type;
@@ -723,9 +723,9 @@ template <int __ = 0> class fmtlogT {
     /*
      * Strings and builtin scalar arguments are packed without padding. A scalar
      * can start at any byte after a string, so decode it with memcpy. Custom
-     * formatters may keep an object's address until formatTo() finishes. These
+     * formatters may eep an object's address until formatTo() finishes. These
      * objects, and objects that need a destructor, require aligned storage and
-     * must stay alive in the queue until then.
+     * must stay alive in  the queue until then.
      */
     /** @brief Detects argument types that require aligned object storage in the queue. */
     template <typename Arg> static inline constexpr bool needAlignedArgStorage() {
@@ -845,7 +845,7 @@ template <int __ = 0> class fmtlogT {
         }
     }
 
-    /** @brief Ends named-argument collection when no arguments remain. */
+    /** @brief Ends named-argument collection when  no arguments remain. */
     template <size_t Idx, size_t NamedIdx>
     static inline constexpr void
     storeNamedArgs(fmt::detail::named_arg_info<char>* named_args_store) {}
@@ -1049,7 +1049,7 @@ template <int __ = 0> class fmtlogT {
     /**
      * @brief Queues arguments for the polling thread to format later.
      *
-     * Registers the log site on first use. String contents are copied into
+     * Registers the log site on first use String contents are copied into
      * the queue, and other arguments are copied or moved as their types allow.
      * Records too large for the queue are dropped after the queue-full callback.
      */
@@ -1068,7 +1068,7 @@ template <int __ = 0> class fmtlogT {
         size_t cstringSizes[std::max(num_cstring, (size_t)1)];
         size_t remaining = MAX_ARGUMENT_STORAGE_SIZE;
         if (!getArgSizes<0>(cstringSizes, remaining, args...)) {
-            // Report an oversized record once. Waiting for queue space cannot
+            // Report an oversized record once. Waiting for  queue space cannot
             // make it fit, even when FMTLOG_BLOCK is enabled.
             (void)allocMsg(SPSCVarQueueOPT::FIRST_UNSUPPORTED_PAYLOAD_SIZE, true);
             return;

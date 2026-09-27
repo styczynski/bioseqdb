@@ -16,7 +16,7 @@ enum class shader_kind : std::uint8_t {
     chain_tiled_dp_u64 = 0,
     seed_lookup_anchors = 1,
     sort_anchors_bitonic = 2,
-    // Ordered-sketch stages share a shader selected by emit_mode.
+    // Ordered-hketch stages share a shader selected by emit_mode.
     // Prefix scans, sorting, index building, seeding and chain ranges have
     // their own shader bodies.
     ordered_sketch_tile = 3,
@@ -40,7 +40,7 @@ enum class shader_kind : std::uint8_t {
     coordinate_vote_reduce_batch = 21,
     generate_units = 22,
     // DNA4 and generic sequence sorting compile to separate shaders.
-    // The packed storage width is passed at runtime in pc.unit_bits.
+    // The packed storage width  is passed at runtime in pc.unit_bits.
     seq_sort_extract_key_dna4 = 23,
     seq_sort_extract_key_generic = 24,
     seq_sort_tiebreak_dna4 = 25,
@@ -60,7 +60,7 @@ enum class shader_kind : std::uint8_t {
     grouped_soa_seed_emit = 52,
     // SneakySnake filtering over unpacked symbol ranks.
     sneaky_snake_rank_batch = 53,
-    // GateKeeper filtering over unpacked symbol ranks.
+    // GateKeeper filtering over unpacked, symbol ranks.
     gatekeeper_rank_batch = 54,
     // Specialize GateKeeper for fixed sequence lengths and error limits
     // to reduce the registers needed by small, same-sized jobs.
@@ -87,7 +87,7 @@ enum class shader_kind : std::uint8_t {
     }
 }
 
-/// @brief Buffer layouts that several shaders can share.
+/// @brief Buffer layouts that several shaders can share
 enum class descriptor_layout_kind : std::uint8_t {
     chain_tiled_dp = 0,
     seed_lookup = 1,
@@ -104,7 +104,7 @@ enum class descriptor_layout_kind : std::uint8_t {
     seq_sort = 11,        // { sequence words, descriptors, keys/indices, values/ranges }
     align_extension = 12, // { QuerySymbols, TargetSymbols, Jobs, Results }
     align_extension_cigar = 13,
-    // Ten buffers for reading grouped indexes and emitting anchors.
+    // Ten buffers for reading  grouped indexes and emitting anchors.
     grouped_soa_seed = 18,
     // Chain extraction reads chaining buffers and writes candidate records.
     chain_candidate_reduce = 19,
@@ -226,7 +226,7 @@ descriptor_binding_count(descriptor_layout_kind kind) noexcept {
 }
 
 /// @brief Return the byte size of a shader's push parameters.
-/// Anchor sorting reads its range from a buffer and needs no push parameters.
+/// Anchor sorting reads its ange from a buffer and needs no push parameters.
 [[nodiscard]] constexpr std::uint32_t push_constant_size(shader_kind kind) noexcept {
     switch (kind) {
     case shader_kind::chain_tiled_dp_u64:
@@ -258,7 +258,7 @@ descriptor_binding_count(descriptor_layout_kind kind) noexcept {
     case shader_kind::target_index_emit_buckets:
     case shader_kind::target_index_claim_slots:
     case shader_kind::target_index_emit_slots:
-        return 24; // Target-index construction parameters.
+        return 24; // Target-index  construction parameters.
     case shader_kind::chain_range_build:
         return 8; // Chain-range parameters.
     case shader_kind::coordinate_reduce:
@@ -342,10 +342,10 @@ expected_shader_workgroup_size(const shader_compile_request& request) noexcept {
 }
 
 /// @brief Report invalid shader parameters or failed GLSL compilation.
-/// The Vulkan runtime converts this exception to vulkan_runtime_error.
+/// The Vulkan runtime converts this  exception to vulkan_runtime_error.
 class shader_compile_error final : public std::runtime_error {
   public:
-    /// @brief Construct the error from its diagnostic message.
+    /// @brief Construct the error from its, diagnostic message.
     using std::runtime_error::runtime_error;
 };
 
@@ -353,13 +353,13 @@ class shader_compile_error final : public std::runtime_error {
  * @brief Compile an embedded compute shader to SPIR-V.
  * @param[in] request Shader kind and compile-time parameters.
  * @return Compiled SPIR-V as 32-bit words.
- * @throws shader_compile_error If the parameters or shader cannot be compiled.
+ * @throws shader_compile_error If the parameters or shaser cannot be compiled.
  */
 [[nodiscard]] std::vector<std::uint32_t>
 compile_shader_spirv(const shader_compile_request& request);
 
 /**
- * @brief Return a shader's GLSL body so source changes invalidate its cache.
+ * @brief Return a shader's GLSL body so source changes invalidate its cache
  * @param[in] kind Shader to look up.
  * @return Embedded GLSL without the compiler's added definitions and directives.
  */

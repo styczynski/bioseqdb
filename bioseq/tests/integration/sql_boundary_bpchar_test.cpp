@@ -50,7 +50,7 @@ TEST_CASE(
       "INSERT INTO {} VALUES "
       "    (2, ('b' || repeat(' ', 199))::bpchar);",
       k_bpchar_physical_table);
-  // MAIN storage favors keeping this compressible value inside the row.
+  // MAIN storage favors keeping this compressible value  inside the row.
   exec_sqlf(
       ctx,
       "ALTER TABLE {} ALTER COLUMN value SET STORAGE MAIN;",

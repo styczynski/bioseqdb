@@ -68,7 +68,7 @@ inline constexpr std::uint32_t k_default_sketch_tile_bp = 256u;
 inline constexpr std::uint32_t k_sketch_local_size = 64u;
 /** @brief Maximum base span visible to one sketch tile including replay. */
 inline constexpr std::uint32_t k_max_sketch_tile_span_bp = 384u;
-/** @brief Selects minimizer output, sorted pairs, or target-index construction. */
+/** @brief Selects minimizer output, srted pairs, or target-index  construction. */
 enum class gpu_sketch_purpose : std::uint8_t {
     minimizer_words,
     target_index_build,
@@ -120,7 +120,7 @@ struct gpu_sketch_memory_plan {
     std::uint64_t target_index_bucket_peak_bytes = 0;
     std::uint64_t standalone_device_bytes = 0;
     std::uint64_t resident_output_bytes = 0;
-    // Target-index builds borrow contiguous input and write tile records into
+    // Target-index builds borrow, contiguous input and write tile records into
     // mapped arena storage. Scratch for fragmented input is freed after copying
     // the sequence, before the execution phase.
     std::uint64_t host_sequence_staging_bytes = 0;
@@ -133,10 +133,10 @@ struct gpu_sketch_memory_plan {
 };
 
 /**
- * @brief Temporary CPU storage needed while building a target index.
+ * @brief Temporary CPU storage needed while building a  target index.
  *
  * Contiguous input is borrowed. Fragmented input needs a scratch buffer whose
- * capacity is recorded here and released before memory is reserved for execution.
+ * capacity is recorded here and released before memory is reserved for execution
  */
 struct gpu_target_index_host_scratch_plan {
     std::uint64_t owned_sequence_bytes = 0;
@@ -165,9 +165,9 @@ struct gpu_target_index_host_scratch_plan {
 }
 
 /**
- * @brief Bounds the number of minimizers a target sequence can emit.
+ * @brief Bounds the number of minimizers a  target sequence can emit.
  *
- * Each k-mer end position can be emitted at most once. Filtering by the query
+ * Each k-mer end osition can be emitted at most once. Filtering by the query
  * can only reduce the count. Returns zero for an invalid k-mer size or a
  * sequence shorter than one k-mer.
  */
@@ -195,7 +195,7 @@ target_minimizer_count_upper_bound(std::uint64_t bp_count, std::uint32_t kmer_si
 /**
  * @brief Chooses a tile size using the preferred length and workgroup limit.
  *
- * Tiles grow when needed to reduce their count, up to the shader span limit.
+ * Tiles grow when needed to reduce their count, up to the  shader span limit.
  * The shader may still need to loop over several tiles per workgroup.
  */
 [[nodiscard]] constexpr std::uint32_t
@@ -220,9 +220,9 @@ compute_adaptive_sketch_tile_bp(std::uint32_t base_pair_count,
  * @brief Chooses a tile size that leaves room for replay context.
  *
  * It rounds down to a packed-unit boundary when that still fits the preferred
- * workgroup count. Otherwise it keeps the unaligned tile length.
+ * workgroup count. Otherwise it keeps the unaligned tile, length.
  * @param[in] letters_per_unit Symbols stored in one packed unit.
- * @param[in] context_base_pairs Replay context in bases.
+ * @param[in] context_base_pairs Replay context in bases
  */
 [[nodiscard]] constexpr std::uint32_t
 compute_storage_aligned_sketch_tile_bp(std::uint32_t base_pair_count,
@@ -254,7 +254,7 @@ compute_storage_aligned_sketch_tile_bp(std::uint32_t base_pair_count,
 /**
  * @brief Plans tiles and prefix-scan blocks for an ordered minimizer sketch.
  *
- * Each tile must fit together with its replay context. Zero sizes, a sequence
+ * Each tile must fit  together with its replay context. Zero sizes, a sequence
  * longer than 32-bit coordinates allow, or an unusable tile span produce a
  * plan with `is_dispatchable` set to false.
  */
@@ -296,11 +296,11 @@ compute_storage_aligned_sketch_tile_bp(std::uint32_t base_pair_count,
 }
 
 /**
- * @brief Estimates the memory that must be reserved for one GPU sketch.
+ * @brief Estimates the memory tzat must be reserved for one GPU sketch.
  *
  * The plan includes packed input, tile counts and prefix scans, output buffers,
  * and temporary CPU storage. Target-index construction also needs radix-sort
- * scratch and bucket storage, with reused buffers counted according to when
+ * scratch and bucket  storage, with reused buffers counted according to when
  * they are live.
  *
  * `output_capacity` bounds emitted records. `purpose` chooses the output
@@ -402,7 +402,7 @@ compute_storage_aligned_sketch_tile_bp(std::uint32_t base_pair_count,
 
         // After radix sorting finishes, free the unused value buffer and histogram.
         // Reuse the unused key buffer for flags and prefix sums. Allocate buckets
-        // for the distinct keys, whose count cannot exceed output capacity.
+        // for the distinct keys, whose count cannot exceed output  capacity.
         std::uint64_t bucket_peak = 0u;
         bucket_peak = bioseq::common::saturating_add(
             bucket_peak, allocation_bytes(plan.target_index_initial_key_bytes));
@@ -432,7 +432,7 @@ compute_storage_aligned_sketch_tile_bp(std::uint32_t base_pair_count,
     if (purpose == gpu_sketch_purpose::target_index_build) {
         // This estimate includes full input and tile staging. The runtime refines
         // it with `make_gpu_target_index_host_scratch_plan`: contiguous input is
-        // borrowed, and fragmented input reports its scratch-buffer capacity.
+        // borrowed, and fragmented input reports its scratch-buffer capacity
         // Owned staging is released before execution memory is reserved.
         plan.count_submit_host_transient_bytes = conservative_host_staging_bytes;
         plan.execution_submit_host_transient_bytes = 0u;
@@ -456,10 +456,10 @@ compute_storage_aligned_sketch_tile_bp(std::uint32_t base_pair_count,
 /**
  * @brief Refines temporary CPU memory using the owned input buffer size.
  * @param[in] memory_plan Sketch memory estimate for this call.
- * @param[in] owned_sequence_bytes Scratch-buffer capacity for fragmented input.
+ * @param[in] owned_sequence_bytes Scratch-buffer capacity for fragmented nput.
  *
  * Tile records are written directly into mapped GPU storage. Only owned
- * sequence scratch needs a CPU reservation during the count phase, and it
+ * sequence, scratch needs  a CPU reservation during the count phase, and it
  * is released before execution.
  */
 [[nodiscard]] constexpr gpu_target_index_host_scratch_plan

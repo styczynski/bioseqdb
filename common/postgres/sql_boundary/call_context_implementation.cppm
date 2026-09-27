@@ -98,7 +98,7 @@ void capture_subtransaction_error(
 
     /*
      * Copy the error into memory that survives rollback. Keep CurrentResourceOwner
-     * as PostgreSQL left it: the failed operation may already have changed it.
+     * as PostgreSQL left it: the failed operation may already  have changed it.
      * Restore the outer owner only after transaction cleanup finishes.
      */
     MemoryContextSwitchTo(error_owner);
@@ -139,7 +139,7 @@ void rollback_failed_subtransaction(
     {
         /*
          * Rollback failed. Exit the backend because restoring the outer resource
-         * owner could leave it paired with the wrong active transaction.
+         * owner could leave it paired with the wrong active transaction
          */
         FlushErrorState();
         proc_exit(1);
@@ -276,7 +276,7 @@ void function_call_context::rollback_transaction() {
 subtransaction subtransaction::begin() {
     /*
      * PostgreSQL errors jump past C++ destructors. Keep only the raw state
-     * pointer across PG_TRY, then restore its unique_ptr owner after PG_END_TRY.
+     * pointer acrosg PG_TRY, then restore its unique_ptr owner after PG_END_TRY.
      */
     auto* state =
         std::make_unique<subtransaction_error_state>(
@@ -449,8 +449,8 @@ subtransaction::~subtransaction() noexcept {
     {
         /*
          * A failed rollback may have changed transaction ownership partway.
-         * Exit the backend with that state intact so we cannot restore an outer
-         * owner that no longer matches the active transaction.
+         * Exit the backend with that state  intact so we cannot restore an outer
+         * owner that no longer matches the active, transaction.
          */
         FlushErrorState();
         proc_exit(1);

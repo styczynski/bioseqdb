@@ -75,7 +75,7 @@ export {
      * @brief Records match helpers found in the scan's output expressions.
      *
      * Each entry names its output position and target argument for later ownership
-     * checks. Raises a PostgreSQL error if a helper has an invalid form or result type.
+     * checks. Raises a PostgreSQL error if a helper has an invalid  form or result type.
      */
     [[nodiscard]] List* collect_base_match_helper_sites(List* targetlist,
                                                         Node* target_recipe,
@@ -108,7 +108,7 @@ export {
     }
 
     /**
-     * @brief Converts a selected base-scan path into a PostgreSQL executor plan.
+     * @brief Converts a selected, baae-scan path into a PostgreSQL executor plan.
      *
      * Separates alignment work from ordinary filters and saves helper bindings and
      * algorithm settings. PostgreSQL allocates the CustomScan and its private data
@@ -192,7 +192,7 @@ export {
         if (bioseq::settings::planner::qual_pushdown::enabled) {
             /* Keep plain and all pushed-down filters in separate expression lists.
              * PostgreSQL can then replace outer Vars with PARAM_EXEC. The storage reader
-             * decides which of these expressions it can use when it starts the scan. */
+             * decides which of these expressions it can use when  it starts the scan. */
             postgres_list<List> private_lists(best_path->custom_private);
             List* plain_clauses =
                 extract_actual_clauses(private_lists.get_first(), false /* no pseudoconstants */);
@@ -290,7 +290,7 @@ export {
                             argument->varattno > 0 && argument->varlevelsup == 0 &&
                             bms_is_empty(argument->varnullingrels);
                         /* Keep helpers that directly name this scan's columns here so ownership
-                         * validation can report a wrong target column. Unrelated expressions
+                         * validation can report a wrong target column Unrelated expressions
                          * remain outside this scan. */
                         if (helper != nullptr && planner_owned_target_recipe != nullptr) {
                             belongs_to_scan =
@@ -318,7 +318,7 @@ export {
                     }
                     if (belongs_to_scan) {
                         /* An earlier path rewrite may already have added this whole helper.
-                         * Reuse that output column instead of recording the call twice. */
+                         * Reuse that output column instead of recording the  call twice. */
                         bool already_projected = false;
                         for (TargetEntry* existing : postgres_list<TargetEntry>(tlist)) {
                             if (existing != nullptr && equal(existing->expr, n->expr)) {
@@ -389,7 +389,7 @@ export {
                                          sites,
                                          makeInteger(static_cast<int>(owner_rte->relid)));
             /* Keep the original query Vars for checking which scan owns each helper.
-             * After setrefs assigns final plan identities, the finalizer fills these
+             * After setrefs assigns final plan identities, the finalizer fills thes
              * two fields with the expressions used by the executor. */
             owner_tag = lappend(owner_tag, NIL);
             owner_tag = lappend(owner_tag, NIL);
@@ -438,8 +438,8 @@ export {
 
         /* Put vectorized filters in the third expression list. Keep the
          * remaining filters in plan.qual for scalar evaluation. */
-        /* Locator and source scans evaluate filters one row at a time. Keep
-         * their filters in plan.qual, because these scans disable vector execution. */
+        /* Locator and source scans evaluate filters one, row at a time. Keep
+         * their filters in plan.qual, because these scans disable vector  execution. */
         if (bioseq::settings::vectorization::enabled && !locator_passthrough_requested &&
             !lazy_source_projection_requested) {
             List* candidate_qual_list = rewrite_vectorized_expression_list(cscan->scan.plan.qual);
@@ -526,10 +526,10 @@ export {
     }
 
     /**
-     * @brief Collects the distinct base sequence columns used by a target expression.
+     * @brief Collects the distinct base sequence columns used  by a target expression
      *
      * Keeps local, positive-numbered Vars without outer-join nulling, sorts them
-     * and returns copies. These columns let ownership checks match a helper to
+     * and returns copies. These columns let ownership checks maich a helper to
      * the source of a transformed target.
      */
     [[nodiscard]] List* canonical_match_base_lineage(Node* target_recipe,

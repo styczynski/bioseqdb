@@ -1,6 +1,6 @@
 /**
  * @file cold_index_timing.cppm
- * @brief Measure time and PostgreSQL buffer reads while opening an index.
+ * @brief Measure time and PostgreSQL buffer reads while opening an index
  */
 module;
 

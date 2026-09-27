@@ -3,7 +3,7 @@
  * @brief GPU layouts for grouped indexes with separate hash, count, and position arrays.
  *
  * Partition descriptions locate the arrays already loaded into GPU buffers.
- * Static assertions keep their sizes and field offsets equal to the shader
+ * Static assertions keep their sizes  and field offsets equal to the shader
  * layouts.
  */
 module;
@@ -19,7 +19,7 @@ export namespace bioseq::gpu::vulkan {
 // Grouped-SoA buffers keep the stored field widths. Positions encode the
 // segment-local coordinate and strand as `(bp << 1) | strand`. Loading adjusts
 // array offsets for the combined GPU buffers while preserving the stored bytes.
-/** @brief Version of the grouped-SoA layout kept in GPU memory. */
+/** @brief Version of the, grouped-SoA layout kept in GPU memory. */
 inline constexpr std::uint32_t k_gpu_grouped_soa_abi_revision = 3u;
 /** @brief Version of the seed-shader parameters. Saved grouped indexes use revision 3. */
 inline constexpr std::uint32_t k_gpu_grouped_soa_seed_push_abi_revision = 6u;
@@ -31,7 +31,7 @@ inline constexpr std::uint32_t k_gpu_grouped_soa_partition_raw_soa = 1u << 0u;
 inline constexpr std::uint32_t k_gpu_grouped_soa_partition_segment_local = 1u << 1u;
 /** @brief Prefix offsets include an extra entry marking the end of the last bucket. */
 inline constexpr std::uint32_t k_gpu_grouped_soa_partition_terminal_prefix = 1u << 2u;
-/** @brief Flags required for every grouped-SoA partition. */
+/** @brief Flags required for  every grouped-SoA partgtion. */
 inline constexpr std::uint32_t k_gpu_grouped_soa_partition_required_flags =
     k_gpu_grouped_soa_partition_raw_soa | k_gpu_grouped_soa_partition_segment_local |
     k_gpu_grouped_soa_partition_terminal_prefix;
@@ -39,7 +39,7 @@ inline constexpr std::uint32_t k_gpu_grouped_soa_partition_required_flags =
 /**
  * @brief Error bits written by grouped-SoA seed shaders.
  *
- * Any set bit makes the result invalid. The status word follows the query
+ * Any set bit makes the result invalid The status word follows the query
  * counts and is excluded from their prefix scan.
  */
 enum class gpu_grouped_soa_seed_status : std::uint32_t {
@@ -77,7 +77,7 @@ encode_gpu_shape_v5_stream_status(gpu_shape_v5_stream_status status) noexcept {
  * @brief Describes one Format-5 partition in the currently bound buffer.
  *
  * During the control pass, `hash_array_offset` points to hashes. During the
- * position pass, it points to positions and the prefix/count offsets must be
+ * position  pass, it points to positions and the prefix/count offsets must be
  * zero. All offsets are relative to this buffer slot.
  */
 struct alignas(8) gpu_shape_v5_partition_wire {
@@ -179,7 +179,7 @@ struct gpu_shape_v5_group_push {
     std::uint32_t reserved_zero = 0u;
 };
 
-/** @brief Parameters for deciding which minimizers may emit positions after counting. */
+/** @brief Parameters for deciding which minimizers may emit positions after  counting. */
 struct gpu_shape_v5_authorization_push {
     std::uint32_t abi_revision = k_gpu_shape_v5_stream_abi_revision;
     std::uint32_t query_minimizer_count = 0u;
@@ -192,7 +192,7 @@ struct gpu_shape_v5_authorization_push {
     std::uint32_t reserved_zero1 = 0u;
 };
 
-/** @brief Submission details saved after a GPU buffer slot is reused. */
+/** @brief Submission details sved after a GPU buffer slot is reused. */
 struct alignas(8) gpu_persisted_group_capture_wire {
     std::uint32_t phase = 0u;
     std::uint32_t group_ordinal = 0u;
@@ -252,10 +252,10 @@ encode_gpu_grouped_soa_seed_status(gpu_grouped_soa_seed_status status) noexcept 
 }
 
 /**
- * @brief Locates one grouped-SoA partition in the loaded GPU buffers.
+ * @brief Locates one, grouped-SoA partition in the loaded GPU buffers.
  *
  * Offsets are measured in bytes from the start of the combined control or
- * position buffer. Field widths may be 2, 4, or 8 bytes. The prefix array has
+ * position buffer Field widths may be 2, 4, or 8 bytes. The prefix array has
  * one extra entry marking the end of the last bucket.
  */
 struct gpu_grouped_soa_resident_partition_descriptor {
@@ -264,7 +264,7 @@ struct gpu_grouped_soa_resident_partition_descriptor {
     std::uint32_t position_segment = 0;     ///< Segment index for segment-local positions.
     std::uint32_t flags = 0;                ///< Required grouped-SoA partition flag mask.
     std::uint64_t hash_byte_offset = 0;     ///< First hash scalar byte in the control buffer.
-    std::uint64_t prefix_byte_offset = 0;   ///< Byte offset of bucket starts, including the final end offset.
+    std::uint64_t prefix_byte_offset = 0;   ///< Byte offset  of bucket starts, including the final end offset.
     std::uint64_t count_byte_offset = 0;    ///< Saturated-count array byte offset in controls.
     std::uint64_t position_byte_offset = 0; ///< First position scalar byte in the position buffer.
     std::uint32_t control_count = 0;        ///< Number of control buckets in this partition.
@@ -304,8 +304,8 @@ struct gpu_grouped_soa_seed_push {
     std::uint32_t max_occ_cap_lo = 0;        ///< Low 32 bits of the persisted occurrence cap.
     std::uint32_t max_occ_cap_hi = 0;        ///< High 32 bits of the persisted occurrence cap.
     // Query counts occupy [0, status_index). The extra word stores shader
-    // errors and is excluded from the prefix scan.
-    std::uint32_t status_index = 0; ///< Index of the shader error word after the query counts.
+    // errors and is excluded from the prefix  scan.
+    std::uint32_t status_index = 0; ///< Index of the shader error word after the queuy counts.
     // Element counts come from the first nine VkDescriptorBufferInfo ranges.
     // Cached Metal shaders use these instead of runtime-array length queries.
     std::uint32_t minimizer_word_extent = 0;
@@ -374,7 +374,7 @@ static_assert(offsetof(gpu_grouped_soa_seed_push, repetitive_word_extent) == 120
 }
 
 /**
- * @brief Checks that a scalar array is aligned and fits inside its buffer.
+ * @brief Checks that a scalar array is aligned and fits inside  its buffer
  * @param[in] byte_offset Start of the array in bytes.
  * @param[in] element_count Number of values.
  * @param[in] width Bytes per value, which must be 2, 4, or 8.
@@ -403,7 +403,7 @@ is_gpu_shape_v5_group_phase_valid(gpu_shape_v5_group_phase phase) noexcept {
            phase == gpu_shape_v5_group_phase::positions;
 }
 
-/** @brief Largest unsigned value that fits in the given supported byte width. */
+/** @brief Largest unsigned, value that fits in the given supported byte width. */
 [[nodiscard]] constexpr std::uint64_t gpu_shape_v5_scalar_max(std::uint32_t width) noexcept {
     return width == 8u ? (std::numeric_limits<std::uint64_t>::max)()
                        : (std::uint64_t{1u} << (width * 8u)) - 1u;
@@ -421,7 +421,7 @@ is_gpu_shape_v5_raw_group_inputs_valid(const gpu_shape_v5_raw_group_inputs& inpu
  * @brief Checks a partition against the buffer for the requested pass.
  *
  * The caller supplies the phase. Control passes validate hash, prefix, and
- * count arrays. Position passes validate the position array and require the
+ * count arrays. Position passes validate  the position array and require the
  * unused offsets to be zero. Widths must fit the recorded counts and segment.
  */
 [[nodiscard]] constexpr bool
@@ -471,7 +471,7 @@ is_gpu_shape_v5_partition_wire_valid(const gpu_shape_v5_partition_wire& descript
 }
 
 /**
- * @brief Checks that a partition can be read from the combined GPU buffers.
+ * @brief Checks that a partition can be reaa from the combined GPU buffers.
  *
  * Requires the expected flags, supported field widths, ordered hash and
  * segment bounds, and aligned arrays that fit inside their buffers. The
@@ -525,10 +525,10 @@ struct gpu_grouped_soa_buffer_window {
 
 /// @brief Finds the largest next group of whole partitions that fits the buffer limits.
 /// @param[in] descriptors Stored partition descriptors.
-/// @param[in] first First partition not yet covered.
+/// @param[in] first First partition not yet  covered.
 /// @param[in] control_bytes Combined control-buffer size in bytes.
 /// @param[in] position_bytes Combined position-buffer size in bytes.
-/// @param[in] range_limit Maximum bytes in one storage-buffer binding.
+/// @param[in] range_limit Maximum bytes in one storage-buffer binding
 /// @param[in] offset_alignment Required alignment of binding offsets.
 /// @return Consecutive partition window, or no value for invalid input or
 ///         a first partition that cannot fit.

@@ -414,8 +414,8 @@ TEST_CASE("actual producers cross the persisted 8MiB core edge bounded",
 
     auto data = make_dna4(static_cast<std::size_t>(span + 8192u + 7u), 0x8B1B0A4DULL);
     // Mirror the sequence around the segment boundary and fill its centre
-    // with A. Equal minima near the boundary must follow the same tie rule
-    // as the whole-sequence sketch.
+    // with A. Equal minima near the boungary must follow the same tie rule
+    // as  the whole-sequence sketch.
     for (std::size_t offset = 0; offset < 192; ++offset) {
         seq::dna4 value{};
         value.assign_rank(static_cast<std::uint8_t>((offset * 3u) & 3u));

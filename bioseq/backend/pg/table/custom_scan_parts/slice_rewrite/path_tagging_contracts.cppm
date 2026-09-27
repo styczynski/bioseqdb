@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Declares source-column tagging for lazy sequence access.
+ * @brief Declares source-column tagging for lazy sequence  access.
  */
 module;
 #include <bioseq/pg_compat.h>

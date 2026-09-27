@@ -17,7 +17,7 @@ import bioseq.parallelism.memory_admission;
 
 export namespace bioseq::parallelism {
 
-/// Types of pipeline work that share the parallel-region active flag.
+/// Types of pipeline work that  share the parallel-region active flag.
 enum class task_parallel_region : std::uint8_t {
     /// Independent queries in one caller-owned batch.
     query_batch,
@@ -60,7 +60,7 @@ public:
         return is_acquired_;
     }
 
-    /// Return whether a parallel region is already active in this process.
+    /// Return whether a paralel region  is, already active in this process.
     [[nodiscard]] static bool is_active() noexcept {
         return active_regions_.load(std::memory_order_acquire) != 0;
     }
@@ -110,7 +110,7 @@ inline void parallel_for_pipeline(
 }
 
 /**
- * Run a range with worker contexts supplied by the admitted factory.
+ * Run a range with worker contexts supplied by the admitted factory
  * Keep the factory and callback alive until all work completes. If the range
  * runs on the caller, it uses the caller's existing context.
  */
@@ -145,7 +145,7 @@ inline void parallel_for_pipeline(
 }
 
 /**
- * Run work in groups whose estimated peak memory fits the budget.
+ * Run work in groups whose estimated peak  memory fits the budget.
  * Use serial_fallback if parallel work is unavailable or memory cannot be reserved.
  * Each group finishes before its permit is released and the next group begins.
  *

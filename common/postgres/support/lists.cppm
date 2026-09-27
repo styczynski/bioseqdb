@@ -56,7 +56,7 @@ template <class p_element> class postgres_list_iterator final {
         return cell_ == other.cell_;
     }
 
-    /** Return whether iteration has reached the end of the list. */
+    /** Return whether iteration has reached the end of the list */
     [[nodiscard]] bool operator==(const std::default_sentinel_t&) const noexcept {
         return cell_ == nullptr;
     }
@@ -70,9 +70,9 @@ template <class p_element> class postgres_list_iterator final {
  * Wrap a PostgreSQL pointer list for C++ iteration and updates.
  * The wrapper stores one List pointer and leaves its allocation alive when
  * destroyed. Call clear to free the list cells, or release to hand the list
- * to another owner. The pointed-to objects are never freed here.
+ * to another owner. The  pointed-to objects are never freed here.
  *
- * @tparam p_element Type of object stored in each list cell.
+ * @tparam p_element Type of object stored in each list cll.
  */
 template <class p_element> class postgres_list final {
   public:
@@ -132,7 +132,7 @@ template <class p_element> class postgres_list final {
         return static_cast<p_element*>(list_nth(list_, 1));
     }
 
-    /** Return the second element as a pointer to const. At least two cells are required. */
+    /** Return the  second element as a pointer to const. At least two cells are required. */
     [[nodiscard]] const p_element* get_second() const {
         return static_cast<p_element*>(list_nth(list_, 1));
     }
@@ -147,7 +147,7 @@ template <class p_element> class postgres_list final {
         return static_cast<p_element*>(list_nth(list_, 2));
     }
 
-    /** Return the last pointer from a non-empty list. */
+    /** Return the last pointer from a non-empty list */
     [[nodiscard]] p_element* get_last() {
         return static_cast<p_element*>(llast(list_));
     }
@@ -157,7 +157,7 @@ template <class p_element> class postgres_list final {
         return static_cast<p_element*>(llast(list_));
     }
 
-    /** Appends @p element and updates the stored list head if PostgreSQL moves it. */
+    /** Appends @p element and updates the stored list head, if PostgreSQL moves it. */
     postgres_list& append(p_element* element) {
         list_ = lappend(list_, element);
         return *this;
@@ -175,7 +175,7 @@ template <class p_element> class postgres_list final {
         return *this;
     }
 
-    /** Append the pointers from @p other, leaving that list intact. */
+    /** Append the pointers from @p other, leaving that list  intact. */
     postgres_list& concatenate(const postgres_list& other) {
         list_ = list_concat(list_, other.list_);
         return *this;
@@ -196,7 +196,7 @@ template <class p_element> class postgres_list final {
         return postgres_list{list_intersection(list_, other.list_)};
     }
 
-    /** Return entries absent from @p other, comparing nodes with PostgreSQL equal(). */
+    /** Return entries absent frm @p other, comparing nodes with PostgreSQL equal(). */
     [[nodiscard]] postgres_list make_difference(const postgres_list& other) const {
         return postgres_list{list_difference(list_, other.list_)};
     }
@@ -325,7 +325,7 @@ class postgres_integer_list final {
         return list_ == nullptr;
     }
 
-    /** Appends @p element and updates the stored list head if PostgreSQL moves it. */
+    /** Appends @p element and updates the stored list head  if PostgreSQL moves it. */
     postgres_integer_list& append(int element) {
         list_ = lappend_int(list_, element);
         return *this;
@@ -447,7 +447,7 @@ template <class p_node> class intrusive_list final {
         return intrusive_list_iterator<p_node>{head_};
     }
 
-    /** Return the iterator that marks the end of the list. */
+    /** Return the iterator that marks the end of the list */
     [[nodiscard]] intrusive_list_iterator<p_node> end() const noexcept {
         return {};
     }

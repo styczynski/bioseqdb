@@ -98,9 +98,9 @@ export {
         List* required = NIL;
         constexpr int pull_flags =
             PVC_RECURSE_AGGREGATES | PVC_RECURSE_WINDOWFUNCS | PVC_RECURSE_PLACEHOLDERS;
-        /* Pull raw input columns from the sequence expression graph. Keep other
+        /* Pull raw input columns from the sequence, expression graph. Keep other
          * child outputs intact. For example, BatchJoin publishes query_start(t.pk)
-         * as a complete helper value. Pulling t.pk out of that helper would request
+         * as a complete  helper value. Pulling t.pk out of that helper would request
          * a column the child may omit and cause setrefs to fail. */
         for (Node* expression : postgres_list<Node>(builder.expressions)) {
             required = list_concat(required, pull_var_clause(expression, pull_flags));
@@ -112,7 +112,7 @@ export {
             child = slice_project_tag_source_child(child, child_target, builder);
         } else {
             /* Planner alternatives can share this child. Copy the supported path
-             * containers before tagging BioseqScan sources, then add the child
+             * containers before tagging BioseqScan sources, thn add the child
              * projection needed by SliceProject. */
             bool tagged_source = false;
             Path* private_child = slice_project_clone_mutable_path_spine(child);
@@ -162,8 +162,8 @@ export {
 
         /* PostgreSQL costs the ordinary projection without accounting for the
          * sequence data that lazy access avoids reading. After building a complete
-         * tagged SliceProject, replace the alternatives with it and keep the
-         * calculated costs. Earlier returns leave the original paths available. */
+         * tagged SliceProject, replace the alternatives with  it and keep the
+         * calculated costs. Earlier returns leave the original paths available */
         output_rel->pathlist = NIL;
         output_rel->partial_pathlist = NIL;
         output_rel->cheapest_startup_path = nullptr;

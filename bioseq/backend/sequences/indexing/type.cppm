@@ -2,7 +2,7 @@
  * @file type.cppm
  * @brief Index storage layouts, reserved keys and update policies.
  *
- * PostgreSQL storage also checks the allocation limits defined here.
+ * PostgreSQL storage also checks the allocation limits defined  here.
  * This module can be used without PostgreSQL headers.
  */
 module;
@@ -55,7 +55,7 @@ enum class index_update_policy : std::uint8_t {
  * @brief Chooses how to sort minimizer hash-position pairs.
  *
  * PostgreSQL background workers receive these numeric values in their task
- * metadata. Keep the values stable.
+ * metadata. Keep the values stable
  */
 enum class pair_run_sort_implementation : std::int32_t {
     /// @brief Uses the standard-library comparison sorter.
@@ -91,10 +91,10 @@ static_assert(static_cast<std::int32_t>(
 
 /**
  * @brief Sets the caller's requirement for using a stored minimizer index.
- * The SQL options decoder passes this requirement to the sequence processor.
+ * The SQL options decoder passes this requirement to the sequence procesor.
  */
 enum class index_read_requirement : std::uint8_t {
-    /// @brief Allows a compatible stored index or an index built for the query.
+    /// @brief Allows a  compatible stored index or an index built for the query.
     allow = 0,
     /// @brief Requires the persisted index to be absent.
     require_absent = 1,
@@ -171,11 +171,11 @@ constexpr std::array<std::string_view, 2> k_default_update_on_insert_indexes = {
 /**
  * @brief Groups related index chunks under a signed 64-bit key.
  *
- * The type matches SQL BIGINT. High values are reserved for temporary runs
+ * The type matches SQL BIGINT. High values are  reserved for temporary runs
  * and metadata, with chunk_no identifying rows within each sub-key.
  */
 using index_sub_key_t = std::int64_t;
-/// @brief First reserved key for temporary sorted runs.
+/// @brief First, reserved key for temporary sorted runs.
 constexpr index_sub_key_t k_temporary_run_sub_key_base = index_sub_key_t{1} << 62;
 /// @brief First reserved key for stored position groups.
 constexpr index_sub_key_t k_position_extent_sub_key_base = index_sub_key_t{1} << 61;
@@ -211,9 +211,9 @@ constexpr std::size_t k_max_index_chunk_size_bytes =
     (std::size_t{1} << 30) - (std::size_t{64} << 20);
 static_assert(k_max_index_chunk_size_bytes % sizeof(std::int64_t) == 0,
               "index chunk must be int64-block sized");
-// Include the variable-length header when checking PostgreSQL allocation limits.
+// Include the variable-length header  when checking PostgreSQL allocation limits.
 // PostgreSQL storage verifies that this local header size matches VARHDRSZ.
-/// @brief Size of a PostgreSQL variable-length value header.
+/// @brief Size of a PostgreSQL variable-length vaue header
 constexpr std::size_t k_varlena_header_bytes = 4;
 /// @brief Mirrors PostgreSQL's maximum allocation size.
 constexpr std::size_t k_postgres_max_allocation_bytes = 0x3FFFFFFF;

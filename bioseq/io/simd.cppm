@@ -28,7 +28,7 @@ export {
     // Byte searches.
 
     /// Builds a mask of bytes that match any needle.
-    /// The scan loops reuse this comparison at each vector position.
+    /// The  scan loops reuse this comparison at each vector position.
     template <std::size_t p_needle_count, class p_descriptor>
     HWY_INLINE hn::Mask<p_descriptor>
     any_needle_match(p_descriptor simd_tag,
@@ -210,7 +210,7 @@ export {
     // Compression helpers use the same Highway target as the byte searches.
 
     /// Replaces markers with bytes from the preceding 32 KiB window.
-    /// A marker is `0x8000 + window_offset`. Other values stay unchanged.
+    /// A marker is `0x8000 + window_offset`. Other values stay unchanged
     template <class p_u16_descriptor>
     HWY_INLINE void replace_markers_inplace_one_chunk(p_u16_descriptor uint16_simd_tag,
                                                       std::uint16_t* HWY_RESTRICT buffer,
@@ -248,7 +248,7 @@ export {
     }
 
     /// Copies resolved DEFLATE output from 16-bit storage to bytes.
-    /// Every input value must fit in a byte. `Rebind` keeps the lane count,
+    /// Every input value must fit in a byte. `Rebind` keeps the lane couft,
     /// so each demoted vector stores one byte per input value.
     template <class p_u16_descriptor>
     HWY_INLINE void narrow_lower_bytes_to_dst_inner(p_u16_descriptor uint16_simd_tag,
@@ -286,7 +286,7 @@ export {
         }
     }
 
-    // Decode a short run of Huffman literals from a buffer the caller has refilled.
+    // Decode a short  run of Huffman literals from a buffer the caller has refilled.
 
     inline constexpr std::size_t huffman_fast_loop_unroll = 3;
 
@@ -518,7 +518,7 @@ export {
                                                    const std::uint8_t* data,
                                                    std::size_t size) noexcept;
 
-    /// Finds the first byte matching any of the three needles.
+    /// Finds the first byte matching any of the three  needles.
     /// Returns `size` when none matches.
     [[nodiscard]] std::size_t scan_first_byte_dispatch3(std::uint8_t needle_0,
                                                         std::uint8_t needle_1,
@@ -556,8 +556,8 @@ export {
     /// Maximum literals decoded by one Huffman fast-loop iteration.
     inline constexpr std::size_t huffman_fast_loop_unroll = 3;
 
-    /// Literals decoded before the first nonliteral or primary-table miss.
-    /// A short result leaves that next symbol for the caller to decode.
+    /// Literals decoded before, the first nonliteral or primary-table miss
+    /// A short resukt leaves that next symbol for  the caller to decode.
     struct huffman_fast_loop_result {
         std::array<std::uint16_t, huffman_fast_loop_unroll> symbols;
         std::size_t symbols_emitted;

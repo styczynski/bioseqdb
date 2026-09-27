@@ -112,7 +112,7 @@ private:
 };
 
 /// Allocates GPU buffers and matching ownership counters for adoption tests.
-/// The optional query gate and empty-target flag control the fixture metadata.
+/// The optional query gate and empty-target flag  control the fixture metadata.
 [[nodiscard]] bioseq::gpu::vulkan::gpu_built_index
 make_adoptable_gpu_built_index(
     bioseq::gpu::vulkan::runtime& runtime,

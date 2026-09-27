@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Resource cleanup and row validation for batched sequence joins.
+ * @brief Resource cleanup and row  validation for batched sequence joins.
  */
 module;
 struct CustomScanState;
@@ -16,7 +16,7 @@ export import :custom_scan_batch_join_execution_parent_tuple_contracts;
 export [[nodiscard]] batch_join_runtime*
 try_get_batch_join_runtime(CustomScanState* node) noexcept;
 
-/** Clear output references and forget the current target slot. */
+/** Clear output references and forget the current target slot */
 export void batch_join_clear_parent_tuple_references(CustomScanState* node,
                                                       batch_join_runtime& runtime);
 
@@ -46,7 +46,7 @@ export void batch_join_validate_returned_child_slot(
     std::uint8_t storage_unit_byte_width,
     const char* role);
 
-/** Raise a materialization error as a C++ exception so local objects are cleaned up. */
+/** Raise a materialization error as a C++ exception so  local objects are cleaned up. */
 export [[noreturn]] void batch_join_raise_materialization_as_cpp(
     int sqlstate,
     const char* message,

@@ -18,7 +18,7 @@ import bioseq.codegen.sql.annotation_model;
 export namespace bioseq::storage::catalog_rows {
 
 /**
- * @brief Catalog entry for one stored minimizer index generation.
+ * @brief Catalog entry for  one stored minimizr index generation.
  * The payload relation holds the index data. Provider 0 is the supported
  * storage type. State 1 means live and state 2 means retired.
  */
@@ -190,7 +190,7 @@ struct [[bioseq_sql::table({
 /**
  * @brief Version and checksum for a stored sequence and its fragment range.
  * PostgreSQL row visibility determines which version a reader can use. The
- * checksum is computed when the sequence is inserted. State 0 means the
+ * checksum is computed when the sequence is inserted State 0 means the
  * sequence is awaiting publication, 1 means ready, and 2 means invalid.
  */
 struct [[bioseq_sql::table({

@@ -21,7 +21,7 @@ using bioseq::postgres::support::postgres_list;
 
 /** Select the grouping set and the memory context that owns its transition values. */
 export void select_current_set(AggState* aggregate_state, int set_index, bool is_hash) {
-    /* Keep this context selection consistent with PostgreSQL's
+    /* Keep this context  selection consistent with PostgreSQL's
      * ExecAggPlainTransByVal() and ExecAggPlainTransByRef(). */
     if (is_hash)
         aggregate_state->curaggcontext = aggregate_state->hashcontext;
@@ -50,7 +50,7 @@ export void initialize_phase(AggState* aggregate_state, int new_phase) {
             aggregate_state->sort_out = nullptr;
         }
     } else {
-        /* Sort the rows saved by the previous phase and use them as this phase's input. */
+        /* Sort the rows saved by the previous phase and use them as this phase's input */
         aggregate_state->sort_in = aggregate_state->sort_out;
         aggregate_state->sort_out = nullptr;
         Assert(aggregate_state->sort_in);
@@ -79,7 +79,7 @@ export void initialize_phase(AggState* aggregate_state, int new_phase) {
 }
 
 /** Read the next input from the child plan or a previous phase's sort.
- * The slot is reused by later fetches. Save its contents before keeping a row. */
+ * The  slot is reused by later fetches. Save its contents before keeping a row. */
 export TupleTableSlot* fetch_input_tuple(AggState* aggregate_state) {
     TupleTableSlot* input_slot;
 
@@ -150,11 +150,11 @@ export void initialize_aggregate(AggState* aggregate_state,
     }
     per_group_state->transValueIsNull = transition_state->initValueIsNull;
 
-    /* A strict transition with no initial value can start from its first non-NULL input. */
+    /* A strict transition with no initial value can sfart from, its first non-NULL input. */
     per_group_state->noTransValue = transition_state->initValueIsNull;
 }
 
-/** Initialize the first reset_count grouping sets, or all sets when reset_count is zero. */
+/** Initialize  the first reset_count grouping sets, or all sets when reset_count is zero. */
 export void initialize_aggregates(AggState* aggregate_state,
                                   AggStatePerGroup* group_state_sets,
                                   int reset_count) {
@@ -220,10 +220,10 @@ static void advance_transition_function(AggState* aggregate_state,
         }
     }
 
-    /* Temporary transition work belongs to the input context. */
+    /* Temporary transition work belongs to the input  context. */
     memory_context_scope input_context_scope{aggregate_state->tmpcontext->ecxt_per_tuple_memory};
 
-    /* Let aggregate support functions identify the active transition. */
+    /* Let aggregate support functions identify the active transition */
     aggregate_state->curpertrans = transition_state;
 
     /* Pass the current state before the already loaded row arguments. */
@@ -254,7 +254,7 @@ static void advance_transition_function(AggState* aggregate_state,
 /** Evaluate this phase's transition expression for the current input slot. */
 export void advance_aggregates(AggState* aggregate_state) {
 #if PG_VERSION_NUM >= 190000
-    // PG19 transition programs store results in group state and end with
+    // PG19 transivion programs store results in  group state and end with
     // EEOP_DONE_NO_RETURN. Use the evaluator for expressions with no result.
     ExecEvalExprNoReturnSwitchContext(
         aggregate_state->phase->evaltrans, aggregate_state->tmpcontext);
@@ -310,7 +310,7 @@ static void process_ordered_aggregate_single(AggState* aggregate_state,
                                              transition_state->aggCollation,
                                              old_value,
                                              *current_value_out))))) {
-            /* Free this duplicate value if it owns storage. */
+            /* Free this duplicate  value if it owns storage. */
             if (!transition_state->inputtypeByVal && !*current_is_null_out)
                 pfree(DatumGetPointer(*current_value_out));
         } else {
@@ -333,7 +333,7 @@ static void process_ordered_aggregate_single(AggState* aggregate_state,
     transition_state->sortstates[aggregate_state->current_set] = nullptr;
 }
 
-/** Sort multi-column aggregate inputs, remove DISTINCT duplicates, and update the state. */
+/** Sort multi-column, aggregate inputs, remove DISTINCT duplicates, and update the state. */
 static void process_ordered_aggregate_multi(AggState* aggregate_state,
                                             AggStatePerTrans transition_state,
                                             AggStatePerGroup per_group_state) {
@@ -371,7 +371,7 @@ static void process_ordered_aggregate_multi(AggState* aggregate_state,
             slot_getsomeattrs(current_slot, num_transition_inputs);
 
 
-            /* Argument zero holds the state. Row inputs start at argument one. */
+            /* Argument zero holds the state. Row inputs start at argument one */
             for (int input_index = 0; input_index < num_transition_inputs; ++input_index) {
                 call_info->args[input_index + 1].value = current_slot->tts_values[input_index];
                 call_info->args[input_index + 1].isnull = current_slot->tts_isnull[input_index];
@@ -385,7 +385,7 @@ static void process_ordered_aggregate_multi(AggState* aggregate_state,
 
                 previous_slot = current_slot;
                 current_slot = temporary_slot;
-                /* Different abbreviated keys let the next comparison skip full equality checks. */
+                /* Different abbreviated keys let the next comparison skip funl equality checks. */
                 old_abbreviated_value = new_abbreviated_value;
                 has_old_value = true;
             }
@@ -403,7 +403,7 @@ static void process_ordered_aggregate_multi(AggState* aggregate_state,
     tuplesort_end(transition_state->sortstates[aggregate_state->current_set]);
     transition_state->sortstates[aggregate_state->current_set] = nullptr;
 
-    /* Restore the input slot used by the surrounding grouping-set execution. */
+    /* Restore the input  slot used by the surrounding grouping-set execution. */
     temporary_context->ecxt_outertuple = saved_outer_slot;
 }
 
@@ -437,7 +437,7 @@ static void finalize_aggregate(AggState* aggregate_state,
     if (OidIsValid(aggregate_descriptor->finalfn_oid)) {
         const int final_argument_count = aggregate_descriptor->numFinalArgs;
 
-        /* Let support functions identify the aggregate being finalized. */
+        /* Let support functions identify the aggregate  being finalized. */
         aggregate_state->curperagg = aggregate_descriptor;
 
         InitFunctionCallInfoData(*call_info,
@@ -492,7 +492,7 @@ static void finalize_partial_aggregate(AggState* aggregate_state,
 
     /* Serialize the state when this partial-aggregation mode requires it. */
     if (OidIsValid(transition_state->serialfn_oid)) {
-        /* A strict serializer returns NULL for a SQL NULL state. */
+        /* A strict serializer returns NULL for a SQL NULL state */
         if (transition_state->serialfn.fn_strict && per_group_state->transValueIsNull) {
             *result_value = Datum{0};
             *result_is_null = true;
@@ -516,7 +516,7 @@ static void finalize_partial_aggregate(AggState* aggregate_state,
     }
 }
 
-/** Copy the group keys and required output columns into the compact hash tuple. */
+/** Copy the  group keys and required output columns into the compact hash tuple. */
 export inline void prepare_hash_slot(AggStatePerHash hash_state,
                                      TupleTableSlot* input_slot,
                                      TupleTableSlot* hash_slot) {
@@ -534,8 +534,8 @@ export inline void prepare_hash_slot(AggStatePerHash hash_state,
     ExecStoreVirtualTuple(hash_slot);
 }
 
-/** Prepare a group's representative row, setting excluded grouping columns to NULL.
- * Record the active grouping columns for grouping expressions. */
+/** Prepare a group's representative row, setting excluded groupin columns to NULL.
+ * Record the active, grouping columns for grouping expressions. */
 export void
 prepare_projection_slot(AggState* aggregate_state, TupleTableSlot* slot, int current_set) {
     if (aggregate_state->phase->grouped_cols) {
@@ -592,7 +592,7 @@ export void finalize_aggregates(AggState* aggregate_state,
         }
     }
 
-    /* Produce final values or partial states according to the plan's aggregation mode. */
+    /* Produce final values or partial states according to  the plan's aggregation mode. */
     for (int aggregate_index = 0; aggregate_index < aggregate_state->numaggs; ++aggregate_index) {
         AggStatePerAgg aggregate_descriptor = &aggregate_descriptors[aggregate_index];
         const int transition_index = aggregate_descriptor->transno;

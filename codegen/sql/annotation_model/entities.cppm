@@ -70,7 +70,7 @@ struct declaration_reference {
 
 /// Makes an entities(...) expression usable in an annotation with references
 /// of different C++ types. The collector recovers each referenced declaration
-/// from the source expression.
+/// from  the source exprssion
 struct entity_reference_list {
     bool present{};
 

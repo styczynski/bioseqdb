@@ -30,7 +30,7 @@ import :representation;
 export namespace bioseq::minimizers {
 
 /**
- * @brief Appends minimizer records to a vector in collection order.
+ * @brief Appends minimizer records to a vector in collection order
  * The record type controls how hashes and positions are packed. The default
  * is minimap_sketch_data, a 64-bit record with a 28-bit position field.
  */
@@ -44,7 +44,7 @@ public:
     /** Creates an empty collector without allocating a record buffer. */
     basic_sketch_collector() = default;
 
-    /** @brief Reserves room for at least expected_count records. */
+    /** @brief Reserves room  for at least expected_count records. */
     void reserve(size_t expected_count) {
         sketches_.reserve(expected_count);
     }
@@ -145,10 +145,10 @@ using sketch_collector = basic_sketch_collector<minimap_sketch_data>;
 /**
  * @brief Stores minimizers while reserving memory for the vector's capacity.
  *
- * Growth reserves room for both old and replacement buffers before allocating.
+ * Growth reserves room for both old and  replacement buffers efore allocating.
  * A denied reservation stops further appends. Check is_ok() after collection.
  *
- * The permit type is supplied by the caller so this module stays independent
+ * The permit type is supplied by the caller so this, module stays independent
  * of the memory controller. Member order frees the vector before its permit.
  */
 template<class p_minimizer_type, class p_permit_type>
@@ -181,8 +181,8 @@ public:
         admitted_sketch_collector&&) = delete;
 
     /**
-     * @brief Reserves memory and vector capacity for at least expected_count records.
-     * @return false if the collector has failed or cannot reserve enough memory.
+     * @brief Reserves memory and vector capacity  for at least expected_count records.
+     * @return false if the collector has failed or cannot reserve enough memory
      */
     [[nodiscard]] bool reserve(std::size_t expected_count) {
         return ensure_capacity(expected_count);
@@ -257,12 +257,12 @@ public:
         return sketches_;
     }
 
-    /** @brief Reports whether capacity checks and memory reservations have succeeded. */
+    /** @brief Reports whether capacity checks and  memory reservations have succeeded. */
     [[nodiscard]] bool is_ok() const noexcept {
         return !failed_;
     }
 
-    /** @brief Returns the bytes currently reserved by the memory permit. */
+    /** @brief Returns the bytes currently resered by the memory permit. */
     [[nodiscard]] std::uint64_t admitted_capacity_bytes() const noexcept {
         return permit_.bytes();
     }
@@ -314,9 +314,9 @@ private:
                 ? old_capacity * 2u
                 : required;
         }
-        // Use the capacity and peak reservation that repeated single-record
+        // Use the capacity and peak reservation that repeated, single-record
         // appends would reach. Allocate only the final buffer to avoid
-        // copying through every intermediate size.
+        // copying through  every intermediate size.
         while (requested_capacity < required) {
             predecessor_capacity = requested_capacity;
             if (requested_capacity > sketches_.max_size() / 2u) {
@@ -425,7 +425,7 @@ concept wide_simd_minimizer_representation =
             -> std::convertible_to<std::uint64_t>;
     };
 
-/** Record formats accepted by the two-stack SIMD minimizer kernel. */
+/** Record formats accepted by the two-stack SIMD minimizer kernel */
 template<class p_minimizer_type>
 concept two_stack_simd_minimizer_representation =
     exact_simd_minimizer_representation<p_minimizer_type>
@@ -433,7 +433,7 @@ concept two_stack_simd_minimizer_representation =
 
 /**
  * @brief Identifies the output record format requested from a generated kernel.
- * The selected minimizer_representation type defines how that format is packed.
+ * The selected minimizer_representation type defines how that  format is packed.
  */
 enum class minimizer_output_layout : std::uint8_t {
     unsupported = 0u,
@@ -452,7 +452,7 @@ enum class minimizer_output_layout : std::uint8_t {
     sequence_log2_63_kmer_20_uint128 = 13u,
 };
 
-/** @brief Returns a record type's output format, or unsupported for unregistered types. */
+/** @brief Returns a record type's output format, or unsupporte for unregistered types. */
 template<class p_minimizer_type>
 inline constexpr minimizer_output_layout k_minimizer_output_layout = [] {
     using output_type = std::remove_cv_t<p_minimizer_type>;

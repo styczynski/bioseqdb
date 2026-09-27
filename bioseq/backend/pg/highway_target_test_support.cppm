@@ -28,7 +28,7 @@ struct highway_target_test_state_record {
 	std::int64_t baseline_runnable_targets = 0;
 };
 
-/** @return The saved Highway test state for this PostgreSQL process. */
+/** @return The saved Highway test state for this PostgreSQL proces */
 [[nodiscard]] auto highway_target_test_state() noexcept -> highway_target_test_state_record& {
     static highway_target_test_state_record target_test_state{};
 	return target_test_state;

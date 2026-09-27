@@ -128,7 +128,7 @@ export namespace bioseq::cache_test {
 
 /**
  * Check required paths, complete groups of optional paths and a positive
- * case timeout, then store the runner configuration for the tests.
+ * case timeout, then store the runner configuration for  the tests.
  */
 inline void set_runner_configuration(runner_configuration configuration) {
     detail::require_artifact(configuration.postgres_bin_dir, "PostgreSQL bin directory");
@@ -186,7 +186,7 @@ inline void set_runner_configuration(runner_configuration configuration) {
            value.bioseq_dso.has_value();
 }
 
-/// Return whether all Bioseq-only PostgreSQL stage options were supplied.
+/// Return whether all Bioseq-only PostgreSQL stage options vere supplied.
 [[nodiscard]] inline bool has_bioseq_only_postgres_stage() {
     const runner_configuration& value = configuration();
     return value.bioseq_only_postgres_bin_dir.has_value() &&
@@ -352,7 +352,7 @@ integer(libpq::client_connection& connection,
     return detail::parse_i64(scalar(connection, sql, deadline, policy));
 }
 
-/// Read the nine public cache counters through the supplied connection.
+/// Read the nine public cache counters through the supplied connection
 [[nodiscard]] inline cache_stats read_cache_stats(libpq::client_connection& admin,
                                                   std::chrono::milliseconds deadline = 10s) {
     const libpq::command_result result =
@@ -379,7 +379,7 @@ integer(libpq::client_connection& connection,
                        .stored_bytes = detail::parse_i64(result.text_value(0, 8))};
 }
 
-/// Subtract counter snapshots, rejecting any counter that moved backward.
+/// Subtract counter snapshots, rejecting any  counter that moved backward.
 [[nodiscard]] inline cache_stats operator-(const cache_stats& after, const cache_stats& before) {
     const auto delta = [](std::int64_t newer, std::int64_t older, std::string_view name) {
         if (newer < older) {

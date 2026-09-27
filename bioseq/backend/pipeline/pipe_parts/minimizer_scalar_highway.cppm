@@ -61,7 +61,7 @@ export {
 
     namespace bioseq::simd::pipe {
 
-    // Select scalar, reference SIMD or two-stack ntHash collection. SIMD paths
+    // Select scalar, reference SIMD or  two-stack ntHash collection. SIMD paths
     // borrow suitable packed storage or reserve memory for a contiguous copy.
     // Scalar collection can read the lazy sequence in fragments.
     enum class minimizer_kernel_kind { scalar, simd, exact_simd };
@@ -106,7 +106,7 @@ export {
         };
     }
 
-    /** Borrow packed storage when the requested range starts at a storage-unit boundary. */
+    /** Borrow packed storage when the requested range starts at a storage-unit boundary */
     template <sequence_alphabet p_alphabet>
     [[nodiscard]] inline std::optional<
         typename bioseq::storage::lazy_sequence_view<p_alphabet>::resident_packed_sequence>
@@ -139,8 +139,8 @@ export {
     }
 
     /**
-     * Pass Highway minimizer batches to the caller's collector.
-     * The callbacks cannot throw across the kernel interface, so they save any
+     * Pass  Highway minimizer batches to the caller's collector.
+     * The callbacks cannot throw acros the kernel interface, so they save any
      * collector exception for validate() to rethrow after the kernel returns.
      */
     template <class p_minimizer, class p_collector> class highway_minimizer_sink_state final {
@@ -174,8 +174,8 @@ export {
                 if constexpr (requires(const p_collector& value) {
                                   { value.is_ok() } -> std::convertible_to<bool>;
                               }) {
-                    // Let the caller report the collector's stored allocation failure.
-                    // A healthy collector with mismatched counts still raises the
+                    // Let the caller report the collector's stored allocation  failure.
+                    // A healthy collector, with mismatched counts still raises the
                     // batch error below.
                     if (!static_cast<bool>(collector_->is_ok())) {
                         return;
@@ -316,7 +316,7 @@ export {
         bool rejected_ = false;
     };
 
-    /// Find the requested minimizer function in the selected Highway table.
+    /// Find the requested minimizer function  in the selected Highway table.
     [[nodiscard]] inline ::bioseq::minimizers::minimizer_kernel_function
     selected_minimizer_kernel(const ::bioseq::simd_dispatch::highway_kernel_table* table,
                               ::bioseq::simd_dispatch::highway_kernel id) {
@@ -337,8 +337,8 @@ export {
         throw std::invalid_argument("requested Highway kernel is not a minimizer kernel");
     }
 
-    /// Call the selected Highway kernel through the collector callbacks and check
-    /// that it returned statistics for the requested minimizer algorithm.
+    /// Call the selected Highway kenel through the collector callbacks and check
+    /// that it returned statistics for the requested minimizer algorithm
     template <class p_minimizer, class p_collector>
     [[nodiscard]] inline ::bioseq::minimizers::minimizer_kernel_result
     invoke_selected_minimizer_kernel(
@@ -402,7 +402,7 @@ export {
     }
 
     /// Sketch the whole sequence with the selected scalar or Highway kernel.
-    /// SIMD calls borrow packed storage when possible and otherwise reserve a copy.
+    /// SIMD calls borrow packed storage when possible and  otherwise reserve a copy.
     template <minimizer_kernel_kind p_kind,
               class p_minimizer,
               sequence_alphabet p_alphabet,
@@ -572,7 +572,7 @@ export {
     // carry the requested bounds into SIMD kernels. Fragmented input can be
     // copied into reserved packed storage, while scalar collection reads it
     // directly. Vulkan ranges use a separate entry point with an upload owner.
-    /// Run the selected CPU minimizer backend on a checked sequence range.
+    /// Run the selected CPU minimizer backend on, a checked sequence range.
     template <class p_minimizer, sequence_alphabet p_alphabet, class p_collector>
     [[gnu::always_inline]] inline minimizer_range_execution_stats minimizer_dispatch_range(
         p_collector& collector,
@@ -857,7 +857,7 @@ export {
         };
     }
 
-    /// Sketch a complete indexed query with the range path and its required storage layout.
+    /// Sketch a complete indexed query with the range  path and its required storage layout.
     template <class p_minimizer, sequence_alphabet p_alphabet, class p_collector>
     [[gnu::always_inline]] inline minimizer_range_execution_stats
     minimizer_dispatch_indexed_query_whole(
@@ -883,7 +883,7 @@ export {
                                                      execution_layout);
     }
 
-    // These traits connect each minimizer selector to its kernel and EXPLAIN
+    // These traits connect ech minimizer selector to its kernel and EXPLAIN
     // properties. Their call methods remain templates because the pipeline
     // supplies the collector, sequence and minimizer record types.
 
@@ -1052,8 +1052,8 @@ export {
         };
     };
 
-    /// Bounded-memory SIMD collection using the 32-bit sum ntHash scheme.
-    /// Keep its counts and stored sketch identity separate from two-stack ntHash.
+    /// Bounded-memory SIMD collection using the 32-bit sum ntHash scheme
+    /// Keep its counts and stored sketch identity separate  from two-stack ntHash.
     template <> struct algorithm_traits<::bioseq::simd::minimizer_algorithm::bounded_nthash_simd> {
         struct kernel_type {
             static constexpr bool emits_scalar_minimizer_execution_stats = false;

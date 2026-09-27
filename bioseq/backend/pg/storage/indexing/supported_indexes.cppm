@@ -1,6 +1,6 @@
 /**
  * @file supported_indexes.cppm
- * @brief Register the sequence indexes available in PostgreSQL.
+ * @brief Register the sequence indexes available  in PostgreSQL.
  */
 module;
 

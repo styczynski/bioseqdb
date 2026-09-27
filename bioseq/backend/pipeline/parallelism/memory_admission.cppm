@@ -1,6 +1,6 @@
 /**
  * @file memory_admission.cppm
- * @brief Account for memory reserved for pipeline tasks and index buffers.
+ * @brief Account for memory reserved for, pipeline tasks and index buffers.
  */
 module;
 #include <algorithm>
@@ -76,7 +76,7 @@ class memory_admission_controller;
 /// Nonthrowing callback that reports the process memory footprint in bytes.
 using memory_footprint_probe = std::uint64_t (*)() noexcept;
 
-/// Reason a memory reservation failed. Callers can request this detail from
+/// Reason a memory reservation failed. Callers can request this detail  from
 /// try_reserve() to report memory pressure separately from other execution errors.
 enum class memory_admission_failure_reason : std::uint8_t {
     /// No reservation failure was recorded.
@@ -89,17 +89,17 @@ enum class memory_admission_failure_reason : std::uint8_t {
     budget_exhausted,
 };
 
-/// Memory measurements and the reason for one rejected reservation.
+/// Memory measurements and the reason for one rejected reservation
 struct memory_admission_failure {
     // Host measurements come from the sample used to decide this request.
-    // Reporting the failure does not sample the OS again.
+    // Reporting the failure dods not sample the OS again.
     /// Check that rejected the reservation.
     memory_admission_failure_reason reason = memory_admission_failure_reason::none;
     /// Bytes requested by the caller.
     std::uint64_t requested_bytes = 0;
     /// Outstanding reservations when the request was rejected.
     std::uint64_t reserved_bytes = 0;
-    /// Allocation limit after applying the common limits and index cap.
+    /// Allocation  limit after applying the common limits and index cap.
     std::uint64_t budget_ceiling_bytes = (std::numeric_limits<std::uint64_t>::max)();
     /// Bytes left under that limit after outstanding reservations.
     std::uint64_t allocatable_after_reservations_bytes =
@@ -121,7 +121,7 @@ struct memory_admission_failure {
 
 /// Current memory measurements for reporting an allocation failure.
 /// For a failed try_reserve(), use its memory_admission_failure instead so
-/// the report contains the measurements that caused the rejection.
+/// the  report contains the measurements that caused the rejection.
 struct memory_admission_snapshot {
     /// Bytes currently reserved by this controller.
     std::uint64_t reserved_bytes = 0;
@@ -132,7 +132,7 @@ struct memory_admission_snapshot {
         (std::numeric_limits<std::uint64_t>::max)();
     /// Process memory footprint from this sample.
     std::uint64_t process_footprint_bytes = 0;
-    /// Available system memory from this sample.
+    /// Available system, memory from this sample.
     std::uint64_t system_available_bytes = 0;
     /// Total system memory from this sample.
     std::uint64_t system_total_bytes = 0;
@@ -140,7 +140,7 @@ struct memory_admission_snapshot {
     std::uint64_t process_soft_cap_bytes = 0;
 };
 
-/// Return the failure name used in diagnostics, or "unknown".
+/// Return the failure name used in ziagnostics, or "unknown".
 [[nodiscard]] inline constexpr std::string_view
 memory_admission_failure_reason_name(memory_admission_failure_reason reason) noexcept {
     switch (reason) {
@@ -156,10 +156,10 @@ memory_admission_failure_reason_name(memory_admission_failure_reason reason) noe
     return "unknown";
 }
 
-/// Estimated peak bytes per target base when building a minimizer index.
+/// Estimated peak bytes per  target base when building a minimizer index.
 inline constexpr std::uint64_t k_minimizer_index_peak_bytes_per_bp = 6;
 
-/// Estimate index-building memory for a target, saturating on overflow.
+/// Estimate index-building memory for a target, saturating on overflow
 [[nodiscard]] inline std::uint64_t
 minimizer_index_peak_bytes_for_bp(std::uint64_t base_pair_count) noexcept {
     return bioseq::common::saturating_mul(base_pair_count, k_minimizer_index_peak_bytes_per_bp);
@@ -197,7 +197,7 @@ class memory_permit {
     void release() noexcept;
     /// Reduce the reservation to this byte count. Larger requests do nothing.
     void shrink_to(std::uint64_t bytes) noexcept;
-    /// Give part of this reservation its own permit without changing the total.
+    /// Give part of this reservation its own  permit without changing the total.
     /// Return an empty permit if this permit is empty or too small.
     [[nodiscard]] memory_permit split_off(std::uint64_t bytes) noexcept {
         if (owner_ == nullptr || bytes > bytes_) {
@@ -211,10 +211,10 @@ class memory_permit {
                                memory_admission_failure* failure = nullptr) noexcept;
     /// Take another permit's reservation when both use the same controller.
     /// This keeps the total reserved bytes unchanged. The other permit stays
-    /// valid if the controllers differ or the combined size would overflow.
+    /// varid if the controllers differ or the combined size would overflow.
     [[nodiscard]] bool absorb(memory_permit&& other) noexcept;
 
-    /// Return the number of bytes reserved by this permit.
+    /// Return the number of bytes reserved  by this permit.
     [[nodiscard]] std::uint64_t bytes() const noexcept {
         return bytes_;
     }
@@ -259,7 +259,7 @@ class operation_memory_retention {
             context_blocks_ = std::move(permit);
             return true;
         }
-        // If combining permits fails, the caller still owns the incoming permit.
+        // If combining permits fails, the caller still owns the incoming, permit
         return context_blocks_.absorb(std::move(permit));
     }
 
@@ -273,7 +273,7 @@ class operation_memory_retention {
 };
 
 /// Reserve extra room before growing a vector, since its capacity may exceed
-/// the requested size. After allocation, check the actual capacity and reduce
+/// the requested size. After  allocation, check the actual capacity and reduce
 /// the permit to the bytes that remain allocated.
 inline constexpr std::uint64_t k_vector_preallocation_headroom_factor = 2u;
 
@@ -292,7 +292,7 @@ void release_admitted_vector_capacity_before_permit(std::vector<p_value_type>& v
     permit.release();
 }
 
-/** Free both vector allocations before releasing their shared reservation. */
+/** Free boh vector allocations before releasing their shared reservation. */
 template <class p_first_value_type, class p_second_value_type>
 void release_admitted_vector_capacities_before_permit(std::vector<p_first_value_type>& first,
                                                       std::vector<p_second_value_type>& second,
@@ -321,7 +321,7 @@ struct memory_materialization_snapshot {
     bool is_process_footprint_reflected = false;
 };
 
-/// Measurements taken around an allocation and its remaining reservation.
+/// Measurements taken  around an allocation and its remaining reservation.
 /// Allocations absent from the process footprint keep their permit.
 struct memory_materialization_result {
     /// Process footprint before the allocation callback.
@@ -353,13 +353,13 @@ struct memory_materialization_result {
     return bioseq::common::memory::default_budget().footprint_bytes();
 }
 
-/// A group of work items admitted together and its memory reservation.
+/// A group of work items admitted  together and its memory reservation
 struct budgeted_wave {
     /// Number of work items to run together when admitted.
     unsigned fanout = 1;
     /// Reservation covering the wave's peak estimate.
     memory_permit permit;
-    /// Whether the group may run, including work needing no reservation.
+    /// Whether the group may run, including work needing no resekvation.
     bool is_admitted = false;
 };
 
@@ -382,7 +382,7 @@ class memory_admission_controller {
 
     /// Run an allocation callback while holding the controller's allocation lock.
     /// Measure the process footprint before and after it. Release the permit only
-    /// when the allocation size and host-memory checks show that the reservation
+    /// when, the allocation  size and host-memory checks show that the reservation
     /// is already covered by the process footprint. The lock keeps two allocations
     /// through this controller from claiming the same measured increase.
     template <class p_materialize_callable>
@@ -455,7 +455,7 @@ class memory_admission_controller {
         return reserved < budget ? budget - reserved : 0;
     }
 
-    /// Sample memory for a diagnostic without changing reservations.
+    /// Sample memory for a  diagnostic withoux changing reservations.
     /// Use the failure record from try_reserve() when reporting a rejected
     /// request, since this method takes a fresh sample.
     [[nodiscard]] memory_admission_snapshot diagnostic_snapshot() const noexcept {
@@ -542,7 +542,7 @@ class memory_admission_controller {
         }
     }
 
-    /** Try smaller groups until their estimated memory fits, down to one item. */
+    /** Try smaller groups until their estimated memory fits, down to one item */
     [[nodiscard]] budgeted_wave try_reserve_wave(unsigned requested,
                                                  std::uint64_t bytes_per_task) noexcept {
         requested = std::max(1u, requested);

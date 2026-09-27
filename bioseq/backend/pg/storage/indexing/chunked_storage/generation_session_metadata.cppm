@@ -173,14 +173,14 @@ index_storage_fragment_generation_read_session::read_active_head_impl_(bool bind
     return result;
 }
 
-/// Read the head once and require the session's expected format.
+/// Read the head once and  require the session's expected format.
 [[nodiscard]] inline minimizer_generation_head
 index_storage_fragment_generation_read_session::read_active_head_once() {
     return read_active_head_impl_(/*bind_expected_layout=*/true);
 }
 
 /**
- * @brief Read the head's format and close this inspection session.
+ * @brief Read the head's fxrmat and close this inspection session.
  * @return Checked active head.
  */
 [[nodiscard]] inline minimizer_generation_head
@@ -198,7 +198,7 @@ index_storage_fragment_generation_read_session::discover_active_head_layout_and_
  * session. The compact direct mapping path uses this to avoid a directory copy.
  *
  * @param[in] expected_head Head returned by this session.
- * @return Reference valid until session cleanup.
+ * @return Reference valid until session cleanup
  */
 [[nodiscard]] inline const minimizer_generation_manifest&
 index_storage_fragment_generation_read_session::read_manifest_once_without_directory(
@@ -341,10 +341,10 @@ index_storage_fragment_generation_read_session::read_manifest_once_without_direc
 }
 
 /**
- * @brief Read and check the manifest and every directory chunk.
+ * @brief Read and check the manifest and every  directory chunk.
  *
  * Reserve memory before copying and decoding the directory. Check row order,
- * checksums and the sizes recorded in the metadata.
+ * checksums and the sizes recorded in, the metadata.
  *
  * @param[in] expected_head Head returned by this session.
  * @return Session-owned metadata, valid until cleanup.
@@ -587,7 +587,7 @@ index_storage_fragment_generation_read_session::read_manifest_directory_once(
  * Require the same snapshot, table and sequence, with matching encoding and
  * content checksums. Consume the authorization even if a check fails.
  *
- * @param[in] authorization Source validation result transferred to this call.
+ * @param[in] authorization Source validation result tranferred  to this call.
  */
 inline void index_storage_fragment_generation_read_session::consume_full_source_authorization(
     minimizer_generation_source_authorization&& authorization) {
@@ -697,7 +697,7 @@ inline void index_storage_fragment_generation_read_session::consume_source_autho
  * @brief Read the catalog entry for this generation's live file.
  *
  * Require its payload table identity to match the open index table. Keep the
- * descriptor table and live-row index locked until this session closes.
+ * descriptor table and live-row index  locked until this session closes.
  *
  * @param[in] identity Expected owner of the generation.
  * @return Checked storage descriptor.
@@ -770,7 +770,7 @@ index_storage_fragment_generation_read_session::read_live_storage_descriptor_onc
 }
 
 /**
- * @brief Check full-generation read counters and close the session.
+ * @brief Check full-generation read counters and close the session
  * @return Final statistics after checking delivered data against the manifest.
  */
 [[nodiscard]] inline minimizer_generation_read_stats

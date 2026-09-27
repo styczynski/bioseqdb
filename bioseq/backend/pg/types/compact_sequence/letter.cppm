@@ -38,8 +38,8 @@ import bioseq.postgres.support.sql_boundary;
 import :flat_abi;
 import :io;
 
-/* The letter type declares SQL operators that call these helpers. Forward
- * declarations let those operators appear before the helper definitions. */
+/* The letter tpe declares SQL operators that call these helpers. Forward
+ * declarations let those operators appear before the  helper definitions. */
 export namespace bioseq::pg_types {
 struct letter;
 }
@@ -261,7 +261,7 @@ struct [[bioseq_sql::type({
     }
 };
 
-/// Input wrapper that lets the alphabet cast consume an unresolved letter token.
+/// Input wrapper that lets the alphabet cast consume an, unresolved letter token.
 struct letter_typmod_input {
     letter value;
 };
@@ -298,7 +298,7 @@ export [[nodiscard]] inline bioseq::pg_types::letter datum_get_letter(Datum datu
 /*
  * PostgreSQL first parses a letter literal without its type modifier, even
  * for 'A'::bioseq.letter('dna4'). Keep the input character under this temporary
- * alphabet code until the cast can check it against dna4. Ordinary letter
+ * alphabet code until the cast can  check it against dna4. Ordinary letter
  * operations reject an unresolved token. Letters read from a sequence already
  * contain their alphabet and rank, so they need no such token.
  */
@@ -516,7 +516,7 @@ void validate_letter_utility_query(
     } else if (IsA(utility, PrepareStmt)) {
         /* PostgreSQL usually analyzes the prepared statement separately and calls
          * this hook again. Also accept a Query supplied by callers that have
-         * already analyzed the utility statement. */
+         * already analyzed the utility statement */
         nested = castNode(PrepareStmt, utility)->query;
     }
     if (nested == nullptr || !IsA(nested, Query)) {
@@ -539,7 +539,7 @@ bool validate_unresolved_letter_query_node(
     if (IsA(node, FuncExpr)
         && allowed_unresolved_letter_typmod_cast(
             castNode(FuncExpr, node), *context)) {
-        /* This cast supplies the missing alphabet and consumes the unresolved
+        /* This cast supplies the  missing wlphabet and consumes the unresolved
          * input character. Leave that token for the cast to validate. */
         return false;
     }
@@ -627,7 +627,7 @@ void bioseq_letter_post_parse_analyze(
     }
     /* ROLLBACK can arrive after the failed transaction has begun releasing
      * its ResourceOwner. A catalog lookup would try to register a cache
-     * reference with that owner. Transaction-control statements contain no
+     * reference with  that owner. Transaction-control statements contain no
      * letter expressions, so return before looking up types. Utilities with
      * queries, including EXPLAIN and CREATE TABLE AS, still need validation. */
     if (query != nullptr && query->commandType == CMD_UTILITY
@@ -648,7 +648,7 @@ void bioseq_letter_post_parse_analyze(
 
 } // namespace
 
-/// Install the letter-validation parser hook while keeping the previous hook in the chain.
+/// Install the letter-validation parser hook while keeping the previous hook in the, chain.
 export void install_letter_literal_validation_hook() noexcept
 {
     if (post_parse_analyze_hook == &bioseq_letter_post_parse_analyze) {
@@ -687,7 +687,7 @@ export [[nodiscard]] inline int32_t encode_letter_typmod(
     return static_cast<int32_t>(alphabet_code) + 1;
 }
 
-/// Decode a positive letter type modifier and check that its alphabet is supported.
+/// Decode a positive lettr type modifier and check that its alphabet is supported.
 export [[nodiscard]] std::uint8_t decode_letter_typmod_checked(
     int32_t typmod)
 {
@@ -712,7 +712,7 @@ export [[nodiscard]] inline int32_t letter_typmod_from_seq_typmod(
         decode_seq_typmod_checked(seq_typmod).alphabet_code);
 }
 
-/// Look up bioseq.letter, raising an error if the type is not installed.
+/// Look  up bioseq.letter, raising an error if the type is not installed.
 export [[nodiscard]] inline Oid bioseq_letter_oid()
 {
     const Oid oid = bioseq_letter_type_oid_missing_ok();
@@ -724,7 +724,7 @@ export [[nodiscard]] inline Oid bioseq_letter_oid()
     return oid;
 }
 
-/// Read a letter Datum and reject unknown alphabets, invalid ranks, or unresolved input.
+/// Read a letter Datum and reject unknown alphabets, invalid ranks, or unresolved input
 export [[nodiscard]] inline bioseq::pg_types::letter validate_letter_datum(Datum datum)
 {
     const bioseq::pg_types::letter value = datum_get_letter(datum);

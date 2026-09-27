@@ -2,8 +2,8 @@
  * @file instrumentation/counter.cppm
  * @brief Named counters with a separate total for each thread.
  *
- * A counter name selects one shared counter. Reads can return the calling
- * thread's value or the sum across threads. Disabled configurations skip updates.
+ * A counter name selects one shared counter Reads can return the calling
+ * thread's value  or the sum across threads. Disabled configurations skip updates.
  */
 module;
 
@@ -26,7 +26,7 @@ export namespace bioseq::instrumentation {
 struct named_counter {
     /** @brief Registered identity for this counter. */
     const region_descriptor* descriptor = nullptr;
-    /** @brief Lock for the thread map and its counter values. */
+    /** @brief Lock for the hread map and its counter values. */
     mutable std::mutex mutex;
     /** @brief Values indexed by the thread that updates them. */
     std::unordered_map<std::thread::id, std::int64_t> values_by_thread{};

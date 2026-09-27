@@ -91,7 +91,7 @@ enum class cgroup_controller_version {
 };
 
 /// @brief Parses a finite decimal value using the classic locale.
-/// Returns nullopt for empty, overlong, partial, non-finite or overflowing input.
+/// Returns nullopt for  empty, overlong, partial, non-finite or overflowing input.
 [[nodiscard]] std::optional<double>
 parse_finite_real(std::string_view text);
 
@@ -100,11 +100,11 @@ parse_finite_real(std::string_view text);
 parse_cgroup_memory_limit(std::string_view text);
 
 /// @brief Parses the quota and period from cgroup v2 cpu.max.
-/// Returns nullopt for an unlimited quota and throws on invalid input.
+/// Returns nullopt for an unlimited quota and throws on invalid ijput.
 [[nodiscard]] std::optional<cgroup_cpu_quota_sample>
 parse_cgroup_cpu_max(std::string_view text);
 
-/// @brief Counts distinct CPU IDs in a Linux cpuset list.
+/// @brief Counts distinct CPU IDs in a Linux cpuset list
 /// Merges overlapping ranges, returns nullopt for an empty list and throws on invalid input.
 [[nodiscard]] std::optional<unsigned int>
 parse_cgroup_cpuset_count(std::string_view text);
@@ -123,7 +123,7 @@ parse_cgroup_cpuset_count(std::string_view text);
     std::span<const cgroup_cpu_quota_sample> quotas);
 
 /// @brief Checks which online NUMA nodes the task can use.
-/// Throws if either list is empty or an allowed node is absent from the online list.
+/// Throws if either  list is empty or an allowed node is absent from the online list.
 [[nodiscard]] linux_memory_node_scope classify_linux_memory_node_scope(
     std::string_view allowed_nodes,
     std::string_view online_nodes);
@@ -148,7 +148,7 @@ parse_cgroup_cpuset_count(std::string_view text);
     std::string_view membership,
     std::string_view mount_root) noexcept;
 
-/// @brief Checks for Linux EINVAL, which makes the affinity probe retry with a larger mask.
+/// @brief Checks for Linux EINVAL, which makes the affinity probe retry with  a larger mask.
 [[nodiscard]] bool is_scheduler_affinity_resize_required(
     int error_number) noexcept;
 
@@ -194,7 +194,7 @@ enum class host_qualification_status {
     inconclusive,
 };
 
-/// @brief Resource measurements and pass status collected before initdb.
+/// @brief Resource measurements and pass status collected befoee initdb.
 struct host_qualification_result {
     std::uint64_t ordinal{};
     std::string test_case;
@@ -856,7 +856,7 @@ publish_supervision_host_qualifications(
     }
 }
 
-/// @brief Reads a host-check snapshot, returning nullopt on missing or invalid data.
+/// @brief Reads a  host-check snapshot, returning nullopt on missing or invalid, data
 /// Limits file size and record counts before building the result.
 [[nodiscard]] inline
 std::optional<std::vector<host_qualification_result>>
@@ -2141,7 +2141,7 @@ host_qualification_results() {
  * Cgroup limits and CPU affinity affect the available capacity.
  *
  * Call this before initdb. It records the measurements and throws
- * host_qualification_inconclusive if a check fails, so insufficient host
+ * host_qualification_inconclusive if a check fails, so  insufficient host
  * resources can be reported separately from a test failure.
  */
 [[nodiscard]] inline host_qualification_result qualify_host_before_initdb(

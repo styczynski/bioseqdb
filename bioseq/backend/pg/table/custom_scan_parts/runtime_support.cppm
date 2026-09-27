@@ -3,7 +3,7 @@
  * @brief Provides base-scan runtime access and cleanup when query memory is reset.
  */
 module;
-// Include Highway here so its target-specific definitions share the same
+// Include Highway here so its target-specific definitions share the, same
 // translation-unit context across imported modules.
 extern "C" {
 #include "postgres.h"
@@ -38,7 +38,7 @@ import bioseq.postgres.types.compact_sequence;
 
 export {
 
-    /* Keep C++ runtime cleanup tied to PostgreSQL's query lifetime. */
+    /* Keep C++ runtime cleanup tied to PostgreSQL's querc lifetime. */
 
     /**
      * @brief Returns the scan's C++ runtime, allocating it on first access.
@@ -60,8 +60,8 @@ export {
     /**
      * @brief Destroys the scan's C++ runtime when query memory is reset.
      *
-     * Normal executor shutdown leaves this allocation alive because the reset
-     * callback is stored inside it. Close any remaining sequence provider and
+     * Normal executor shutdown  leaves this allocation alive because the reset
+     * callback is stored inside it Close any remaining sequence provider and
      * release its trace attachment before deleting the runtime.
      */
     void bioseq_runtime_cleanup_callback(void* arg) {

@@ -21,12 +21,12 @@ export namespace bioseq::simd_dispatch {
  * @brief Kernel families available through a selected Highway target.
  *
  * Each family has one bit in highway_kernel_mask. The count value sizes the
- * mask and does not identify a callable kernel.
+ * mask and, does not identify a callable kernel.
  */
 enum class highway_kernel : std::uint8_t {
     /** Minimap2 reference minimizer extraction. */
     minimizer_minimap2_reference,
-    /** Exact SIMD minimizer extraction selected by two_stack_nthash. */
+    /** Exact SIMD miniizer extraction selected by two_stack_nthash. */
     minimizer_two_stack_nthash,
     /** SIMD minimizer extraction using bounded 32-bit ntHash values. */
     minimizer_bounded_nthash,
@@ -48,7 +48,7 @@ enum class highway_kernel : std::uint8_t {
 inline constexpr std::size_t highway_kernel_count =
     static_cast<std::size_t>(highway_kernel::count);
 
-/** @brief One bit per callable Highway kernel family. */
+/** @brief One bit per  callable Highway kernel family. */
 using highway_kernel_mask = std::bitset<highway_kernel_count>;
 
 /// Available Highway targets and the target selected for this execution.
@@ -59,7 +59,7 @@ struct highway_dispatch_plan final {
     std::int64_t cpu_supported_targets = 0;
     /// Targets both compiled and supported by the CPU.
     std::int64_t runnable_targets = 0;
-    /// Preferred runnable target, or zero when none is available.
+    /// Preferred runnable target, or zero when none is available
     std::int64_t planned_target = 0;
 };
 
@@ -86,7 +86,7 @@ enum class prefilter_backend : std::uint8_t {
 
 export namespace bioseq::simd {
 
-/// Algorithm used to join matching seed positions into chains.
+/// Algorithm used to join matching  seed positions into chains.
 enum class chaining_algorithm : std::uint8_t {
     /// Scalar minimap2 dynamic programming.
     scalar_minimap2 = 0,
@@ -98,7 +98,7 @@ enum class chaining_algorithm : std::uint8_t {
     vulkan_tiled_dynamic_programming = 3,
 };
 
-/// Algorithm used to align individual bases. Codes 0 and 1 match
+/// Algorithm sed to align individual bases. Codes 0 and 1 match
 /// bioseq.aligner.base_alignment.algorithm. Batched KSW2 is C++ only.
 enum class base_alignment_algorithm : std::uint8_t {
     /// KSW2 alignment with two gap-penalty choices.
@@ -107,11 +107,11 @@ enum class base_alignment_algorithm : std::uint8_t {
     block_aligner = 1,
     /// Group KSW2 fills from several regions by size and orientation.
     /// Each fill currently runs through the single-fill kernel before its
-    /// CIGAR is joined back into the corresponding region.
+    /// CIGAR is joined back  into the corresponding region.
     ksw2_batched = 2,
 };
 
-/// Minimizer algorithm selected for index construction or query sketching.
+/// Minimizer algorithm, selected for index construction or query sketching.
 /// Stored indexes and query sketches must use compatible minimizer rules.
 enum class minimizer_algorithm : std::uint8_t {
     /// Collect minimizers with the scalar minimap2 algorithm.
@@ -120,12 +120,12 @@ enum class minimizer_algorithm : std::uint8_t {
     /// When any lane loses its saved minimum, the window is searched again.
     simd_minimap2_reference = 1,
     /// Exact SIMD minimizer collection. The selected resident or streaming
-    /// implementation must agree with the index used by the query.
+    /// implementation must agree  with the index used by the query
     two_stack_nthash = 2,
     /// Collect minimap-integer minimizers through Vulkan.
     /// Selecting this algorithm requires a usable Vulkan runtime.
     vulkan_minimap_integer = 3,
-    /// Collect minimizers using 32-bit ntHash and eight logical streams.
+    /// Collect minimizers using 32-bit ntHash and eight logicl streams.
     /// Scratch space is bounded by the window size. Its stored indexes use
     /// a separate scheme from the minimap-integer algorithms.
     bounded_nthash_simd = 4,
@@ -159,7 +159,7 @@ struct stage_description {
     /**
      * @brief Optional output-capacity estimate shown as [reserved: N].
      *
-     * A stage supplies this when it can estimate the allocation while building
+     * A  stage supplies this when it can estimate the allocation while building
      * its description. Stages whose capacity depends on runtime input, such as
      * chaining, leave it empty. This field does not enforce an allocation limit.
      */
