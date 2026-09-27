@@ -1,10 +1,6 @@
-/*-------------------------------------------------------------------------
- *
- * common/postgres/sql_boundary/index.cppm
- *
- * Public dependency surface for generated PostgreSQL SQL boundaries.
- *
- *-------------------------------------------------------------------------
+/**
+ * @file common/postgres/sql_boundary/index.cppm
+ * @brief Shared conversions and error handling for generated PostgreSQL entry points.
  */
 module;
 
@@ -32,15 +28,16 @@ export import :shape;
 export namespace bioseq::postgres::support {
 
 /**
- * Invoke one typed C++ callback and translate failures to PostgreSQL's C ABI.
+ * Run a C++ SQL callback and report its exceptions as PostgreSQL errors.
  *
- * The callback must be trivially destructible because PostgreSQL ERROR uses
- * non-local control flow. PostgreSQL errors captured as C++ exceptions retain
- * their original ErrorData; standard C++ failures become internal SQL errors.
+ * Preserve captured PostgreSQL ErrorData. Report other exceptions as internal
+ * SQL errors, after leaving the C++ catch blocks so exception objects can be
+ * destroyed before PostgreSQL jumps out.
  *
- * @tparam p_callback_type Trivially destructible nullary Datum callable.
- * @param callback Callback invoked exactly once.
- * @return Datum returned by the callback.
+ * @tparam p_callback_type A callable taking no arguments and returning Datum.
+ * Its captured state must need no destructor.
+ * @param callback Called exactly once.
+ * @return The callback's Datum result.
  */
 template<class p_callback_type>
     requires std::invocable<p_callback_type&>

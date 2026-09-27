@@ -1,12 +1,10 @@
-/*-------------------------------------------------------------------------
+/**
+ * @file common/postgres/sql_boundary/owning_values.cppm
+ * @brief C++ values that keep their own copies of SQL argument and result data.
  *
- * common/postgres/sql_boundary/owning_values.cppm
- *
- * Owning C++ values for PostgreSQL varlena and pass-by-reference boundary
- * types.  The generated fmgr layer converts these values at the outermost
- * PostgreSQL boundary so C++ routine owners never retain borrowed Datums.
- *
- *-------------------------------------------------------------------------
+ * Generated wrappers convert these values to and from PostgreSQL Datums.
+ * Their strings, arrays and fixed-size fields can survive independently of
+ * the memory holding the original SQL value.
  */
 module;
 
@@ -21,13 +19,13 @@ export module bioseq.postgres.sql_boundary:owning_values;
 
 export namespace bioseq::postgres::support {
 
-/** Owning JSONB text in PostgreSQL's canonical output representation. */
+/** Own JSON text for a SQL JSONB value. PostgreSQL validates it when encoding. */
 class jsonb_value final {
 public:
     explicit jsonb_value(std::string encoded)
         : encoded_{std::move(encoded)} {}
 
-    /** Return the canonical JSONB text. */
+    /** Return the stored JSON text. */
     [[nodiscard]] const std::string& encoded() const noexcept {
         return encoded_;
     }
@@ -36,7 +34,7 @@ private:
     std::string encoded_;
 };
 
-/** Owning PostgreSQL BYTEA payload. */
+/** Own the bytes of a PostgreSQL BYTEA value. */
 class bytea_value final {
 public:
     explicit bytea_value(std::vector<std::byte> bytes)
@@ -51,7 +49,7 @@ private:
     std::vector<std::byte> bytes_;
 };
 
-/** Owning values for a PostgreSQL bigint array. */
+/** Own the non-null integer elements of a PostgreSQL bigint array. */
 class bigint_array final {
 public:
     explicit bigint_array(std::vector<std::int64_t> values)
@@ -67,7 +65,7 @@ private:
     std::vector<std::int64_t> values_;
 };
 
-/** Owning PostgreSQL INTERVAL fields without backend-owned pointers. */
+/** Store PostgreSQL INTERVAL fields directly, with no borrowed pointers. */
 struct interval_value final {
     /** Signed time component in microseconds. */
     std::int64_t microseconds{};
@@ -77,7 +75,7 @@ struct interval_value final {
     std::int32_t months{};
 };
 
-/** Classification for one owning PostgreSQL timestamptz value. */
+/** Distinguish a finite timestamptz from negative or positive infinity. */
 enum class timestamp_kind : std::uint8_t {
     finite,             ///< A finite PostgreSQL timestamp.
     negative_infinity,  ///< PostgreSQL's negative-infinity sentinel.
@@ -85,19 +83,18 @@ enum class timestamp_kind : std::uint8_t {
 };
 
 /**
- * Owning representation of PostgreSQL timestamptz.
- *
- * Finite values are signed microseconds from PostgreSQL's 2000-01-01 epoch.
- * `postgres_epoch_microseconds` is ignored for either infinity kind.
+ * A PostgreSQL timestamptz stored as a C++ value.
+ * Finite values count signed microseconds from 2000-01-01. For either infinity
+ * kind, the converter ignores postgres_epoch_microseconds.
  */
 struct timestamp_with_time_zone final {
-    /** Finite or infinite classification. */
+    /** Whether this value is finite, negative infinity or positive infinity. */
     timestamp_kind kind{timestamp_kind::finite};
     /** Signed microseconds from PostgreSQL's 2000-01-01 epoch. */
     std::int64_t postgres_epoch_microseconds{};
 };
 
-/** Owning physical tuple identifier. */
+/** A physical row address stored as a block number and item offset. */
 struct tuple_identifier final {
     /** Heap block number. */
     std::uint32_t block_number{};
