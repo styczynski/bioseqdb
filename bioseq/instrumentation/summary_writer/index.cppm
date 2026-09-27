@@ -1,19 +1,16 @@
 /**
  * @file instrumentation/summary_writer/index.cppm
- * @brief Cold-path one-shot summary dump.
+ * @brief Print and reset the shared production profiler.
  *
- * Declares cold-path non-templated entry points that route to the
- * process-wide profiler block. Bodies live in the same-module implementation
- * unit so GCC does not have to serialize the templated logging/reset bodies
- * into this exported BMI.
+ * Definitions live in the implementation unit so GCC can keep the logging
+ * and reset templates out of this exported module interface.
  */
 export module bioseq.instrumentation.summary_writer;
 
 export namespace bioseq::instrumentation::summary {
 
-/// Non-templated entry: dump the persistent process-wide profiler block
-/// for production_profiling_configuration to the debug log. No-op if profiling never
-/// ran in this process.
+/// Print measurements from the shared production profiler to the debug log.
+/// A profiler with no recorded visits still produces summary markers.
 void write_summary_to_log() noexcept;
 
 /** @brief Reset metrics in the persistent production profiler state. */

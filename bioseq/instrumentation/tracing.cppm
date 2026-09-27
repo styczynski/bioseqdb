@@ -1,10 +1,9 @@
 /**
  * @file instrumentation/tracing.cppm
- * @brief Fixed-layout single-producer/single-consumer trace ring.
+ * @brief Trace events and a ring buffer for one producer.
  *
- * Instantiated producers push fixed-width 64-byte events into a per-thread
- * ring. A separate consumer can advance the read sequence. This module owns
- * the fixed data layout and producer-side push operation.
+ * Events occupy 64 bytes. A consumer advances read_sequence after reading them.
+ * This module supplies the storage and the producer's push operation.
  */
 module;
 
@@ -27,7 +26,7 @@ enum class trace_event_kind : std::uint32_t {
     loop_iteration = 4,
 };
 
-/** @brief Fixed one-cache-line event written to a trace ring. */
+/** @brief Trace event stored in a 64-byte slot. */
 struct alignas(64) trace_event {
     trace_event_kind kind = trace_event_kind::region_begin;
     std::uint32_t region_id = 0;
