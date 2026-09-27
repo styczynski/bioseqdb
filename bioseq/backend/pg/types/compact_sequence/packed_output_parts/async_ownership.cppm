@@ -1,6 +1,6 @@
 /**
  * @file async_ownership.cppm
- * @brief Fixed-capacity asynchronous job ownership and shutdown transitions.
+ * Track asynchronous sequence jobs and release their resources during shutdown.
  */
 module;
 
@@ -31,9 +31,9 @@ export module bioseq.postgres.types.compact_sequence:packed_output_async_ownersh
 import :packed_output_materialization_trace;
 import bioseq.parallelism.pool;
 
-/* Fixed scheduler-independent owner state.  Concrete executors install only
- * preconstructed, no-throw callbacks; no state transition allocates. */
-/// Lifecycle phase of the executor-thread asynchronous owner.
+/* Allocate job storage and prepare cleanup callbacks before scheduling work.
+ * State changes use that storage and callbacks that cannot throw. */
+/// Whether the executor accepts work, is stopping it, or has finished cleanup.
 export enum class slice_async_owner_phase : std::uint8_t {
   accepting = 0u,
   quiescing,
@@ -41,10 +41,10 @@ export enum class slice_async_owner_phase : std::uint8_t {
   terminal,
 };
 
-/// Maximum number of simultaneously retained slice jobs.
+/// Maximum number of active slice jobs.
 export inline constexpr std::uint32_t slice_async_max_live_jobs = 2u;
 
-/// Monotonic lifecycle state of one asynchronous job slot.
+/// Progress of one job from enrollment through cleanup, before its slot is reused.
 export enum class slice_async_job_state : std::uint8_t {
   unused = 0u,
   enrolled,
@@ -55,32 +55,32 @@ export enum class slice_async_job_state : std::uint8_t {
   released,
 };
 
-/// Completeness recorded when an asynchronous owner is quiesced.
+/// Whether shutdown followed a complete or interrupted execution.
 export enum class slice_shutdown_disposition : std::uint8_t {
   complete = 0u,
   incomplete,
 };
 
-/// Generation-checked handle identifying one asynchronous job slot.
+/// Slot index and generation used to reject completions from an earlier use.
 export struct slice_async_completion_handle {
   std::uint32_t slot_index;
   std::uint64_t generation;
 };
 
-/// Preconstructed callback safe to invoke during no-throw cleanup.
+/// Callback and argument prepared before cleanup. The callback must not throw.
 export struct slice_noexcept_callback {
   void *argument;
   void (*invoke)(void *) noexcept;
 };
 
-/// Cancellation callback retained with an asynchronous job.
+/// Cancellation callback stored with an asynchronous job.
 export using preconstructed_cancel_handle = slice_noexcept_callback;
-/// Join callback retained with an asynchronous job.
+/// Callback that waits for the job to stop using its resources.
 export using preconstructed_join_handle = slice_noexcept_callback;
-/// Callback releasing all backing resources retained by an asynchronous job.
+/// Callback that releases the input buffers and other resources held by a job.
 export using retained_job_backings = slice_noexcept_callback;
 
-/// Fixed-size worker error publication copied without allocation.
+/// Fixed-size worker error record that can be copied without allocating.
 export struct fixed_job_error_handoff {
   std::uint8_t published;
   std::uint8_t incomplete;
@@ -93,18 +93,19 @@ export struct fixed_job_error_handoff {
 static_assert(std::is_trivially_copyable_v<fixed_job_error_handoff>);
 static_assert(std::is_standard_layout_v<fixed_job_error_handoff>);
 
-/// Preconstructed cleanup callbacks transferred into an enrolled job.
+/// Prepared callbacks transferred to the owner when a job is enrolled.
 export struct slice_async_job_resources {
   preconstructed_cancel_handle cancel;
   preconstructed_join_handle join;
   retained_job_backings backings;
 };
 
-/// Executor-owned fixed record for one asynchronous job lifecycle.
+/// Executor-owned state, counters, and cleanup callbacks for one job slot.
 export struct slice_async_job_slot {
   std::uint64_t generation;
-  /* Executor-thread owned.  Workers publish only counters/error bytes and
-   * return the immutable completion handle through the scheduler. */
+  /* Only the executor changes the job state. Workers write their counters
+   * and error record, then return the unchanged completion handle through
+   * the scheduler. */
   slice_async_job_state state;
   slice_dsm_counter *counters;
   std::uint32_t counter_count;
@@ -119,7 +120,7 @@ export struct slice_async_job_slot {
 static_assert(std::is_trivially_copyable_v<slice_async_job_slot>);
 static_assert(std::is_standard_layout_v<slice_async_job_slot>);
 
-/// Memory-context cleanup owner for tracing state and asynchronous job slots.
+/// Keep job resources and tracing alive until all work has stopped.
 export struct slice_async_owner_guard {
   MemoryContextCallback callback;
   slice_materialization_runtime *runtime;
@@ -166,7 +167,7 @@ handle_matches(slice_async_owner_guard const *guard,
          guard->jobs[handle.slot_index].generation == handle.generation;
 }
 
-/// Merge a complete worker delta only after validating every counter record.
+/// Check every worker counter before adding a completed job to the totals.
 inline void merge_job_counters_noexcept(slice_async_owner_guard *guard,
                                         slice_async_job_slot &job) noexcept {
   if (guard->runtime == nullptr ||
@@ -178,9 +179,8 @@ inline void merge_job_counters_noexcept(slice_async_owner_guard *guard,
     }
     return;
   }
-  /* Validate the entire delta and destination before committing any prefix.
-   * This mirrors the DSM two-pass merge contract: malformed accounting is
-   * visible as invalid/overflowed, never as a plausible partial success. */
+  /* Check every source and destination record before adding any counters.
+   * If one is malformed, mark the trace invalid and keep its totals unchanged. */
   for (std::uint32_t index = 0u; index < job.counter_count; ++index) {
     if (job.counters[index].overflowed > 1u ||
         !slice_dsm_counter_reserved_valid(job.counters[index]) ||
@@ -231,10 +231,9 @@ inline void rearm_job_noexcept(slice_async_owner_guard *guard,
 
 } // namespace
 
-/* A scheduler installs this scope in the concrete worker submission.  The
- * slot owns a private delta sink, so worker observations never race the
- * executor/DSM cumulative counters. */
-/// Return the worker scope backed by one generation-checked job slot.
+/* Install this scope when the scheduler enters a worker job. Each job
+ * writes to its own counters, so workers do not race the executor's totals. */
+/// Return this job's tracing scope, or an empty scope for a stale handle.
 export [[nodiscard]] inline slice_materialization_scope
 slice_async_job_scope_noexcept(slice_async_owner_guard *guard,
                                slice_async_completion_handle handle) noexcept {
@@ -252,10 +251,10 @@ slice_async_job_scope_noexcept(slice_async_owner_guard *guard,
   };
 }
 
-/* Backend-thread-only generation-checked owner recovery for upper consumers
- * (notably BatchSort) that receive a traced EOH rather than a downward
- * executor binding. */
-/// Borrow the live asynchronous owner associated with an attachment.
+/* An upper executor such as BatchSort can receive a traced expanded value
+ * without a direct pointer to its job owner. Recover that owner only on its
+ * original backend thread and while its generation is still live. */
+/// Borrow an owner that is still accepting work on the current backend thread.
 export [[nodiscard]] inline slice_async_owner_guard *
 borrow_slice_async_owner_noexcept(
     slice_trace_attachment const *attachment) noexcept {
@@ -275,7 +274,7 @@ borrow_slice_async_owner_noexcept(
   return owner;
 }
 
-/// Enroll cleanup resources into one unused fixed-capacity job slot.
+/// Give an unused job slot its cleanup callbacks and return a completion handle.
 export [[nodiscard]] inline bool enroll_slice_async_job_noexcept(
     slice_async_owner_guard *guard, slice_async_job_resources resources,
     slice_async_completion_handle *handle) noexcept {
@@ -306,7 +305,7 @@ export [[nodiscard]] inline bool enroll_slice_async_job_noexcept(
   return false;
 }
 
-/// Advance an enrolled job after scheduler acceptance.
+/// Mark an enrolled job as accepted by the scheduler.
 export [[nodiscard]] inline bool mark_slice_async_job_scheduled_noexcept(
     slice_async_owner_guard *guard,
     slice_async_completion_handle handle) noexcept {
@@ -321,7 +320,7 @@ export [[nodiscard]] inline bool mark_slice_async_job_scheduled_noexcept(
   return true;
 }
 
-/// Publish a bounded worker error into its job slot.
+/// Copy a worker error into its fixed-size slot, truncating a long message.
 export inline void handoff_slice_async_job_error_noexcept(
     slice_async_owner_guard *guard, slice_async_completion_handle handle,
     std::uint32_t sqlstate, char const *message, bool incomplete) noexcept {
@@ -344,12 +343,12 @@ export inline void handoff_slice_async_job_error_noexcept(
       1u, std::memory_order_release);
 }
 
-/// Advance a scheduled job after executor-side completion publication.
+/// Mark a scheduled job finished after the executor receives its completion.
 export [[nodiscard]] inline bool mark_slice_async_job_finished_noexcept(
     slice_async_owner_guard *guard,
     slice_async_completion_handle handle) noexcept {
-  /* Called by the executor only after scheduler completion publication;
-   * workers never read or write job.state. */
+  /* The executor calls this after the scheduler reports completion.
+   * Workers never access job.state. */
   if (!handle_matches(guard, handle)) {
     return false;
   }
@@ -361,7 +360,8 @@ export [[nodiscard]] inline bool mark_slice_async_job_finished_noexcept(
   return true;
 }
 
-/// Join, merge, and release one job without allocating or raising an error.
+/// Wait for a job, merge its completed counters, and release its resources.
+/// Cancel unfinished work first. This cleanup does not allocate or throw.
 export [[nodiscard]] inline bool drain_slice_async_job_noexcept(
     slice_async_owner_guard *guard, slice_async_completion_handle handle,
     bool *incomplete_out = nullptr,
@@ -372,14 +372,13 @@ export [[nodiscard]] inline bool drain_slice_async_job_noexcept(
   auto &job = guard->jobs[handle.slot_index];
   bool forced_incomplete = false;
   if (job.state == slice_async_job_state::enrolled) {
-    /* A scheduler rejection is still a visible incomplete job use. */
+    /* A job rejected by the scheduler still counts as an incomplete use. */
     forced_incomplete = true;
     job.state = slice_async_job_state::scheduled;
   }
   if (job.state == slice_async_job_state::scheduled) {
-    /* Reaching drain before executor-side completion publication means
-     * shutdown/early-stop had to cancel this use.  It cannot be reported
-     * as a complete cycle even when cancellation and join both succeed. */
+    /* Completion has not reached the executor, so stop and join this job.
+     * Even successful cleanup leaves this execution incomplete. */
     forced_incomplete = true;
     invoke_slice_callback(job.cancel);
     invoke_slice_callback(job.join);
@@ -406,10 +405,9 @@ export [[nodiscard]] inline bool drain_slice_async_job_noexcept(
     }
   }
   if (job.state == slice_async_job_state::joined) {
-    /* A job-local sink is a tentative delta until the worker has published a
-     * complete outcome.  Cancellation, ERROR, scheduler rejection, and an
-     * early drain can all leave a valid-looking prefix in that sink; merging
-     * it would invent a completed materialization in Actual Calls/Bytes. */
+    /* A cancelled or failed job may have written some counters before it
+     * stopped. Add counters only after a complete result, or Actual Calls and
+     * Bytes would include work that never finished. */
     if (!incomplete) {
       merge_job_counters_noexcept(guard, job);
     }
@@ -528,7 +526,7 @@ inline void pool_observer_worker_leave(
 
 } // namespace
 
-/// Adapt an asynchronous slice owner to the parallelism-pool observer contract.
+/// Connect a live job owner to the pool's scheduling and cleanup callbacks.
 export [[nodiscard]] inline bioseq::parallelism::tracked_job_observer
 make_slice_async_pool_observer_noexcept(
     slice_async_owner_guard *owner) noexcept {
@@ -550,7 +548,7 @@ make_slice_async_pool_observer_noexcept(
   };
 }
 
-/// Stop accepting work and drain every enrolled job.
+/// Stop accepting jobs, finish their cleanup, and publish the shutdown result once.
 export inline void quiesce_slice_async_owner_noexcept(
     slice_async_owner_guard *guard,
     slice_shutdown_disposition disposition) noexcept {
@@ -577,7 +575,7 @@ export inline void quiesce_slice_async_owner_noexcept(
   guard->phase = slice_async_owner_phase::quiesced;
 }
 
-/// Quiesce an owner and detach all trace/runtime storage.
+/// Stop all jobs, then detach their trace attachment and destroy the runtime.
 export inline void finish_slice_async_owner_noexcept(
     slice_async_owner_guard *guard,
     slice_shutdown_disposition disposition) noexcept {
@@ -601,14 +599,14 @@ export inline void finish_slice_async_owner_noexcept(
   guard->phase = slice_async_owner_phase::terminal;
 }
 
-/// Memory-context reset callback that performs incomplete owner shutdown.
+/// Stop unfinished work when its PostgreSQL memory context resets.
 export inline void slice_async_owner_reset(void *argument) noexcept {
   finish_slice_async_owner_noexcept(
       static_cast<slice_async_owner_guard *>(argument),
       slice_shutdown_disposition::incomplete);
 }
 
-/// Initialize fixed job slots and attach their owner to a trace attachment.
+/// Initialize preallocated job slots and link their owner to the trace attachment.
 export [[nodiscard]] inline bool initialize_slice_async_owner_noexcept(
     slice_async_owner_guard *guard, slice_materialization_runtime *runtime,
     slice_trace_attachment *attachment, slice_async_job_slot *jobs,
@@ -657,7 +655,7 @@ export [[nodiscard]] inline bool initialize_slice_async_owner_noexcept(
   return true;
 }
 
-/// Return a fully quiesced owner to its accepting phase for executor rescan.
+/// Accept jobs again for a rescan after every previous job has been cleaned up.
 export [[nodiscard]] inline bool rearm_slice_async_owner_for_rescan_noexcept(
     slice_async_owner_guard *guard) noexcept {
   if (guard == nullptr || guard->phase != slice_async_owner_phase::quiesced ||

@@ -1,6 +1,6 @@
 /**
  * @file letter.cppm
- * @brief Fixed-width self-describing letter Datum and its SQL semantics.
+ * Store one letter as an alphabet code and rank, and provide its SQL operations.
  */
 module;
 
@@ -38,24 +38,23 @@ import bioseq.postgres.support.sql_boundary;
 import :flat_abi;
 import :io;
 
-/* SQL operator members are declared on letter before their shared comparison
- * and hash implementations. These pointer-free declarations break that
- * type/operation ordering cycle; the definitions remain below the type. */
+/* The letter type declares SQL operators that call these helpers. Forward
+ * declarations let those operators appear before the helper definitions. */
 export namespace bioseq::pg_types {
 struct letter;
 }
 
-/// Compare alphabet-qualified ranks in their stable physical order.
+/// Compare letters by alphabet code, then by rank.
 [[nodiscard]] int compare_letters(
     bioseq::pg_types::letter left,
     bioseq::pg_types::letter right) noexcept;
-/// Return the two ABI bytes consumed by PostgreSQL hash support.
+/// Return the alphabet and rank bytes used by PostgreSQL hashing.
 [[nodiscard]] std::array<unsigned char, 2> letter_hash_bytes(
     bioseq::pg_types::letter value) noexcept;
 
 export namespace bioseq::pg_types {
 
-/// Two-byte alphabet-qualified rank passed by value through PostgreSQL.
+/// A two-byte letter containing its alphabet and rank, passed by value in SQL.
 struct [[bioseq_sql::type({
     .schema = bioseq::sql::fixed_schema<"bioseq">,
     .internal_length = 2,
@@ -262,7 +261,7 @@ struct [[bioseq_sql::type({
     }
 };
 
-/// Raw parser token accepted only by the same-type typmod cast.
+/// Input wrapper that lets the alphabet cast consume an unresolved letter token.
 struct letter_typmod_input {
     letter value;
 };
@@ -276,7 +275,7 @@ static_assert(std::is_trivially_copyable_v<
 static_assert(std::is_standard_layout_v<
               bioseq::pg_types::letter_typmod_input>);
 
-/// Encode an alphabet-qualified rank in PostgreSQL's by-value Datum bits.
+/// Store an alphabet code and rank in PostgreSQL's by-value Datum.
 export [[nodiscard]] inline Datum make_letter_datum(
     std::uint8_t alphabet_code,
     std::uint8_t rank) noexcept
@@ -297,12 +296,11 @@ export [[nodiscard]] inline bioseq::pg_types::letter datum_get_letter(Datum datu
 }
 
 /*
- * PostgreSQL coerces an unknown SQL literal to the unmodified base type before
- * invoking the same-type typmod cast.  Consequently letter_in sees typmod -1
- * even for `'A'::bioseq.letter('dna4')`.  This token is a parser-only bridge:
- * the typmod cast must consume it, and every ordinary letter operation rejects
- * it.  A physical letter produced by sequence element access never uses this
- * code and remains valid without an expression typmod.
+ * PostgreSQL first parses a letter literal without its type modifier, even
+ * for 'A'::bioseq.letter('dna4'). Keep the input character under this temporary
+ * alphabet code until the cast can check it against dna4. Ordinary letter
+ * operations reject an unresolved token. Letters read from a sequence already
+ * contain their alphabet and rank, so they need no such token.
  */
 inline constexpr std::uint8_t unresolved_letter_alphabet_code =
     pgseq_unbound_alphabet_code;
@@ -493,9 +491,8 @@ void guard_letter_ctas_output(
     }
 }
 
-/* Query traversal calls the node walker, while nested Query nodes call back
- * into query-level validation. This declaration is the required recursion
- * seam; the definition follows the node walker. */
+/* The expression walker checks nested queries by calling this function,
+ * which in turn walks their expressions. Declare it before the walker. */
 void validate_and_guard_letter_query(
     Query* query,
     unresolved_letter_query_context* context);
@@ -517,10 +514,9 @@ void validate_letter_utility_query(
     } else if (IsA(utility, DeclareCursorStmt)) {
         nested = castNode(DeclareCursorStmt, utility)->query;
     } else if (IsA(utility, PrepareStmt)) {
-        /* PostgreSQL normally stores a raw parsetree here and analyzes the
-         * prepared statement separately, which invokes this hook again.  A
-         * Query is nevertheless handled defensively for callers that provide
-         * an already-analyzed utility tree. */
+        /* PostgreSQL usually analyzes the prepared statement separately and calls
+         * this hook again. Also accept a Query supplied by callers that have
+         * already analyzed the utility statement. */
         nested = castNode(PrepareStmt, utility)->query;
     }
     if (nested == nullptr || !IsA(nested, Query)) {
@@ -543,17 +539,15 @@ bool validate_unresolved_letter_query_node(
     if (IsA(node, FuncExpr)
         && allowed_unresolved_letter_typmod_cast(
             castNode(FuncExpr, node), *context)) {
-        /* The parser-only token is consumed directly by this positive-typmod
-         * cast.  The other two arguments are canonical int4/bool Consts, so
-         * there is no unresolved subtree to visit below this node. */
+        /* This cast supplies the missing alphabet and consumes the unresolved
+         * input character. Leave that token for the cast to validate. */
         return false;
     }
     if (unresolved_letter_const(node, context->letter_oid)) {
         unresolved_letter_input_error();
     }
     if (IsA(node, RangeTblEntry)) {
-        /* query_tree_walker owns traversal of the RTE's expressions when it
-         * supplies the RTE itself to this callback. */
+        /* query_tree_walker visits the expressions inside this range-table entry. */
         return false;
     }
     if (IsA(node, Query)) {
@@ -620,11 +614,9 @@ void bioseq_letter_post_parse_analyze(
 #endif
 )
 {
-    /* Count this callback itself, not only the downstream hook.  PostgreSQL
-     * invokes shared-preload libraries in configured order but their hooks
-     * form a last-installed-first-called chain, so bioseq can sit on either
-     * side of another preload hook.  An inbound count proves exact traversal
-     * of the installed chain independently of that ordering. */
+    /* Count entry into this hook so tests can check that it ran once. Hooks
+     * call the previously installed hook, so the order of preloaded libraries
+     * determines whether Bioseq runs before or after another hook. */
     if (letter_hook_call_count <
         static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max())) {
         ++letter_hook_call_count;
@@ -633,13 +625,11 @@ void bioseq_letter_post_parse_analyze(
         previous_letter_post_parse_analyze_hook(
             parse_state, query, jumble_state);
     }
-    /* ROLLBACK is parsed after the failed transaction ResourceOwner has
-     * entered its release phase.  It cannot contain a letter expression, and
-     * even a missing-ok type/function lookup would try to acquire a syscache
-     * reference from that released owner.  Leave transaction control to
-     * PostgreSQL without touching catalogs; query-bearing utility statements
-     * such as EXPLAIN, CTAS, PREPARE and DECLARE CURSOR still take the normal
-     * validation path below. */
+    /* ROLLBACK can arrive after the failed transaction has begun releasing
+     * its ResourceOwner. A catalog lookup would try to register a cache
+     * reference with that owner. Transaction-control statements contain no
+     * letter expressions, so return before looking up types. Utilities with
+     * queries, including EXPLAIN and CREATE TABLE AS, still need validation. */
     if (query != nullptr && query->commandType == CMD_UTILITY
         && query->utilityStmt != nullptr
         && IsA(query->utilityStmt, TransactionStmt)) {
@@ -658,7 +648,7 @@ void bioseq_letter_post_parse_analyze(
 
 } // namespace
 
-/// Install the chain-preserving parser hook for unresolved letter literals.
+/// Install the letter-validation parser hook while keeping the previous hook in the chain.
 export void install_letter_literal_validation_hook() noexcept
 {
     if (post_parse_analyze_hook == &bioseq_letter_post_parse_analyze) {
@@ -684,7 +674,7 @@ std::int64_t letter_hook_chain_calls() noexcept
 
 }  // namespace bioseq::pg_types::sql_routines
 
-/// Encode an alphabet code as PostgreSQL's positive letter typmod.
+/// Encode a supported alphabet as a positive PostgreSQL letter type modifier.
 export [[nodiscard]] inline int32_t encode_letter_typmod(
     std::uint8_t alphabet_code)
 {
@@ -697,7 +687,7 @@ export [[nodiscard]] inline int32_t encode_letter_typmod(
     return static_cast<int32_t>(alphabet_code) + 1;
 }
 
-/// Decode and validate a positive PostgreSQL letter typmod.
+/// Decode a positive letter type modifier and check that its alphabet is supported.
 export [[nodiscard]] std::uint8_t decode_letter_typmod_checked(
     int32_t typmod)
 {
@@ -711,7 +701,7 @@ export [[nodiscard]] std::uint8_t decode_letter_typmod_checked(
     return static_cast<std::uint8_t>(typmod - 1);
 }
 
-/// Derive a letter typmod from a compact-sequence typmod.
+/// Use a sequence type modifier's alphabet as a letter type modifier.
 export [[nodiscard]] inline int32_t letter_typmod_from_seq_typmod(
     int32_t seq_typmod)
 {
@@ -722,7 +712,7 @@ export [[nodiscard]] inline int32_t letter_typmod_from_seq_typmod(
         decode_seq_typmod_checked(seq_typmod).alphabet_code);
 }
 
-/// Resolve the installed bioseq.letter OID or raise undefined-object.
+/// Look up bioseq.letter, raising an error if the type is not installed.
 export [[nodiscard]] inline Oid bioseq_letter_oid()
 {
     const Oid oid = bioseq_letter_type_oid_missing_ok();
@@ -734,7 +724,7 @@ export [[nodiscard]] inline Oid bioseq_letter_oid()
     return oid;
 }
 
-/// Decode a physical letter Datum and reject unresolved or invalid ranks.
+/// Read a letter Datum and reject unknown alphabets, invalid ranks, or unresolved input.
 export [[nodiscard]] inline bioseq::pg_types::letter validate_letter_datum(Datum datum)
 {
     const bioseq::pg_types::letter value = datum_get_letter(datum);

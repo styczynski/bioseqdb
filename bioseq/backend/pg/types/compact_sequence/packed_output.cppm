@@ -1,6 +1,6 @@
 /**
  * @file packed_output.cppm
- * @brief Exported packed-output facade and SQL contract entry points.
+ * Export sequence packing, tracing, and ownership helpers with SQL test functions.
  */
 module;
 
@@ -48,7 +48,7 @@ export import :packed_output_test_contracts;
 
 export namespace bioseq::pg_types::sql_routines {
 
-/// Run materialization tracing and asynchronous ownership contracts.
+/// Test sequence-copy tracing and ownership during asynchronous work.
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq_internal">,
 })]]
@@ -113,7 +113,7 @@ std::int64_t slice_payload_allocation_probe(std::int32_t action) {
   pg_unreachable();
 }
 
-/// Raise a deterministic worker error when invoked by a parallel worker.
+/// Raise a test error in a parallel worker to check that cleanup preserves it.
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq_internal">,
     .volatility = bioseq::sql::volatility::immutable,
@@ -144,12 +144,12 @@ bool slice_trace_worker_failure_probe(std::int32_t action) {
 }
 
 }  // namespace bioseq::pg_types::sql_routines
-/* Internal acceptance seam for logical-length guardrails. Its immutable
- * process-lifetime source synthesizes DNA4 rank zero on demand, so tests can
- * exercise bigint metadata without allocating the logical payload. */
+/* This test source produces DNA4 rank zero on demand. It stays alive for
+ * the process, so tests can check very large sequence lengths without
+ * allocating all their letters. */
 export namespace bioseq::pg_types::sql_routines {
 
-/// Create a source-backed DNA4 sequence with a requested logical length.
+/// Create a test sequence of the requested length whose letters are all DNA4 A.
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq_internal">,
     .volatility = bioseq::sql::volatility::immutable,
@@ -188,7 +188,7 @@ Datum synthetic_lazy_sequence(std::int64_t requested) {
       type, 0u);
 }
 
-/// Run flat-size and allocation-limit guardrail contracts.
+/// Test flat sequence sizes and allocation limits.
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq_internal">,
 })]]
@@ -200,7 +200,7 @@ bool materialization_size_self_test() {
   return run_materialization_size_guardrail_matrix();
 }
 
-/// Return the number of persistent tree pieces represented by a sequence.
+/// Count the leaf pieces in a sequence's tree.
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq_internal">,
     .volatility = bioseq::sql::volatility::immutable,
@@ -221,10 +221,10 @@ std::int64_t sequence_piece_count(
       : 0;
 }
 
-/* Direct PostgreSQL ownership-protocol seam: RW datumTransfer reparents the
- * EOH, while RO datumCopy produces an independent flat value.  Both must
- * survive reset/deletion of the context that originally owned the EOH. */
-/// Exercise writable transfer and read-only copy ownership across context resets.
+/* datumTransfer moves a writable expanded value to the destination memory
+ * context. datumCopy copies a read-only value into independent flat storage.
+ * Both results must survive a reset of their original memory context. */
+/// Test that transferred and copied sequences survive resets of their original contexts.
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq_internal">,
 })]]

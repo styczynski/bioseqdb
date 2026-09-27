@@ -1,6 +1,6 @@
 /**
  * @file materialization_contract.cppm
- * @brief Declares compact-sequence materialization categories shared across subsystems.
+ * Name the output formats and reasons recorded when sequence contents are copied.
  */
 module;
 
@@ -8,7 +8,7 @@ module;
 
 export module bioseq.postgres.types.compact_sequence.materialization_contract;
 
-/// Mechanism that produced one compact-sequence materialization.
+/// Kind of sequence data produced by a copy or conversion.
 export enum class materialization_mechanism : std::uint8_t {
     backing_copy = 0u,
     packed_full,
@@ -18,7 +18,7 @@ export enum class materialization_mechanism : std::uint8_t {
     letter_array,
 };
 
-/// Consumer boundary that required a compact-sequence materialization.
+/// Operation that needed sequence contents in an allocated buffer.
 export enum class materialization_reason : std::uint8_t {
     executor_copy = 0u,
     heap_tuple,
