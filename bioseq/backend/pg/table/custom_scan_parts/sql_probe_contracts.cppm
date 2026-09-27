@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Declares SQL-visible custom-scan diagnostic probes.
+ * @brief Declares SQL tests of custom-scan planning and match-helper binding.
  */
 export module bioseq.postgres.table:custom_scan_sql_probe_contracts;
 
@@ -19,7 +19,7 @@ export namespace bioseq::table::sql_routines {
     .privileges = bioseq::sql::privileges::all,
     .from = bioseq::sql::public_role,
 })]]
-/** @brief Reports BatchJoin base ProjectionPath eligibility and wrapper-cost ownership decisions. */
+/** @brief Test which base projections BatchJoin accepts and which path supplies their costs. */
 bioseq::postgres::support::named_output<bioseq::table::batch_join_projection_guard_probe_row>
     batch_join_projection_guard_probe();
 
@@ -32,8 +32,13 @@ bioseq::postgres::support::named_output<bioseq::table::batch_join_projection_gua
     .privileges = bioseq::sql::privileges::all,
     .from = bioseq::sql::public_role,
 })]]
-/** @brief Reports match-helper ownership and copy-on-write propagation through Projection,
-   Material, Memoize, Unique, and Append paths. */
+/**
+ * @brief Test match-helper propagation through copied planner paths.
+ *
+ * Checks Projection, Material, Memoize, Unique, and Append wrappers, including
+ * unchanged originals and siblings. Also checks rejection of duplicate owners,
+ * unknown wrappers, and hidden mmsearch filters.
+ */
 bioseq::postgres::support::named_output<bioseq::table::match_helper_wrapper_propagation_probe_row>
     match_helper_wrapper_propagation_probe();
 
@@ -46,8 +51,7 @@ bioseq::postgres::support::named_output<bioseq::table::match_helper_wrapper_prop
     .privileges = bioseq::sql::privileges::all,
     .from = bioseq::sql::public_role,
 })]]
-/** @brief Reports whether carrier translation accepts exact setrefs offsets and slots and rejects
-   attribute, alias, slot, or range mismatches. */
+/** @brief Test match-helper binding after setrefs changes table numbers and tuple-slot references. */
 bioseq::postgres::support::named_output<bioseq::table::base_match_executor_translation_probe_row>
     base_match_executor_translation_probe();
 
@@ -60,8 +64,11 @@ bioseq::postgres::support::named_output<bioseq::table::base_match_executor_trans
     .privileges = bioseq::sql::privileges::all,
     .from = bioseq::sql::public_role,
 })]]
-/** @brief Returns and optionally resets counters for match-owner finalization scopes across
-   PostgreSQL errors. */
+/**
+ * @brief Read match-owner finalization scope counters, optionally resetting them first.
+ *
+ * Test builds use these counters to check cleanup after PostgreSQL errors.
+ */
 bioseq::postgres::support::named_output<
     bioseq::table::match_owner_finalization_scope_diagnostics_row>
     match_owner_finalization_scope_diagnostics(bool reset);

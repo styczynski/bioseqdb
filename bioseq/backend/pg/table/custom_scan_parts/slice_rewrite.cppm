@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Aggregates SliceProject path cloning, owner admission, and upper-path rewrite.
+ * @brief Exports the planner code that places SliceProject and tags its sequence sources.
  */
 export module bioseq.postgres.table:custom_scan_slice_rewrite;
 

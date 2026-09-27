@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Installs SliceProject ownership at upper-planner stages.
+ * @brief Adds SliceProject paths during upper query planning.
  */
 module;
 #include <bioseq/pg_compat.h>
@@ -39,7 +39,7 @@ import :custom_scan_slice_rewrite_aggregate_rewrite;
 using namespace bioseq::postgres::support;
 
 export {
-    /* Install SliceProject ownership at the relevant upper-planner stages. */
+    /* Add lazy sequence projections at supported upper planner stages. */
     void bioseq_slice_project_create_upper_paths(PlannerInfo* root,
                                                  UpperRelationKind stage,
                                                  RelOptInfo* input_rel,
@@ -57,21 +57,10 @@ export {
         if (!(stage == UPPERREL_WINDOW || stage == UPPERREL_DISTINCT || stage == UPPERREL_ORDERED ||
               stage == UPPERREL_FINAL))
             return;
-        /*
-         * PostgreSQL can defer the final SELECT projection until after the
-         * UPPERREL_FINAL hook has run.  In that shape output_rel->reltarget still
-         * describes the pass-through input (and a later core ProjectionPath becomes
-         * the visible Result), while grouping_planner has already published the
-         * stage's authoritative projection in root->upper_targets.  Discovering
-         * recipes only in output_rel->reltarget therefore misses the common
-         *
-         *     Result (slice expression)
-         *       -> BioseqScan (raw sequence Var)
-         *
-         * plan.  Build the owner against the same stage target core will apply
-         * after this hook.  Falling back to the relation target preserves stages
-         * for which core has no separate upper target.
-         */
+        /* PostgreSQL can add the final SELECT projection after this hook. At that
+         * point reltarget still describes the child values, while upper_targets
+         * already contains expressions such as seq[1:10]. Use that stage target to
+         * find the sequence work, falling back to reltarget when it is absent. */
         PathTarget* projection_target = root->upper_targets[stage];
         if (projection_target == nullptr) {
             projection_target = output_rel->reltarget;
@@ -109,18 +98,10 @@ export {
         List* required = NIL;
         constexpr int pull_flags =
             PVC_RECURSE_AGGREGATES | PVC_RECURSE_WINDOWFUNCS | PVC_RECURSE_PLACEHOLDERS;
-        /* Only the owned recipe graph needs raw child inputs.  Ordinary projection
-         * expressions are already represented by the chosen child's PathTarget and
-         * must remain atomic here.  In particular, a raw BatchJoin output contract
-         * publishes each match_result helper as one exact output identity;
-         * descending through bioseq.query_start(t.pk) would synthesize a new t.pk
-         * requirement above the owner even though that raw Var is intentionally
-         * absent from its public target.  Core setrefs would then fail while binding
-         * the intermediate ProjectionPath.  The IR expression list contains every
-         * lazy producer,
-         * source, concat operand, and bound expression, so pulling from it retains
-         * the complete SliceProject dependency closure without opening non-lazy
-         * helper identities. */
+        /* Pull raw input columns from the sequence expression graph. Keep other
+         * child outputs intact. For example, BatchJoin publishes query_start(t.pk)
+         * as a complete helper value. Pulling t.pk out of that helper would request
+         * a column the child may omit and cause setrefs to fail. */
         for (Node* expression : postgres_list<Node>(builder.expressions)) {
             required = list_concat(required, pull_var_clause(expression, pull_flags));
         }
@@ -130,10 +111,9 @@ export {
         if (slice_project_is_bioseq_scan_path(child)) {
             child = slice_project_tag_source_child(child, child_target, builder);
         } else {
-            /* A join/upper child is immutable and may be shared by many candidates.
-             * Deep-copy supported core path shapes and tag every BioseqScan source
-             * below them before installing hidden leaf outputs through core's
-             * projection constructor.  The final target remains wrapper-only. */
+            /* Planner alternatives can share this child. Copy the supported path
+             * containers before tagging BioseqScan sources, then add the child
+             * projection needed by SliceProject. */
             bool tagged_source = false;
             Path* private_child = slice_project_clone_mutable_path_spine(child);
             private_child =
@@ -180,11 +160,10 @@ export {
         path->custom_restrictinfo = NIL;
         path->methods = &bioseq_slice_project_path_methods();
 
-        /* The core ProjectionPath remains fractionally cheaper because PostgreSQL's
-         * generic cost model cannot represent avoided full-sequence hydration.  Do
-         * not falsify either cost.  Once a complete source-tagged wrapper exists,
-         * remove the incompatible unowned alternatives so selection is structural.
-         * Every early/fallback return above leaves the original lists untouched. */
+        /* PostgreSQL costs the ordinary projection without accounting for the
+         * sequence data that lazy access avoids reading. After building a complete
+         * tagged SliceProject, replace the alternatives with it and keep the
+         * calculated costs. Earlier returns leave the original paths available. */
         output_rel->pathlist = NIL;
         output_rel->partial_pathlist = NIL;
         output_rel->cheapest_startup_path = nullptr;
@@ -197,4 +176,4 @@ export {
         set_cheapest(output_rel);
     }
 
-} // export custom-scan partition declarations
+} // export
