@@ -1,6 +1,6 @@
 /**
  * @file catalog.cppm
- * @brief Exported sequence-source catalog facade.
+ * @brief Export catalog operations for sequence versions and index generations.
  */
 export module bioseq.postgres.storage.manager:sequence_storage_catalog;
 
