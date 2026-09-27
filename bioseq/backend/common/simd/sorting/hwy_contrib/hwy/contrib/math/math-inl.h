@@ -1718,9 +1718,9 @@ HWY_INLINE V Hypot(const D d, V a, V b) {
   // this increase, or scale down, so the sum of squares stays finite whenever
   // the final hypotenuse is representable.
 
-  
 
-  
+
+
 
   const VI scl_pow2 = BitCast(
       di,

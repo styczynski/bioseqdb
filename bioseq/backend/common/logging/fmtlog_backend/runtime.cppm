@@ -263,7 +263,7 @@ template <int ___ = 0> class fmtlogDetailT {
 
     /** Registered format metadata for one log site. */
     struct StaticLogInfo {
-        
+
         /** Captures formatter, source location, level, and format string for a log site. */
         constexpr StaticLogInfo(fmtlog::FormatToFn fn,
                                 const char* loc,

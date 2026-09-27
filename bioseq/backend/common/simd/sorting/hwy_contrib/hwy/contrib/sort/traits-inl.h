@@ -415,7 +415,7 @@ struct KeyValue64 : public KeyLane<uint64_t, hwy::K32V32> {
   // Check differences in the upper 32-bit key field.
   template <class D>
   HWY_INLINE bool NoKeyDifference(D /*tag*/, Vec<D> diff) const {
-    
+
     const RebindToUnsigned<D> du;
     const Vec<decltype(du)> zero = Zero(du);
     const Vec<decltype(du)> keys = ShiftRight<32>(diff);  // clear values

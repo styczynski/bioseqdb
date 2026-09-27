@@ -260,15 +260,15 @@ template <int __ = 0> class fmtlogT {
     /** @brief Severity filter for queued records and flush policy. */
     enum LogLevel : uint8_t { DBG = 0, INF, WRN, ERR, OFF };
 
-    
+
     /** @brief Allocates the calling thread's queue buffer before the first log call. */
     static void preallocate() noexcept;
 
-    
+
     /** @brief Opens a log file, appending by default or truncating when requested. */
     static void setLogFile(const char* filename, bool truncate = false);
 
-    
+
     /**
      * @brief Writes logs to an existing FILE handle.
      *
@@ -277,7 +277,7 @@ template <int __ = 0> class fmtlogT {
      */
     static void setLogFile(FILE* fp, bool manageFp = false);
 
-    
+
     /**
      * @brief Drains thread queues and writes formatted records.
      *
@@ -286,19 +286,19 @@ template <int __ = 0> class fmtlogT {
      */
     static void poll(bool forceFlush = false);
 
-    
+
     /** @brief Sets the delay before a later poll flushes buffered output, in nanoseconds. */
     static void setFlushDelay(int64_t ns) noexcept;
 
-    
+
     /** @brief Flushes when a record at or above @p flushLogLevel is written. */
     static void flushOn(LogLevel flushLogLevel) noexcept;
 
-    
+
     /** @brief Flushes when the output buffer reaches at least bytes. */
     static void setFlushBufSize(uint32_t bytes) noexcept;
 
-    
+
     /**
      * @brief Receives a formatted record whose severity passes the callback filter.
      * @param ns Timestamp in nanoseconds since the epoch.
@@ -319,7 +319,7 @@ template <int __ = 0> class fmtlogT {
                             size_t bodyPos,
                             size_t logFilePos);
 
-    
+
     /** @brief Registers @p cb for records at or above @p minCBLogLevel. */
     static void setLogCB(LogCBFn cb, LogLevel minCBLogLevel) noexcept;
 
@@ -328,31 +328,31 @@ template <int __ = 0> class fmtlogT {
     /** @brief Registers the queue-full callback and opaque @p userData passed to it. */
     static void setLogQFullCB(LogQFullCBFn cb, void* userData) noexcept;
 
-    
+
     /** @brief Closes the log file. Callbacks still receive subsequent records. */
     static void closeLogFile() noexcept;
 
-    
+
     /** @brief Sets the fmt pattern for the line header written before each body. */
     static void setHeaderPattern(const char* pattern);
 
-    
+
     /** @brief Sets the calling thread's label for the {t} header field. */
     static void setThreadName(const char* name) noexcept;
 
-    
+
     /** @brief Sets the minimum level accepted by @ref checkLogLevel. */
     static inline void setLogLevel(LogLevel logLevel) noexcept;
 
-    
+
     /** @brief Returns the active minimum log level. */
     static inline LogLevel getLogLevel() noexcept;
 
-    
+
     /** @brief Checks the level filter, or returns true if FMTLOG_NO_CHECK_LEVEL is set. */
     static inline bool checkLogLevel(LogLevel logLevel) noexcept;
 
-    
+
     /**
      * @brief Starts a thread that polls at the requested nanosecond interval.
      *
@@ -360,7 +360,7 @@ template <int __ = 0> class fmtlogT {
      */
     static void startPollingThread(int64_t pollInterval = 1000000000) noexcept;
 
-    
+
     /** @brief Stops the background polling thread started by @ref startPollingThread. */
     static void stopPollingThread() noexcept;
 

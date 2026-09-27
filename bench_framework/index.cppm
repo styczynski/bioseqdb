@@ -5666,7 +5666,7 @@ split_iterations(std::size_t iterations, std::size_t groups) {
         case metric_kind::region_total_branches:     return static_cast<double>(region_agg.total_branches);
         case metric_kind::region_total_branch_misses: return static_cast<double>(region_agg.total_branch_misses);
         default: return 0.0;     // Ratios and loop metrics are handled separately.
-                                  
+
     }
 }
 
