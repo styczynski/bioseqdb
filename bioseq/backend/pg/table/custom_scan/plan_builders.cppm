@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Aggregates base-scan and join planner-to-executor plan construction.
+ * @brief Build executor plans for Bioseq table scans and sequence joins.
  */
 export module bioseq.postgres.table:custom_scan_plan_builders;
 

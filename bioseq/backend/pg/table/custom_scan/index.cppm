@@ -1,10 +1,10 @@
 /**
  * @file
- * @brief SQL entry points and initialization for Bioseq planner and executor scans.
+ * @brief SQL test probes for match-helper planning and plan translation.
  */
 module;
-// Anchor Highway in this global module fragment so target-specific definitions
-// imported through multiple module graphs share one translation-unit context.
+// Include Highway here so modules importing its target-specific types
+// share the same translation-unit definitions.
 #include <bioseq/pg_compat.h>
 #include <hwy/highway.h>
 
@@ -196,10 +196,9 @@ bioseq::postgres::support::named_output<bioseq::table::match_helper_wrapper_prop
     auto* join_rel = match_helper_wrapper_probe_rel(
         RELOPT_JOINREL, 0, bms_union(bms_make_singleton(1), bms_make_singleton(2)));
 
-    /* Use an actual registered match-result helper as the propagated identity.
-     * The NULL sequence recipe keeps the standalone cost probe independent of
-     * a synthetic range table while retaining the exact bioseq.seq type/equality
-     * contract checked by per_row_known_path_owner_recipe(). */
+    /* Use the registered query_len helper with a null sequence argument.
+     * Its type and expression identity are valid without constructing a range
+     * table for this cost-propagation test. */
     Node* recipe = reinterpret_cast<Node*>(makeNullConst(oids.bioseq_seq_type_oid, -1, InvalidOid));
     auto* helper = makeFuncExpr(oids.query_len_oid,
                                 get_func_rettype(oids.query_len_oid),
@@ -354,8 +353,8 @@ bioseq::postgres::support::named_output<bioseq::table::match_helper_wrapper_prop
                                    cloned_sibling->pathtarget == sibling_target &&
                                    !helper_available(cloned_sibling);
 
-    /* Equal recipes owned by two distinct nodes are ambiguous; an unknown
-     * CustomPath is an opaque evaluation frontier.  Both must fail closed. */
+    /* Reject a helper with two matching owners. Also reject an unknown
+     * CustomPath, whose evaluation behavior this analysis cannot inspect. */
     auto* second_owner = makeNode(CustomPath);
     *second_owner = *owner;
     second_owner->path.pathtarget = create_empty_pathtarget();
@@ -383,10 +382,9 @@ bioseq::postgres::support::named_output<bioseq::table::match_helper_wrapper_prop
                                           unknown_ownership.unsupported_wrapper &&
                                           !unknown_ownership.invalid_owner_abi;
 
-    /* GroupResultPath has no child, but it owns executable bare quals outside
-     * PathTarget and ParamPathInfo.  Put one hidden mmsearch beside an otherwise
-     * exact parameterized BioseqScan owner and invoke the production closed-world
-     * audit: the GroupResult qual must invalidate the unique-owner result. */
+    /* GroupResultPath stores executable conditions outside its output list.
+     * Add a second mmsearch there to check that the analysis finds it and
+     * rejects the claim that one BioseqScan owns all matching work. */
     auto* bmo_target = makeVar(
         /*varno=*/1,
         /*varattno=*/1,
