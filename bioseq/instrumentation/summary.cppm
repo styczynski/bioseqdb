@@ -1,9 +1,6 @@
 /**
  * @file instrumentation/summary.cppm
- * @brief Percentile estimation, metric summaries, and reset operations.
- *
- * Templated operations consume explicit profiler state. Convenience entry
- * points use the persistent production state.
+ * @brief Estimate duration percentiles, print measurements, and reset profiler state.
  */
 module;
 
@@ -25,7 +22,7 @@ import bioseq.instrumentation.profiler_state;
 
 namespace bioseq::instrumentation::summary::detail {
 
-/** @brief Arena values in the stable summary-output order, including the sentinel. */
+/** @brief Printed order of memory categories, starting with none. */
 inline constexpr std::array k_arena_kinds{
     arena_kind::none,
     arena_kind::scratch,
@@ -37,10 +34,9 @@ inline constexpr std::array k_arena_kinds{
 static_assert(k_arena_kinds.size() == arena_kind_count);
 
 /**
- * @brief Map an arena enum to its stable summary field value.
- *
- * @param[in] kind Arena category to render.
- * @return Static string used by the stable summary format.
+ * @brief Return the name printed for a memory category.
+ * @param[in] kind Memory category.
+ * @return Category name, or ? for none and unknown values.
  */
 [[nodiscard]] constexpr const char* arena_kind_name(arena_kind kind) noexcept {
     switch (kind) {
@@ -62,15 +58,14 @@ static_assert(k_arena_kinds.size() == arena_kind_count);
 }
 
 /**
- * @brief Estimate a percentile from a saturated 32-bucket base-two histogram.
+ * @brief Estimate a percentile from duration buckets.
  *
- * The result is the upper bound of the first bucket whose cumulative count
- * reaches the requested fraction. This intentionally preserves the coarse,
- * order-of-magnitude estimate used by summary logging.
+ * Use the first bucket that reaches the requested fraction. Its normal upper
+ * bound is the estimate, even for the final bucket that also holds larger values.
  *
- * @param[in] histogram Nanosecond-duration histogram to inspect.
- * @param[in] percentile Requested fraction, clamped to `[0, 1]`.
- * @return Inclusive upper bound of the selected bucket, or zero when empty.
+ * @param[in] histogram Duration counts in nanoseconds.
+ * @param[in] percentile Requested fraction, clamped to [0, 1].
+ * @return Bucket estimate, or zero for an empty histogram.
  */
 [[nodiscard]] inline std::uint64_t estimate_percentile(const duration_histogram& histogram,
                                                        double percentile) noexcept {
@@ -91,9 +86,8 @@ static_assert(k_arena_kinds.size() == arena_kind_count);
     for (std::size_t bucket_index = 0; bucket_index < bucket_count; ++bucket_index) {
         cumulative_count += histogram.buckets[bucket_index];
         if (cumulative_count >= required_count) {
-            // Bucket i covers values with floor(log2(v)) == i, so the
-            // upper bound is 2^(i+1) - 1. Guard against undefined
-            // 1<<63 by clamping the last bucket.
+            // Use the normal upper bound of this bucket. The final bucket may
+            // also contain larger durations. Check the shift width before shifting.
             if (bucket_index + 1 >= 64) {
                 return std::numeric_limits<std::uint64_t>::max();
             }
@@ -108,15 +102,14 @@ static_assert(k_arena_kinds.size() == arena_kind_count);
 export namespace bioseq::instrumentation::summary {
 
 /**
- * @brief Estimate a percentile from a 32-bucket base-two duration histogram.
+ * @brief Estimate a duration percentile from the histogram.
  *
- * The estimate returns a bucket upper bound and can overshoot the bucket
- * midpoint by up to a factor of two. It is intended for order-of-magnitude
- * latency summaries rather than fine-grained percentile analysis.
+ * The result is approximate because each bucket covers a range of durations.
+ * The final bucket returns 2^32 - 1 nanoseconds even when it contains longer visits.
  *
- * @param[in] histogram Nanosecond-duration histogram to inspect.
- * @param[in] percentile Requested fraction, clamped to `[0, 1]`.
- * @return Inclusive upper bound of the selected bucket, or zero when empty.
+ * @param[in] histogram Duration counts in nanoseconds.
+ * @param[in] percentile Requested fraction, clamped to [0, 1].
+ * @return Bucket estimate, or zero for an empty histogram.
  */
 [[nodiscard]] inline std::uint64_t estimate_percentile(const duration_histogram& histogram,
                                                        double percentile) noexcept {
@@ -124,14 +117,14 @@ export namespace bioseq::instrumentation::summary {
 }
 
 /**
- * @brief Write every visited region, loop, and tracked arena to the debug log.
+ * @brief Write recorded region, loop, and memory-category measurements to the debug log.
  *
- * Descriptor order, field names, units, and formatting are stable: durations
- * are nanoseconds, PMU fields are raw deltas, and loop rows precede region rows
- * for the same descriptor. Disabled configurations compile to a no-op.
+ * Durations use nanoseconds. Hardware counters report raw changes.
+ * For a descriptor with loop measurements, print that row and skip its region row.
+ * Disabled profiling produces no output.
  *
- * @tparam p_configuration_type Compile-time instrumentation feature policy.
- * @param[in] profiler Quiescent profiler state to summarize without resetting.
+ * @tparam p_configuration_type Profiling configuration.
+ * @param[in] profiler State to read after all writers have stopped updating it.
  */
 template <profiling_configuration p_configuration_type>
 void write_summary_to_log(profiler_state<p_configuration_type>& profiler) noexcept {
@@ -149,9 +142,7 @@ void write_summary_to_log(profiler_state<p_configuration_type>& profiler) noexce
                 continue;
             }
 
-            // Loop aggregate first (loops also populate the region table
-            // via the base aggregate fields, but the loop record is the
-            // richer one to print).
+            // Prefer the loop row because it also includes iteration and work counts.
             if (auto* const loop_metrics = profiler.loop_aggregates.find(descriptor_id);
                 loop_metrics != nullptr && loop_metrics->visits > 0) {
                 const auto mean_ns = loop_metrics->total_ns / loop_metrics->visits;
@@ -236,10 +227,9 @@ void write_summary_to_log(profiler_state<p_configuration_type>& profiler) noexce
 }
 
 /**
- * @brief Reset all descriptor and arena aggregates in a profiler block.
- *
- * @tparam p_configuration_type Compile-time instrumentation feature policy.
- * @param[in,out] profiler Profiler state whose recorded measurements are discarded.
+ * @brief Clear recorded region, loop, and memory-category measurements.
+ * @tparam p_configuration_type Profiling configuration.
+ * @param[in,out] profiler State to reset after its writers stop updating it.
  */
 template <profiling_configuration p_configuration_type>
 void reset_metrics(profiler_state<p_configuration_type>& profiler) noexcept {

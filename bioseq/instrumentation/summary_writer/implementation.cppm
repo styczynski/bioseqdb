@@ -1,6 +1,6 @@
 /**
  * @file instrumentation/summary_writer/implementation.cppm
- * @brief Cold-path one-shot summary dump implementation.
+ * @brief Print and reset measurements in the shared production profiler.
  */
 module;
 
@@ -13,7 +13,7 @@ import bioseq.instrumentation.profiler_state;
 
 namespace bioseq::instrumentation::summary {
 
-/** @brief Route the production profiler state through the templated summary writer. */
+/** @brief Print measurements from the shared production profiler. */
 void write_summary_to_log() noexcept {
     using production_configuration_type =
         bioseq::instrumentation::production_profiling_configuration;

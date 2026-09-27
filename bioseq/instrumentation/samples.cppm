@@ -1,8 +1,8 @@
 /**
  * @file instrumentation/samples.cppm
- * @brief Signal-producer sample layout and per-thread ring.
+ * @brief Sample records and a ring buffer with storage allocated in advance.
  *
- * The fixed record layout supports signal-side capture without allocation.
+ * Pushing a sample copies it into existing storage or counts it as dropped.
  */
 module;
 
@@ -16,7 +16,7 @@ import bioseq.instrumentation.configuration;
 
 export namespace bioseq::instrumentation {
 
-/** @brief Fixed-layout sample captured without signal-side allocation. */
+/** @brief Timing, program location, and counters captured in one sample. */
 struct alignas(64) sample_record {
     std::uint64_t timestamp_ns = 0;
     std::uint64_t cycles = 0;
@@ -31,10 +31,7 @@ struct alignas(64) sample_record {
     std::uint16_t active_region_id = 0;
     std::uint32_t reserved = 0;
 };
-// Two cache lines on 64-bit platforms. The second line stays cold during
-// region-only profiling and is touched only when the sampler service is
-// activated. Keeping it 128 B (instead of squeezing to 64) avoids losing
-// signal-side fields and prevents alignment surprises.
+// Keep the sample layout at 128 bytes with 64-byte alignment.
 static_assert(sizeof(sample_record) == 128);
 static_assert(alignof(sample_record) == 64);
 
