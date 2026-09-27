@@ -39,7 +39,7 @@ import bioseq.indexing.minimizer_sequence;
 import bioseq.indexing.symbol_counts;
 import bioseq.parallelism.memory_admission;
 import bioseq.indexing.registry;
-import bioseq.common.hashing; 
+import bioseq.common.hashing;
 
 import bioseq.tests.support.indexing_storage_fakes;
 
