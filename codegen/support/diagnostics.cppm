@@ -23,7 +23,7 @@ enum class diagnostic_operation : std::uint8_t {
     database_isolation,
 };
 
-/// @brief Source range associated with generated-code diagnostics.
+/// @brief Source range associated with a generator message.
 struct source_span {
     std::filesystem::path path;
     std::size_t first_line{};
@@ -32,7 +32,7 @@ struct source_span {
     std::size_t last_column{};
 };
 
-/// @brief Typed diagnostic emitted by a code-generation operation.
+/// @brief Generator message with its severity and optional source location.
 struct diagnostic {
     diagnostic_severity severity{};
     diagnostic_operation operation{};

@@ -11,7 +11,7 @@ export module bioseq.codegen.support:source_text;
 
 export namespace bioseq::codegen {
 
-/// @brief Removes surrounding ASCII whitespace.
+/// @brief Removes surrounding spaces, tabs, and line breaks.
 /// @param value Text to trim.
 /// @return Trimmed copy.
 [[nodiscard]] std::string trim_ascii_whitespace(std::string_view value) {
@@ -23,7 +23,7 @@ export namespace bioseq::codegen {
     return std::string(value.substr(first, last - first + 1));
 }
 
-/// @brief Locates a Bioseq attribute while allowing whitespace after `[[`.
+/// @brief Finds a bioseq:: attribute, allowing spaces or tabs after [[.
 /// @param line Source line to inspect.
 /// @return Attribute offset or `std::string_view::npos`.
 [[nodiscard]] std::size_t find_bioseq_attribute(std::string_view line) noexcept {
@@ -42,9 +42,12 @@ export namespace bioseq::codegen {
     return std::string_view::npos;
 }
 
-/// @brief Prepares module source for parsing as a Clang translation unit.
+/// @brief Adapts module source for the external-annotation Clang parser.
+///
+/// Removes module/import lines, moves Bioseq struct attributes into their
+/// accepted position, and keeps raw-string contents intact.
 /// @param source Original module source.
-/// @return Normalized translation-unit text.
+/// @return Source text for the parser.
 [[nodiscard]] std::string prepare_clang_translation_unit(
     std::string_view source) {
     std::istringstream lines{std::string(source)};
@@ -114,7 +117,7 @@ export namespace bioseq::codegen {
     return result.str();
 }
 
-/// @brief Decodes the payload of a C++ raw string initializer.
+/// @brief Extracts the contents of a C++ raw string initializer.
 /// @param expression Raw string expression spelling.
 /// @return Text between the raw delimiters.
 [[nodiscard]] std::string decode_cpp_raw_string(std::string_view expression) {
@@ -135,9 +138,9 @@ export namespace bioseq::codegen {
     return std::string(expression.substr(delimiter_end + 1, content_end - delimiter_end - 1));
 }
 
-/// @brief Sanitizes arbitrary text into a C++ identifier.
-/// @param value Text to sanitize.
-/// @return Identifier-safe spelling.
+/// @brief Replaces characters that cannot appear in a generated C++ identifier.
+/// @param value Text to convert.
+/// @return Letters, digits, and underscores, with a leading underscore if needed.
 [[nodiscard]] std::string make_cpp_identifier(std::string_view value) {
     std::string result;
     result.reserve(value.size() + 1);
