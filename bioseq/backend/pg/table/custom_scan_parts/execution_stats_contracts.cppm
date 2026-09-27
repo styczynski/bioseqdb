@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Declares shared EXPLAIN statistics rendering without PostgreSQL header fanout.
+ * @brief Shared alignment statistics for EXPLAIN output.
  */
 module;
 struct ExplainState;
@@ -13,7 +13,7 @@ import bioseq.pipeline.query_sketch_plan_contract;
 import bioseq.pipeline.runtime_contract;
 import bioseq.pipeline.stats;
 
-/** @brief Render pipeline counters and selected alignment policy for EXPLAIN ANALYZE. */
+/** Show alignment settings, timing, and work counters in EXPLAIN ANALYZE. */
 export void explain_pipeline_execution_stats(
     const bioseq::pipeline_stats::pipeline_execution_stats& stats,
     ExplainState* es,

@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Declares the exact mmsearch alphabet-mismatch diagnostic boundary.
+ * @brief Error reporting for mmsearch operands with different alphabets.
  */
 export module bioseq.postgres.table:custom_scan_join_ownership_alphabet_mismatch_contracts;
 
