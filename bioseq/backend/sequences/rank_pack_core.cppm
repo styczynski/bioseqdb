@@ -1,10 +1,9 @@
 /**
  * @file rank_pack_core.cppm
- * @brief Storage-neutral LSB-first rank-packing mechanics.
+ * @brief Shared packing steps that place the first rank in each word's low bits.
  *
- * Scalar encoders, SIMD streams, fixed-span writers, and sequence
- * materializers share these transitions so packing order and final padding
- * remain identical across storage policies.
+ * Encoders and sequence-copying paths supply their own word writer. These helpers
+ * keep rank order and final padding consistent across those writers.
  */
 module;
 
@@ -20,7 +19,7 @@ module;
 
 export module bioseq.sequences.rank_pack_core;
 
-/** @brief Shared LSB-first rank-packing primitives for storage policies. */
+/** Packs ranks in sequence order and passes completed words to a caller-supplied writer. */
 export namespace bioseq::sequences::rank_pack_detail {
 
 /** @brief Unsigned integral counter accepted by the packing primitives. */
@@ -30,26 +29,23 @@ concept unsigned_rank_counter =
 
 /** @brief Result of flushing a final partial packed unit. */
 struct lsb_finish_result {
-    /** @brief Whether the output policy accepted the final unit. */
+    /** True when no final write was needed or the writer accepted it. */
     bool capacity_ok{true};
     /** @brief Empty logical-symbol slots in the final packed unit. */
     std::uint16_t padding_letters{};
 };
 
 /**
- * @brief Append one validated logical rank to an LSB-first packing state.
- * @tparam p_storage_unit Unsigned destination word type.
- * @tparam p_bits_per_character Logical rank width.
- * @tparam p_letters_per_unit Logical ranks stored in one destination word.
- * @tparam p_counter_type Unsigned emitted-symbol counter type.
- * @tparam p_rank_type Integral input-rank type.
- * @tparam p_write_unit_type Callable accepting one completed destination word.
- * @param partial_word In-progress destination word.
- * @param partial_letters Occupied rank slots in `partial_word`.
- * @param emitted_symbols Total accepted ranks, incremented on success.
- * @param rank Already-validated logical rank.
- * @param write_unit Storage-policy callback for completed words.
- * @return `true` when the rank was admitted and any required flush succeeded.
+ * @brief Adds one valid rank to the partial word and writes the word when full.
+ *
+ * The caller checks rank validity and counter capacity. A failed write leaves the
+ * full word and updated counters in place.
+ * @param partial_word Word being assembled.
+ * @param partial_letters Used symbol slots in that word.
+ * @param emitted_symbols Number of ranks added to the packing state.
+ * @param rank Valid alphabet rank.
+ * @param write_unit Accepts completed words and reports success.
+ * @return False if the state was already full or the writer rejected a word.
  */
 template <class p_storage_unit,
           std::size_t p_bits_per_character,
@@ -89,20 +85,18 @@ requires (std::unsigned_integral<p_storage_unit> && std::integral<p_rank_type>)
 }
 
 /**
- * @brief Merge prepacked ranks without scalar rank-by-rank decoding.
- * @tparam p_storage_unit Unsigned destination word type.
- * @tparam p_bits_per_character Logical rank width.
- * @tparam p_letters_per_unit Logical ranks stored in one destination word.
- * @tparam p_packed_type Unsigned type holding the incoming packed chunk.
- * @tparam p_counter_type Unsigned emitted-symbol counter type.
- * @tparam p_write_unit_type Callable accepting one completed destination word.
- * @param partial_word In-progress destination word.
- * @param partial_letters Occupied rank slots in `partial_word`.
- * @param emitted_symbols Total merged ranks, incremented on success.
- * @param packed_ranks LSB-first source ranks.
- * @param rank_count Valid ranks contained in `packed_ranks`.
- * @param write_unit Storage-policy callback for completed words.
- * @return `true` when all ranks were merged and every flush succeeded.
+ * @brief Adds several already-packed ranks to the current output word.
+ *
+ * Copies groups of low bits and writes each completed word. On writer failure,
+ * previous writes and the updated packing state remain. The caller ensures the
+ * symbol counter has room.
+ * @param partial_word Word being assembled.
+ * @param partial_letters Used symbol slots.
+ * @param emitted_symbols Number of ranks added to the packing state.
+ * @param packed_ranks Source ranks, first symbol in the low bits.
+ * @param rank_count Number of source ranks.
+ * @param write_unit Accepts completed words.
+ * @return False for invalid counts, an already-full state, or a rejected write.
  */
 template <class p_storage_unit,
           std::size_t p_bits_per_character,
@@ -166,15 +160,14 @@ requires (std::unsigned_integral<p_storage_unit>
 }
 
 /**
- * @brief Flush the final partial word and derive its empty-rank count.
- * @tparam p_storage_unit Unsigned destination word type.
- * @tparam p_bits_per_character Logical rank width.
- * @tparam p_letters_per_unit Logical ranks stored in one destination word.
- * @tparam p_write_unit_type Callable accepting the final destination word.
- * @param partial_word In-progress destination word, cleared after a flush.
- * @param partial_letters Occupied rank slots, cleared after a flush.
- * @param write_unit Storage-policy callback for the final word.
- * @return Capacity status and the number of padding rank slots.
+ * @brief Writes the final partial word and reports its unused symbol slots.
+ *
+ * An empty state needs no write. A successful write clears the state, while a
+ * rejected write leaves it unchanged.
+ * @param partial_word Word being assembled.
+ * @param partial_letters Used symbol slots.
+ * @param write_unit Accepts the final word.
+ * @return Write status and final padding. An already-full state is an error.
  */
 template <class p_storage_unit,
           std::size_t p_bits_per_character,

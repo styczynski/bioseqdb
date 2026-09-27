@@ -1,11 +1,11 @@
 /**
  * @file sneaky_snake.cppm
- * @brief Alphabet-generic SneakySnake edit-distance lower-bound prefilter.
+ * @brief SneakySnake edit-distance filtering over rank bytes.
  *
- * The primitive consumes already-normalized uint8 rank buffers.  Equal-length
- * jobs run the source SneakySnake maze walk. Unequal-length jobs use only the
- * always-safe length-difference lower bound.  The batch ABI intentionally
- * matches the Vulkan job/result layout.
+ * For equal lengths, follows the longest matching run among nearby diagonals,
+ * then charges an edit to pass the next mismatch. It repeats this within bounded
+ * sequence blocks and rejects once the accumulated lower bound exceeds the threshold.
+ * Unequal lengths use only the length difference.
  */
 module;
 
@@ -25,14 +25,14 @@ export import bioseq.prefilter.types;
 
 export namespace bioseq::prefilter {
 
-/// Production maze geometry shared by the CPU and Vulkan implementations.
+/// Default block width and escape limit shared by CPU and Vulkan SneakySnake.
 inline constexpr std::uint32_t k_sneaky_snake_default_submaze_width = 512u;
 inline constexpr std::uint32_t k_sneaky_snake_default_max_escape_segments = 512u;
 
 struct sneaky_snake_options {
     /// A zero value selects k_sneaky_snake_default_submaze_width.
     std::uint32_t submaze_width = k_sneaky_snake_default_submaze_width;
-    /// Zero keeps y equal to the effective submaze width (512 by default).
+    /// Zero allows as many mismatch escapes per block as the effective block width.
     std::uint32_t max_escape_segments = 0u;
 };
 
@@ -45,7 +45,7 @@ static_assert(offsetof(sneaky_snake_options, max_escape_segments) == 4u);
 
 namespace sneaky_snake_detail {
 
-/// Resolve the configured submaze width, including the public zero sentinel.
+/// Returns the configured block width, using the default when it is zero.
 [[nodiscard]] constexpr std::uint32_t effective_width(
     sneaky_snake_options options) noexcept
 {
@@ -54,7 +54,7 @@ namespace sneaky_snake_detail {
         : options.submaze_width;
 }
 
-/// Resolve the configured escape limit, including the width-derived default.
+/// Returns the configured escape limit, using the block width when it is zero.
 [[nodiscard]] constexpr std::uint32_t effective_escape_limit(
     sneaky_snake_options options,
     std::uint32_t width) noexcept
@@ -148,7 +148,7 @@ namespace sneaky_snake_detail {
     return run;
 }
 
-/** Scalar primitive policy for the target-neutral maze traversal. */
+/** Scalar rank comparisons and candidate scanning for the shared SneakySnake walk. */
 struct scalar_traversal final {
     [[nodiscard]] std::uint32_t diagonal_run(
         std::span<const std::uint8_t> query,
@@ -186,10 +186,10 @@ struct scalar_traversal final {
 };
 
 /**
- * Target-neutral SneakySnake maze control shared by scalar and generated
- * fixed-target Highway policies. The policy owns only the two rank-scan
- * primitives. Maze geometry, escape accounting, and result semantics have one
- * implementation in this facade.
+ * @brief Checks whether one shifted comparison improves the longest known match.
+ *
+ * Scalar and Highway implementations supply the rank-comparison function.
+ * @return True when this candidate matches through the end of the block.
  */
 template <class p_traversal_type>
 [[nodiscard]] inline bool improve_diagonal_candidate_with(
@@ -230,9 +230,8 @@ template <class p_traversal_type>
     }
 
     const std::uint32_t length = static_cast<std::uint32_t>(query.size());
-    // Freeze the current best as an exact candidate filter. Any diagonal that
-    // can improve the maximum must match at this offset. Scanning the clipped
-    // start window contiguously is therefore order-independent and exact.
+    // A longer match must agree at the position just beyond the current best
+    // run. Use that rank to skip candidate diagonals that cannot improve it.
     const std::uint32_t filter_offset = best;
     const std::uint8_t filter_rank =
         target[static_cast<std::size_t>(position) + filter_offset];
@@ -320,7 +319,7 @@ template <class p_traversal_type>
         lower_bound <= max_edits);
 }
 
-/// Evaluate one already-size-checked rank pair without repeating span limits.
+/// Filters rank spans whose lengths have already been checked to fit uint32_t.
 template <class p_traversal_type>
 [[nodiscard]] inline prefilter_result bounded_with(
     p_traversal_type& traversal,
@@ -357,10 +356,11 @@ template <class p_traversal_type>
 }
 
 /**
- * @brief Evaluate a checked rank-buffer batch with a target-specific callable.
+ * @brief Evaluates each valid rank-buffer job with the supplied backend.
  *
- * Slice validation and fail-open unsupported results are centralized here so
- * scalar and generated Highway backends cannot drift at the batch boundary.
+ * Out-of-bounds jobs remain candidates without reading their slices. Scalar and
+ * Highway batches share these bounds checks.
+ * @return Results in job order.
  */
 template <class p_evaluator_type>
 [[nodiscard]] inline std::vector<prefilter_result> evaluate_batch_with(
@@ -384,7 +384,7 @@ template <class p_evaluator_type>
 
 } // namespace sneaky_snake_detail
 
-/// Scalar single-job entry point over rank spans.
+/// Filters one rank pair on CPU. Lengths exceeding uint32_t are kept without evaluation.
 [[nodiscard]] inline prefilter_result sneaky_snake_scalar(
     std::span<const std::uint8_t> query,
     std::span<const std::uint8_t> target,
@@ -401,7 +401,7 @@ template <class p_evaluator_type>
         query, target, max_edits, options);
 }
 
-/// Scalar reference batch implementation over flat uint8 rank buffers.
+/// Filters a batch of rank-buffer slices using the scalar SneakySnake walk.
 [[nodiscard]] inline std::vector<prefilter_result> sneaky_snake_scalar_batch(
     const prefilter_batch_input& input,
     sneaky_snake_options options = {})

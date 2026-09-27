@@ -1,6 +1,6 @@
 /**
  * @file rank_pack.cppm
- * @brief Checked storage policies for LSB-first logical-rank packing.
+ * @brief Packs checked ranks into growable vectors or fixed buffers.
  */
 module;
 
@@ -29,23 +29,23 @@ enum class invalid_rank_policy : std::uint8_t {
     reject,
 };
 
-/** @brief Capacity model supplied by a packed-unit sink. */
+/** Chooses a growable vector or a fixed output buffer. */
 enum class pack_capacity_policy : std::uint8_t {
-    /** Grow an owned vector as completed units arrive. */
+    /** Append completed words to a growable vector. */
     grow_vector,
     /** Reject writes beyond a fixed borrowed span. */
     fixed_span,
 };
 
-/** @brief Terminal status of a checked rank-packing operation. */
+/** Status reported while packing ranks or finishing the output. */
 enum class rank_pack_status : std::uint8_t {
-    /** Every admitted rank and final unit was written successfully. */
+    /** Packing has encountered no error. */
     ok,
-    /** At least one rank was outside the selected alphabet. */
+    /** An invalid alphabet rank stopped packing under the reject policy. */
     invalid_rank,
     /** The fixed sink did not have room for another packed unit. */
     capacity_overflow,
-    /** Emitted-symbol count differed from the requested count. */
+    /** The symbol count overflowed or differed from the expected count. */
     length_mismatch,
     /** Written-unit count differed from the requested count. */
     unit_count_mismatch,
@@ -55,9 +55,9 @@ enum class rank_pack_status : std::uint8_t {
 struct rank_pack_result {
     /** @brief Terminal operation status. */
     rank_pack_status status{rank_pack_status::ok};
-    /** @brief Logical ranks admitted to packed storage. */
+    /** Ranks added to the packing state, including a word that failed to write. */
     std::uint64_t emitted_symbols{};
-    /** @brief Completed storage units written to the sink. */
+    /** Packed words accepted by the output writer, including a final partial word. */
     std::uint64_t written_units{};
     /** @brief Empty logical-rank slots in the final unit. */
     std::uint16_t padding_letters{};
@@ -69,15 +69,15 @@ struct rank_pack_result {
 };
 
 /**
- * @brief Packed-unit sink that appends to an owned vector.
- * @tparam p_unit_type Unsigned storage word selected by the sequence traits.
+ * @brief Appends packed words to a vector owned by the caller.
+ * @tparam p_unit_type Packed-word type.
  */
 template <class p_unit_type>
 class growing_rank_pack_unit_sink {
 public:
-    /** @brief Unsigned word type written by this sink. */
+    /** Packed-word type written by this sink. */
     using storage_unit = p_unit_type;
-    /** @brief Reports vector-growth capacity handling to template callers. */
+    /** Identifies this sink as a growable-vector writer. */
     static constexpr pack_capacity_policy capacity_policy =
         pack_capacity_policy::grow_vector;
 
@@ -107,15 +107,15 @@ private:
 };
 
 /**
- * @brief Packed-unit sink over a fixed borrowed span.
- * @tparam p_unit_type Unsigned storage word selected by the sequence traits.
+ * @brief Writes packed words into a fixed buffer owned by the caller.
+ * @tparam p_unit_type Packed-word type.
  */
 template <class p_unit_type>
 class fixed_rank_pack_unit_sink {
 public:
-    /** @brief Unsigned word type written by this sink. */
+    /** Packed-word type written by this sink. */
     using storage_unit = p_unit_type;
-    /** @brief Reports fixed-span capacity handling to template callers. */
+    /** Identifies this sink as a fixed-buffer writer. */
     static constexpr pack_capacity_policy capacity_policy =
         pack_capacity_policy::fixed_span;
 
@@ -147,11 +147,14 @@ private:
 };
 
 /**
- * @brief Stateful checked rank packer shared by materialization paths.
- * @tparam p_output_instance Compact-sequence instance defining packing traits.
- * @tparam p_invalid_policy Compile-time invalid-rank handling policy.
- * @tparam p_capacity_policy Compile-time sink capacity model.
- * @tparam p_unit_sink_type Sink receiving completed packed units.
+ * @brief Checks alphabet ranks while packing them into a selected output writer.
+ *
+ * Invalid ranks are dropped or reported according to the policy. Full words are
+ * written as they become available, and finish writes any partial final word.
+ * @tparam p_output_instance Sequence type supplying the packing settings.
+ * @tparam p_invalid_policy How to handle invalid ranks.
+ * @tparam p_capacity_policy Growable or fixed output capacity.
+ * @tparam p_unit_sink_type Writer for packed words.
  */
 template <class p_output_instance,
           invalid_rank_policy p_invalid_policy,
@@ -176,15 +179,15 @@ public:
     static_assert(traits::letters_per_unit
                   <= (std::numeric_limits<std::uint16_t>::max)());
 
-    /** @param sink Storage policy that receives completed packed units. */
+    /** @param sink Writer that receives completed packed words. */
     explicit checked_rank_pack_sink(p_unit_sink_type sink) noexcept(
             std::is_nothrow_move_constructible_v<p_unit_sink_type>)
         : sink_(std::move(sink)) {}
 
     /**
-     * @brief Validate and append one logical rank.
+     * @brief Checks one rank and adds it using the configured invalid-rank policy.
      * @param rank Alphabet rank to append.
-     * @return Current status after applying the configured invalid-rank policy.
+     * @return Current status. Calls after finish or an error leave the state unchanged.
      */
     [[nodiscard]] rank_pack_status append_rank(std::uint8_t rank) {
         if (status_ != rank_pack_status::ok || finished_) {
@@ -218,9 +221,9 @@ public:
     }
 
     /**
-     * @brief Append a contiguous range of logical ranks.
-     * @param ranks Borrowed rank bytes.
-     * @return First non-success status, or `rank_pack_status::ok`.
+     * @brief Appends rank bytes in order until an error occurs.
+     * @param ranks Input ranks.
+     * @return First error status, or ok. Invalid ranks may be skipped under the drop policy.
      */
     [[nodiscard]] rank_pack_status append_ranks(
             std::span<const std::uint8_t> ranks) {
@@ -234,10 +237,13 @@ public:
     }
 
     /**
-     * @brief Flush the partial word and validate optional expected counts.
-     * @param expected_symbols Optional exact emitted-rank count.
-     * @param expected_units Optional exact written-unit count.
-     * @return Stable terminal result. Repeated calls return the same value.
+     * @brief Finishes packing and checks any expected output counts.
+     *
+     * Writes the partial final word if no earlier error occurred. Stores the result
+     * so repeated calls return it unchanged, even with different expected counts.
+     * @param expected_symbols Optional required number of packed ranks.
+     * @param expected_units Optional required number of written words.
+     * @return Final status, counts, and padding.
      */
     [[nodiscard]] rank_pack_result finish(
             std::optional<std::uint64_t> expected_symbols = std::nullopt,
