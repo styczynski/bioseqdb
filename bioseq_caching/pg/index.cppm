@@ -1,12 +1,6 @@
-/*-------------------------------------------------------------------------
- *
- * Thin primary interface for the bioseq_cache PostgreSQL adapter.
- *
- * Runtime behavior and its typed SQL backend surfaces are owned by the
- * dedicated runtime module. This primary only composes that module with the
- * PostgreSQL extension entry point.
- *
- *-------------------------------------------------------------------------
+/**
+ * @file
+ * @brief Exports the cache runtime and calls its initializer when PostgreSQL loads the extension.
  */
 module;
 

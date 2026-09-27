@@ -1,8 +1,6 @@
-/*-------------------------------------------------------------------------
- *
- * Exact-result planner/executor dependency evidence.
- *
- *-------------------------------------------------------------------------
+/**
+ * @file
+ * @brief Checks which providers observe writes to relations used by an exact-result plan.
  */
 module;
 
@@ -23,7 +21,7 @@ import bioseq.cache.pg.provider;
 
 export namespace bioseq::cache::pg::planner {
 
-/** Provider-completeness evidence associated with one relation dependency. */
+/** Reports whether a relation is used and which provider claims complete write tracking. */
 struct exact_dependency_evidence_result {
     bool references_relation = false;
     bool complete_provider = false;
@@ -35,8 +33,8 @@ struct exact_dependency_evidence_result {
 namespace detail {
 
 /**
- * Bounded recursive plan walker which associates a complete provider wrapper
- * with every relation in its subtree.
+ * Walks a plan up to the node limit to find providers covering the requested relation.
+ * A matching provider wrapper covers relation references in its child plans.
  */
 class exact_dependency_evidence_walker {
 public:
@@ -52,7 +50,7 @@ public:
           visited_(visited),
           maximum_nodes_(maximum_nodes) {}
 
-    /** Collect evidence for one plan subtree. */
+    /** Find relation references and provider matches in this subtree. */
     [[nodiscard]] exact_dependency_evidence_result collect(
             const Plan* plan) noexcept {
         exact_dependency_evidence_result result{};
@@ -140,7 +138,7 @@ public:
     }
 
 private:
-    /** Recognize a relation-bearing scan node without following its children. */
+    /** Check whether this scan reads the requested relation. */
     [[nodiscard]] bool scan_references_relation(
             const Plan* plan) const noexcept {
         bool scan_node = false;
@@ -183,7 +181,7 @@ private:
             && range->relid == relation_oid_;
     }
 
-    /** Merge one child result while rejecting conflicting provider ownership. */
+    /** Combine child evidence and mark conflicting provider identifiers as ambiguous. */
     static void merge(
             exact_dependency_evidence_result& result,
             const exact_dependency_evidence_result& child) noexcept {
@@ -205,7 +203,7 @@ private:
         result.provider_abi_revision = child.provider_abi_revision;
     }
 
-    /** Merge every plan in one PostgreSQL list. */
+    /** Collect and combine evidence from each plan in the list. */
     void collect_list(
             exact_dependency_evidence_result& result,
             const List* plans) noexcept {
@@ -226,7 +224,7 @@ private:
 
 } // namespace detail
 
-/** Collect bounded provider/write evidence for one relation dependency. */
+/** Find write-tracking evidence for one relation, using the shared plan-node budget. */
 [[nodiscard]] inline exact_dependency_evidence_result exact_dependency_evidence(
         const Plan* plan,
         EState* estate,
