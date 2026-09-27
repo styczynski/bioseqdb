@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Declares column-scan cost finalization contracts.
+ * @brief Declares column-scan read-cost estimates.
  */
 module;
 #include <bioseq/pg_compat.h>
@@ -10,7 +10,7 @@ export module bioseq.postgres.table:custom_scan_scan_paths_cost_finalization_con
 /** @brief Apply parallel-worker adjustments to an existing Bioseq scan path. */
 export void adjust_bioseq_column_parallel_scan_cost(Path* path);
 
-/** @brief Cost a Bioseq custom scan from relation size, projection width, and clauses. */
+/** @brief Estimates scan read cost from selected columns and filters that can skip stripes. */
 export void cost_bioseq_column_scan(PlannerInfo* root,
                                     RelOptInfo* rel,
                                     Oid relation_id,

@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Constructs recursive and parameterized Bioseq scan paths.
+ * @brief Builds Bioseq scan paths with different outer-row dependencies.
  */
 module;
 #include <bioseq/pg_compat.h>
@@ -70,36 +70,12 @@ using namespace bioseq::postgres::support;
 
 export {
     /**
-     * @brief Enumerates bounded parameterization subsets and adds columnar custom paths.
+     * @brief Adds scan paths for bounded subsets of the candidate outer relations.
      *
-     * Recursively searches the
-     * parameterization space and add CustomPaths for columnar scans.
-     *
-     * The set paramRelids is the parameterization at the current level, and
-     * candidateRelids is the set from which we draw to generate paths with
-     * greater parameterization.
-     *
-     * BioseqColumn tables resemble indexes because of the ability to push down
-     * quals. Ordinary quals, such as x = 7, can be pushed down easily. But join
-     * quals of the form "x = y" (where "y" comes from another rel) require the
-     * proper parameterization.
-     *
-     * Paths that require more outer rels can push down more join clauses that
-     * depend on those outer rels. But requiring more outer rels gives the planner
-     * fewer options for the shape of the plan. That means there is a trade-off,
-     * and we should generate plans of various parameterizations, then let the
-     * planner choose. We always need to generate one minimally-parameterized path
-     * (parameterized only by lateral refs, if present) to make sure that at least
-     * one path can be chosen. Then, we generate as many parameterized paths as we
-     * reasonably can.
-     *
-     * The set of all possible parameterizations is the power set of
-     * candidateRelids. The power set has cardinality 2^N, where N is the
-     * cardinality of candidateRelids. To avoid creating a huge number of paths,
-     * limit the depth of the search; the depthLimit is equivalent to the maximum
-     * number of required outer rels (beyond the minimal parameterization) for the
-     * path. A depthLimit of zero means that only the minimally-parameterized path
-     * will be generated.
+     * An outer dependency lets the scan apply a join filter such as x = y, where y
+     * comes from another table. Start with required lateral dependencies, then add
+     * combinations up to @p depth_limit so the planner can compare different join orders.
+     * A zero limit adds only the current dependency set.
      */
     void add_bioseq_column_scan_paths_rec(PlannerInfo* root,
                                           RelOptInfo* rel,
@@ -119,7 +95,7 @@ export {
         if (owner_path != nullptr)
             for (RestrictInfo* owner :
                  postgres_list<RestrictInfo>(owner_path->custom_restrictinfo)) {
-                // Removes paths that execute an mmsearch restriction claimed by another owner.
+                // Removes alternatives that would execute this mmsearch through the SQL function.
                 auto prune_competing_owner_execution = [rel, owner](List* paths) {
                     postgres_list<Path> survivors;
                     for (Path* candidate : postgres_list<Path>(paths)) {
@@ -144,9 +120,7 @@ export {
             bioseq_column_scan_path->total_cost += bioseq_column_scan_path->rows * 0.1;
         add_path(rel, bioseq_column_scan_path);
 
-        /* For columnar custom scan we should also do planning for parallel exeuction
-         * if it is enabled with GUC.
-         */
+        /* Also consider a parallel custom scan when enabled. */
         if (bioseq::settings::execution::parallel::enabled) {
             int bioseq_min_parallel_process_running =
                 bioseq::settings::execution::parallel::minimum_processes;
@@ -164,10 +138,8 @@ export {
             if (parallel_leader_participation)
                 bioseq_min_parallel_process_running--;
 
-            /*
-             * We know how many workers are we going to run. Since workers are using single stripe
-             * probably it doesn't have much sense to spawn more workers than stripes in table.
-             */
+            /* Limit the preliminary worker count to the available stripes.
+             * The forced minimum below overrides this estimate. */
             bioseq_min_parallel_process_running = std::min<int64_t>(
                 bioseq_min_parallel_process_running,
                 parallel_leader_participation ? bioseq_column_table_stripe_count(rte->relid) - 1
@@ -186,9 +158,7 @@ export {
                                    bioseq_min_parallel_process_running > 0)) {
                 bioseq_log<logging_level::debug>("[bioseq] pg: AddBioseqColumnScanPathsRec() "
                                                  "add_partial_path for parallel scan");
-                /*
-                 * Passing NULL for JOIN quals in parallel execution.
-                 */
+                /* A parallel path has no outer-row parameter dependencies. */
                 Path* parallel_bioseq_column_scan_path =
                     add_bioseq_column_scan_path(root, rel, rte, nullptr);
 
@@ -208,17 +178,14 @@ export {
         bioseq_log<logging_level::debug>(
             "[bioseq] pg: AddBioseqColumnScanPathsRec() recursing into candidate relids");
 
-        /* recurse for all candidateRelids, unless we hit the depth limit */
+        /* Stop adding outer dependencies at the configured search depth. */
         Assert(depth_limit >= 0);
         if (depth_limit-- == 0) {
             return;
         }
 
-        /*
-         * Iterate through parameter combinations depth-first. Deeper levels
-         * generate paths of greater parameterization (and hopefully lower
-         * cost).
-         */
+        /* Each deeper level adds another outer relation whose join filters
+         * the scan can evaluate. */
         bioseq_log<logging_level::debug>("[bioseq] pg: AddBioseqColumnScanPathsRec() iterating "
                                          "parameter combinations depth-first");
         Relids tmp_candidate_relids = bms_copy(candidate_relids);
@@ -226,11 +193,8 @@ export {
         while ((relid = bms_next_member(candidate_relids, relid)) >= 0) {
             Relids tmp_param_relids = bms_add_member(bms_copy(param_relids), relid);
 
-            /*
-             * Because we are generating combinations (not permutations), remove
-             * the relid from the set of candidates at this level as we descend to
-             * the next.
-             */
+            /* Remove each visited relation before descending, so the same subset
+             * is considered only once. */
             tmp_candidate_relids = bms_del_member(tmp_candidate_relids, relid);
 
             add_bioseq_column_scan_paths_rec(
@@ -240,7 +204,7 @@ export {
         bms_free(tmp_candidate_relids);
     }
 
-    /** @brief Generates bounded parameterized custom paths for a columnar base relation. */
+    /** @brief Builds a limited set of scan paths using outer relations from eligible join filters. */
     void add_bioseq_column_scan_paths(PlannerInfo* root, RelOptInfo* rel, RangeTblEntry* rte) {
         bioseq_log<logging_level::debug>("[bioseq] pg: AddBioseqColumnScanPaths() entered");
         List* join_clauses = find_pushdown_join_clauses(root, rel);
@@ -248,15 +212,14 @@ export {
 
         int depth_limit = choose_depth_limit(bms_num_members(candidate_relids));
 
-        /* must always parameterize by lateral refs */
+        /* Every candidate must include the required lateral dependencies. */
         Relids param_relids = bms_copy(rel->lateral_relids);
 
         add_bioseq_column_scan_paths_rec(
             root, rel, rte, param_relids, candidate_relids, depth_limit);
 
-        /* Once a CustomPath claims a restriction, remove only alternatives that
-         * would execute that same RestrictInfo through the SQL function.  This is
-         * structural selection; costs remain honest and nonnegative. */
+        /* Once a custom scan owns an mmsearch restriction, remove alternatives
+         * that would call its SQL stub. Keep other scans that own the same restriction. */
         postgres_list<RestrictInfo> owners;
         for (Path* candidate : postgres_list<Path>(rel->pathlist)) {
             if (!IsA(candidate, CustomPath))
@@ -280,7 +243,7 @@ export {
                     owners.append(owner);
             }
         }
-        // Removes paths that execute a restriction now owned by a custom scan.
+        // Removes alternatives that would evaluate an owned restriction through its SQL stub.
         auto prune_owned = [rel, &owners](List* paths) {
             postgres_list<Path> survivors;
             for (Path* candidate : postgres_list<Path>(paths)) {
@@ -313,14 +276,11 @@ export {
     }
 
     /**
-     * @brief Appends a human-readable parameterization set to caller-owned storage.
+     * @brief Formats the outer relations required by a scan for a planner message.
      *
-     * Returns the string representation of the set of
-     * rels given in paramRelids.
-     *
-     * Takes a StringInfo so that it doesn't return palloc'd memory. This makes it
-     * easy to call this function as an argument to ereport(), such that it won't
-     * be evaluated unless the message is going to be output somewhere.
+     * Appends quoted relation aliases to @p buf and returns its data. An empty
+     * dependency set returns the literal "unparameterized" without changing the buffer.
+     * The caller can defer this formatting until it emits a diagnostic.
      */
     char* parameterization_as_string(PlannerInfo* root, Relids param_relids, StringInfo buf) {
         bioseq::postgres::support::postgres_bitmapset param_relids_view{param_relids};
@@ -372,23 +332,16 @@ export {
     }
 
     /**
-     * @brief Maps parent permission columns to an inheritance child's attribute numbers.
+     * @brief Maps the parent's selected-column bitmap to an inheritance child.
      *
-     * Adapted from PostgreSQL 16's static fixup_inherited_columns helper.
-     *
-     * When user is querying on a table with children, it implicitly accesses
-     * child tables also. So, we also need to check security label of child
-     * tables and columns, but there is no guarantee attribute numbers are
-     * same between the parent and children.
-     * It returns a bitmapset which contains attribute number of the child
-     * table based on the given bitmapset of the parent.
+     * Matches columns by name because parent and child attribute numbers can differ.
+     * Keeps the whole-row marker unchanged. The scan cost uses this bitmap to count
+     * selected columns. Adapted from PostgreSQL 16's fixup_inherited_columns helper.
      */
     Bitmapset* fixup_inherited_columns(Oid parent_id, Oid child_id, Bitmapset* columns) {
         bioseq::postgres::support::postgres_bitmapset result;
 
-        /*
-         * obviously, no need to do anything here
-         */
+        /* Reuse the bitmap when both relation IDs are the same. */
         if (parent_id == child_id) {
             return columns;
         }
@@ -397,9 +350,7 @@ export {
             /* bit numbers are offset by FirstLowInvalidHeapAttributeNumber */
             AttrNumber attno = index + FirstLowInvalidHeapAttributeNumber;
 
-            /*
-             * whole-row-reference shall be fixed-up later
-             */
+            /* Keep the whole-row marker unchanged. */
             if (attno == InvalidAttrNumber) {
                 result.add(index);
                 continue;
@@ -452,28 +403,24 @@ export {
     };
 
     /**
-     * @brief Creates and costs a custom scan path with the requested outer relations.
+     * @brief Builds a scan path with storage filters and any mmsearch it can execute.
      *
-     * This follows foreign-path construction while supplying parameterization
-     * through param_info and custom_private.
+     * Checks ownership of mmsearch clauses, records the required outer relations and
+     * adds operand evaluation and alignment to the read cost. Evaluated sequence
+     * operands also need source bindings that keep their underlying storage available.
      */
     Path* add_bioseq_column_scan_path(PlannerInfo* root,
                                       RelOptInfo* rel,
                                       RangeTblEntry* rte,
                                       Relids param_relids) {
         bioseq_log<logging_level::debug>("[bioseq] pg: AddBioseqColumnScanPath() entered");
-        /*
-         * Must return a CustomPath, not a larger structure containing a
-         * CustomPath as the first field. Otherwise, nodeToString() will fail to
-         * output the additional fields.
-         */
+        /* Keep extra state in PostgreSQL node lists. nodeToString() only knows
+         * the standard CustomPath fields. */
         CustomPath* cpath = makeNode(CustomPath);
 
         cpath->methods = bioseq_column_scan_path_methods();
 
-        /*
-         * populate generic path information
-         */
+        /* Start with this relation's requested output columns. */
         Path* path = &cpath->path;
         path->pathtype = T_CustomScan;
         path->parent = rel;
@@ -501,15 +448,14 @@ export {
         bioseq_log<logging_level::debug>(
             "[bioseq] pg: AddBioseqColumnScanPath() pathtarget walk complete");
 
-        /* columnar scans are not parallel-aware, but they are parallel-safe */
+        /* Start with PostgreSQL's parallel-safety decision. Owning mmsearch
+         * below makes this path serial. */
         path->parallel_safe = rel->consider_parallel;
 
         path->param_info = get_baserel_parampathinfo(root, rel, param_relids);
 
-        /*
-         * Usable clauses for this parameterization exist in baserestrictinfo and
-         * ppi_clauses.
-         */
+        /* Consider both base filters and join filters supplied by this
+         * path's outer dependencies. Keep their original RestrictInfo pointers. */
         postgres_list<RestrictInfo> clause_references;
         for (RestrictInfo* rinfo : postgres_list<RestrictInfo>(rel->baserestrictinfo)) {
             if (!list_member_ptr(clause_references.get(), rinfo)) {
@@ -565,9 +511,8 @@ export {
                     owned_mmsearch_resolution = *resolution;
                 }
             }
-            /* The bounded two-call fallback has one target capture and one query
-             * configuration.  Effectful/evaluated operands would either be shared
-             * across SQL occurrences or duplicated, so keep that contract raw-only. */
+            /* The two-call case shares one target capture and query configuration.
+             * Restrict it to raw operands so SQL expressions keep their evaluation count. */
             if (exact && list_length(candidate_expressions) > 1 &&
                 owned_mmsearch_resolution.has_value() &&
                 owned_mmsearch_resolution->any_evaluated_operand) {
@@ -603,9 +548,8 @@ export {
                 restrictions_without_owned_mmsearch(all_clauses.release(),
                                                     owned_mmsearch_restrictions,
                                                     /*restrictions_are_private_copies=*/true)};
-            /* Alignment statistics are backend-local and have no DSM aggregation.
-             * A worker-local snapshot must not be exposed as statement statistics,
-             * so every alignment-owning path is parallel unsafe. */
+            /* Alignment counters are local to each backend. Keep this scan serial
+             * until those counters can be combined across parallel workers. */
             path->parallel_safe = false;
         }
 
@@ -618,7 +562,7 @@ export {
         };
         const bool needs_evaluated_operands = owned_mmsearch_resolution.has_value() &&
                                               owned_mmsearch_resolution->any_evaluated_operand;
-        // Adds a distinct base Var needed to evaluate an owned operand or residual qual.
+        // Records each base column needed by an operand or remaining filter once.
         auto append_support_var = [&base_operand_sources](Var* variable) {
             if (variable == nullptr)
                 return;
@@ -631,7 +575,7 @@ export {
                 lappend(base_operand_sources.target_leaf_support_vars, variable);
         };
         if (needs_evaluated_operands) {
-            // Registers an evaluated operand and the physical sources that keep it valid.
+            // Records the operand expression and the source columns that keep its data alive.
             auto register_operand = [&base_operand_sources, &append_support_var](
                                         const base_local_mmsearch_operand_resolution& operand) {
                 const std::uint32_t producer =
@@ -646,10 +590,9 @@ export {
             if (owned_mmsearch_resolution->local_query.has_value()) {
                 register_operand(*owned_mmsearch_resolution->local_query);
             }
-            /* Residual quals execute before operand ExprStates.  Discover them from
-             * the full baserestrictinfo + parameterized-clause set, not allClauses:
-             * FilterPushdownClauses deliberately omits executor-only quals, while
-             * PlanCustomPath installs those full residuals in scan.plan.qual. */
+            /* Remaining filters run before operand evaluation. Collect their
+             * sequence columns from the full restriction list, including filters
+             * that storage pushdown rejected. */
             List* executable_residual_restrictions =
                 restrictions_without_owned_mmsearch(clause_references.get(),
                                                     owned_mmsearch_restrictions,
@@ -686,16 +629,9 @@ export {
             list_free(executable_residual_restrictions);
         }
 
-        /*
-         * Plain clauses may contain extern params, but not exec params, and can
-         * be evaluated at init time or rescan time. Track them in another list
-         * that is a subset of allClauses.
-         *
-         * Note: although typically baserestrictinfo contains plain clauses,
-         * that's not always true. It can also contain a qual referencing a Var at
-         * a higher query level, which can be turned into an exec param, and
-         * therefore it won't be a plain clause.
-         */
+        /* Separate filters that need no outer-row values. External parameters
+         * are allowed, but PARAM_EXEC values may not be ready when these filters
+         * are initialized. Even a base restriction can contain such a parameter. */
         postgres_list<RestrictInfo> plain_clauses;
         for (auto rinfo : all_clauses) {
             if (bms_is_subset(rinfo->required_relids, rel->relids) &&
@@ -704,11 +640,8 @@ export {
             }
         }
 
-        /*
-         * We can't make our own CustomPath structure, so we need to put
-         * everything in the custom_private list. To keep the two lists separate,
-         * we make them sublists in a 2-element list.
-         */
+        /* Save plain filters and the complete filter list in separate custom_private
+         * sublists. Append mmsearch ownership metadata after them. */
         if (bioseq::settings::planner::qual_pushdown::enabled) {
             cpath->custom_private =
                 list_make2(copyObject(plain_clauses.get()), copyObject(all_clauses.get()));
@@ -727,23 +660,12 @@ export {
 
         int number_of_columns_read = 0;
         if (rte->perminfoindex > 0) {
-            /*
-             * If perminfoindex > 0, that means that this relation's permission info
-             * is directly found in the list of rteperminfos of the Query(root->parse)
-             * So, all we have to do here is retrieve that info.
-             */
+            /* Count selected columns from this relation's permission record. */
             RTEPermissionInfo* perminfo = getRTEPermissionInfo(root->parse->rteperminfos, rte);
             number_of_columns_read = bms_num_members(perminfo->selectedCols);
         } else {
-            /*
-             * If perminfoindex = 0, that means we are skipping the check for permission info
-             * for this relation, which means that it's either a partition or an inheritance child.
-             * In these cases, we need to access the permission info of the top parent of this
-             * relation. After thorough checking, we found that the index of the top parent pointing
-             * to the correct range table entry in Query's range tables (root->parse->rtable) is
-             * found under RelOptInfo rel->top_parent->relid. For reference, check
-             * expand_partitioned_rtentry and expand_inherited_rtentry PG functions
-             */
+            /* An inheritance child uses its top parent's permission record. Map
+             * the selected columns to the child before estimating its read cost. */
             Assert(rel->top_parent);
             RangeTblEntry* parent_rte = rt_fetch(rel->top_parent->relid, root->parse->rtable);
             RTEPermissionInfo* perminfo =
@@ -753,10 +675,8 @@ export {
         }
         int number_of_clauses_pushed = all_clauses.size();
 
-        /* Queries that contain only aggregate with STAR doesn't have any
-         * selectedCols so we should consider at least one column that needs
-         * read (for better cost calculation).
-         */
+        /* Queries such as count(*) select no columns. Charge for at least
+         * one column so the scan still has a read cost. */
         if (number_of_columns_read == 0)
             number_of_columns_read = 1;
 
@@ -844,15 +764,11 @@ export {
         }
 
         if (!OidIsValid(rte->relid) || rte->rtekind != RTE_RELATION || rte->inh) {
-            /* some calls to the pathlist hook don't have a valid relation set. Do nothing */
+            /* Only a concrete table relation can receive these scan paths. */
             return;
         }
 
-        /*
-         * Here we want to inspect if this relation pathlist hook is accessing a columnar table.
-         * If that is the case we want to insert an extra path that pushes down the projection
-         * into the scan of the table to minimize the data read.
-         */
+        /* Bioseq tables can read only the columns requested by a custom scan. */
         Relation relation = RelationIdGetRelation(rte->relid);
         if (relation->rd_tableam == column_table_access_method()) {
             if (rte->tablesample != nullptr) {
@@ -861,47 +777,25 @@ export {
                     .with_message("sample scans not supported on columnar tables");
             }
 
-            /*
-             * There are cases where IndexPath is normally more preferrable over
-             * SeqPath for heapAM but not for columnarAM. In such cases, an
-             * IndexPath could wrongly dominate a SeqPath based on the costs
-             * estimated by postgres earlier. For this reason, here we manually
-             * create a SeqPath, estimate the cost based on columnarAM and append
-             * to pathlist.
-             *
-             * Before doing that, we first re-cost all the existing paths so that
-             * add_path makes correct cost comparisons when appending our SeqPath.
-             */
+            /* Re-cost existing paths for columnar storage, then add a sequential
+             * path again. PostgreSQL may have discarded that path using heap-table
+             * costs before this hook ran. */
             cost_bioseq_column_paths(root, rel, rte->relid);
 
             Path* seq_path = create_bioseq_column_seq_scan_path(root, rel, rte->relid);
             add_path(rel, seq_path);
 
             if (bioseq::settings::planner::custom_scan::enabled) {
-                /*
-                 * When columnar custom scan is enabled
-                 * (bioseq.planner.custom_scan.enabled),
-                 * we only consider BioseqColumnScanPath's & IndexPath's. For this reason,
-                 * we remove other paths and re-estimate IndexPath costs to make accurate
-                 * comparisons between them.
-                 *
-                 * Even more, we might calculate an equal cost for a
-                 * BioseqColumnCustomScan and a SeqPath if we are reading all columns
-                 * of given table since we don't consider chunk group filtering
-                 * when costing BioseqColumnCustomScan.
-                 * In that case, if we don't remove SeqPath's, we might wrongly choose
-                 * SeqPath thinking that its cost would be equal to BioseqColumnCustomScan.
-                 */
+                /* With custom scans enabled, replace ordinary scan alternatives with
+                 * Bioseq paths and keep index paths for cost comparison. This also
+                 * prevents a tied SeqScan from bypassing column selection and stripe pruning. */
                 remove_paths_by_predicate(rel, is_not_index_path);
                 add_bioseq_column_scan_paths(root, rel, rte);
                 slice_project_try_install_base_owner(root, rel, relation);
             }
         } else {
-            /* External logical relations use a distinct table AM. The
-             * always-owned slot returns false (this columnar hook simply falls
-             * through) unless the external provider stack is compiled in and has
-             * registered a path builder, in which case the builder replaces the
-             * physical scan with the external CustomScan. */
+            /* Let a registered external-table provider add its scan paths.
+             * Without a provider, this call leaves the relation's paths alone. */
             (void)bioseq::postgres::external::try_add_scan_paths(root, rel, rte, relation);
         }
         bioseq_log<logging_level::debug>(
@@ -909,7 +803,7 @@ export {
         RelationClose(relation);
     }
 
-    /** @brief Apply table-AM planner capabilities after the prior relation-info hook. */
+    /** @brief Applies Bioseq scan restrictions after the preceding relation-info hook. */
 #if PG_VERSION_NUM >= 190000
     void bioseq_column_build_simple_rel_hook(PlannerInfo* root,
                                              RelOptInfo* rel,
@@ -917,8 +811,8 @@ export {
         if (previous_build_simple_rel_hook) {
             previous_build_simple_rel_hook(root, rel, rte);
         }
-        // PG19 moved this hook after relation setup and also calls it for
-        // functions, subqueries and CTEs. Only tables have a catalog OID.
+        // The PG19 hook also receives functions, subqueries and CTEs.
+        // Only table entries have a relation OID.
         if (rte->rtekind != RTE_RELATION) {
             return;
         }
@@ -935,10 +829,10 @@ export {
         bioseq_log<logging_level::debug>("[bioseq] pg: BioseqColumnRelationInfoHook() entered");
 
         if (relation_oid_uses_column_table_access_method(relation_object_id)) {
-            /* disable parallel query */
+            /* Use Bioseq's custom parallel-path planning for this table. */
             rel->rel_parallel_workers = 0;
 
-            /* disable index-only scan */
+            /* Every index lookup must fetch the Bioseq row. */
             for (auto index_opt_info : postgres_list<IndexOptInfo>(rel->indexlist)) {
                 memset(index_opt_info->canreturn, false, index_opt_info->ncolumns * sizeof(bool));
             }

@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Owns scan costing, predicate pushdown, selectivity, and path admission.
+ * @brief Estimates scan costs and selects filters for columnar scan paths.
  */
 module;
 #include <bioseq/pg_compat.h>
@@ -76,17 +76,15 @@ export {
         return nattrs;
     }
 
-    /** @brief Re-costs a sequential path for full-stripe columnar reads. */
+    /** @brief Estimates sequential-scan cost for reading every stored column and stripe. */
     void cost_bioseq_column_seq_path(RelOptInfo* rel, Oid relation_id, Path* path) {
         if (!enable_seqscan) {
-            /* costs are already set to disable_cost, don't adjust them */
+            /* Keep PostgreSQL's cost for a disabled sequential scan. */
             return;
         }
 
-        /*
-         * Seq scan doesn't support projection or qual pushdown, so we will read
-         * all the stripes and all the columns.
-         */
+        /* Ordinary SeqScan reads all columns and stripes. Column selection
+         * and stripe pruning belong to the Bioseq custom scan. */
         double stripes_to_read = bioseq_column_table_stripe_count(relation_id);
         int number_of_columns_read = relation_id_get_number_of_attributes(relation_id);
 
@@ -99,7 +97,7 @@ export {
     /** @brief Creates and costs a nonparallel sequential path for a columnar relation. */
     Path* create_bioseq_column_seq_scan_path(PlannerInfo* root, RelOptInfo* rel, Oid relation_id) {
         bioseq_log<logging_level::debug>("[bioseq] pg: CreateBioseqColumnSeqScanPath() entered");
-        /* columnar doesn't support parallel scan */
+        /* Keep this ordinary SeqScan serial. Bioseq custom scans handle parallel reads. */
         int parallel_workers = 0;
 
         Relids required_outer = rel->lateral_relids;
@@ -108,7 +106,7 @@ export {
         return path;
     }
 
-    /** @brief Estimates columnar stripe-read cost added to an index access path. */
+    /** @brief Estimates the stripe reads needed to fetch rows found through an index. */
     Cost bioseq_column_index_scan_additional_cost(PlannerInfo* root,
                                                   RelOptInfo* rel,
                                                   Oid relation_id,
@@ -119,11 +117,8 @@ export {
         Cost per_stripe_cost =
             bioseq_column_per_stripe_scan_cost(rel, relation_id, number_of_columns_read);
 
-        /*
-         * We don't need to pass correct loop count to amcostestimate since we
-         * will only use index correlation & index selectivity, and loop count
-         * doesn't have any effect on those two.
-         */
+        /* Request index selectivity and correlation from the index cost estimator.
+         * Its cost outputs are unused here, so estimate a single pass. */
         double fake_loop_count = 1;
         Cost fake_index_startup_cost;
         Cost fake_index_total_cost;
@@ -145,46 +140,27 @@ export {
         RelationClose(relation);
         double estimated_rows = row_count * index_selectivity;
 
-        /*
-         * In the worst case (i.e no correlation between the column & the index),
-         * we need to read a different stripe for each row.
-         */
+        /* With scattered matches, fetching each row may require another stripe read. */
         double max_stripe_read_count = estimated_rows;
 
-        /*
-         * In the best case (i.e the column is fully correlated with the index),
-         * we wouldn't read the same stripe again and again thanks
-         * to locality.
-         */
+        /* With matches clustered in storage order, each stripe read supplies
+         * roughly one stripe's worth of matching rows. */
         double avg_stripe_row_count =
             row_count / static_cast<double>(bioseq_column_table_stripe_count(relation_id));
         double min_stripe_read_count = estimated_rows / avg_stripe_row_count;
 
-        /*
-         * While being close to 0 means low correlation, being close to -1 or +1
-         * means high correlation. For index scans on columnar tables, it doesn't
-         * matter if the column and the index are "correlated" (+1) or
-         * "anti-correlated" (-1) since both help us avoiding from reading the
-         * same stripe again and again.
-         */
+        /* Both ascending and descending index order can keep nearby rows
+         * together, so only the size of the correlation matters. */
         double abs_index_correlation = std::abs(index_correlation);
 
-        /*
-         * To estimate the number of stripes that we need to read, we do linear
-         * interpolation between minStripeReadCount & maxStripeReadCount. To do
-         * that, we use complement to 1 of absolute correlation, where being
-         * close to 0 means high correlation and being close to 1 means low
-         * correlation.
-         * In practice, we only want to do an index scan when absIndexCorrelation
-         * is 1 (or extremely close to it), or when the absolute number of tuples
-         * returned is very small. Other cases will have a prohibitive cost.
-         */
+        /* Blend the clustered and scattered read estimates using correlation.
+         * Poor correlation makes index access costly unless it selects very few rows. */
         double complement_index_correlation = 1 - abs_index_correlation;
         double estimated_stripe_read_count =
             min_stripe_read_count +
             complement_index_correlation * (max_stripe_read_count - min_stripe_read_count);
 
-        /* even in the best case, we will read a single stripe */
+        /* Charge for at least one stripe read. */
         estimated_stripe_read_count = std::max(estimated_stripe_read_count, 1.0);
 
         Cost scan_cost = per_stripe_cost * estimated_stripe_read_count;
@@ -212,7 +188,7 @@ export {
         if (!enable_indexscan) {
             bioseq_log<logging_level::debug>(
                 "[bioseq] pg: CostBioseqColumnIndexPath() skipped (enable_indexscan=false)");
-            /* costs are already set to disable_cost, don't adjust them */
+            /* Keep PostgreSQL's cost for a disabled index scan. */
             return;
         }
 
@@ -223,11 +199,8 @@ export {
                       index_path->path.startup_cost,
                       index_path->path.total_cost);
 
-        /*
-         * We estimate the cost for columnar table read during index scan. Also,
-         * instead of overwriting total cost, we "add" ours to the cost estimated
-         * by indexAM since we should consider index traversal related costs too.
-         */
+        /* Add stripe reads to the existing cost, which already accounts for
+         * traversing the index. */
 
         if (!bioseq::settings::planner::index_scan::enabled) {
             bioseq_log<logging_level::debug>(
@@ -254,13 +227,8 @@ export {
         bioseq_log<logging_level::debug>("[bioseq] pg: CostBioseqColumnPaths() entered");
         for (auto path : postgres_list<Path>(rel->pathlist)) {
             if (pg_node_view{to_pg_node(path)}.is_type<IndexPath>()) {
-                /*
-                 * Since we don't provide implementations for scan_bitmap_next_block
-                 * & scan_bitmap_next_tuple, postgres doesn't generate bitmap index
-                 * scan paths for columnar tables already (see related comments in
-                 * TableAmRoutine). For this reason, we only consider IndexPath's
-                 * here.
-                 */
+                /* Bioseq has no bitmap-scan callbacks, so this branch only needs
+                 * ordinary index paths. */
                 cost_bioseq_column_index_path(
                     root, rel, relation_id, reinterpret_cast<IndexPath*>(path));
             } else if (path->pathtype == T_SeqScan) {
@@ -270,18 +238,15 @@ export {
     }
 
     /**
-     * @brief Checks whether column correlation makes a restriction useful for stripe pruning.
+     * @brief Checks whether a column's storage order makes min/max pruning useful.
      *
-     * Checks whether a qual involving this Var is likely to be
-     * useful based on the correlation stats. If so, or if stats are unavailable,
-     * return true. Otherwise return false and set absVarCorrelation when the
-     * caller wants to use for logging purposes.
+     * Accepts the filter when correlation meets the configured threshold or statistics
+     * are missing. On rejection, writes the absolute correlation to
+     * @p abs_var_correlation if the caller provided it.
      */
     bool check_var_stats(PlannerInfo* root, Var* var, Oid sortop, float* abs_var_correlation) {
         bioseq_log<logging_level::debug>("[bioseq] pg: CheckVarStats() entered");
-        /*
-         * Collect isunique, ndistinct, and varCorrelation.
-         */
+        /* Look up the column statistics, then its correlation with storage order. */
         VariableStatData var_stat_data;
         examine_variable(root, reinterpret_cast<Node*>(var), var->varno, &var_stat_data);
         if (var_stat_data.rel == nullptr || !HeapTupleIsValid(var_stat_data.statsTuple)) {
@@ -306,17 +271,11 @@ export {
         free_attstatsslot(&sslot);
         ReleaseVariableStats(var_stat_data);
 
-        /*
-         * If the Var is not highly correlated, then the chunk's min/max bounds
-         * will be nearly useless.
-         */
+        /* Poor correlation spreads values across chunks and weakens min/max pruning. */
         if (std::abs(var_correlation) <
             bioseq::settings::planner::qual_pushdown::correlation_threshold) {
             if (abs_var_correlation) {
-                /*
-                 * Report absVarCorrelation if caller wants to know why given
-                 * var is rejected.
-                 */
+                /* Return the rejected correlation for the caller's diagnostic message. */
                 *abs_var_correlation = std::abs(var_correlation);
             }
             return false;
@@ -338,80 +297,17 @@ export {
         return false;
     }
 
-    /*
-     * ExtractPushdownClause extracts an Expr node from given clause for pushing down
-     * into the given rel (including join clauses). This test may not be exact in
-     * all cases; it's used to reduce the search space for parameterization.
-     *
-     * Note that we don't try to handle cases like "Var + ExtParam = 3". That
-     * would require going through eval_const_expression after parameter binding,
-     * and that doesn't seem worth the effort. Here we just look for "Var op Expr"
-     * or "Expr op Var", where Var references rel and Expr references other rels
-     * (or no rels at all).
-     *
-     * Moreover, this function also looks into BoolExpr's to recursively extract
-     * pushdownable OpExpr's of them:
-     * i)   AND_EXPR:
-     *      Take pushdownable args of AND expressions by ignoring the other args.
-     * ii)  OR_EXPR:
-     *      Ignore the whole OR expression if we cannot extract a pushdownable Expr
-     *      from one of its args.
-     * iii) NOT_EXPR:
-     *      Simply ignore NOT expressions since we don't expect to see them before
-     *      an expression that we can pushdown, see the comment in function.
-     *
-     * The reasoning for those three rules could also be summarized as such;
-     * for any expression that we cannot push-down, we must assume that it
-     * evaluates to true.
-     *
-     * For example, given following WHERE clause:
-     * (
-     *     (a > random() OR a < 30)
-     *     AND
-     *     a < 200
-     * ) OR
-     * (
-     *     a = 300
-     *     OR
-     *     a > 400
-     * );
-     * Even if we can pushdown (a < 30), we cannot pushdown (a > random() OR a < 30)
-     * due to (a > random()). However, we can pushdown (a < 200), so we extract
-     * (a < 200) from the lhs of the top level OR expression.
-     *
-     * For the rhs of the top level OR expression, since we can pushdown both (a = 300)
-     * and (a > 400), we take this part as is.
-     *
-     * Finally, since both sides of the top level OR expression yielded pushdownable
-     * expressions, we will pushdown the following:
-     *  (a < 200) OR ((a = 300) OR (a > 400))
-     */
-    /*
-     * mmsearch() FuncExprs are recognised here as pushdownable scan
-     * quals even though they have no btree opclass and no scan-key
-     * shape: the actual filtering happens at execution time inside
-     * batch_processor::process_sequences. The reason we still register
-     * them as "pushdownable" is to make the planner consider
-     * parameterised paths for cross-table mmsearches like
-     *   WHERE mmsearch(t1.seq, t2.seq2)
-     * Without this recognition `FilterPushdownClauses` drops the
-     * FuncExpr from `joinClauses`, `FindCandidateRelids` returns no
-     * outer rels for it, and `AddBioseqColumnScanPathsRec` never asks
-     * `get_baserel_parampathinfo` to bring the qual into the inner
-     * scan's `ppi_clauses`. The result: mmsearch ends up as a Nested
-     * Loop join filter (the C stub), which always returns TRUE, and
-     * the inner scan never runs the aligner — every cross-product row
-     * comes back with NULL bioseq.* projections.
-     *
-     * Returning the unchanged FuncExpr from this helper tells
-     * FilterPushdownClauses "this clause references this rel and is
-     * safe to attach to its quals." Postgres (via
-     * `replace_nestloop_params`) will rewrite the cross-rel Var (e.g.
-     * t2.seq2) into a PARAM_EXEC Param at plan-finalization time, and
-     * BeginCustomScan / ReScanCustomScan already handle Params for the
-     * mmsearch second argument.
-     */
-    /** @brief Checks whether an mmsearch call can be owned by this base scan path. */
+    /* Pushdown selection narrows the search for parameterized scan paths.
+     * It keeps useful parts of AND, requires a useful part from every OR arm,
+     * and rejects NOT. For ordinary comparisons, one side must be a column
+     * of this relation and the other must be independent of that relation.
+     * Replacing an unusable condition with true explains which partial
+     * filters remain safe. */
+    /* Recognize mmsearch here so a join query can produce a parameterized
+     * inner scan. For mmsearch(t1.seq, t2.seq), the t1 scan can receive t2.seq
+     * as PARAM_EXEC and align it on each rescan. Keeping the call in the
+     * candidate clauses lets the planner discover that outer dependency. */
+    /** @brief Checks whether an mmsearch call is a candidate for this base scan. */
     [[nodiscard]] bool
     is_mmsearch_pushdownable(RelOptInfo* rel, FuncExpr* fe, const bioseq_stub_oids& stub_oids) {
         if (!is_mmsearch_funcid(fe->funcid, stub_oids)) {
@@ -431,29 +327,17 @@ export {
             return false;
         }
         Var* col_var = target_resolution->primary_sequence_var;
-        /*
-         * The first argument is the column to align — it MUST belong to
-         * `rel`. Cross-table mmsearch with the column on the OTHER side
-         * (e.g. mmsearch(t1.seq, t2.seq) when we are processing t2)
-         * doesn't push to this rel; the mirror call from t1's side
-         * (mmsearch(t1.seq, t2.seq) processing t1) does.
-         */
+        /* The aligned target must come from this relation. In mmsearch(t1.seq,
+         * t2.seq), t1 owns the target and t2 supplies the query. */
         if (col_var->varno != rel->relid) {
             return false;
         }
         if (col_var->varattno <= 0) {
             return false;
         }
-        /*
-         * Constrain the second argument to shapes BioseqColumnScan_BeginCustomScan
-         * actually handles at execution time (Const literal, Param-driven NL
-         * inner-side rewrite, or another base-relation Var with a varno that
-         * Postgres can later turn into a PARAM_EXEC on the parameterised path).
-         * Without this filter the planner would generate a parameterised path
-         * carrying a complex-expression mmsearch which BeginCustomScan then
-         * silently rejects, leaving the buffer inactive and bioseq.* projections
-         * NULL.
-         */
+        /* The executor accepts a literal, parameter, column or expression
+         * evaluated from this scan's row as the query sequence. An outer column
+         * becomes a nested-loop parameter during planning. */
         const bool local_query_recipe =
             !pg_node_view{arg1}.is_type<Const>() && !pg_node_view{arg1}.is_type<Var>() &&
             !pg_node_view{arg1}.is_type<Param>() &&
@@ -465,23 +349,14 @@ export {
         if (!pg_node_view{arg1}.is_type<Const>() && !pg_node_view{arg1}.is_type<Var>() &&
             !pg_node_view{arg1}.is_type<Param>() && !local_query_recipe)
             return false;
-        /* A volatile function inside a validated base-local query recipe stays at
-         * this scan frontier and is evaluated by one retained ExprState exactly
-         * once per admitted row.  Only an unvalidated volatile shape is ineligible. */
+        /* Keep a validated volatile query expression at this scan, where it
+         * is evaluated once per admitted row. Reject other volatile query shapes. */
         if (contain_volatile_functions(arg1) && !local_query_recipe) {
             return false;
         }
-        /*
-         * Typmod compatibility check. We accept a supported bioseq.seq arg1
-         * here and let BeginCustomScan enforce the binding contract:
-         *   - same (alphabet, width)     → direct dispatch
-         *   - same alphabet, diff width → rewidth arg1 to the column width
-         *   - different bound alphabet  → SQLSTATE 42804 before dispatch
-         *
-         * Generate the parameterized path for supported sequence types and perform
-         * coalescing in BeginCustomScan, where the executor has the complete binding
-         * information needed to produce a value or a precise type error.
-         */
+        /* Require sequence types with known typmods here. The executor checks
+         * alphabet compatibility and repacks a query with a different storage width
+         * when it binds the operands. */
         if (col_var->vartype != stub_oids.bioseq_seq_type_oid || target_resolution->typmod < 0) {
             return false;
         }
@@ -508,18 +383,12 @@ export {
         if (arg1_typoid != stub_oids.bioseq_seq_type_oid || arg1_typmod < 0) {
             return false;
         }
-        /*
-         * Width must always be in the supported set (8 / 16 / 32 / 64).
-         * Alphabet must be one we know how to dispatch on (dna4 / dna5).
-         * The pack/unpack helper will raise on truly invalid typmods, so
-         * we keep this gate loose: anything BeginCustomScan can decode
-         * is allowed through. Cross-typmod is a runtime concern, not a
-         * planner-time rejection.
-         */
+        /* Detailed alphabet and width checks happen when the executor binds
+         * these operands. This test only requires their sequence type and typmod. */
         return true;
     }
 
-    /** @brief Extracts the safe storage or mmsearch frontier owned by a base relation. */
+    /** @brief Extracts filters worth considering inside this base scan, including mmsearch. */
     Expr* extract_pushdown_clause(PlannerInfo* root, RelOptInfo* rel, Node* node) {
         CHECK_FOR_INTERRUPTS();
         check_stack_depth();
@@ -528,13 +397,8 @@ export {
             return nullptr;
         }
 
-        /*
-         * mmsearch FuncExpr accepted by IsMmsearchPushdownable above.
-         * When the qual is a parameter-driven cross-table join
-         * mmsearch(t1.seq, t2.seq2), letting it through here is what
-         * makes Postgres generate the parameterised inner-side path
-         * that drives mmsearch_parameter_rebind.
-         */
+        /* Keep eligible mmsearch calls so an inner scan can receive its query
+         * from an outer row through a nested-loop parameter. */
         if (FuncExpr* fe = try_cast_pg_node<FuncExpr>(node)) {
             const bioseq_stub_oids& stub_oids = get_cached_stub_oids();
             if (is_mmsearch_pushdownable(rel, fe, stub_oids)) {
@@ -548,12 +412,8 @@ export {
 
         if (BoolExpr* boolean_expression = try_cast_pg_node<BoolExpr>(node)) {
             if (boolean_expression->boolop == NOT_EXPR) {
-                /*
-                 * Standard planner should have already applied de-morgan rule to
-                 * simple NOT expressions. If we encounter with such an expression
-                 * here, then it can't be a pushdownable one, such as:
-                 *   WHERE id NOT IN (SELECT id FROM something).
-                 */
+                /* Simple NOT conditions should already be simplified by PostgreSQL.
+                 * Leave any remaining NOT expression outside the pushdown filter. */
                 bioseq_log_pg(planner_debug_level(),
                               "columnar planner: cannot push down clause: "
                               "must not contain a subplan");
@@ -576,7 +436,7 @@ export {
                     return nullptr;
                 }
 
-                /* simply skip AND args that we cannot pushdown */
+                /* AND can still use its other filters when one argument is rejected. */
             }
 
             int npushdownable_args = pushdownable_args.size();
@@ -595,7 +455,7 @@ export {
             } else if (boolean_expression->boolop == OR_EXPR) {
                 return make_orclause(pushdownable_args.release());
             } else {
-                /* already discarded NOT expr, so should not be reachable */
+                /* NOT was handled before visiting the arguments. */
                 return nullptr;
             }
         }
@@ -650,7 +510,7 @@ export {
             return nullptr;
         }
 
-        /* only the default opclass is used for qual pushdown. */
+        /* Use the column type's default B-tree operator class for comparisons. */
         Oid var_op_class = GetDefaultOpClass(var_side->vartype, BTREE_AM_OID);
         Oid var_op_family;
         Oid var_opc_in_type;
@@ -677,10 +537,7 @@ export {
             var_op_family, var_opc_in_type, var_opc_in_type, BTLessStrategyNumber);
         Assert(OidIsValid(sortop));
 
-        /*
-         * Check that statistics on the Var support the utility of this
-         * clause.
-         */
+        /* Reject the comparison if available statistics suggest poor stripe pruning. */
         float abs_var_correlation = 0;
         if (!check_var_stats(root, var_side, sortop, &abs_var_correlation)) {
             bioseq_log_pg(planner_debug_level(),
@@ -698,15 +555,11 @@ export {
         return reinterpret_cast<Expr*>(node);
     }
 
-    /** @brief Copies restrictions whose safe frontier can be pushed into a base scan. */
+    /** @brief Copies restrictions and keeps the parts that can be used inside this base scan. */
     List* filter_pushdown_clauses(PlannerInfo* root, RelOptInfo* rel, List* input_clauses) {
         postgres_list<RestrictInfo> filtered_clauses;
         for (auto rinfo : postgres_list<RestrictInfo>(input_clauses)) {
-            /*
-             * Ignore clauses that don't refer to this rel, and pseudoconstants.
-             *
-             * Pseudoconstants contain no Vars and are not pushed into this rel.
-             */
+            /* Skip pseudoconstants and clauses that do not depend on this relation. */
             if (rinfo->pseudoconstant || !bms_is_member(rel->relid, rinfo->required_relids)) {
                 continue;
             }
@@ -738,14 +591,8 @@ export {
     List* find_pushdown_join_clauses(PlannerInfo* root, RelOptInfo* rel) {
         postgres_list<RestrictInfo> join_clauses{copyObject(rel->joininfo)};
 
-        /*
-         * Here we are generating the clauses just so we can later extract the
-         * interesting relids. This is somewhat wasteful, but it allows us to
-         * filter out joinclauses, reducing the number of relids we need to
-         * consider.
-         *
-         * This pass does not derive further EC implications from joininfo itself.
-         */
+        /* Generate implied equality clauses so pushdown checks can narrow
+         * the outer relations considered for parameterized paths. */
         List* ec_clauses = generate_implied_equalities_for_column(
             root, rel, pushdown_join_clause_matches, nullptr, rel->lateral_referencers);
         join_clauses.concatenate(ec_clauses);
@@ -754,14 +601,10 @@ export {
     }
 
     /**
-     * @brief Finds useful outer relations for parameterized base-scan paths.
+     * @brief Finds additional outer relations that could supply scan parameters.
      *
-     * Identifies candidate rels for parameterization from the
-     * list of join clauses.
-     *
-     * Some rels cannot be considered for parameterization, such as a partitioned
-     * parent of the given rel. Other rels are just not useful because they don't
-     * appear in a join clause that could be pushed down.
+     * Collects dependencies from admitted join clauses. Excludes this scan's relations,
+     * already-required lateral dependencies and outer-join relation IDs.
      */
     Relids find_candidate_relids(PlannerInfo* root, RelOptInfo* rel, List* join_clauses) {
         Relids candidate_relids = nullptr;
@@ -776,37 +619,25 @@ export {
     }
 
     /**
-     * @brief Estimates the binomial coefficient used to bound path enumeration.
+     * @brief Estimates how many sets of @p k relations can be chosen from @p n.
      *
-     * Calculates the number of combinations of n things taken k at
-     * a time. When the correct result is large, the calculation may produce a
-     * non-integer result, or overflow to inf, which caller should handle
-     * appropriately.
-     *
-     * Use the following two formulae from Knuth TAoCP, 1.2.6:
-     *    (2) Combinations(n, k) = (n*(n-1)..(n-k+1)) / (k*(k-1)..1)
-     *    (5) Combinations(n, k) = Combinations(n, n-k)
+     * Used to limit planner path enumeration. Computes n choose k in floating point,
+     * so large results can lose precision or become infinity. Uses the product and
+     * symmetry identities from Knuth, TAoCP 1.2.6, equations (2) and (5).
      */
     double combinations(int n, int k) {
         double v = 1;
 
-        /*
-         * If k is close to n, then both the numerator and the denominator are
-         * close to n!, and we may overflow even if the input is reasonable
-         * (e.g. Combinations(500, 500)). Use formula (5) to choose the smaller,
-         * but equivalent, k.
-         */
+        /* Choosing k or n-k gives the same count. Use the smaller value to
+         * reduce work and avoid needless overflow near n, such as choose(500, 500). */
         k = std::min(k, n - k);
 
-        /* calculate numerator of formula (2) first */
+        /* Multiply the descending numerator factors of n choose k. */
         for (int i = n; i >= n - k + 1; i--) {
             v *= i;
         }
 
-        /*
-         * Divide by each factor in the denominator of formula (2), skipping
-         * division by 1.
-         */
+        /* Divide by k factorial. The factor 1 needs no operation. */
         for (int i = k; i >= 2; i--) {
             v /= i;
         }
@@ -815,18 +646,11 @@ export {
     }
 
     /**
-     * @brief Chooses a parameterization depth that stays within the configured path limit.
+     * @brief Limits how many outer relations each parameterized path may depend on.
      *
-     * Calculates the depth limit for the parameterization
-     * search, given the number of candidate relations.
-     *
-     * The maximum number of paths generated for a given depthLimit is:
-     *
-     *    Combinations(nCandidates, 0) + Combinations(nCandidates, 1) + ... +
-     *    Combinations(nCandidates, depthLimit)
-     *
-     * There's no closed formula for a partial sum of combinations, so just keep
-     * increasing the depth until the number of combinations exceeds the limit.
+     * Counts subsets from size zero upward and stops before their total exceeds
+     * the configured path limit. Returns zero when qual pushdown is disabled,
+     * leaving only the path with no additional outer dependencies.
      */
     int choose_depth_limit(int n_candidates) {
         if (!bioseq::settings::planner::qual_pushdown::enabled) {
