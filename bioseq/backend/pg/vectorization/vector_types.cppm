@@ -1,21 +1,13 @@
 /**
  * @file
- * Defines the fixed-capacity vector slot ABI and its ownership operations.
+ * Store a batch of rows as one value array per column for vector execution.
+ * The slot owns copied values and can return selected rows as scalar tuples.
  */
 
-/*-------------------------------------------------------------------------
- *
- * vectorization/vector_types.cppm
- *
- * Owns the vectorised data model used by the columnar custom scan and the
- * exported helpers that build/populate it. A vector_tuple_table_slot_storage stores one
- * vector_column_storage per attribute, each of which packs up to
- * `vector_column_capacity` values for batched evaluation. The storage records
- * are shared directly across modules, so their field order and types are part
- * of the private vector-function boundary. The helpers allocate slots,
- * write incoming tuples, extract scalar tuples, and reset batches.
- *
- *-------------------------------------------------------------------------
+/*
+ * A vector slot holds up to vector_column_capacity rows. The columnar scan and
+ * vector functions share these records directly, so their field order and
+ * types must agree across modules.
  */
 module;
 
@@ -39,78 +31,83 @@ import bioseq.postgres.support.runtime_diagnostics;
 export constexpr std::uint32_t vector_column_capacity = 10'000;
 
 /**
- * Varlena values need ownership that is independent of the input slot. Keep
- * that distinction explicit instead of inferring it from stored_by_value: a
- * varlena lane contains an owned Datum pointer, while fixed-width values are
- * stored inline (using PostgreSQL's by-value flag when extracted).
+ * Fixed-size values are copied into the column buffer. Variable-length values
+ * use pointers to owned copies, so they survive reuse of the input tuple slot.
+ * stored_by_value controls how fetch_att reads each stored value.
  */
 export enum class vector_storage_kind : std::uint8_t { inline_fixed, owned_varlena_datum };
 
-/** Raw storage passed through the private vector-function boundary. */
+/** Values and NULL flags for one column in a vector batch. */
 export struct vector_column_storage {
-    /** Number of populated lanes. */
+    /** Number of populated rows in this column. */
     std::uint32_t lane_count;
-    /** Bytes reserved for each lane in data. */
+    /** Bytes reserved for each row in data. */
     std::uint16_t element_width;
     /** Whether fetch_att reads each lane as an inline Datum value. */
     bool stored_by_value;
-    /** Ownership policy for lane payloads. */
+    /** Whether data holds fixed-size values or pointers to owned copies. */
     vector_storage_kind storage_kind;
-    /** Context that owns copied varlena payloads. */
+    /** Memory context used to allocate variable-length value copies. */
     MemoryContext storage_context;
-    /** Aligned fixed-stride lane buffer. */
+    /** Aligned value buffer, with element_width bytes per row. */
     Datum* data;
-    /** PostgreSQL NULL flag for each possible lane. */
+    /** True for each NULL row value. */
     std::array<bool, vector_column_capacity> is_null;
-    /** Optional batch-level source-row mapping. */
+    /** Optional source row numbers, borrowed from the containing batch slot. */
     std::uint64_t* source_row_numbers;
 
-    /** Returns the populated PostgreSQL null flags. */
+    /** View the NULL flags for populated rows. */
     [[nodiscard]] std::span<bool> nulls() noexcept {
         return {is_null.data(), lane_count};
     }
 
-    /** Returns the populated PostgreSQL null flags. */
+    /** Read the NULL flags for populated rows. */
     [[nodiscard]] std::span<const bool> nulls() const noexcept {
         return {is_null.data(), lane_count};
     }
 
-    /** Views populated lanes as the requested fixed-width value type. */
+    /**
+     * View populated values without copying. p_value must match the stored
+     * element width and representation.
+     */
     template <class p_value> [[nodiscard]] std::span<p_value> values() noexcept {
         return {reinterpret_cast<p_value*>(data), lane_count};
     }
 
-    /** Views populated lanes as the requested fixed-width value type. */
+    /**
+     * Read populated values without copying. p_value must match the stored
+     * element width and representation.
+     */
     template <class p_value> [[nodiscard]] std::span<const p_value> values() const noexcept {
         return {reinterpret_cast<const p_value*>(data), lane_count};
     }
 };
 
-/** TupleTableSlot extension that owns one vector batch. */
+/** PostgreSQL tuple slot holding a batch with one value array per column. */
 export struct vector_tuple_table_slot_storage {
-    /** PostgreSQL virtual-slot prefix consumed by TTSOpsVirtual. */
+    /** Virtual tuple slot kept first for PostgreSQL slot operations. */
     VirtualTupleTableSlot virtual_slot;
     /** Number of populated rows. */
     std::uint32_t row_count;
-    /** Rows that remain after vector predicate evaluation. */
+    /** True for rows that pass the vector filters. */
     std::array<bool, vector_column_capacity> row_is_active;
     /** Source row number for each batch row. */
     std::array<std::uint64_t, vector_column_capacity> source_row_numbers;
 };
 
 /**
- * These enum values are the first members of reinterpret-cast structures.
- * Their explicit `int` representation therefore remains part of the ABI.
+ * Mark an argument as a scalar constant or a vector column. Keep the int-sized
+ * tag first in vector_operand_storage because vector functions read it directly.
  */
 export enum class vector_operand_storage_kind : int { constant, column };
 
-/** Stores one constant datum or vector-column handle for an fmgr argument. */
+/** One vector function argument: a scalar Datum or a column storage pointer. */
 export struct vector_operand_storage {
     vector_operand_storage_kind kind;
     Datum datum;
 };
 
-/** Serialized storage used by PostgreSQL's int8 aggregate state. */
+/** PostgreSQL BIGINT aggregate state, with a 128-bit sum to limit overflow. */
 export struct int128_aggregate_state_storage {
     bool calculate_sum_of_squares;
     int64 count;
@@ -118,16 +115,16 @@ export struct int128_aggregate_state_storage {
     int128 sum_of_squares;
 };
 
-/** Serialized state used by PostgreSQL's int8 sum aggregate. */
+/** Count and sum stored in the two-BIGINT array for SMALLINT and INTEGER AVG. */
 export struct int64_aggregate_state_storage {
     int64 count;
     int64 sum;
 };
 
-/* Direct assertions protect the storage boundaries without shadow layouts. */
+/* Check the field offsets shared by vector functions and aggregate states. */
 namespace {
 
-/** Computes an ABI field offset rounded up to the required alignment. */
+/** Round a field offset up to its required memory alignment. */
 [[nodiscard]] consteval std::size_t aligned_offset(std::size_t offset,
                                                    std::size_t alignment) noexcept {
     return (offset + alignment - 1) / alignment * alignment;
@@ -177,7 +174,11 @@ static_assert(sizeof(int64_aggregate_state_storage) == 2 * sizeof(int64));
 
 } // namespace
 
-/** Allocate an empty vector column with fixed batch-capacity storage. */
+/**
+ * Allocate an empty column and its fixed-capacity buffer in the current context.
+ * Keep source_row_numbers as a borrowed pointer. storage_context is used later
+ * for copies of variable-length values.
+ */
 export [[nodiscard]] vector_column_storage*
 allocate_vector_column(std::int16_t element_width,
                        bool stored_by_value,
@@ -201,7 +202,7 @@ allocate_vector_column(std::int16_t element_width,
 
 namespace {
 
-/** Records the source varlena representation before detoasting a vector lane. */
+/** Record whether an observed input value is compressed, external or inline. */
 void note_owned_varlena_source_form(Datum source) noexcept {
     if (!bioseq::postgres::support::runtime_diagnostics::is_bpchar_source_observation_active())
         return;
@@ -224,7 +225,10 @@ void note_owned_varlena_source_form(Datum source) noexcept {
         bioseq::postgres::support::runtime_diagnostics::bpchar_source_site::vector_copy);
 }
 
-/** Releases owned lane values and restores an empty batch state. */
+/**
+ * Free owned variable-length values and empty the batch for reuse.
+ * Keep the column buffers ready for the next batch.
+ */
 void cleanup_vector_slot_contents(
     vector_tuple_table_slot_storage* vector_slot,
     bioseq::postgres::support::runtime_diagnostics::vector_payload_cleanup_kind cleanup_kind) {
@@ -258,7 +262,7 @@ void cleanup_vector_slot_contents(
     vector_slot->row_count = 0;
 }
 
-/** Clears a vector slot through PostgreSQL's TupleTableSlot callback ABI. */
+/** Clear the batch contents, then clear the PostgreSQL virtual slot. */
 void clear_vector_tuple_slot(TupleTableSlot* slot) {
     cleanup_vector_slot_contents(
         reinterpret_cast<vector_tuple_table_slot_storage*>(slot),
@@ -266,7 +270,7 @@ void clear_vector_tuple_slot(TupleTableSlot* slot) {
     TTSOpsVirtual.clear(slot);
 }
 
-/** Releases vector-column storage through PostgreSQL's slot callback ABI. */
+/** Free batch values and column buffers when PostgreSQL releases the slot. */
 void release_vector_tuple_slot(TupleTableSlot* slot) {
     auto* vector_slot = reinterpret_cast<vector_tuple_table_slot_storage*>(slot);
     cleanup_vector_slot_contents(
@@ -292,12 +296,12 @@ void release_vector_tuple_slot(TupleTableSlot* slot) {
     TTSOpsVirtual.release(slot);
 }
 
-/** Confirms that vector lanes are already in materialized storage. */
+/** Materializing this slot needs no copy because it already owns its values. */
 void materialize_vector_tuple_slot(TupleTableSlot*) {
-    /* Every fixed-width lane is inline and every varlena lane is owned. */
+    /* Fixed-size values are inline, and variable-length values have owned copies. */
 }
 
-/** Rejects unsupported generic slot copies at the PostgreSQL boundary. */
+/** Report that PostgreSQL's generic slot-copy operation cannot copy a batch. */
 void copy_vector_tuple_slot(TupleTableSlot*, TupleTableSlot*) {
     ereport(ERROR,
             (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
@@ -315,8 +319,8 @@ HeapTuple copy_vector_heap_tuple(TupleTableSlot*) {
 /** Rejects conversion of a vector batch to a minimal tuple. */
 MinimalTuple copy_vector_minimal_tuple(TupleTableSlot*
 #if PG_VERSION_NUM >= 180000
-    // PG18 adds space before a copied tuple. Batch-to-scalar conversion is
-    // unsupported regardless of that space, exactly as on PG17.
+    // PostgreSQL 18 adds an argument for reserved bytes before the tuple.
+    // The batch conversion remains unsupported.
     , Size
 #endif
 ) {
@@ -326,7 +330,7 @@ MinimalTuple copy_vector_minimal_tuple(TupleTableSlot*
     pg_unreachable();
 }
 
-/** Returns the stable vector slot method table after all callbacks exist. */
+/** Return the PostgreSQL slot callbacks for storing and freeing vector batches. */
 [[nodiscard]] const TupleTableSlotOps* vector_tuple_slot_ops() {
     static const TupleTableSlotOps operations = [] {
         TupleTableSlotOps configured_operations = TTSOpsVirtual;
@@ -349,7 +353,7 @@ export [[nodiscard]] bool is_vector_tuple_table_slot(const TupleTableSlot* slot)
     return slot != nullptr && slot->tts_ops == vector_tuple_slot_ops();
 }
 
-/** Allocate a vector slot with one owned column per tuple attribute. */
+/** Create a vector slot with one empty, owned column per tuple attribute. */
 export TupleTableSlot* create_vector_tuple_table_slot(TupleDesc tuple_desc) {
     TupleTableSlot* slot =
         MakeTupleTableSlot(CreateTupleDescCopy(tuple_desc), vector_tuple_slot_ops()
@@ -397,15 +401,20 @@ export TupleTableSlot* create_vector_tuple_table_slot(TupleDesc tuple_desc) {
     return slot;
 }
 
-/** Materialize selected attributes from one vector row into a scalar slot. */
+/**
+ * Copy selected attributes of one batch row into a scalar virtual slot.
+ * Attribute indices are zero-based. By-reference values still point into the
+ * batch. Keep those values unchanged while the scalar tuple is in use.
+ */
 export void extract_tuple_from_vector_slot(TupleTableSlot* output_slot,
                                            vector_tuple_table_slot_storage* vector_slot,
                                            std::int32_t row_index,
                                            List* attr_needed_list) {
-    /* Only attributes_needed is materialized below, but ExecStoreVirtualTuple
-     * publishes every descriptor attribute as valid.  Establish canonical
-     * virtual-slot contents first so omitted columns are NULL rather than stale
-     * Datums left behind by an earlier row. */
+    /*
+     * ExecStoreVirtualTuple marks every attribute valid, including those this
+     * scan did not request. Start with NULLs so omitted attributes cannot expose
+     * values left over from the previous row.
+     */
     bioseq::postgres::support::pg_slot_datums_view{output_slot}.clear_all_to_null();
     output_slot->tts_nvalid = 0;
     foreach_int(attribute_number, attr_needed_list) {
@@ -421,11 +430,15 @@ export void extract_tuple_from_vector_slot(TupleTableSlot* output_slot,
     }
 
     ExecStoreVirtualTuple(output_slot);
-    /* Preserve the scan wrapper's physical relation; callers set the row-specific TID. */
+    /* Keep the physical relation OID. The caller sets this row's TID. */
     output_slot->tts_tableOid = vector_slot->virtual_slot.base.tts_tableOid;
 }
 
-/** Store one PostgreSQL datum in a vector column, copying owned varlena bytes. */
+/**
+ * Write or replace one row value in a column. Copy variable-length values into
+ * the column's memory context, freeing any previous owned value at that row.
+ * Report an error when row_index is outside the batch capacity.
+ */
 export void write_datum_to_vector_column(vector_column_storage* column,
                                          Datum input_datum,
                                          bool is_null,
@@ -477,7 +490,11 @@ export void write_datum_to_vector_column(vector_column_storage* column,
     column->lane_count = std::max(column->lane_count, static_cast<uint32>(row_index + 1));
 }
 
-/** Append one scalar tuple to a vector batch at the requested row index. */
+/**
+ * Copy all attributes of a scalar tuple into the requested batch row.
+ * Update each column's populated count. The caller sets the batch row count
+ * and source-row mapping.
+ */
 export void write_tuple_to_vector_slot(TupleTableSlot* input_slot,
                                        vector_tuple_table_slot_storage* vector_slot,
                                        std::int32_t row_index) {
@@ -493,7 +510,7 @@ export void write_tuple_to_vector_slot(TupleTableSlot* input_slot,
     }
 }
 
-/** Release owned lane payloads and reset a vector slot for the next batch. */
+/** Free owned row values and reset the batch while keeping its column buffers. */
 export void reset_vector_tuple_table_slot(vector_tuple_table_slot_storage* vector_slot) {
     cleanup_vector_slot_contents(vector_slot,
                                  bioseq::postgres::support::runtime_diagnostics::
