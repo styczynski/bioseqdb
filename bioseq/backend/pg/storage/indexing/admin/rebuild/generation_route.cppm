@@ -1,6 +1,6 @@
 /**
  * @file admin/rebuild/generation_route.cppm
- * @brief Internal locator-backed minimizer generation rebuild contract.
+ * @brief Rebuild a minimizer index from a stored sequence locator.
  */
 module;
 
@@ -18,13 +18,9 @@ import bioseq.sequences.kmers.highway_minimizer_contract;
 export namespace bioseq::storage::indexing::rebuild_detail {
 
 /**
- * @brief Borrowed state required to rebuild one locator-backed minimizer generation.
- *
- * Relation and locator identities select the source and destination. The snapshot,
- * caches, memory contexts, promoted datum, and kernel table remain owned by the
- * caller and must outlive the call. The route publishes either grouped-SoA or the
- * registered hash-major representation and propagates PostgreSQL and C++ failures
- * after its local read-session and storage cleanup.
+ * Source, storage, and backend settings for one minimizer generation build.
+ * The caller owns the snapshot, caches, memory contexts, sequence datum, and
+ * kernel table. They must remain valid until the build returns.
  */
 struct locator_generation_rebuild_request {
     Oid user_relation_oid = InvalidOid;
@@ -49,11 +45,9 @@ struct locator_generation_rebuild_request {
 };
 
 /**
- * @brief Build and validate one locator-backed persisted minimizer generation.
- * @param request Borrowed source, storage, snapshot, and backend state.
- *
- * The selected representation is published atomically. Storage owners and the
- * promoted sequence view are closed before any failure is propagated.
+ * Build and publish the supported grouped-SoA or hash-major format for this source.
+ * Check the published identity and counts, then close the source read session.
+ * Failures are rethrown after local cleanup.
  */
 void build_and_verify_locator_minimizer_generation(
     const locator_generation_rebuild_request& request);

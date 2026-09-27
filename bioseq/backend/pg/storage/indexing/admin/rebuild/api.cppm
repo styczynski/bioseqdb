@@ -1,6 +1,6 @@
 /**
  * @file admin/rebuild/api.cppm
- * @brief Declares the stable PostgreSQL index-rebuild entry points.
+ * @brief Index registry queries and rebuild entry points.
  */
 module;
 
