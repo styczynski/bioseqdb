@@ -1,6 +1,6 @@
 /**
  * @file scanner/snapshot_rebind.cppm
- * @brief Parallel-worker snapshot rebinding for a scan source provider.
+ * @brief Set a scan source's snapshot after restoring parallel scan state.
  */
 module;
 
@@ -21,14 +21,15 @@ import bioseq.postgres.storage.scanner.source_provider_contract;
 
 export namespace bioseq::storage {
 
-/** Rebind a scan provider to the registered snapshot restored from its
- * parallel DSM coordinate. Upper owners may already retain leases on this
- * registry, so the registry is updated in place rather than replaced. No
- * source domain may have observed the preceding snapshot.
- * @param provider Open scan provider owned by the current backend thread.
- * @param authoritative_registered_snapshot Replacement registered MVCC
- * snapshot that must outlive the provider and derived leases.
- * @throws PostgreSQL ERROR when the provider is invalid or a domain is active.
+/**
+ * Set the snapshot restored from parallel scan shared memory.
+ * Update the existing registry so its counted references still point to it.
+ * This is allowed only before any source has opened its read resources.
+ * @param provider Open scan provider on the current backend thread.
+ * @param authoritative_registered_snapshot Registered MVCC snapshot that
+ * must outlive the provider and any counted references.
+ * @throws PostgreSQL ERROR for an invalid provider or snapshot, or if a source
+ * has already opened a read domain.
  */
 inline void
 rebind_pg_sequence_source_provider_snapshot(pg_sequence_source_provider* provider,

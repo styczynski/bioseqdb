@@ -1,6 +1,6 @@
 /**
  * @file scanner/lazy_binding_contract.cppm
- * @brief Defines the immutable PostgreSQL lazy-sequence source binding.
+ * @brief Source details needed to open a lazy PostgreSQL sequence view.
  */
 module;
 
@@ -29,30 +29,29 @@ import bioseq.storage.scanner;
 export namespace bioseq::storage {
 
 /**
- * Immutable PostgreSQL relation, locator, and lifetime resources from which
- * one callback-scoped lazy facade may be constructed.
- *
- * Keeping this value separate from the facade lets administrative writers
- * validate publication inputs without importing the concrete scanner.
- * @tparam p_sequence_config Concrete alphabet and storage-unit configuration.
+ * Table, locator and borrowed resources used to open a lazy sequence view.
+ * These fields stay fixed while the binding exists. Keeping them separate
+ * lets index writers check their input without depending on the scanner.
+ * @tparam p_sequence_config Alphabet and packed storage type.
  */
 template <class p_sequence_config> class postgres_lazy_sequence_binding final {
   public:
-    /// Concrete sequence representation captured by this binding.
+    /// Alphabet and packed storage type.
     using sequence_config = p_sequence_config;
-    /// Logical alphabet exposed by callback-scoped views.
+    /// Alphabet exposed by lazy views.
     using alphabet_type = typename compact_sequence_range<p_sequence_config>::traits::alphabet_type;
 
-    /// Capture a validated locator and borrowed PostgreSQL read resources.
-    /// @param db_oid Database component of the source identity.
-    /// @param tablespace_oid Tablespace component of the source identity.
-    /// @param main_relfilenode File component of the source identity.
-    /// @param column_attno One-based sequence attribute number.
-    /// @param locator Physical fragment range and logical sequence length.
-    /// @param last_fragment_padding Unused letters in the final packed unit.
-    /// @param registered_snapshot Borrowed registered MVCC snapshot.
-    /// @param caches Borrowed read-side cache.
-    /// @param parent_mctx Parent context for callback-scoped allocation.
+    /// Save source details and borrow the resources needed for reads.
+    /// This constructor stores the inputs. Validation happens when a reader opens.
+    /// @param db_oid Parent database.
+    /// @param tablespace_oid Parent tablespace.
+    /// @param main_relfilenode Parent table file number.
+    /// @param column_attno One-based sequence column number.
+    /// @param locator Fragment range and sequence length.
+    /// @param last_fragment_padding Unused letters in the last packed unit.
+    /// @param registered_snapshot Registered MVCC snapshot kept alive by the caller.
+    /// @param caches Read cache kept alive by the caller.
+    /// @param parent_mctx Parent context for the read session.
     postgres_lazy_sequence_binding(Oid db_oid,
                                    Oid tablespace_oid,
                                    Oid main_relfilenode,
@@ -69,19 +68,19 @@ template <class p_sequence_config> class postgres_lazy_sequence_binding final {
     postgres_lazy_sequence_binding(const postgres_lazy_sequence_binding&) noexcept = default;
     postgres_lazy_sequence_binding& operator=(const postgres_lazy_sequence_binding&) = delete;
 
-    /// @return Database component of the source identity.
+    /// @return Parent database OID.
     [[nodiscard]] Oid db_oid() const noexcept {
         return db_oid_;
     }
-    /// @return Tablespace component of the source identity.
+    /// @return Parent tablespace OID.
     [[nodiscard]] Oid tablespace_oid() const noexcept {
         return tablespace_oid_;
     }
-    /// @return File component of the source identity.
+    /// @return Parent table file number.
     [[nodiscard]] Oid main_relfilenode() const noexcept {
         return main_relfilenode_;
     }
-    /// @return One-based sequence attribute number.
+    /// @return One-based sequence column number.
     [[nodiscard]] std::int16_t column_attno() const noexcept {
         return column_attno_;
     }
@@ -101,7 +100,7 @@ template <class p_sequence_config> class postgres_lazy_sequence_binding final {
     [[nodiscard]] seq_caches* caches() const noexcept {
         return caches_;
     }
-    /// @return Parent context for callback-scoped session state.
+    /// @return Parent memory context for the read session.
     [[nodiscard]] MemoryContext parent_mctx() const noexcept {
         return parent_mctx_;
     }
@@ -116,7 +115,7 @@ template <class p_sequence_config> class postgres_lazy_sequence_binding final {
         return static_cast<std::uint8_t>(
             sizeof(typename compact_sequence_range<p_sequence_config>::traits::storage_unit));
     }
-    /// @return Logical-letter capacity of one physical fragment.
+    /// @return Maximum number of letters in one fragment.
     [[nodiscard]] static constexpr std::uint64_t fragment_bp_capacity() noexcept {
         return static_cast<std::uint64_t>(default_fragment_storage_units) *
                static_cast<std::uint64_t>(
@@ -133,9 +132,11 @@ template <class p_sequence_config> class postgres_lazy_sequence_binding final {
         return static_cast<std::size_t>(remainder == 0u ? 0u : letters_per_unit - remainder);
     }
 
-    /// Compare every source, locator, and borrowed-lifetime identity field.
+    /// Check whether two bindings can share one scanner.
+    /// Table and column identifiers, locator bytes, padding and all borrowed
+    /// resource pointers must match.
     /// @param other Binding to compare.
-    /// @return Whether both bindings may reuse one concrete call state.
+    /// @return Whether both bindings can share one scanner.
     [[nodiscard]] bool
     matches_same_source(const postgres_lazy_sequence_binding& other) const noexcept {
         return db_oid_ == other.db_oid_ && tablespace_oid_ == other.tablespace_oid_ &&

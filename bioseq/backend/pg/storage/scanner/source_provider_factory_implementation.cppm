@@ -1,6 +1,6 @@
 /**
  * @file scanner/source_provider_factory_implementation.cppm
- * @brief Implements the narrow scan-provider factory through its scanner owner.
+ * @brief Connect the table-scan factory to sequence source creation.
  */
 module;
 
