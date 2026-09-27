@@ -1,6 +1,6 @@
 /**
  * @file index_materialization.cppm
- * @brief Device target-index materialization from prepared uploads.
+ * @brief Builds a target minimizer index on the GPU from prepared input.
  */
 module;
 
@@ -49,18 +49,20 @@ import :sketch_dispatch;
 export namespace bioseq::gpu::vulkan {
 
 /**
- * @brief Builds a device-resident minimizer index from one prepared upload.
- * @tparam p_minimizer_type Packed minimizer record emitted by the sketch kernel.
- * @param upload Packed bytes and shader geometry.
- * @param rank_lut Alphabet rank mapping.
- * @param window_size Window length in k-mers.
- * @param kmer_size K-mer length in biological symbols.
- * @param query_gate Optional canonical query filter.
- * @param decline_out Optional pre-dispatch rejection record.
- * @param owned_sequence_staging_bytes Bytes owned by caller staging.
- * @param release_owned_sequence_staging Callback that releases caller staging.
- * @return Resident index, or no value when construction is declined.
- * @throws vulkan_runtime_error If runtime execution fails.
+ * @brief Builds a target minimizer index that remains in device memory.
+ *
+ * Reserves memory for counting first. The runtime then uses the exact count to
+ * size the index and checks its allocation against the memory budget.
+ * @param upload Packed input kept alive until the runtime finishes reading it.
+ * @param rank_lut Alphabet decoding table.
+ * @param window_size K-mers per window.
+ * @param kmer_size Symbols per k-mer.
+ * @param query_gate Optional bitmap filtering target hashes.
+ * @param decline_out Optional rejection details.
+ * @param owned_sequence_staging_bytes Bytes in caller-owned temporary input.
+ * @param release_owned_sequence_staging Releases that input once upload is complete.
+ * @return Device index, or no value when input, memory, or build checks fail.
+ * @throws vulkan_runtime_error If execution fails.
  */
 template <class p_minimizer_type>
 [[nodiscard]] std::optional<gpu_built_index>
@@ -197,10 +199,9 @@ build_gpu_index_from_upload_on_device(
         .char_mask = upload.char_mask,
         .padding_letters = upload.padding_letters,
     };
-    // Pipeline-cache metadata is process-lived authority. Resolve the exact
-    // target-index key set before reserving the transient count/main peak so a
-    // cold pipeline cannot nest a metadata admission after large mapped Vulkan
-    // allocations have become visible in the process footprint.
+    // Prepare the target-index pipelines before reserving dispatch memory.
+    // Their cached metadata lives for the process lifetime and needs its own
+    // reservation, which is harder to obtain after large GPU buffers are mapped.
     runtime.prepare_target_index_pipelines(sketch_params);
 
     auto& admission = memory_admission_controller::instance();
@@ -267,10 +268,8 @@ build_gpu_index_from_upload_on_device(
                 if (!built.valid) {
                     return {};
                 }
-                // runtime publishes this bit only after rewinding and
-                // destroying all sketch-arena backing buffers while its mutex
-                // is still held. Do not inspect the shared arena here: another
-                // Vulkan request may already own it after runtime returned.
+                // The runtime records arena cleanup while holding its mutex. Check that
+                // result here, since another request may already be using the shared arena.
                 if (built.ownership.arena_trimmed_before_permit_shrink != 1u) {
                     built.valid = false;
                     built.failure_reason = gpu_index_build_failure::

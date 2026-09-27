@@ -1,6 +1,6 @@
 /**
  * @file contract.cppm
- * @brief Vulkan minimizer wire traits, decline identities, and alphabet contracts.
+ * @brief Minimizer record layouts, input checks, and Vulkan rejection reasons.
  */
 module;
 
@@ -44,16 +44,16 @@ import bioseq.instrumentation;
 
 export namespace bioseq::gpu::vulkan {
 
-/** @brief Immutable identity for a canonical Vulkan query gate. */
+/** @brief Query-gate identity backed by shared read-only bitmap words. */
 using vulkan_sketch_query_gate_identity = gpu_index_gate_identity;
 
 /**
- * @brief Freezes query-gate words and computes their stable identity.
- * @param words Exact query-gate words in device order.
- * @param mask Bit mask applied by the gate.
- * @param canonical_words Optional immutable owner for `words`.
- * @return Disabled identity for an empty gate, otherwise the canonical identity.
- * @throws vulkan_runtime_error If the supplied owner differs from `words`.
+ * @brief Builds an identity for a query-gate bitmap.
+ *
+ * Copies words into shared read-only storage unless canonical_words supplies
+ * a matching owner. The identity includes the gate mask and a digest of the
+ * words. An empty gate returns a disabled identity.
+ * @throws vulkan_runtime_error If canonical_words has different contents.
  */
 [[nodiscard]] inline vulkan_sketch_query_gate_identity
 canonical_vulkan_sketch_query_gate_identity(
@@ -96,7 +96,7 @@ canonical_vulkan_sketch_query_gate_identity(
     };
 }
 
-/** @brief Couples query-gate words with an optional precomputed identity. */
+/** @brief Borrowed query-gate words and their optional cached identity. */
 struct vulkan_sketch_query_gate {
     std::span<const std::uint32_t> words{};
     std::uint32_t mask = 0u;
@@ -107,9 +107,11 @@ struct vulkan_sketch_query_gate {
     [[nodiscard]] bool enabled() const noexcept { return !words.empty(); }
 
     /**
-     * @brief Returns an identity that exactly matches the current word span.
-     * @return Disabled identity when the gate is empty.
-     * @throws vulkan_runtime_error If a supplied identity differs from the words.
+     * @brief Checks the cached gate identity or builds one from the current words.
+     *
+     * An empty gate returns a disabled identity.
+     * @throws vulkan_runtime_error If a supplied identity fails the word, mask,
+     * or layout checks.
      */
     [[nodiscard]] vulkan_sketch_query_gate_identity canonical_identity() const {
         if (!enabled()) return {};
@@ -119,8 +121,8 @@ struct vulkan_sketch_query_gate {
         if (identity_valid && identity.enabled
             && identity.word_count == words.size() && identity.mask == mask
             && identity.is_well_formed()
-            // The pointer fast path is valid only for the immutable owner
-            // carried in the identity; raw/mutable spans still exact-compare.
+            // A span over the identity owner already has the same words. Other spans
+            // need a content comparison.
             && (same_frozen_storage
                 || std::equal(
                     words.begin(), words.end(),
@@ -135,7 +137,7 @@ struct vulkan_sketch_query_gate {
     }
 };
 
-/** @brief Identifies why a selected Vulkan minimizer route was rejected. */
+/** @brief Reasons a Vulkan minimizer request can be rejected. */
 enum class vulkan_sketch_decline_reason : std::uint8_t {
     none,
     empty_sequence,
@@ -160,7 +162,7 @@ enum class vulkan_sketch_decline_reason : std::uint8_t {
     output_capacity_overflow,
 };
 
-/** @brief Captures a Vulkan rejection with the input and memory-plan shape. */
+/** @brief Rejection reason with input dimensions and memory-budget details. */
 struct vulkan_sketch_decline {
     vulkan_sketch_decline_reason reason = vulkan_sketch_decline_reason::none;
     std::uint64_t bp_size = 0;
@@ -178,10 +180,8 @@ struct vulkan_sketch_decline {
 };
 
 /**
- * @brief Reads a diagnostic sequence length without constraining probe types.
- * @tparam p_sequence Candidate sequence type.
- * @param seq Sequence whose optional `bp_size()` member is inspected.
- * @return Biological length, or zero when the type has no length accessor.
+ * @brief Reads sequence length for a rejection message.
+ * @return bp_size() when available, otherwise zero.
  */
 template <class p_sequence>
 [[nodiscard]] inline std::uint64_t vulkan_decline_bp_size(
@@ -195,9 +195,8 @@ template <class p_sequence>
 }
 
 /**
- * @brief Returns the stable diagnostic name for a Vulkan decline reason.
- * @param reason Decline identity.
- * @return Static lower-snake-case name.
+ * @brief Returns the diagnostic name of a Vulkan rejection reason.
+ * @return A static string, or "unknown" for an unrecognized value.
  */
 [[nodiscard]] inline constexpr std::string_view
 vulkan_sketch_decline_reason_name(vulkan_sketch_decline_reason reason) noexcept
@@ -250,9 +249,10 @@ vulkan_sketch_decline_reason_name(vulkan_sketch_decline_reason reason) noexcept
 }
 
 /**
- * @brief Formats a Vulkan decline with its exact shape and memory snapshot.
- * @param decline Decline record to format.
- * @return Single-line diagnostic text.
+ * @brief Formats a rejection reason and input sizes on one line.
+ *
+ * Memory-budget rejections also include the requested bytes and the memory
+ * snapshot used for the decision.
  */
 [[nodiscard]] inline std::string format_vulkan_sketch_decline(
     const vulkan_sketch_decline& decline)
@@ -298,9 +298,9 @@ vulkan_sketch_decline_reason_name(vulkan_sketch_decline_reason reason) noexcept
 }
 
 /**
- * @brief Tests whether a smaller fragment can remove the decline condition.
- * @param reason Decline identity from the current dispatch.
- * @return `true` only for size, capacity, or memory-plan rejections.
+ * @brief Reports whether a smaller segment may avoid this rejection.
+ *
+ * Allows retry for sequence-size, output-capacity, and memory-budget limits.
  */
 [[nodiscard]] inline constexpr bool
 vulkan_sketch_decline_allows_segment_split(
@@ -335,9 +335,9 @@ vulkan_sketch_decline_allows_segment_split(
 }
 
 /**
- * @brief Converts a target-index build failure to a sketch decline reason.
- * @param reason Runtime target-index failure.
- * @return Matching strict Vulkan decline identity.
+ * @brief Maps a target-index build failure to a minimizer rejection reason.
+ *
+ * An unspecified failure is reported as a target-index consistency failure.
  */
 [[nodiscard]] inline constexpr vulkan_sketch_decline_reason
 vulkan_target_index_failure_decline_reason(
@@ -371,9 +371,8 @@ vulkan_target_index_failure_decline_reason(
 }
 
 /**
- * @brief Throws the selected-Vulkan error for a recorded decline.
- * @param stage Operation name prefixed to the diagnostic.
- * @param decline Exact decline record.
+ * @brief Throws a Vulkan error describing the rejected operation.
+ * @param stage Operation name included in the message.
  * @throws vulkan_runtime_error Always.
  */
 [[noreturn]] inline void throw_vulkan_strict_decline(
@@ -386,16 +385,13 @@ vulkan_target_index_failure_decline_reason(
         format_vulkan_sketch_decline(decline)));
 }
 
-/**
- * @brief Defines device serialization for one minimizer representation.
- * @tparam p_record_type Packed minimizer record.
- */
+/** Describes how a minimizer record is stored in device buffers. */
 template <class p_record_type, class = void>
 struct minimizer_wire_traits;
 
 /**
- * @brief Serializes a single-word 16-bit, 32-bit, or 64-bit minimizer.
- * @tparam p_record_type Record exposing `storage_type` and `raw_value()`.
+ * Describes 16-, 32-, and 64-bit single-word minimizer records. Supplies
+ * field widths and buffer sizes for the shader interface.
  */
 template <class p_record_type>
     requires requires (p_record_type m) {
@@ -426,9 +422,10 @@ struct minimizer_wire_traits<p_record_type> {
                               minimizer_word_kind::u64;
 
     /**
-     * @brief Computes 32-bit device words required for a record count.
-     * @param n Number of minimizer records.
-     * @return Saturating device-word count.
+     * @brief Sizes a record count in 32-bit device words.
+     *
+     * Two 16-bit records share a word. Other records use one or two words each.
+     * Size arithmetic saturates at uint64_t maximum.
      */
     [[nodiscard]] static constexpr std::uint64_t device_words32_for_count(
         std::uint64_t n) noexcept
@@ -440,9 +437,10 @@ struct minimizer_wire_traits<p_record_type> {
     }
 
     /**
-     * @brief Computes device bytes required for a record count.
-     * @param n Number of minimizer records.
-     * @return Saturating byte count.
+     * @brief Returns device storage bytes for n records.
+     *
+     * Includes padding to complete the last 32-bit word. Arithmetic saturates
+     * at uint64_t maximum.
      */
     [[nodiscard]] static constexpr std::uint64_t device_bytes_for_count(
         std::uint64_t n) noexcept
@@ -452,10 +450,7 @@ struct minimizer_wire_traits<p_record_type> {
     }
 };
 
-/**
- * @brief Serializes a two-word 128-bit minimizer as four device words.
- * @tparam p_record_type Record exposing low and high 64-bit words.
- */
+/** Describes 128-bit minimizers stored as four 32-bit device words. */
 template <class p_record_type>
     requires requires (p_record_type m) {
         { m.data_low_64() } -> std::convertible_to<std::uint64_t>;
@@ -469,11 +464,8 @@ struct minimizer_wire_traits<p_record_type> {
     static constexpr bool k_is_packed_uint16 = false;
     static constexpr std::uint32_t k_words32_per_minimizer = 4u;
     static constexpr std::uint32_t k_position_bits = p_record_type::layout_type::k_position_bits;
-    // The 128-bit layout packs `high_ = (kmer << 8) | span` into a 64-bit word,
-    // so only the low 56 bits of the kmer survive the span shift. The emit
-    // shader masks/compares with this effective width so its window-minimum
-    // selection matches `minimizer_representation<L,p_kmer_size>::operator<=>` (which compares the
-    // stored, truncated kmer), not the wider pre-truncation `layout_type::k_hash_bits`.
+    // The high word reserves eight bits for the span, leaving at most 56 hash
+    // bits. Use that stored width so shader comparisons agree with host records.
     static constexpr std::uint32_t k_hash_bits =
         p_record_type::layout_type::k_hash_bits < 56u ? static_cast<std::uint32_t>(p_record_type::layout_type::k_hash_bits) : 56u;
     static constexpr std::uint32_t k_hash_shift = 8u;
@@ -483,9 +475,9 @@ struct minimizer_wire_traits<p_record_type> {
         minimizer_word_kind::u64x2;
 
     /**
-     * @brief Computes 32-bit device words required for a record count.
-     * @param n Number of minimizer records.
-     * @return Saturating device-word count.
+     * @brief Returns the 32-bit device-word count for n 128-bit records.
+     *
+     * The count saturates at uint64_t maximum.
      */
     [[nodiscard]] static constexpr std::uint64_t device_words32_for_count(
         std::uint64_t n) noexcept
@@ -495,9 +487,9 @@ struct minimizer_wire_traits<p_record_type> {
     }
 
     /**
-     * @brief Computes device bytes required for a record count.
-     * @param n Number of minimizer records.
-     * @return Saturating byte count.
+     * @brief Returns device bytes for n 128-bit records.
+     *
+     * The count saturates at uint64_t maximum.
      */
     [[nodiscard]] static constexpr std::uint64_t device_bytes_for_count(
         std::uint64_t n) noexcept
@@ -508,12 +500,10 @@ struct minimizer_wire_traits<p_record_type> {
 };
 
 /**
- * @brief ABI-preserving name for the traits-normalized nucleotide LUT lane.
+ * @brief Shader mode that maps nucleotide ranks through the uploaded lookup table.
  *
- * The public shader ABI originally named value 1 after DNA5.  Its actual
- * contract is broader: packed ranks are decoded with the uploaded nt4 LUT and
- * the rolling state consumes the normalized two-bit codes.  Keep the numeric
- * value and shader behavior unchanged while avoiding a DNA5-only host gate.
+ * The shader interface calls this value dna5_nt4, but it supports other
+ * nucleotide alphabets through the same table. Its numeric value is 1.
  */
 inline constexpr alphabet_kernel_kind k_lut_normalized_nucleotide_kernel =
     alphabet_kernel_kind::dna5_nt4;
@@ -521,12 +511,10 @@ static_assert(
     static_cast<std::uint8_t>(k_lut_normalized_nucleotide_kernel) == 1u);
 
 /**
- * @brief Selects the shader alphabet key from nucleotide traits and packing.
- * @tparam p_alphabet Logical alphabet.
- * @tparam p_bits_per_char Packed rank width.
- * @tparam p_alphabet_size Number of logical ranks.
- * @return Direct DNA4-compatible lane, normalized nucleotide LUT lane, or
- * `generic` for the existing rank-prefix semantics.
+ * @brief Chooses how the shader decodes an alphabet.
+ *
+ * Standard two-bit DNA4 uses ranks directly. Other nucleotide alphabets use
+ * a lookup table, and non-nucleotide alphabets use generic rank handling.
  */
 template <class p_alphabet,
           std::size_t p_bits_per_char,
@@ -534,8 +522,8 @@ template <class p_alphabet,
 [[nodiscard]] constexpr alphabet_kernel_kind
 alphabet_kernel_kind_for_shape() noexcept {
     if constexpr (seqan3::nucleotide_alphabet<p_alphabet>) {
-        // Only the known DNA4 rank order can bypass the normalization LUT.
-        // A new four-rank nucleotide alphabet may permute those ranks.
+        // Direct decoding requires the known DNA4 rank order. Four-rank alphabets
+        // can assign different ranks to the bases.
         if constexpr (std::same_as<p_alphabet, seq::dna4>
                       && p_bits_per_char == 2u && p_alphabet_size == 4u) {
             return alphabet_kernel_kind::dna4_nt4;
@@ -545,11 +533,7 @@ alphabet_kernel_kind_for_shape() noexcept {
     return alphabet_kernel_kind::generic;
 }
 
-/**
- * @brief Selects the shader alphabet key from a sequence type.
- * @tparam p_sequence Packed sequence exposing storage traits.
- * @return Specialized nucleotide key or `generic`.
- */
+/** Chooses the shader alphabet mode from a packed sequence type. */
 template <class p_sequence>
 [[nodiscard]] constexpr alphabet_kernel_kind choose_alphabet_kernel() {
     using traits = typename std::remove_cvref_t<p_sequence>::traits;
@@ -559,11 +543,7 @@ template <class p_sequence>
         traits::alphabet_size>();
 }
 
-/**
- * @brief Selects the shader alphabet key directly from sequence traits.
- * @tparam p_traits Packed sequence traits.
- * @return Specialized nucleotide key or `generic`.
- */
+/** Chooses the shader alphabet mode from packed sequence traits. */
 template <class p_traits>
 [[nodiscard]] constexpr alphabet_kernel_kind alphabet_kernel_kind_of_traits() noexcept {
     return alphabet_kernel_kind_for_shape<
@@ -572,7 +552,12 @@ template <class p_traits>
         p_traits::alphabet_size>();
 }
 
-/** @brief Tests packed metadata against the shader's physical decoder ABI. */
+/**
+ * @brief Checks that the shader can decode the packed units and alphabet.
+ *
+ * Requires 8-, 16-, 32-, or 64-bit units, at most 256 ranks, and consistent
+ * symbol widths, masks, and symbols per unit.
+ */
 [[nodiscard]] constexpr bool vulkan_minimizer_packed_shape_supported(
     std::size_t unit_bits,
     std::size_t bits_per_char,
@@ -599,9 +584,9 @@ template <class p_traits>
 }
 
 /**
- * @brief Tests whether shader metadata can represent an alphabet shape.
- * @tparam p_traits Packed sequence traits.
- * @return `true` when alphabet and packed storage fit the decoder ABI.
+ * @brief Checks alphabet and storage traits against the shader decoder limits.
+ *
+ * Returns false when required trait fields are missing.
  */
 template <class p_traits>
 [[nodiscard]] constexpr bool vulkan_minimizer_alphabet_shape_supported() noexcept {
@@ -627,7 +612,12 @@ template <class p_traits>
     }
 }
 
-/** @brief Tests runtime k against one selected shader rolling width. */
+/**
+ * @brief Checks whether a k-mer fits the shader rolling state.
+ *
+ * Nucleotides use two bits per base. Generic ranks use bits_per_char.
+ * At most 32 symbols and 64 bits are supported.
+ */
 [[nodiscard]] constexpr bool vulkan_minimizer_kmer_size_supported(
     alphabet_kernel_kind alphabet_kind,
     std::size_t bits_per_char,
@@ -644,10 +634,9 @@ template <class p_traits>
 }
 
 /**
- * @brief Tests whether a k-mer size fits the selected shader alphabet.
- * @tparam p_traits Packed sequence traits.
- * @param kmer_size K-mer length in biological symbols.
- * @return `true` when the rolling hash can represent the k-mer.
+ * @brief Checks a k-mer length using the alphabet and packing traits.
+ *
+ * Both the packed input and the shader rolling state must support it.
  */
 template <class p_traits>
 [[nodiscard]] constexpr bool vulkan_minimizer_kmer_size_supported(
@@ -663,22 +652,14 @@ template <class p_traits>
     }
 }
 
-/**
- * @brief Tests whether a window size fits the Vulkan kernel contract.
- * @param window_size Window length in k-mers.
- * @return `true` for the supported inclusive range.
- */
+/** Accepts minimizer windows containing 1 through 256 k-mers. */
 [[nodiscard]] constexpr bool vulkan_minimizer_window_size_supported(
     std::size_t window_size) noexcept
 {
     return window_size != 0 && window_size <= 256;
 }
 
-/**
- * @brief Tests whether sequence traits admit Vulkan minimizer sketching.
- * @tparam p_traits Packed sequence traits.
- * @return `true` when the alphabet metadata fits the ABI.
- */
+/** Checks the packed alphabet metadata required for Vulkan minimizer sketching. */
 template <class p_traits>
 [[nodiscard]] constexpr bool is_vulkan_minimizer_sketch_supported() noexcept
 {
@@ -686,15 +667,11 @@ template <class p_traits>
 }
 
 /**
- * @brief Builds forward and reverse codes for every alphabet rank.
+ * @brief Builds shader lookup tables for forward and complemented ranks.
  *
- * Nucleotide ranks are normalized through the existing minimap2 nt4 helper,
- * including their trait-defined complement.  The non-nucleotide `generic`
- * lane retains its existing narrow meaning: ranks zero through three are the
- * only canonical codes, higher ranks are ambiguous, and the packed rank width
- * remains the rolling width.  It is not an arbitrary-alphabet hash algorithm.
- * @tparam p_sequence Packed sequence type supplying alphabet traits.
- * @return Shader rank lookup table.
+ * Nucleotide alphabets map to A/C/G/T codes through nt4_normalize. Ambiguous
+ * symbols map to code 4. For generic alphabets, only ranks 0 through 3 and
+ * complement ranks in that range are valid codes.
  */
 template <class p_sequence>
 [[nodiscard]] vulkan_rank_lut make_vulkan_rank_lut() {

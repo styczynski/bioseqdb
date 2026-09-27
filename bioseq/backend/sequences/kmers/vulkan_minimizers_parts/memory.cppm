@@ -1,6 +1,6 @@
 /**
  * @file memory.cppm
- * @brief Host and device minimizer ownership and admission accounting.
+ * @brief Minimizer buffer ownership and memory-budget estimates.
  */
 module;
 
@@ -46,21 +46,19 @@ import :upload;
 
 export namespace bioseq::gpu::vulkan {
 
-/**
- * @brief Retains one reconciled permit across device and host batch storage.
- */
+/** Shares one memory reservation between a batch and its device results. */
 struct vulkan_batch_sketch_memory_retention {
     bioseq::parallelism::memory_permit permit;
 };
 
 /**
- * @brief Owns device-resident minimizer words and their admission lifetime.
- * @tparam p_minimizer_type Packed minimizer record represented by `words`.
+ * @brief Owns a device minimizer buffer and the memory reserved for it.
+ * @tparam p_minimizer_type Record type stored in words.
  */
 template <class p_minimizer_type>
 struct vulkan_device_minimizer_storage {
-    // Declaration order is intentional: reverse destruction frees `words`
-    // before either admission owner can release its reservation.
+    // Members are destroyed in reverse order. Free the device buffer before
+    // releasing either memory reservation.
     std::shared_ptr<vulkan_batch_sketch_memory_retention> batch_memory_retention;
     bioseq::parallelism::memory_permit permit;
     buffer words;
@@ -73,8 +71,8 @@ struct vulkan_device_minimizer_storage {
 };
 
 /**
- * @brief Borrows device minimizer storage through a shared owner.
- * @tparam p_minimizer_type Packed minimizer record represented by the buffer.
+ * @brief Selects minimizer records in a device buffer and keeps its owner alive.
+ * @tparam p_minimizer_type Record type stored in the buffer.
  */
 template <class p_minimizer_type>
 struct vulkan_device_minimizer_span {
@@ -82,11 +80,11 @@ struct vulkan_device_minimizer_span {
     std::uint64_t record_offset = 0u;
     std::uint64_t record_count = 0u;
 
-    /** @brief Returns the device buffer, or null for an empty span. */
+    /** Returns the device buffer, or null when this span has no owner. */
     [[nodiscard]] const buffer* words() const noexcept {
         return owner ? &owner->words : nullptr;
     }
-    /** @brief Returns the first physical record in the shared device buffer. */
+    /** Returns the record offset within the shared device buffer. */
     [[nodiscard]] std::uint64_t offset() const noexcept {
         return record_offset;
     }
@@ -94,22 +92,22 @@ struct vulkan_device_minimizer_span {
     [[nodiscard]] std::uint64_t count() const noexcept {
         return owner ? record_count : 0u;
     }
-    /** @brief Returns the device-word stride of one minimizer. */
+    /** Returns the 32-bit word stride, or zero for packed 16-bit records or no owner. */
     [[nodiscard]] std::uint32_t words32_per_minimizer() const noexcept {
         return owner ? owner->words32_per_minimizer : 0u;
     }
-    /** @brief Returns the resident minimizer word encoding. */
+    /** Returns the record encoding, or u32 when this span has no owner. */
     [[nodiscard]] minimizer_word_kind word_kind() const noexcept {
         return owner ? owner->word_kind : minimizer_word_kind::u32;
     }
 
     /**
-     * @brief Borrow a checked record subrange without changing the descriptor offset.
+     * @brief Returns a checked subrange sharing the same device buffer.
      *
-     * The runtime binds the owner's complete buffer and carries `record_offset`
-     * in its existing query-record/push wire. This deliberately avoids assuming
-     * that a minimizer-record boundary satisfies Vulkan's storage-buffer offset
+     * The shader receives the record offset separately while Vulkan binds the whole
+     * buffer. Record boundaries therefore do not need to satisfy Vulkan buffer-offset
      * alignment.
+     * @throws vulkan_runtime_error If the span or requested subrange is out of bounds.
      */
     [[nodiscard]] vulkan_device_minimizer_span
     subspan(std::uint64_t first, std::uint64_t count) const {
@@ -126,28 +124,28 @@ struct vulkan_device_minimizer_span {
 };
 
 /**
- * @brief Selects ownership and admission rules for host sketch results.
+ * @brief Chooses how returned host buffers are kept and charged to the memory budget.
  *
- * The collector-compatible route retains vector growth headroom. The fixed
- * route requires the caller to adopt the returned allocation directly.
+ * Collectors reserve room for vector growth. Fixed adoption reserves one result
+ * allocation, which the caller must take over without copying.
  */
 enum class vulkan_sketch_host_ownership_route : std::uint8_t {
     collector_compatible = 0,
     fixed_zero_copy_adoption = 1,
 };
 
-/** @brief Identifies the runtime route recorded by a sketch dispatch token. */
+/** Identifies the sketch operation recorded in a completion token. */
 enum class vulkan_sketch_dispatch_route : std::uint8_t {
     none,
     collect_minimizers,
 };
 
-/** @brief Authenticates one completed collector-compatible runtime roundtrip. */
+/** Records completion of one minimizer collection and download. */
 struct vulkan_sketch_dispatch_token {
     vulkan_sketch_dispatch_route route = vulkan_sketch_dispatch_route::none;
     std::uint64_t completed_roundtrips = 0;
 
-    /** @brief Validates the route and exact completed-roundtrip count. */
+    /** Checks that the token records exactly one completed minimizer collection. */
     [[nodiscard]] constexpr bool is_internally_consistent() const noexcept {
         return route == vulkan_sketch_dispatch_route::collect_minimizers
             && completed_roundtrips == 1;
@@ -171,7 +169,7 @@ static_assert(!vulkan_sketch_dispatch_token{}.is_internally_consistent());
 static_assert(vulkan_sketch_dispatch_token::
     completed_collect_minimizers_roundtrip().is_internally_consistent());
 
-/** @brief Aggregates completed runtime work for the segment-pair route. */
+/** Counts GPU work used to find matching sequence-segment pairs. */
 struct vulkan_segment_pair_execution_stats {
     std::uint64_t completed_roundtrips = 0;
     std::uint64_t downloaded_minimizers = 0;
@@ -179,10 +177,10 @@ struct vulkan_segment_pair_execution_stats {
     bool saturated = false;
 
     /**
-     * @brief Adds a counter while preserving overflow as saturation state.
-     * @param destination Aggregate counter updated in place.
-     * @param increment Counter value to add.
-     * @param did_saturate Set when the sum exceeds `uint64_t`.
+     * @brief Adds to a counter, clamping overflow at uint64_t maximum.
+     * @param destination Counter to update.
+     * @param increment Amount to add.
+     * @param did_saturate Set to true on overflow and otherwise left unchanged.
      */
     static void add(
             std::uint64_t& destination,
@@ -219,9 +217,9 @@ struct vulkan_segment_pair_execution_stats {
     }
 
     /**
-     * @brief Validates saturation and optional completed-work requirements.
-     * @param require_completed_roundtrip Require at least one roundtrip.
-     * @return `true` when the counters satisfy the route contract.
+     * @brief Checks that counters have not overflowed and any required work completed.
+     * @param require_completed_roundtrip Require at least one completed dispatch.
+     * @return False for saturated counters or missing required work.
      */
     [[nodiscard]] bool is_internally_consistent(
             bool require_completed_roundtrip = true) const noexcept {
@@ -230,21 +228,21 @@ struct vulkan_segment_pair_execution_stats {
     }
 };
 
-/** @brief Owns segment pairs together with their exact capacity permit. */
+/** Owns segment pairs and the memory reserved for their vector capacity. */
 struct vulkan_owned_segment_pairs {
     using value_type = std::pair<std::uint64_t, std::uint64_t>;
 
-    // Reverse destruction releases pair capacity before admission.
+    // Free the pair vector before releasing its memory reservation.
     bioseq::parallelism::memory_permit permit;
     std::vector<value_type> pairs;
 
-    /** @brief Constructs an empty pair owner with no admission. */
+    /** Creates an empty result without a memory reservation. */
     vulkan_owned_segment_pairs() = default;
     /** @brief Prevents copying a move-only memory permit. */
     vulkan_owned_segment_pairs(const vulkan_owned_segment_pairs&) = delete;
     /** @brief Prevents copy assignment of a move-only memory permit. */
     vulkan_owned_segment_pairs& operator=(const vulkan_owned_segment_pairs&) = delete;
-    /** @brief Transfers vector storage before transferring its permit. */
+    /** Moves the pair buffer before moving its memory reservation. */
     vulkan_owned_segment_pairs(vulkan_owned_segment_pairs&& other) noexcept {
         pairs.swap(other.pairs);
         permit = std::move(other.permit);
@@ -260,7 +258,7 @@ struct vulkan_owned_segment_pairs {
         return *this;
     }
 
-    /** @brief Releases vector capacity before surrendering its permit. */
+    /** Frees the pair buffer before releasing its memory reservation. */
     void release_capacity_before_permit() noexcept {
         bioseq::parallelism::release_admitted_vector_capacity_before_permit(
             pairs, permit);
@@ -302,8 +300,7 @@ struct vulkan_owned_segment_pairs {
  */
 template <class p_minimizer_type>
 struct vulkan_sketch_result {
-    // Both possible admission owners precede the host vector so reverse
-    // destruction frees vector storage before either reservation is released.
+    // Keep reservations alive until the host vector has been destroyed.
     std::optional<bioseq::parallelism::memory_permit> host_permit;
     std::shared_ptr<vulkan_device_minimizer_storage<p_minimizer_type>> device;
     std::vector<p_minimizer_type> host_minimizers;
@@ -331,14 +328,11 @@ struct vulkan_sketch_result {
  */
 template <class p_minimizer_type>
 struct vulkan_batch_sketch_result {
-    // Consumers that detach either host vector without retaining `device`
-    // must move `memory_retention` with it.  GPU schedulers naturally retain
-    // `device`, which shares the same anchor.
-    // It is declared first so reverse destruction releases every accounted
-    // vector/device before the final admission anchor.
+    // When moving a host vector out, keep memory_retention alive with it.
+    // A device owner can hold the same reservation for the vector's lifetime.
+    // Declaring the reservation first keeps it alive until all buffers are freed.
     std::shared_ptr<vulkan_batch_sketch_memory_retention> memory_retention;
-    // The optional authorized readback is a later, independent physical
-    // allocation. It is not charged again to the completed sketch reservation.
+    // A later host readback has its own allocation and memory reservation.
     bioseq::parallelism::memory_permit host_readback_permit;
     std::vector<p_minimizer_type> host_minimizers;
     std::vector<gpu_seed_query_record_wire> query_records;
@@ -364,7 +358,7 @@ struct vulkan_batch_sketch_result {
     vulkan_batch_sketch_result(const vulkan_batch_sketch_result&) = delete;
     vulkan_batch_sketch_result& operator=(const vulkan_batch_sketch_result&) = delete;
 
-    /// Move physical allocations before moving the permits that authorize them.
+    /// Move buffers before moving their memory reservations.
     vulkan_batch_sketch_result(vulkan_batch_sketch_result&& other) noexcept {
         adopt_empty(other);
     }
@@ -396,7 +390,7 @@ struct vulkan_batch_sketch_result {
     }
 
 private:
-    /// The destination has no physical storage or admission when called.
+    /// Requires an empty destination with no buffers or memory reservations.
     void adopt_empty(vulkan_batch_sketch_result& other) noexcept {
         host_minimizers.swap(other.host_minimizers);
         query_records.swap(other.query_records);
@@ -413,12 +407,14 @@ private:
 };
 
 /**
- * @brief Decodes downloaded bytes into exact minimizer records.
- * @tparam p_minimizer_type Trivially copied packed minimizer record.
- * @param bytes Downloaded device bytes.
- * @param count Number of complete minimizer records.
- * @return Records in device emission order.
- * @throws vulkan_runtime_error If the count or byte span is invalid.
+ * @brief Copies downloaded record bytes into a host minimizer vector.
+ *
+ * The record type must support copying its object representation. Records keep
+ * the device emission order.
+ * @param bytes Downloaded bytes.
+ * @param count Number of records to copy.
+ * @return Host records.
+ * @throws vulkan_runtime_error If the count exceeds host limits or bytes is too short.
  */
 template <class p_minimizer_type>
 [[nodiscard]] std::vector<p_minimizer_type> decode_host_minimizer_bytes(
@@ -441,21 +437,22 @@ template <class p_minimizer_type>
 }
 
 /**
- * @brief Estimates output capacity for one sketch dispatch.
- * @param bp_size Biological input length.
- * @param window_size Window length in k-mers.
- * @return Saturating record-capacity estimate.
+ * @brief Estimates an initial output capacity for a minimizer dispatch.
+ *
+ * The estimate can be too small for some sequences. Callers must check overflow
+ * or count records before allocating exact output storage.
+ * @param bp_size Input length in symbols.
+ * @param window_size K-mers per window.
+ * @return Suggested record capacity.
  */
 [[nodiscard]] inline std::uint64_t estimate_vulkan_minimizer_capacity(
     std::uint64_t bp_size, std::uint64_t window_size) noexcept
 {
     using bioseq::common::saturating_mul;
-    // ~2/(w+1) minimizers per bp in practice; 3·(bp/w) is a safe (>1.5×) upper
-    // planning estimate that keeps ordinary single-pass sketch buffers small.
-    // Those APIs fail closed if it underestimates. Target-index construction is
-    // different: it first obtains exact T without an output allocation, records
-    // whether this estimate was low, then sizes and admits the deterministic
-    // emit from T rather than treating this heuristic as a semantic cap.
+    // Small inputs reserve at least one record per base. Larger inputs use an
+    // expected minimizer density to reduce buffer sizes. Sketch calls reject
+    // overflow. Target-index construction counts records first and uses that
+    // exact count for the final output allocation.
     if (bp_size <= k_default_sketch_tile_bp) {
         return std::max<std::uint64_t>(64u, bp_size);
     }
@@ -464,10 +461,10 @@ template <class p_minimizer_type>
 }
 
 /**
- * @brief Computes resident device bytes for a minimizer capacity.
- * @tparam p_minimizer_type Packed minimizer record.
- * @param max_minimizers Record capacity.
- * @return Saturating device byte count.
+ * @brief Returns device buffer bytes for the requested minimizer capacity.
+ *
+ * Includes record-layout padding. Overflow clamps to uint64_t maximum.
+ * @param max_minimizers Number of records.
  */
 template <class p_minimizer_type>
 [[nodiscard]] std::uint64_t vulkan_sketch_resident_bytes(
@@ -477,15 +474,17 @@ template <class p_minimizer_type>
 }
 
 /**
- * @brief Computes transient bytes reserved for a sketch dispatch.
- * @param bp Biological input length.
+ * @brief Estimates temporary memory for a sketch dispatch.
+ *
+ * Includes the Vulkan arena setup and host memory used to submit the count pass.
+ * @param bp Input length in symbols.
  * @param sequence_bytes Packed input bytes before upload alignment.
- * @param letters_per_unit Biological symbols stored in one packed unit.
- * @param window_size Window length in k-mers.
- * @param kmer_size K-mer length in biological symbols.
- * @param max_minimizers Output record capacity.
- * @param minimizer_device_output_bytes Resident output bytes.
- * @return Saturating transient byte count, or `UINT64_MAX` for an invalid plan.
+ * @param letters_per_unit Symbols per packed unit.
+ * @param window_size K-mers per window.
+ * @param kmer_size Symbols per k-mer.
+ * @param max_minimizers Output capacity in records.
+ * @param minimizer_device_output_bytes Device output buffer bytes.
+ * @return Temporary bytes, or UINT64_MAX for an invalid plan or overflow.
  */
 [[nodiscard]] inline std::uint64_t vulkan_sketch_transient_reserved_bytes(
     std::uint64_t bp,
@@ -514,14 +513,14 @@ template <class p_minimizer_type>
         plan.count_submit_host_transient_bytes);
 }
 
-/** @brief Bounded allocator allowance for one fixed host result allocation. */
+/** Extra bytes reserved for allocator overhead on one fixed host result. */
 inline constexpr std::uint64_t k_vulkan_exact_host_allocation_headroom_bytes =
     64ull * 1024ull;
 
 /**
- * @brief Adds bounded allocator overhead to one fixed host allocation.
- * @param requested_bytes Exact payload bytes.
- * @return Saturating admission byte count.
+ * @brief Adds the allocator allowance to a fixed host allocation.
+ * @param requested_bytes Result payload bytes.
+ * @return Bytes to reserve, clamped to uint64_t maximum on overflow.
  */
 [[nodiscard]] constexpr std::uint64_t
 vulkan_exact_host_allocation_admission_bytes(
@@ -534,9 +533,9 @@ vulkan_exact_host_allocation_admission_bytes(
 }
 
 /**
- * @brief Computes admission for a fixed host result allocation.
- * @param exact_host_size_bytes Exact result payload bytes.
- * @return Zero for an empty result, otherwise payload plus allocator overhead.
+ * @brief Returns the memory reservation needed for a fixed host result.
+ * @param exact_host_size_bytes Result payload bytes.
+ * @return Zero for an empty result, otherwise payload plus allocator allowance.
  */
 [[nodiscard]] constexpr std::uint64_t
 vulkan_fixed_host_result_admission_bytes(
@@ -548,12 +547,12 @@ vulkan_fixed_host_result_admission_bytes(
 }
 
 /**
- * @brief Sums all retained resources required during dispatch.
- * @param physical_arena_bytes Physical Vulkan arena allocation.
- * @param host_transient_headroom_bytes Host dispatch staging with overhead.
- * @param query_gate_bytes Query-gate payload bytes.
- * @param resident_allocation_bytes Pessimistic resident result allocation.
- * @return Saturating dispatch admission byte count.
+ * @brief Totals the memory to reserve while a sketch dispatch runs.
+ * @param physical_arena_bytes Vulkan arena allocation.
+ * @param host_transient_headroom_bytes Temporary host buffers with allocator allowance.
+ * @param query_gate_bytes Query-gate bitmap bytes.
+ * @param resident_allocation_bytes Estimated allocation kept for the result.
+ * @return Total bytes, clamped to uint64_t maximum on overflow.
  */
 [[nodiscard]] constexpr std::uint64_t
 vulkan_sketch_dispatch_admission_bytes(
@@ -573,10 +572,10 @@ vulkan_sketch_dispatch_admission_bytes(
 }
 
 /**
- * @brief Computes retained admission during exact host materialization.
- * @param actual_device_allocation_bytes Actual resident device allocation.
- * @param exact_host_headroom_bytes Exact host allocation with overhead.
- * @return Saturating retained byte count.
+ * @brief Totals device output and host memory needed during result download.
+ * @param actual_device_allocation_bytes Existing device result buffer.
+ * @param exact_host_headroom_bytes Host result allocation with allocator allowance.
+ * @return Total bytes, clamped to uint64_t maximum on overflow.
  */
 [[nodiscard]] constexpr std::uint64_t
 vulkan_sketch_host_materialization_admission_bytes(
@@ -588,7 +587,7 @@ vulkan_sketch_host_materialization_admission_bytes(
         exact_host_headroom_bytes);
 }
 
-/** @brief Estimates retained resources used to admit and split one GPU batch. */
+/** Estimated buffer sizes used to decide whether a GPU batch fits in memory. */
 struct vulkan_sketch_memory_estimate {
     std::uint64_t packed_sequence_bytes = 0;
     std::uint64_t query_minimizer_bytes = 0;
