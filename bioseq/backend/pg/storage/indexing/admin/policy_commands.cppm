@@ -1,6 +1,6 @@
 /**
  * @file admin/policy_commands.cppm
- * @brief Applies user-facing PostgreSQL index policy changes.
+ * @brief Enable an index and set its insert-time maintenance policy.
  */
 module;
 
@@ -16,10 +16,10 @@ import bioseq.postgres.storage.indexing.index_relation_identity;
 export namespace bioseq::storage::indexing {
 
 /**
- * Enable a registered index and select whether inserts maintain it.
+ * Enable the named index for every sequence column and set its insert policy.
  *
- * @return Zero on success, one for an unknown name, or two when the index
- * cannot be maintained during insertion.
+ * @return One for an unknown name, two for unsupported insert maintenance,
+ * or zero otherwise. Zero is also returned if the SPI connection fails.
  */
 [[nodiscard]] int
 set_index_policy_impl(Oid rel_oid, std::string_view name, bool update_on_insert) {

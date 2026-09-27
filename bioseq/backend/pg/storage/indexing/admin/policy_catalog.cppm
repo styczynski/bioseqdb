@@ -1,6 +1,6 @@
 /**
  * @file admin/policy_catalog.cppm
- * @brief Index policy, catalog and shared publication failure contracts.
+ * @brief Read index policies and support index maintenance during insertion.
  */
 module;
 
@@ -42,15 +42,15 @@ static_assert(__cplusplus >= 202302L, "C++23-or-later");
 
 export namespace bioseq::storage::indexing {
 
-// ---- policy catalog -------------------------------------------------------
-/// One enabled and maintenance-policy row from the index policy catalog.
+// Index policies.
+/// An index name and its enabled and update-on-insert settings.
 struct policy_row {
     std::string name;
     bool enabled;
     bool update_on_insert;
 };
 
-/// Raise a PostgreSQL error for an invalid policy SPI stage or result row.
+/// Report a policy-query failure or invalid row as a PostgreSQL error.
 [[noreturn]] inline void
 table_policy_spi_error_as_cpp(const char* stage,
                               int status,
@@ -74,11 +74,8 @@ table_policy_spi_error_as_cpp(const char* stage,
 }
 
 /**
- * @brief Load every policy override for one physical sequence column.
- * @param user_relid Source Bioseq relation.
- * @param relfn Current relation storage incarnation.
- * @param attno Sequence attribute number.
- * @return Enabled and update-on-insert policy rows in catalog order.
+ * Read index settings for one sequence column in the current table file.
+ * Reject NULL fields and SPI failures. Rows have no specified order.
  */
 [[nodiscard]] inline std::vector<policy_row>
 load_table_policy(Oid user_relid, Oid relfn, std::int16_t attno) {
@@ -146,16 +143,13 @@ load_table_policy(Oid user_relid, Oid relfn, std::int16_t attno) {
     return out;
 }
 
-// ---- age log + policy upsert ---------------------------------------------
-/// Record the successful publication age for one persisted index.
+// Publication age and kernel selection.
+/// Save the time when this index was successfully written.
 void note_successful_write(Oid user_relid, Oid relfn, std::int16_t attno, std::string_view name);
 
 /**
- * Bind the process-local table for one PostgreSQL maintenance operation.
- *
- * The cold plan chooses one runnable target once at the owning operation root.
- * The generated exact-target lookup is a direct table rebind, not a nested
- * Highway dispatch. scalar and Vulkan producers do not require this table.
+ * Select the process-local SIMD kernel table for this maintenance operation.
+ * Scalar and Vulkan builds return null because they do not use this table.
  */
 [[nodiscard]] inline const bioseq::minimizers::minimizer_kernels*
 selected_minimizer_kernels_for_operation(bioseq::minimizers::minimizer_sketch_backend backend,
@@ -163,22 +157,16 @@ selected_minimizer_kernels_for_operation(bioseq::minimizers::minimizer_sketch_ba
     return bind_selected_minimizer_kernels_for_operation(backend, operation);
 }
 
-/// Scheme-untagged minimizer fragment and sequence rows do not carry a
-/// minimizer-scheme identity.
-/// Persisting bounded ntHash into that fragment layout would let a later
-/// Exact reader (or the reverse) accept conflicting hashes under the same
-/// index name. PostgreSQL-locator rebuilds use the scheme-tagged grouped-SoA
-/// generation route. Only an inline scheme-untagged source reaches this
-/// guard from update_index. The INSERT hook uses the same fragment layout and
-/// keeps the guard until it can source a published PostgreSQL locator.
-/// Silently substituting scalar or Exact is never permitted.
+/// Reject bounded ntHash when the storage format cannot record its hash scheme.
+/// Otherwise an Exact reader could accept incompatible hashes under the same
+/// index name. Locator-based READY builds use a format that records the scheme.
 [[noreturn]] inline void reject_bounded_nthash_for_scheme_untagged_fragment_layout(
     bioseq::minimizers::minimizer_sketch_backend backend, std::string_view operation) {
     reject_bounded_nthash_for_scheme_untagged_fragment_storage(backend, operation);
 }
 
-// ---- INSERT-time build ----------------------------------------------------
-/// Build every eligible per-insert index for one locator-backed sequence row.
+// Index maintenance during insertion.
+/// Build the enabled update-on-insert indexes using the sequence payload and its locator.
 void index_build_on_insert(Oid user_relid,
                            std::int16_t attno,
                            std::uint64_t rowno,
@@ -186,8 +174,8 @@ void index_build_on_insert(Oid user_relid,
                            const std::optional<sequence_locator>& loc_opt,
                            MemoryContext mctx);
 
-/// Per-row driver invoked by the TAM insert hooks: builds on-insert indexes for
-/// every SEQ column. `detoasted_values` carries the ORIGINAL (pre-stub) payload.
+/// Build insert-time indexes for each non-null sequence column with a locator.
+/// detoasted_values must contain the full sequence values from before stub replacement.
 inline void
 index_build_on_insert_columns(Oid user_relid,
                               const std::vector<std::int16_t>& seq_attnos,
@@ -210,21 +198,19 @@ index_build_on_insert_columns(Oid user_relid,
     }
 }
 
-// ---- letter_to_rank -------------------------------------------------------
+// Alphabet letter lookup.
 namespace detail {
 constexpr std::size_t k_num_alphabets =
     static_cast<std::size_t>(pgseq_supported_alphabets::alphabet_count);
 constexpr std::size_t k_char_domain = 256;
-/// Build an alphabet-indexed byte-to-rank lookup table.
+/// Build a byte-to-rank table for each alphabet, using -1 for invalid letters.
 inline auto build_letter_rank_table() {
     std::array<std::array<std::int8_t, k_char_domain>, k_num_alphabets> table{};
     for (auto& row : table)
         row.fill(static_cast<std::int8_t>(-1));
     for (std::uint8_t alphabet_code = 0; alphabet_code < k_num_alphabets; ++alphabet_code) {
-        // Rank conversion depends only on the alphabet.  Dispatching a
-        // fabricated storage width here violates bioseq::pg_types::seq's active width
-        // policy in optimized PostgreSQL builds (which intentionally enable
-        // only 8-byte storage units).
+        // Choose only the alphabet here. Rank conversion is independent of sequence
+        // packing, and a made-up storage width can be disabled in this build.
         pgseq_supported_alphabets::dispatch_alphabet_by_code(
             alphabet_code, [&table, alphabet_code]<class p_alphabet>() {
                 for (int char_code = 0; char_code < static_cast<int>(k_char_domain); ++char_code) {
@@ -246,7 +232,7 @@ inline const auto& letter_rank_table() {
     return t;
 }
 } // namespace detail
-/// Convert one encoded alphabet letter to its rank or return negative one.
+/// Return the letter rank, or -1 for an unknown alphabet or invalid letter.
 [[nodiscard]] inline int letter_to_rank(std::uint8_t alphabet_code, char letter) {
     if (alphabet_code >= detail::k_num_alphabets)
         return -1;
@@ -254,8 +240,8 @@ inline const auto& letter_rank_table() {
         detail::letter_rank_table()[alphabet_code][static_cast<std::uint8_t>(letter)]);
 }
 
-// ---- per-row index-present probe -----------------------------------------
-/// Check the publication witness for one fragment index row.
+// Stored-index presence.
+/// Check whether the index has a directory chunk for this source row.
 [[nodiscard]] bool index_present(Oid user_relid,
                                  Oid db,
                                  Oid spc,
@@ -267,8 +253,8 @@ inline const auto& letter_rank_table() {
                                  seq_caches* caches,
                                  MemoryContext mctx);
 
-// ---- estimate_index_presence (planner cost bias only) ---------------------
-/// Estimate table coverage from shard statistics without scanning payloads.
+// Planner coverage estimate.
+/// Estimate indexed-row coverage from one shard statistic for planner costing.
 [[nodiscard]] float
 estimate_index_presence(Oid user_relid, double estimated_total_rows, std::string_view index_name);
 
