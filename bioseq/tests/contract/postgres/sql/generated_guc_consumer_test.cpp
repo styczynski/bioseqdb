@@ -1,6 +1,6 @@
 /**
  * @file generated_guc_consumer_test.cpp
- * @brief Verifies the public surface of generated enum-GUC storage.
+ * @brief Checks enum configuration storage as seen by an importing source file.
  */
 #include <concepts>
 #include <type_traits>
@@ -40,8 +40,7 @@ static_assert(requires(
 });
 
 /**
- * Instantiate the exported generated-like registration body from an ordinary
- * importer without exposing private storage.
+ * Checks that an importer can register enum storage through the exported helper.
  */
 [[maybe_unused]] void instantiate_generated_guc_access() {
     contract::storage storage{contract::wire_mode::enabled};

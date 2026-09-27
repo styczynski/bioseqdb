@@ -1,6 +1,6 @@
 /**
  * @file active_generated_guc_consumer_test.cpp
- * @brief Checks the active generated GUC owner and registry profile.
+ * @brief Checks generated configuration registration for the selected build profile.
  */
 #include <concepts>
 

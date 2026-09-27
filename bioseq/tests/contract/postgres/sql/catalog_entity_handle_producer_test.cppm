@@ -1,6 +1,6 @@
 /**
  * @file catalog_entity_handle_producer_test.cppm
- * @brief Exports generated-like fixed and extension-schema catalog handles.
+ * @brief Exports sample catalog handles for import tests.
  */
 module;
 
@@ -18,7 +18,7 @@ export namespace bioseq::sql::generated::core::
     catalog_entity_handle_producer_test {
 
 /**
- * Fixed-schema generated-like sequence handle used by importer contracts.
+ * Sequence handle bound to the fixed bioseq_internal schema.
  */
 inline constexpr bioseq::postgres::support::relation_entity_handle<
     RELKIND_SEQUENCE,
@@ -28,7 +28,7 @@ inline constexpr bioseq::postgres::support::relation_entity_handle<
     fixed_contract_seq{};
 
 /**
- * Relocatable extension-schema generated-like sequence handle.
+ * Sequence handle that follows the extension when its schema changes.
  */
 inline constexpr bioseq::postgres::support::relation_entity_handle<
     RELKIND_SEQUENCE,
@@ -38,7 +38,7 @@ inline constexpr bioseq::postgres::support::relation_entity_handle<
     extension_contract_seq{};
 
 /**
- * Profile-neutral descriptor imported unchanged by both profile builds.
+ * Module description shared by production and test-index builds.
  */
 inline constexpr std::string_view core_descriptor{
     "bioseq.postgres.sql.generated.core.catalog_entity_handle_producer_test\n"
