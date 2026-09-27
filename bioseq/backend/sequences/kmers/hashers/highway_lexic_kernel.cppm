@@ -1,9 +1,7 @@
 /**
  * @file highway_lexic_kernel.cppm
- * @brief Fixed-target Highway lexicographic minimizer hasher.
- *
- * @details Maintains forward and reverse-complement codes independently in every lane, exposes
- * palindrome and strand masks, and leaves window ordering to the minimizer kernel.
+ * @brief Updates forward and reverse-complement k-mer codes in SIMD lanes.
+ * The smaller code is returned with separate masks for its strand and ties.
  */
 module;
 #include <hwy/highway.h>
@@ -22,24 +20,17 @@ export namespace bioseq::simd {
 namespace [[bioseq::simd]] target {
 namespace hn = hwy::HWY_NAMESPACE;
 
-/**
- * @brief Adds a fixed-target rolling lexicographic hash to the scalar hasher policy.
- * @tparam p_alphabet Sequence alphabet whose rank and complement rules define the rolling state.
- */
+/** @brief Extends the scalar alphabet hasher with SIMD rolling k-mer codes. */
 template <sequence_alphabet p_alphabet>
 struct lexic_hasher : ::bioseq::simd::lexic_hasher<p_alphabet> {
   public:
-    /**
-     * @brief Maintains canonical k-mer state independently in each SIMD lane.
-     * @tparam p_input_type Unsigned lane type holding a packed k-mer code.
-     * @tparam p_simd_tag Highway descriptor for the generated target.
-     */
+    /** @brief Keeps a forward and reverse-complement k-mer code in each lane. */
     template <typename p_input_type, typename p_simd_tag>
     class simd_hash : public simd_hasher_base<p_alphabet, p_input_type, p_simd_tag> {
       public:
-        /** @brief Fixed-target SIMD base supplying vector traits. */
+        /** @brief Shared alphabet and SIMD vector types. */
         using base_type = simd_hasher_base<p_alphabet, p_input_type, p_simd_tag>;
-        /** @brief Lane, mask, and alphabet limits for this specialization. */
+        /** @brief Alphabet limits and vector types for this hasher. */
         using traits = typename base_type::traits;
 
       private:
@@ -48,10 +39,7 @@ struct lexic_hasher : ::bioseq::simd::lexic_hasher<p_alphabet> {
         typename traits::input_vector_type reverse_complement_state_;
         std::size_t reverse_shift_;
 
-        /**
-         * @brief Builds the rank-indexed complement table for non-XOR alphabets.
-         * @return Array mapping every alphabet rank to its complement rank.
-         */
+        /** @brief Maps alphabet ranks to their complement ranks. */
         static constexpr auto make_complement_lut() {
             std::array<p_input_type, traits::alphabet_size> lut{};
             for (std::size_t rank = 0; rank < traits::alphabet_size; ++rank) {
@@ -66,10 +54,8 @@ struct lexic_hasher : ::bioseq::simd::lexic_hasher<p_alphabet> {
             make_complement_lut();
 
         /**
-         * @brief Indicates whether complementing every rank is one XOR by `alphabet_size - 1`.
-         *
-         * XOR-capable alphabets use one vector operation. Other alphabets use the compile-time
-         * lookup cascade so self-complementing and non-power-of-two rank layouts remain exact.
+         * @brief Checks whether every complement can be computed with one XOR.
+         * Alphabets that fail this check use the rank lookup table.
          */
         static constexpr bool k_is_xor_complement = []() constexpr {
             using storage_unit = typename traits::storage_unit;
@@ -85,12 +71,7 @@ struct lexic_hasher : ::bioseq::simd::lexic_hasher<p_alphabet> {
             return true;
         }();
 
-        /**
-         * @brief Computes the complement rank in every active lane.
-         * @param[in] simd_tag Highway descriptor selecting the fixed-target operations.
-         * @param[in] rank Per-lane alphabet ranks.
-         * @return Per-lane complements produced by the XOR or lookup specialization.
-         */
+        /** @brief Finds the complement rank in each lane using XOR or the lookup table. */
         [[always_inline]] static constexpr typename traits::input_vector_type
         apply_complement(const typename traits::input_simd_tag_type& simd_tag,
                          typename traits::input_vector_type rank) {
@@ -113,10 +94,9 @@ struct lexic_hasher : ::bioseq::simd::lexic_hasher<p_alphabet> {
 
       public:
         /**
-         * @brief Initializes every rolling lane for the requested k-mer length.
-         * @param[in] simd_tag Highway descriptor selecting the fixed-target operations.
-         * @param[in] kmer_length Positive number of symbols in each rolling k-mer, clamped to the
-         * lane capacity.
+         * @brief Starts empty rolling k-mers with the requested length.
+         * The length is capped at the lane capacity.
+         * @pre kmer_length is positive.
          */
         explicit simd_hash(const typename traits::input_simd_tag_type& simd_tag,
                            std::size_t kmer_length)
@@ -128,11 +108,9 @@ struct lexic_hasher : ::bioseq::simd::lexic_hasher<p_alphabet> {
                              (std::min(kmer_length, traits::k_max_kmer_length) - 1u)) {}
 
         /**
-         * @brief Advances the forward and reverse-complement rolling states by one symbol.
-         * @param[in] simd_tag Highway descriptor selecting the fixed-target operations.
-         * @param[in] incoming Alphabet rank entering the right edge of each lane's k-mer.
-         * @param[in] outgoing Alphabet rank leaving the left edge of each lane's k-mer.
-         * @return Per-lane minimum of the forward and reverse-complement packed codes.
+         * @brief Updates both strand codes and returns the smaller code in each lane.
+         * @param incoming Rank appended to the forward code.
+         * @param outgoing Rank whose complement is prepended to the reverse code.
          */
         HWY_INLINE typename traits::hasher_return_type
         next(const typename traits::input_simd_tag_type& simd_tag,
@@ -148,18 +126,16 @@ struct lexic_hasher : ::bioseq::simd::lexic_hasher<p_alphabet> {
         }
 
         /**
-         * @brief Identifies lanes whose forward and reverse-complement codes are equal.
-         * @return Per-lane palindrome mask. Callers replace selected lanes with the maximum hash so
-         * they cannot become window minima.
+         * @brief Marks lanes with equal forward and reverse-complement codes.
+         * Minimizer selection uses this mask to exclude palindromic k-mers.
          */
         [[nodiscard]] HWY_INLINE hn::Mask<p_simd_tag> palindrome_mask(const p_simd_tag&) const {
             return hn::Eq(forward_state_, reverse_complement_state_);
         }
 
         /**
-         * @brief Identifies lanes whose reverse-complement code is strictly smaller.
-         * @return Per-lane reverse-strand mask. Equal codes report false and are independently
-         * identified by `palindrome_mask()`.
+         * @brief Marks lanes where the reverse-complement code is smaller.
+         * Equal codes return false and can be checked with palindrome_mask().
          */
         [[nodiscard]] HWY_INLINE hn::Mask<p_simd_tag> reverse_strand_mask(const p_simd_tag&) const {
             return hn::Lt(reverse_complement_state_, forward_state_);
