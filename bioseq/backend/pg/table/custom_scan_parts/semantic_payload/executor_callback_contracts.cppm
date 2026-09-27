@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Re-exports executor and execution-statistics callback contracts.
+ * @brief Re-exports executor callbacks and execution-statistics reporting.
  */
 export module bioseq.postgres.table:custom_scan_semantic_payload_executor_callback_contracts;
 

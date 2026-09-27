@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Declares planner, executor, hook, EXPLAIN, and test callback contracts.
+ * @brief Collects scan callbacks and provides the SliceProject shared-memory test switch.
  */
 module;
 #include <bioseq/pg_compat.h>
@@ -38,7 +38,12 @@ export import :custom_scan_planner_method_contracts;
 export import :custom_scan_planner_path_contracts;
 
 export {
-    /** @brief Arm one backend-local SliceProject DSM diagnostic fixture. */
+    /**
+     * @brief Sets a one-use shared-memory test for the next SliceProject scan.
+     *
+     * Accepts "incomplete", "malformed" or "none". A test must be consumed or
+     * cleared before another can be armed. Available only with BIOSEQ_TEST_INDEXES.
+     */
     void bioseq_arm_slice_dsm_fixture_for_test(std::string_view mode) {
 #ifdef BIOSEQ_TEST_INDEXES
         int requested_mode = k_slice_dsm_test_none;
