@@ -1,8 +1,6 @@
 /**
  * @file index.cppm
- * @brief Public module facade for compact biological sequence primitives.
- *
- * Re-exports the `:packed_sequence` partition so callers depend on one module name.
+ * @brief Expose packed sequence types through import bioseq.sequences.
  */
 export module bioseq.sequences;
 export import :packed_sequence;
