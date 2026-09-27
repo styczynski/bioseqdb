@@ -53,13 +53,12 @@ struct rendered_fmgr_entrypoint_module final {
 namespace fmgr_detail {
 
 /**
- * Return the PostgreSQL regprocedure spelling used by runtime consumers.
+ * Builds the routine name and argument types accepted by PostgreSQL
+ * `regprocedure` lookups.
  *
- * Graph identities retain their entity-kind discriminator and relocatable
- * extension-schema tokens.  Neither is valid input to PostgreSQL's
- * regprocedure resolver, so runtime identities remove those graph-only
- * components.  Fixed schemas, quoted types, and argument spellings remain
- * byte-for-byte stable.
+ * The dependency graph adds an entity-kind prefix and `$extension` schema
+ * markers. Remove those parts for runtime lookup, while preserving fixed
+ * schemas, quoted type names, and argument spelling.
  */
 [[nodiscard]] inline std::string relocatable_routine_identity(
         const normalized_entity& entity) {
@@ -974,7 +973,7 @@ struct cpp_template_binding final {
     return output.str();
 }
 
-/// Renders one typed overload adapter from PostgreSQL arguments to C++.
+/// Generates argument conversion, the C++ call, and result conversion for one SQL overload.
 [[nodiscard]] inline std::string render_overload_helper(
         const normalized_entity& entity,
         const sql_graph& graph,
@@ -1059,7 +1058,7 @@ struct cpp_template_binding final {
     return output.str();
 }
 
-/// Renders one PostgreSQL ABI wrapper and its arity dispatch.
+/// Generates a PostgreSQL C entrypoint that selects an overload by argument count.
 [[nodiscard]] inline std::string render_public_wrapper(
         const rendered_fmgr_wrapper& wrapper) {
     std::ostringstream output;
@@ -1453,7 +1452,7 @@ inline void validate_vector_associations(
     }
 }
 
-/// Renders the complete, deterministically ordered comparison registry.
+/// Generates the checked scalar-to-vector comparison table in a stable order.
 [[nodiscard]] inline rendered_fmgr_entrypoint_module
 render_vector_comparison_registry_from_associations(
         std::vector<vector_association> associations,
@@ -1773,7 +1772,7 @@ inline void validate_vector_aggregate_associations(
         + std::string{sql_type} + "'");
 }
 
-/// Renders the complete, deterministically ordered aggregate registry.
+/// Generates the checked scalar-to-vector aggregate table in a stable order.
 [[nodiscard]] inline rendered_fmgr_entrypoint_module
 render_vector_aggregate_registry_from_associations(
         std::vector<vector_aggregate_association> associations,
@@ -1860,9 +1859,9 @@ render_vector_aggregate_registry(const sql_graph& graph) {
 }  // namespace fmgr_detail
 
 /**
- * Render the closed vector-registry interfaces before FINAL owners import
- * them. FINAL generation independently projects the annotated graph and
- * requires byte equality with these SUPPORT-owned artifacts.
+ * Generates the vector registries during SUPPORT so later modules can
+ * import them. FINAL generation derives the same registries from SQL
+ * annotations and checks that their contents match these files exactly.
  */
 [[nodiscard]] inline std::vector<rendered_fmgr_entrypoint_module>
 render_support_vector_registry_modules(
@@ -1898,7 +1897,8 @@ render_support_vector_registry_modules(
 }
 
 /**
- * Render one configure-known primary module per natural C++ SQL owner module.
+ * Generates one C++ wrapper module for each configured module that owns
+ * SQL functions.
  */
 [[nodiscard]] inline std::vector<rendered_fmgr_entrypoint_module>
 render_fmgr_entrypoint_modules(
@@ -2069,7 +2069,7 @@ render_fmgr_entrypoint_modules(
 }
 
 /**
- * Flatten the symbols actually present in emitted wrapper artifacts.
+ * Collects the public C symbols from generated wrappers and rejects duplicates.
  */
 [[nodiscard]] inline std::vector<std::string>
 emitted_fmgr_wrapper_symbols(

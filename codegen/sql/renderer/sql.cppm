@@ -46,11 +46,10 @@ namespace detail {
     }
     if (entity.source.schema == "$extension") {
         /*
-         * PostgreSQL runs a relocatable extension script with the target
-         * schema first in search_path.  Leaving extension-owned names
-         * unqualified is therefore what makes CREATE EXTENSION ... SCHEMA
-         * select their installation namespace.  graph.extension_schema is
-         * retained for installed manifest identities; it is not SQL text.
+         * PostgreSQL puts the chosen installation schema first in search_path.
+         * Leave extension-owned names unqualified so CREATE EXTENSION ... SCHEMA
+         * places them there. graph.extension_schema records installed names in
+         * the manifest and does not belong in the generated SQL.
          */
         return entity.source.name;
     }

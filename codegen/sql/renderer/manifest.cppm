@@ -452,9 +452,8 @@ struct fmgr_ownership_inventory {
                 + "' must derive its SQL leaf and C symbol from '"
                 + entity.source.name + "'");
         }
-        // The external table-AM handler deliberately retains its handwritten
-        // POSTGRES_FN boundary. It is a natural SQL owner, but remains outside
-        // the generated main-extension wrapper/DSO closure.
+        // The external table access method uses its own handwritten POSTGRES_FN
+        // wrapper. Leave it out of the main extension's generated-wrapper inventory.
         if (reviewed_handwritten_fmgr_export_routine(
                 entity, routine_identity, symbol)) {
             continue;
