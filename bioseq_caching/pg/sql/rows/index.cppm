@@ -1,12 +1,7 @@
-/*-------------------------------------------------------------------------
- *
- * bioseq_cache generated SQL result rows.
- *
- * These owning rows are shared by the cache PostgreSQL adapter and the
- * annotation-owned SQL catalog.  PostgreSQL-specific spellings which cannot
- * be inferred from the C++ representation are declared on the fields.
- *
- *-------------------------------------------------------------------------
+/*
+ * C++ rows used by the cache backend and generated SQL result converters.
+ * Each row owns its strings and values. Field annotations select SQL types
+ * such as OID, JSONB or INTERVAL when the C++ type alone is insufficient.
  */
 module;
 
@@ -94,7 +89,7 @@ static_assert(std::is_aggregate_v<cache_entry_row>);
 
 #if defined(BIOSEQ_CACHE_TESTING)
 
-/** Storage-ledger counters exposed only by the test-support profile. */
+/** Test-only counts of cache storage blocks, reserved bytes and reader pins. */
 struct storage_tier_stats_row final {
     bool force_file_tier;
     std::int64_t dsa_blocks;
@@ -122,7 +117,7 @@ struct entry_state_row final {
     std::int64_t claim_sequence;
 };
 
-/** Transaction-transition state exposed only by test support. */
+/** Test-only counts and completion markers for transaction changes. */
 struct transition_state_row final {
     std::int64_t database_transitions;
     std::int64_t coarse_transitions;
@@ -131,13 +126,13 @@ struct transition_state_row final {
     std::int64_t global_completion;
 };
 
-/** One relation's precise commit-transition state exposed by test support. */
+/** Test-only change count and invalidation epoch for one relation. */
 struct relation_transition_state_row final {
     std::int64_t relation_transitions;
     std::int64_t relation_epoch;
 };
 
-/** Planner-held reusable references exposed only by test support. */
+/** Test-only counts of reader pins, waiters and reservations held during planning. */
 struct planner_reference_counts_row final {
     std::int64_t reader_pins;
     std::int64_t waiter_references;
@@ -173,7 +168,7 @@ struct injected_coverage_row final {
     std::string state;
 };
 
-/** One injected security/domain coverage bucket exposed by test support. */
+/** Test-only generations grouped by database, role, security settings and coverage domain. */
 struct coverage_bucket_state_row final {
     [[bioseq_sql::column({
         .sql_type = bioseq::sql::pg::oid,
