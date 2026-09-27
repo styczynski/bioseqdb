@@ -1,6 +1,6 @@
 /**
  * @file external/provider/query.cppm
- * @brief Provider query variants, validation, and stable hashing.
+ * @brief Shared query format and mapping from fields to SQL columns.
  */
 module;
 
@@ -18,13 +18,11 @@ export module bioseq.external.provider.query;
 
 import bioseq.external.provider.base;
 
-/// Common immutable query contract and field mapping.
+/// Query fields and filters shared by provider adapters.
 export namespace bioseq::external::provider {
 
-// ---------------------------------------------------------------------------
-// Targets, projections, and limits.
-// ---------------------------------------------------------------------------
-/// Row family requested from an external provider.
+// Requested rows, fields, and limits.
+/// Type of row requested from a provider.
 enum class query_target : std::uint8_t {
     taxonomy,
     catalog,
@@ -34,7 +32,7 @@ enum class query_target : std::uint8_t {
     sequence_chunk
 };
 
-/// Sequence materialization mode selected for the query target.
+/// How sequence data should be returned.
 enum class sequence_delivery_mode : std::uint8_t {
     not_applicable,
     raw_bytes,
@@ -42,7 +40,7 @@ enum class sequence_delivery_mode : std::uint8_t {
     chunked_records
 };
 
-/// Provider-neutral field available for projection or filtering.
+/// Shared provider field available for selection or filtering.
 enum class external_field : std::uint16_t {
     provider,
     domain,
@@ -111,7 +109,7 @@ enum class external_field : std::uint16_t {
     count
 };
 
-/// Set of projected provider-neutral fields.
+/// Fields selected for the result.
 using external_field_mask = std::bitset<static_cast<std::size_t>(external_field::count)>;
 
 /// Scalar value accepted by comparison predicates.
@@ -123,7 +121,7 @@ using external_scalar = std::variant<bool,
                                      external_date,
                                      external_timestamp>;
 
-/// Comparison operation applied to a provider-neutral field.
+/// Comparison applied to a shared provider field.
 enum class predicate_operator : std::uint8_t {
     equal,
     not_equal,
@@ -139,30 +137,30 @@ enum class predicate_operator : std::uint8_t {
     is_not_null
 };
 
-/// Field comparison and its ordered scalar operands.
+/// Field comparison with operands in the order required by the operator.
 struct comparison_predicate {
-    predicate_operator operation; // A non-logical operator.
+    predicate_operator operation; // Field comparison, such as equal or between.
     external_field field;
     std::vector<external_scalar> values;
 };
 
-/// Exact or descendant taxonomic match.
+/// Match a taxon alone or include its descendants.
 struct taxon_predicate {
     external_field field; // taxon_id only.
     std::int64_t taxon_id;
     taxon_match match;
 };
 
-/// Provider domain searched by a free-text predicate.
+/// Part of a record searched by a text filter.
 enum class text_search_scope : std::uint8_t { any, organism, assembly, gene, record_description };
 
-/// Free-text search constrained to a provider domain.
+/// Text filter limited to the chosen part of a record.
 struct text_search_predicate {
     text_search_scope scope;
     bounded_string<maximum_identifier_bytes> query;
 };
 
-/// Provider-specific query string routed without reinterpretation.
+/// Query written in one provider's own search syntax.
 struct native_query_predicate {
     provider_id provider;
     bounded_string<maximum_identifier_bytes> query;
@@ -179,9 +177,8 @@ enum class predicate_node_kind : std::uint8_t {
     not_
 };
 
-/// Node in a flat post-order predicate tree.
-///
-/// Logical children are roots named by a separate child-index array.
+/// Node in a predicate tree stored as a flat array in post-order.
+/// Logical nodes refer to child roots through the separate predicate_children array.
 struct predicate_node {
     constexpr static std::uint32_t no_child = std::numeric_limits<std::uint32_t>::max();
 
@@ -196,19 +193,19 @@ struct predicate_node {
         leaf;
 };
 
-/// Provider-neutral projection mask.
+/// Fields requested in the result.
 struct external_projection {
     external_field_mask fields;
 };
 
-/// One ordered result key with null placement.
+/// Sort field with direction and placement of NULL values.
 struct external_order_key {
     external_field field;
     bool is_descending;
     bool are_nulls_first;
 };
 
-/// Complete normalized query consumed by provider adapters.
+/// Shared query passed to provider adapters.
 struct normalized_external_query {
     query_target target;
     sequence_delivery_mode delivery;
@@ -221,7 +218,7 @@ struct normalized_external_query {
     std::optional<std::uint64_t> limit;
     std::optional<std::uint64_t> offset;
     std::size_t requested_page_size;
-    /// @brief Measures resident and dynamically allocated query storage.
+    /// Estimate storage for the query and its filter values.
     [[nodiscard]] std::size_t measure_deep_size_bytes() const noexcept {
         std::size_t total = sizeof(normalized_external_query);
         total += providers.capacity() * sizeof(provider_id);
@@ -247,19 +244,17 @@ struct normalized_external_query {
     }
 };
 
-// ---------------------------------------------------------------------------
-// Translation and correctness.
-// ---------------------------------------------------------------------------
-/// Quality of a provider-side predicate translation.
+// Provider filtering and local checks.
+/// How much of a filter the provider can evaluate.
 enum class pushdown_quality : std::uint8_t {
-    exact,      // Remote result has exactly the requested semantics.
-    superset,   // Remote filter is safe, but local recheck is required.
-    local_only, // Returned metadata can be rechecked locally.
+    exact,      // Provider applies the requested filter exactly.
+    superset,   // Provider may return extra rows, which need a local check.
+    local_only, // Returned metadata is sufficient to evaluate the filter locally.
     unsupported // Provider cannot return enough data to evaluate it.
 };
 
-/// Returns the canonical PostgreSQL column for a projected or rechecked field.
-/// The non-selectable `count` sentinel maps to an empty name.
+/// Return the SQL column used to select or check this field.
+/// The count sentinel has no column and returns an empty name.
 [[nodiscard]] constexpr std::string_view to_sql_column(external_field field) noexcept {
     switch (field) {
     case external_field::provider:

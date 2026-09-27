@@ -1,10 +1,10 @@
 /**
  * @file external/provider/rate_limit.cppm
- * @brief Process-local request pacing keyed by provider policy identity.
+ * @brief Pace requests within a process by origin, credential, and rate tier.
  */
 module;
 
-/// Process-local GCRA request policy with fixed-capacity atomic buckets.
+/// Request pacing with a fixed array of shared counters.
 
 #include <algorithm>
 #include <array>
@@ -26,7 +26,9 @@ import bioseq.external.provider.runtime_services;
 
 export namespace bioseq::external::provider {
 
-/// Process-local GCRA request pacing and retry policy.
+/// Decide when a request can start and track active attempts.
+/// Each bucket stores the next scheduled request time. Bursts may start early
+/// within the tier's allowance, while server retry times delay later requests.
 class gcra_request_policy {
   public:
     static constexpr std::size_t k_bucket_count = 1024;
@@ -34,12 +36,13 @@ class gcra_request_policy {
     /// Constructs a request policy using the injected monotonic clock.
     explicit gcra_request_policy(external_clock_ref clock) noexcept : clock_(clock) {}
 
-    /// Acquires pacing and in-flight admission for one request attempt.
+    /// Reserve an active-request slot or return the next allowed start time.
+    /// This method returns immediately and does not check the stop token.
     std::expected<request_policy_result, external_error> acquire(const policy_request_view& request,
                                                                  std::stop_token) {
         const request_rate_tier_view* tier = find_tier(request);
         if (tier == nullptr) {
-            // No rate tier constrains this request — proceed with no slot.
+            // An unknown tier imposes no limit and needs no attempt token.
             return request_policy_result{
                 request_policy_action::proceed, std::chrono::nanoseconds{0}, std::nullopt};
         }
@@ -50,10 +53,8 @@ class gcra_request_policy {
         const std::size_t index = bucket_index(request);
         bucket& b = buckets_[index];
 
-        // 1) Reserve an in-flight slot on every proceeding request. The cap is
-        // enforced only when maximum_in_flight > 0, but the counter is always
-        // tracked so observe/abandon release symmetrically by token — independent
-        // of what the tier reads at release time (no leak if the profile mutates).
+        // Count every admitted attempt, even when the tier has no concurrency cap.
+        // observe and abandon release that count through the token if the profile changes.
         {
             std::uint32_t cur = b.in_flight.load(std::memory_order_acquire);
             for (;;) {
@@ -67,7 +68,7 @@ class gcra_request_policy {
             }
         }
 
-        // 2) GCRA: eligible when now >= max(tat - burst_tolerance, penalty).
+        // Defer requests that are too early for the burst allowance or server retry time.
         std::int64_t tat = b.tat_ns.load(std::memory_order_acquire);
         for (;;) {
             const std::int64_t penalty = b.penalty_until_ns.load(std::memory_order_acquire);
@@ -79,30 +80,26 @@ class gcra_request_policy {
             const std::int64_t new_tat = (tat > now ? tat : now) + spacing;
             if (b.tat_ns.compare_exchange_weak(
                     tat, new_tat, std::memory_order_acq_rel, std::memory_order_acquire)) {
-                // A monotonic per-bucket admission tag carried in the token for
-                // telemetry / attempt correlation. It is NOT an ABA guard: release
-                // (observe/abandon) is a fungible in-flight decrement keyed only by
-                // slot, so the generation is not re-checked and double-release is a
-                // caller-contract violation, not something this counter prevents.
+                // The generation number identifies this attempt for logging. Release uses
+                // only the bucket index, so callers must release each token exactly once.
                 const std::uint64_t gen = b.generation.fetch_add(1, std::memory_order_acq_rel) + 1;
                 return request_policy_result{
                     request_policy_action::proceed,
                     std::chrono::nanoseconds{0},
                     policy_attempt_token{static_cast<std::uint64_t>(index), gen}};
             }
-            // CAS lost: `tat` reloaded with the current value — re-evaluate.
+            // Another request changed the schedule. Check the updated time again.
         }
     }
 
-    /// Applies response pacing observations and releases attempt admission.
+    /// Apply the server's retry timing and release the attempt's active slot.
     std::expected<request_policy_result, external_error>
     observe(policy_attempt_token token,
             const policy_request_view& request,
             const policy_response_view& response) {
         bucket& b = buckets_[token.slot % k_bucket_count];
-        // A 429/Retry-After (or a server-advertised spacing) pushes the penalty
-        // floor forward so no backend proceeds before it, clamped to the profile's
-        // maximum_retry_after so a hostile header cannot wedge the bucket.
+        // Apply the server's retry time or spacing to later requests in this process.
+        // A positive maximum_retry_after caps how far that delay can extend.
         const std::int64_t now = now_ns();
         std::int64_t penalty_target = 0;
         if (response.rate.retry_at.has_value()) {
@@ -126,7 +123,7 @@ class gcra_request_policy {
             request_policy_action::proceed, std::chrono::nanoseconds{0}, std::nullopt};
     }
 
-    /// Releases admission for an attempt without a response observation.
+    /// Release an attempt that ended without a response.
     void abandon(policy_attempt_token token, const policy_request_view& /*request*/) noexcept {
         release_slot(buckets_[token.slot % k_bucket_count]);
     }
@@ -141,7 +138,7 @@ class gcra_request_policy {
         }
     }
 
-    /// Returns a non-owning erased request-policy reference.
+    /// Return borrowed callbacks for this request policy.
     [[nodiscard]] request_policy_ref ref() noexcept {
         return request_policy_ref{
             this, &acquire_thunk, &observe_thunk, &abandon_thunk, &reset_thunk};
@@ -154,7 +151,7 @@ class gcra_request_policy {
     }
 
   private:
-    /// Atomic state retained for one hashed request-policy identity.
+    /// Shared timing and active-request counters for a hash bucket.
     struct bucket {
         std::atomic<std::int64_t> tat_ns{0};
         std::atomic<std::int64_t> penalty_until_ns{0};
@@ -171,14 +168,14 @@ class gcra_request_policy {
         return clock_.monotonic_now_fn(clock_.object).count();
     }
 
-    /// Returns the active spacing floor for a request tier.
+    /// Use minimum spacing when positive, otherwise initial spacing.
     [[nodiscard]] static std::int64_t
     effective_spacing(const request_rate_tier_view& tier) noexcept {
         const std::int64_t minimum = tier.minimum_spacing.count();
         return minimum > 0 ? minimum : tier.initial_spacing.count();
     }
 
-    /// Multiplies a non-negative burst window and clamps signed overflow.
+    /// Multiply the burst window, returning zero for nonpositive values and clamping overflow.
     [[nodiscard]] static std::int64_t saturating_mul(std::int64_t lhs, std::int64_t rhs) noexcept {
         if (lhs <= 0 || rhs <= 0) {
             return 0;
@@ -198,10 +195,11 @@ class gcra_request_policy {
         return nullptr;
     }
 
-    /// Hashes origin, credential identity, and tier into a conservative shared bucket.
+    /// Choose a bucket from the origin, credential identity, and rate tier.
+    /// Hash collisions make those requests share their timing and active count.
     [[nodiscard]] std::size_t bucket_index(const policy_request_view& request) const noexcept {
         std::uint64_t h = 1469598103934665603ull;
-        // Mix one byte into the shared-bucket FNV-1a hash.
+        // Mix one byte into the request-identity hash.
         const auto mix = [&h](unsigned char byte) noexcept {
             h ^= byte;
             h *= 1099511628211ull;
@@ -218,7 +216,7 @@ class gcra_request_policy {
         return static_cast<std::size_t>(h % k_bucket_count);
     }
 
-    /// Releases one reserved in-flight slot and remains idempotent at zero.
+    /// Release one active-request slot without decrementing below zero.
     static void release_slot(bucket& b) noexcept {
         std::uint32_t cur = b.in_flight.load(std::memory_order_acquire);
         while (cur > 0 && !b.in_flight.compare_exchange_weak(
@@ -232,12 +230,12 @@ class gcra_request_policy {
             request_policy_action::retry_at, std::chrono::nanoseconds{at_ns}, std::nullopt};
     }
 
-    /// Adapts erased acquisition to this policy instance.
+    /// Call acquire through the callback interface.
     static std::expected<request_policy_result, external_error>
     acquire_thunk(void* self, const policy_request_view& request, std::stop_token stop) {
         return static_cast<gcra_request_policy*>(self)->acquire(request, std::move(stop));
     }
-    /// Adapts erased response observation to this policy instance.
+    /// Call observe through the callback interface.
     static std::expected<request_policy_result, external_error>
     observe_thunk(void* self,
                   policy_attempt_token token,
@@ -245,13 +243,13 @@ class gcra_request_policy {
                   const policy_response_view& response) {
         return static_cast<gcra_request_policy*>(self)->observe(token, request, response);
     }
-    /// Adapts erased attempt abandonment to this policy instance.
+    /// Call abandon through the callback interface.
     static void abandon_thunk(void* self,
                               policy_attempt_token token,
                               const policy_request_view& request) noexcept {
         static_cast<gcra_request_policy*>(self)->abandon(token, request);
     }
-    /// Adapts erased test reset to this policy instance.
+    /// Reset test state through the callback interface.
     static void reset_thunk(void* self) noexcept {
         static_cast<gcra_request_policy*>(self)->reset_for_tests();
     }
