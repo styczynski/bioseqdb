@@ -1,6 +1,6 @@
 /**
  * @file index_parts/active_policy_accounting.cppm
- * @brief Applies active-read policy decisions to one scanner dispatch context.
+ * @brief Record the selected index policy in the scanner and dispatch counters.
  */
 module;
 
