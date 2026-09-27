@@ -1,6 +1,6 @@
 /**
  * @file index_admin_hash_major_test.cpp
- * @brief Exercises PostgreSQL hash-major publication, streaming, and failure cleanup.
+ * @brief Checks storing minimizers by hash, reopening them, and cleanup after failures.
  */
 
 #include <libpq-fe.h>
@@ -18,7 +18,7 @@ using namespace bioseq_int_tests::index_admin_test_support;
 namespace {
 
 #ifdef BIOSEQ_TEST_INDEXES
-/** Read one facade-source instrumentation counter. */
+/** Reads a named sequence-source test counter. */
 [[nodiscard]] std::int64_t facade_source_counter(connection_test_context &ctx,
                                                  std::string_view name) {
   return query_scalar_int(
@@ -66,11 +66,9 @@ TEST_CASE("bridged PostgreSQL build and publication leaves preserve published st
             "injected sorted-run PostgreSQL leaf failure\nDETAIL: failure point 1"},
         failure_probe{"scalar_fail_sorted_create_after", "XX000",
             "injected sorted-run PostgreSQL leaf failure\nDETAIL: failure point 2"},
-        // The fixture's 65,565 bp row spans three 32-Kbp scanner cores. Its
-        // test-only 64-KiB merge-reader budget therefore compacts three input
-        // runs into two outputs. Failing output creation #2 confirms output #1
-        // completed and its input handles closed before the run store became
-        // permanently poisoned; the loop below then confirms fresh-txn recovery.
+        // This sequence produces three sorted runs. The 64 KiB reader budget merges
+        // them in two outputs, so failing the second output tests cleanup after
+        // one output has completed. The loop below then retries in a new transaction.
         failure_probe{"scalar_fail_sorted_compact_create_before_nth2", "XX000",
             "injected sorted-run PostgreSQL leaf failure\nDETAIL: failure point 15"},
         failure_probe{"scalar_fail_sorted_reader_minimum", "XX000",
@@ -149,8 +147,8 @@ TEST_CASE("bridged PostgreSQL build and publication leaves preserve published st
     };
     const auto capture_generation_payload = [&ctx, rowno](
             const std::string& sidecar, long long generation) {
-        // Row CRCs authenticate generation_id and are generation-scoped. Compare
-        // stable coordinates, lengths, and exact bytes across generations.
+        // The checksum includes the generation ID, so compare coordinates, lengths,
+        // and payload bytes when checking equivalent data in different generations.
         return query_rows(ctx, fmt::format(
             "SELECT position_segment::text, sub_key::text, chunk_no::text, "
             "chunk_bytes::text, encode(blob, 'hex') "
@@ -177,10 +175,8 @@ TEST_CASE("bridged PostgreSQL build and publication leaves preserve published st
     rowset_t baseline_family = capture_generation_family(baseline_sidecar);
     REQUIRE(!baseline_family.empty());
 
-    // The synthetic ceiling denies the preferred three-reader geometry and
-    // its 32-KiB minimum, then admits a two-reader minimum. Exact generation
-    // payload equality proves reduced fan-in preserves the complete ordered
-    // stream across both compaction passes.
+    // Limit memory so the merge must reduce from three readers to two.
+    // Its output must still match the unrestricted build byte for byte.
     row_t constrained_build = build("scalar_test_sorted_reader_backoff");
     REQUIRE(constrained_build.size() == 72);
     REQUIRE(constrained_build[0].value() == baseline_sidecar);
@@ -206,11 +202,8 @@ TEST_CASE("bridged PostgreSQL build and publication leaves preserve published st
             table, rowno, probe.backend));
         REQUIRE(error.sqlstate == probe.sqlstate);
         REQUIRE(error.message == probe.diagnostic);
-        // Recovery is deliberately a fresh implicit transaction. A poisoned
-        // scanner, run store, row sink, rereader, or SPI publisher must never
-        // be resumed in-place. Exact equality includes the generation-0 head,
-        // all immutable generation rows, and every blob byte; it therefore
-        // also confirms the failed statement left no orphan generation rows.
+        // Check recovery in a new implicit transaction. The stored head and every
+        // generation row must match their pre-failure values, including payload bytes.
         REQUIRE(query_scalar_int(ctx, "SELECT 1;") == 1);
         REQUIRE(capture_generation_family(baseline_sidecar)
             == baseline_family);
@@ -219,8 +212,7 @@ TEST_CASE("bridged PostgreSQL build and publication leaves preserve published st
             "WHERE query_key={} AND generation_id=0;",
             baseline_sidecar, rowno)) == 1);
 
-        // A successful publication after every individual probe confirms the
-        // test-only hook was explicitly disarmed and each failure is isolated.
+        // A normal build must succeed after each injected failure.
         row_t recovered = build("scalar");
         REQUIRE(recovered.size() == 72);
         REQUIRE(recovered[0].value() == baseline_sidecar);
@@ -273,10 +265,8 @@ TEST_CASE("ordinary update_index publishes fragment-minimizer metadata and a reo
             "SELECT bioseq.update_index('{}'::regclass, '{}');",
             table, index_name)) == 1);
 
-        // A distinct backend authenticates the published metadata without
-        // inheriting writer memory. Fragment-minimizer live mmap execution is
-        // covered above; only the sequence-wide hash-major branch below
-        // claims a complete hash-major reopen.
+        // Open a new connection so these checks cannot reuse the writer's memory.
+        // Check fragment metadata or reopen the complete sequence index, as appropriate.
         connection_test_context reopened;
         if (index_name == "minimizers_per_fragment") {
             REQUIRE(require_ready_fragment_minimizer_metadata(
@@ -481,9 +471,8 @@ TEST_CASE("ordinary locator-backed bounded ntHash update publishes hash-major wi
         table);
     const auto rowno = only_column_row_number(ctx, table);
 
-    // The production coordinator rejects the publication unless its returned
-    // evidence carries accepted bounded-ntHash-native work and zero Scalar/Exact/Vulkan
-    // runs, so SQL success is itself no-fallback route evidence.
+    // Build with bounded ntHash and check that the stored generation records
+    // that scheme and producer. A scalar reader must reject it below.
     REQUIRE(query_scalar_int(ctx, fmt::format(
         "SELECT bioseq.update_index('{}'::regclass, "
         "'minimizers_per_sequence');",
@@ -596,10 +585,8 @@ TEST_CASE("ordinary hash-major replacement preserves its active generation when 
     REQUIRE(schema_identity_before[3].has_value());
     REQUIRE(!metadata_age_before.empty());
 
-    // Corrupt a later source fragment after a valid generation exists. The
-    // next ordinary rebuild must fail while validating and streaming the authoritative
-    // locator, before publishing a replacement head. The stable sidecar and
-    // published generation must remain byte-exact.
+    // Remove a later source fragment after building a valid index. Rebuilding
+    // must fail and leave the stored generation, relation identity, and age rows unchanged.
     exec_sql(ctx, fmt::format(
         "SELECT bioseq_internal.remove_sequence_fragment("
         "'{}'::regclass, 'minimizers_per_sequence', {}, 2);",
@@ -609,8 +596,7 @@ TEST_CASE("ordinary hash-major replacement preserves its active generation when 
         "SELECT bioseq.update_index('{}'::regclass, "
         "'minimizers_per_sequence');",
         table));
-    // The immutable-source guard owns this failure before the replacement
-    // publisher can enter a generation-catalog operation.
+    // The rebuild must report that the locator's source has changed.
     REQUIRE(error.sqlstate == "55000");
     REQUIRE(error.contains(
         "bioseq locator no longer matches its immutable source"));
@@ -662,9 +648,8 @@ TEST_CASE("PG index streaming poisons contiguous access and resident "
     REQUIRE(facade_source_counter(ctx, "facade_poison_hits") == 0);
   }
 
-  // max_concurrency is PGC_SIGHUP and cannot be changed by a session.  Use
-  // the cluster's effective pool width; the exact resident-probe and
-  // materialization counters below confirm that this branch was admitted.
+  // The worker limit comes from the cluster configuration. Use that limit
+  // and check the counters below to confirm the resident-data path ran.
   exec_sql(ctx,
            "SET bioseq.scheduler.pipeline.mode='task_parallel';"
            "SELECT bioseq_internal.reset_sequence_source_counters();");
@@ -781,9 +766,8 @@ TEST_CASE("checked bounded ntHash failures unwind grouped fragment and sequence 
                "FROM bioseq.scheduler_stats();") == admission_before);
       REQUIRE(query_scalar_int(ctx, "SELECT 1;") == 1);
 
-      // The same bounded ntHash backend succeeds through the same publisher immediately,
-      // confirming the one-shot failure arm, writer, spill, and source owner were
-      // all cleared by the rejected statement.
+      // Retry with bounded ntHash after the injected failure. The build must succeed
+      // and release its memory reservation when it finishes.
       exec_sql(ctx,
                "SET bioseq.aligner.minimizer.algorithm='bounded_nthash_simd';");
       REQUIRE(query_scalar_int(ctx, fmt::format(

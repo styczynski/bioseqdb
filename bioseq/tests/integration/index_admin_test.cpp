@@ -1,30 +1,11 @@
 /**
  * @file index_admin_test.cpp
- * @brief Exercises metadata catalog, allocator, and publication contracts.
+ * @brief Checks index metadata catalogs, source IDs, and transaction handling.
  */
 
-// Integration scenarios for the metadata-admin SQL surface
-// (bioseq.list_metadata + bioseq.update_index + bioseq.set_index_policy):
-//   * list_metadata enumerates the three production index kinds
-//     (minimizers_per_fragment, symbol_counts, minimizers_per_sequence) for a
-//     freshly-created USING bioseq table, NOT gated on data: every index
-//     appears with storage_size='0 bytes' and a NULL time_since_update,
-//     carrying its registered (index_type, update_policy).
-//   * update_index('minimizers_per_fragment') (re)builds the per-fragment
-//     chunk index for every bioseq.seq column of every row and returns the
-//     count of sequences (re)indexed.
-//   * update_index rejects an unknown index name, and rejects non-bioseq-AM
-//     (heap) tables.
-//   * update_index accepts the table argument as quoted text or as an
-//     explicit ::regclass cast.
-//   * set_index_policy toggles a kind's update_policy (visible through
-//     list_metadata), including opt-in UPDATE_ON_INSERT for the heavier
-//     minimizers_per_sequence kind.
-//   * update_index is idempotent at the content level (stable chunk row
-//     count across repeated calls) and returns 0 on an empty table while
-//     list_metadata still lists the kinds.
-//   * row-count assertions use bioseq.index_table_row_count() through the
-//     integration-test index_table_row_count() wrapper.
+// Tests the SQL definitions and access permissions of index and source catalogs.
+// Also checks that publishing sources and dropping Bioseq tables preserve
+// catalog state across errors, rollback, and savepoint release.
 
 #include <libpq-fe.h>
 
@@ -41,16 +22,13 @@ using namespace bioseq_int_tests::index_admin_test_support;
 TEST_CASE("list_metadata reports all production index kinds for a fresh bioseq table",
           "[component:bioseq][layer:integration][feature:index][resource:postgres]") {
     auto ctx = fresh_context({k_table});
-    // No inserts: list_metadata is NOT gated on data, so every registered
-    // index must already appear for the fresh table.
+    // Registered indexes must appear even before the table has any rows.
     exec_sqlf(ctx,
               "CREATE TABLE {} (pk int, seq0 bioseq.seq('dna4', 32)) "
               "USING bioseq;",
               k_table);
 
-    // Filter out the test-only CHUNKED_PER_TABLE 'test_table_rowcount' index
-    // (only present under -DBIOSEQ_TEST_INDEXES) so the assertion pins exactly
-    // the three production kinds regardless of how the dylib was built.
+    // Exclude the test-only index so both build profiles check the same production indexes.
     const auto rows = query_rows(
         ctx,
         fmt::format("SELECT index_name, index_type, update_policy, "
@@ -100,12 +78,12 @@ TEST_CASE("published generation inspection SQL surface is narrow and administrat
         "FROM pg_proc p WHERE p.oid="
         "'bioseq.inspect_ready_minimizer_generation(regclass,text,bigint)'::regprocedure;");
     REQUIRE(row.size() == 8);
-    REQUIRE(row[0].value() == "s");       // STABLE: read-only catalogue contract
+    REQUIRE(row[0].value() == "s");       // STABLE function
     REQUIRE(row[1].value() == "r");       // PARALLEL RESTRICTED
     REQUIRE(row[2].value() == "0");       // SECURITY INVOKER
     REQUIRE(row[3].value() == "1");       // STRICT
     REQUIRE(row[4].value() == "1");       // RETURNS TABLE / SETOF record
-    REQUIRE(row[5].value() == "3");       // exact input signature
+    REQUIRE(row[5].value() == "3");       // three input arguments
     REQUIRE(row[6].value() == "37");      // 3 inputs + 34 named outputs
     REQUIRE(row[7].value() == "1");       // PUBLIC has no EXECUTE grant
 }
@@ -240,7 +218,7 @@ TEST_CASE("sequence-source catalog has exact schema indexes and ACL",
     REQUIRE(catalog[7].value() == "1");  // no PUBLIC table privilege
     REQUIRE(catalog[8].value() == "1");  // no non-owner table privilege
     REQUIRE(catalog[9].value() == "1");  // no PUBLIC internal-schema USAGE
-    REQUIRE(catalog[10].value() == "1"); // empty config-dump contract
+    REQUIRE(catalog[10].value() == "1"); // dump condition excludes all catalog rows
 
     const auto indexes = query_rows(ctx,
         "SELECT ci.relname, i.indisprimary::int::text, "
@@ -412,7 +390,7 @@ TEST_CASE("generation descriptor and reaper catalogs have exact protected shape"
         REQUIRE(catalog[5].value() == "1"); // extension-owned member
         REQUIRE(catalog[6].value() == "1"); // no PUBLIC table privilege
         REQUIRE(catalog[7].value() == "1"); // no non-owner privilege
-        REQUIRE(catalog[8].value() == "1"); // empty config-dump contract
+        REQUIRE(catalog[8].value() == "1"); // dump condition excludes all catalog rows
     }
 
     const auto storage_indexes = query_rows(ctx,
@@ -711,9 +689,8 @@ TEST_CASE("ordinary drops fail closed on missing or malformed source catalogs",
     const long long table_b_oid = query_scalar_int(ctx, fmt::format(
         "SELECT '{}'::regclass::oid::bigint;", table_b));
 
-    // A rejected RESTRICT drop exercises the ProcessUtility PG_CATCH path.
-    // The following missing-catalog probe must still fail closed, confirming the
-    // teardown context did not leak in this same backend.
+    // A rejected DROP EXTENSION must clear its teardown state. In the same
+    // connection, a later DROP TABLE must still reject a missing source catalog.
     const auto restrict_error = sql_error(ctx, "DROP EXTENSION bioseq;");
     REQUIRE(restrict_error.sqlstate == "2BP01");
 
@@ -754,8 +731,8 @@ TEST_CASE("ordinary DROP preflights an implicit bioseq inheritance child",
     auto ctx = fresh_context({child, parent});
     require_bioseq_shared_preload(ctx);
 
-    // The named parent uses heap; only its unmentioned inheritance child uses
-    // bioseq. A name-only preflight therefore misses the catalog dependency.
+    // DROP names the heap parent, but CASCADE also reaches its Bioseq child.
+    // The catalog check must include that child before either table is removed.
     exec_sqlf(ctx,
         "CREATE TABLE {} (id int, seq bioseq.seq('dna4', 64));",
         parent);
@@ -797,9 +774,8 @@ TEST_CASE("ordinary DROP preflights an implicit bioseq partition",
     auto ctx = fresh_context({child, parent});
     require_bioseq_shared_preload(ctx);
 
-    // A declarative partition parent has no physical table AM of its own. The
-    // unmentioned child is the bioseq relation whose cleanup catalogs must be
-    // validated before PostgreSQL enters dependency deletion.
+    // Dropping the partitioned parent also removes its Bioseq partition.
+    // Check the partition's cleanup catalogs before PostgreSQL starts deleting relations.
     exec_sqlf(ctx,
         "CREATE TABLE {} (id int, seq bioseq.seq('dna4', 64)) "
         "PARTITION BY RANGE (id);", parent);
@@ -884,8 +860,8 @@ TEST_CASE("named partition DROP waits on its parent before locking the child",
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
 
-    // Always release the blocker and drain the asynchronous result before any
-    // assertion can unwind a connection with a live DROP command.
+    // Release the blocking transaction and collect the DROP result before
+    // assertions can unwind the connections.
     exec_sql(blocker_ctx, "ROLLBACK;");
     bool consume_ok = true;
     for (unsigned attempt = 0; attempt < 500 && PQisBusy(drop_ctx.raw());
@@ -942,14 +918,12 @@ TEST_CASE("speculative source authority is consumed or never created",
         "WHERE user_relid='index_admin_source_speculative'::regclass;");
     REQUIRE(states[0].value() == "0");
     REQUIRE(states[1].value() == "1");
-    // PostgreSQL's ON CONFLICT pre-check may determine the conflict before calling
-    // table_tuple_insert_speculative.  In that valid path no source epoch or
-    // publication authority is created, so there is nothing to invalidate.
+    // PostgreSQL can detect this conflict before starting a speculative insert.
+    // That leaves no new source version to invalidate.
     REQUIRE(states[2].value() == "0");
     REQUIRE(states[3].value() == "1");
 
-    // No-conflict ON CONFLICT takes the successful speculative-completion path.
-    // Its move-only authority must be published before PRE_COMMIT.
+    // A successful speculative insert must publish its source before commit.
     exec_sql(ctx,
         "INSERT INTO index_admin_source_speculative VALUES "
         "(2, 'CCCC'::bioseq.seq('dna4', 64)) ON CONFLICT (id) DO NOTHING;");
@@ -965,8 +939,8 @@ TEST_CASE("speculative source authority is consumed or never created",
     REQUIRE(succeeded[2].value() == "0");
     REQUIRE(succeeded[3].value() == "2");
 
-    // A subtransaction rollback must remove its catalog row and leave no
-    // backend-local speculative authority for the outer PRE_COMMIT gate.
+    // Rolling back the savepoint must remove the new source row and clear its
+    // pending publication state before the outer transaction commits.
     exec_sql(ctx, "BEGIN; SAVEPOINT source_speculative;");
     exec_sql(ctx,
         "INSERT INTO index_admin_source_speculative VALUES "
@@ -995,10 +969,8 @@ TEST_CASE("speculative source authority is consumed or never created",
     REQUIRE(after_subtransaction[2] == succeeded[2]);
     REQUIRE(after_subtransaction[3].value() == "2");
 
-    // The symmetric savepoint-release path runs PRE_COMMIT_SUB rather than
-    // ABORT_SUB. Both callbacks close transaction-scoped write-side shard
-    // caches, so verify that a published source and its parent row survive release
-    // and outer commit without a ResourceOwner mismatch.
+    // Releasing a savepoint also closes its write caches. The published source
+    // and parent row must survive both the release and the outer commit.
     exec_sql(ctx, "BEGIN; SAVEPOINT source_speculative_commit;");
     exec_sql(ctx,
         "INSERT INTO index_admin_source_speculative VALUES "

@@ -19,16 +19,14 @@ TEST_CASE(
     "update_index('minimizers_per_fragment') builds the per-fragment index",
     "[component:bioseq][layer:integration][feature:index][resource:postgres]") {
   auto ctx = fresh_context({k_table});
-  // seed_small_bioseq_column sets bioseq.index.insert_maintenance.enabled = on, so the
-  // two default UPDATE_ON_INSERT indexes (minimizers_per_fragment,
-  // symbol_counts) are populated incrementally at INSERT time.
+  // The seed helper enables insert maintenance. Fragment minimizers and
+  // symbol counts should therefore exist before the explicit rebuild.
   seed_small_bioseq_column(ctx, k_table);
 
   REQUIRE(index_table_row_count(ctx, "minimizers_per_fragment", k_table) > 0);
   REQUIRE(index_table_row_count(ctx, "symbol_counts", k_table) > 0);
 
-  // Explicit rebuild of the per-fragment index returns the count of
-  // sequences (re)indexed — three seeded rows.
+  // Rebuilding reports the number of sequences indexed, one for each seeded row.
   REQUIRE(query_scalar_int(
               ctx, fmt::format("SELECT bioseq.update_index('{}'::regclass, "
                                "'minimizers_per_fragment');",
@@ -109,9 +107,7 @@ TEST_CASE("bounded ntHash update_index publishes DNA5 for both minimizer layouts
                 "bioseq.seq('dna5', 64));",
                 route.table);
 
-            // DNA5 is now supported by the selected bounded producer. Retain
-            // the locator-backed fixture and check real index publication;
-            // do not require minimizer equality with another algorithm.
+            // Check that bounded ntHash builds a stored index for this DNA5 source.
             REQUIRE(only_column_row_number(ctx, route.table) > 0);
             REQUIRE(query_scalar_int(ctx, fmt::format(
                 "SELECT bioseq.update_index('{}'::regclass, '{}');",
@@ -129,7 +125,7 @@ TEST_CASE("update_index accepts text and explicit regclass for the table arg",
     auto ctx = fresh_context({k_table});
     seed_small_bioseq_column(ctx, k_table);
 
-    // Quoted text form — PG implicitly casts text -> regclass via regclassin.
+    // PostgreSQL resolves this quoted table name as a regclass argument.
     REQUIRE(query_scalar_int(
                 ctx,
                 fmt::format("SELECT bioseq.update_index('{}', "
@@ -149,9 +145,8 @@ TEST_CASE("update_index rejects non-bioseq-AM tables",
     constexpr std::string_view k_heap_table = "index_admin_heap_t";
     auto ctx = fresh_context({k_heap_table});
 
-    // Plain heap-AM table with a bioseq.seq column. The chunked-storage
-    // reindex path is only reachable from the bioseq columnar AM, so
-    // update_index must refuse a heap relation.
+    // A bioseq.seq column alone does not make a table eligible for update_index.
+    // This heap table must be rejected because it does not use Bioseq storage.
     create_seq_table(
         ctx,
         seq_table_spec{
@@ -174,7 +169,7 @@ TEST_CASE("set_index_policy toggles update_policy and supports per-sequence on-i
     auto ctx = fresh_context({k_table});
     seed_small_bioseq_column(ctx, k_table);
 
-    // Helper: read the current update_policy of one index from list_metadata.
+    // Read this index's update policy from list_metadata.
     auto policy_of = [&ctx](std::string_view index_name) {
         return query_scalar(
             ctx,
@@ -184,7 +179,7 @@ TEST_CASE("set_index_policy toggles update_policy and supports per-sequence on-i
                         k_table, index_name));
     };
 
-    // symbol_counts defaults to UPDATE_ON_INSERT; flip it to UPDATE_MANUALLY.
+    // Change symbol_counts from automatic insert updates to manual updates.
     exec_sqlf(ctx,
               "SELECT bioseq.set_index_policy('{}'::regclass, 'symbol_counts', "
               "'UPDATE_MANUALLY');",
@@ -198,9 +193,7 @@ TEST_CASE("set_index_policy toggles update_policy and supports per-sequence on-i
               k_table);
     REQUIRE(policy_of("symbol_counts") == "UPDATE_ON_INSERT");
 
-    // minimizers_per_sequence is opt-in UPDATE_ON_INSERT. This must be
-    // accepted so asynchronous recompute persistence and batch load can honor
-    // the table policy instead of hard-wiring minimizers_per_fragment.
+    // Allow inserts to maintain the sequence index while the fragment index stays manual.
     exec_sqlf(ctx,
               "SELECT bioseq.set_index_policy('{}'::regclass, "
               "'minimizers_per_fragment', 'UPDATE_MANUALLY');",
@@ -240,8 +233,7 @@ TEST_CASE("update_index('minimizers_per_fragment') is idempotent at the content 
     auto ctx = fresh_context({k_table});
     seed_small_bioseq_column(ctx, k_table);
 
-    // Run the rebuild twice; the per-fragment chunk row count must be stable
-    // (the rebuild clears the index then repopulates from identical input).
+    // Rebuilding the same data twice must leave the same number of fragment rows.
     REQUIRE(query_scalar_int(
                 ctx,
                 fmt::format("SELECT bioseq.update_index('{}'::regclass, "
@@ -272,7 +264,7 @@ TEST_CASE("update_index on an empty bioseq table returns 0 and list_metadata "
               "USING bioseq;",
               k_table);
 
-    // No rows -> no sequences (re)indexed -> 0.
+    // An empty table has no sequences to index.
     REQUIRE(query_scalar_int(
                 ctx,
                 fmt::format("SELECT bioseq.update_index('{}'::regclass, "

@@ -1,9 +1,9 @@
 /**
  * @file index_invariance_test.cpp
- * @brief Verifies mmsearch results across PostgreSQL index choices.
+ * @brief Checks that adding PostgreSQL indexes preserves mmsearch results.
  *
- * The cases compare unindexed, btree, hash, and GIN planner shapes. Aggregate
- * projections and EXPLAIN ANALYZE must retain the same non-null results.
+ * Compares rows and aggregate results before and after adding btree, hash,
+ * and GIN indexes. Alignment fields must remain available in each plan.
  */
 
 #include <fmt/format.h>
@@ -29,7 +29,7 @@ struct invariance_result {
     row_t agg_results;
 };
 
-/** @brief Executes both invariant queries against one planner shape. */
+/** @brief Runs the row and aggregate queries with the current indexes and settings. */
 [[nodiscard]] invariance_result run_invariance_queries(const connection_test_context& ctx,
                                                        std::string_view table_name) {
     invariance_result result;
@@ -41,9 +41,7 @@ struct invariance_result {
                     "                'CTAGTCACTGTAGCCTGATCGTAGCTAGT'::bioseq.seq('dna4', 32)) "
                     " ORDER BY pk;",
                     table_name));
-    // MIN(target_start) exercises the planner path that skips vectorized
-    // aggregation for Bioseq projections. This query stays single-aggregate.
-    // A separate case covers the multi-aggregate contract.
+    // Also aggregate an alignment field to check that it survives the aggregate plan.
     result.agg_results = query_one(
         ctx,
         fmt::format("SELECT MIN(bioseq.target_start(pk)) "
@@ -58,27 +56,19 @@ struct invariance_result {
 
 TEST_CASE("Result rows are independent of B-Tree index presence",
           "[component:bioseq][layer:integration][feature:planner][resource:postgres]") {
-    // Baseline: no additional index. The alignment dataset already
-    // creates a PK btree. No other index is added.
+    // The fixture starts with only its primary-key index.
     auto ctx = fresh_context({k_index_table});
     seed_hoe_fixture(ctx, k_index_table);
     const auto baseline = run_invariance_queries(ctx, k_index_table);
 
-    // Add a B-Tree on the seq0 column. The planner is unlikely to
-    // CHOOSE this index for an mmsearch qual (the operator class
-    // doesn't match), but the index's existence should not
-    // perturb the customscan path. With
-    // `bioseq.planner.index_scan.enabled = on` the planner may
-    // consider an IndexScan path. The result rows should still be
-    // identical.
+    // Adding a sequence btree must preserve both the alignment rows and their aggregate.
     exec_sqlf(ctx, "CREATE INDEX {0}_seq0_btree ON {0} USING btree(seq0);", k_index_table);
 
     const auto with_btree_default = run_invariance_queries(ctx, k_index_table);
     REQUIRE(with_btree_default.row_results == baseline.row_results);
     REQUIRE(with_btree_default.agg_results == baseline.agg_results);
 
-    // Toggle the GUC explicitly so an IndexScan path could be
-    // chosen. The result must stay invariant.
+    // Check both settings of Bioseq's index-scan option.
     {
         guc_scope index_scan_scope(ctx, "bioseq.planner.index_scan.enabled", "on");
         const auto with_btree_idx_on = run_invariance_queries(ctx, k_index_table);
@@ -95,9 +85,7 @@ TEST_CASE("Result rows are independent of B-Tree index presence",
 
 TEST_CASE("Result rows are independent of Hash index presence",
           "[component:bioseq][layer:integration][feature:planner][resource:postgres]") {
-    // Hash indexes on bioseq.seq don't have an opclass, but
-    // creating one on a regular pk column shouldn't perturb the
-    // mmsearch result set.
+    // Adding a hash index on the primary key must preserve mmsearch results.
     auto ctx = fresh_context({k_index_table});
     seed_hoe_fixture(ctx, k_index_table);
     const auto baseline = run_invariance_queries(ctx, k_index_table);
@@ -111,13 +99,9 @@ TEST_CASE("Result rows are independent of Hash index presence",
 
 TEST_CASE("Result rows are independent of GIN index on array-of-text labels",
           "[component:bioseq][layer:integration][feature:planner][resource:postgres]") {
-    // The GIN index models sequences with multiple labels in a PostgreSQL
-    // ARRAY column. A GIN index on the array enables fast
-    // label search. mmsearch on the bioseq.seq column should be
-    // unaffected by the index's existence.
+    // A GIN index on sequence labels must leave sequence alignment results unchanged.
     auto ctx = fresh_context({k_index_label_table});
-    // We need a custom table shape (with a labels column) so
-    // build this labeled dataset explicitly.
+    // Build this fixture with room to add a labels column.
     exec_sqlf(ctx, "SET bioseq.index.insert_maintenance.enabled = on;");
     create_seq_table(ctx,
                      seq_table_spec{
@@ -128,8 +112,7 @@ TEST_CASE("Result rows are independent of GIN index on array-of-text labels",
                      },
                      hoe_seed_rows());
 
-    // Add a labels column populated with deterministic arrays so
-    // the GIN index has something to index.
+    // Fill the labels column so the GIN index has data.
     exec_sqlf(ctx, "ALTER TABLE {} ADD COLUMN labels TEXT[];", k_index_label_table);
     exec_sqlf(ctx, "UPDATE {} SET labels = ARRAY['lab', 'sample', pk::text];", k_index_label_table);
 
@@ -147,11 +130,8 @@ TEST_CASE("Result rows are independent of GIN index on array-of-text labels",
 TEST_CASE("EXPLAIN ANALYZE survives every index combination without "
           "altering bioseq.* results",
           "[component:bioseq][layer:integration][feature:planner][resource:postgres]") {
-    // Composite shape: create all three indexes (PK btree implicit,
-    // seq0 btree, pk hash) on the same relation and verify
-    // EXPLAIN ANALYZE plus the result rows. The planner will
-    // pick whichever path it considers cheapest. Bioseq projections
-    // must keep working.
+    // Keep the primary-key btree, sequence btree, and primary-key hash index
+    // together. Alignment fields and EXPLAIN ANALYZE must still work.
     auto ctx = fresh_context({k_index_table});
     seed_hoe_fixture(ctx, k_index_table);
     exec_sqlf(ctx, "CREATE INDEX {0}_seq0_btree ON {0} USING btree(seq0);", k_index_table);
@@ -170,8 +150,7 @@ TEST_CASE("EXPLAIN ANALYZE survives every index combination without "
     for (const auto& row : rows) {
         REQUIRE(row.size() == 3);
         REQUIRE(row[0].has_value());
-        // Every projected row from a mmsearch-bearing scan must populate
-        // Bioseq fields must be non-null for an alignment result.
+        // Each matched row must have a start position and a CIGAR string.
         REQUIRE(row[1].has_value());
         REQUIRE(row[2].has_value());
         REQUIRE_FALSE(row[2].value().empty());
@@ -180,9 +159,7 @@ TEST_CASE("EXPLAIN ANALYZE survives every index combination without "
     }
     REQUIRE(saw_valid_cigar);
 
-    // EXPLAIN ANALYZE must run without crashing AND must show a
-    // BioseqScan node — the customscan path should win even with
-    // multiple indexes available.
+    // EXPLAIN ANALYZE must execute successfully and report BioseqScan.
     const auto plan = explain_text(
         ctx,
         fmt::format("SELECT pk, bioseq.cigar(pk) FROM {} "
@@ -195,10 +172,7 @@ TEST_CASE("EXPLAIN ANALYZE survives every index combination without "
 
 TEST_CASE("Result rows are invariant under bioseq.planner.index_scan.enabled toggle",
           "[component:bioseq][layer:integration][feature:planner][resource:postgres]") {
-    // The bioseq.planner.index_scan.enabled GUC rewrites vanilla
-    // IndexScan plan nodes into BioseqIndexScan custom nodes so
-    // the columnar reader is reused. The user wants the result
-    // set to be invariant under this rewrite.
+    // Turning Bioseq index scans on or off must preserve the alignment rows and fields.
     auto ctx = fresh_context({k_index_table});
     seed_hoe_fixture(ctx, k_index_table);
     exec_sqlf(ctx, "CREATE INDEX {0}_seq0_btree ON {0} USING btree(seq0);", k_index_table);
