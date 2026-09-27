@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Exercises Bioseq materialization and slice EXPLAIN metrics.
+ * @brief Checks EXPLAIN reports for sequence slices and allocated sequence data.
  */
 #include <libpq-fe.h>
 #include <fmt/format.h>
@@ -87,7 +87,7 @@ TEST_CASE("SQL materialization calls and bytes match allocations",
     REQUIRE(boundary_actual_calls(plan, "text", "SQL conversion") == 3u);
     REQUIRE(boundary_actual_metric(plan, "text", "SQL conversion", "Actual Input Symbols") == 12u);
     REQUIRE(boundary_actual_metric(plan, "text", "SQL conversion", "Actual Output Symbols") == 12u);
-    /* Three 4-symbol text varlenas: VARHDRSZ + 4 bytes each. */
+    /* Each text value has a 4-byte header and four sequence bytes. */
     REQUIRE(boundary_actual_bytes(plan, "text", "SQL conversion") == 24u);
     REQUIRE_FALSE(plan_contains(plan, "Mechanism: packed full"));
 }
@@ -97,9 +97,8 @@ TEST_CASE("rescans retain every materialization counter delta",
     auto ctx = fresh_context({k_table});
     seed_small_bioseq_column(ctx, k_table);
 
-    /* The correlated scalar SubPlan rescans its one-row SliceProject for each
-     * VALUES row.  This is the executor shape used by a parallel worker under
-     * a nested loop as well; counters must remain cumulative across rearms. */
+    /* The correlated subquery rescans SliceProject for each VALUES row.
+     * Its counters must include all three executions. */
     const auto plan =
         explain_with_options(ctx,
                              "ANALYZE, TIMING OFF, COSTS OFF",
@@ -112,7 +111,7 @@ TEST_CASE("rescans retain every materialization counter delta",
     REQUIRE(boundary_actual_calls(plan, "text", "SQL conversion") == 3u);
     REQUIRE(boundary_actual_metric(plan, "text", "SQL conversion", "Actual Input Symbols") == 12u);
     REQUIRE(boundary_actual_metric(plan, "text", "SQL conversion", "Actual Output Symbols") == 12u);
-    /* Three 4-symbol text varlenas: VARHDRSZ + 4 bytes each. */
+    /* Each text value has a 4-byte header and four sequence bytes. */
     REQUIRE(boundary_actual_bytes(plan, "text", "SQL conversion") == 24u);
 }
 
@@ -193,9 +192,8 @@ TEST_CASE("INSERT plan declares a heap-tuple boundary",
              "CREATE TABLE explain_slice_insert_target "
              "(pk int, seq0 bioseq.seq('dna4',32)) USING bioseq;");
 
-    /* Control the ModifyTable/EXPLAIN contract independently of the lazy
-     * wrapper.  A flat Var projection must execute and persist the same three
-     * source rows before comparison with the sliced path. */
+    /* First check that EXPLAIN ANALYZE inserts all three unsliced rows.
+     * This gives the sliced INSERT below a control with the same source data. */
     const auto flat_plan =
         explain_with_options(ctx,
                              "ANALYZE, TIMING OFF, COSTS OFF",
@@ -394,12 +392,9 @@ TEST_CASE("unsliced EXPLAIN remains zero-payload around a sliced heap boundary",
             REQUIRE(allocation_signature() == "0,0,0,0");
         };
 
-    /* Bracket one explicit sliced heap boundary with the same unsliced plan.
-     * len(slice/concat/reverse) is intentionally metadata-only and cannot
-     * allocate payload, so it cannot be the materializing arm. INSERT gives the
-     * sliced value a planned, executed packed-full boundary.  Assert that one
-     * relevant allocation per row, without coupling this control to unrelated
-     * executor-copy or SliceProject-publication counters. */
+    /* Run the unsliced control before and after inserting sliced values.
+     * INSERT requires packed sequence data, so expect one allocation per row.
+     * A length-only query would leave the slice lazy and test no such allocation. */
     run_unsliced_control();
 
     const auto expression = fmt::format("bioseq.reverse(seq0[0:4]) OPERATOR(bioseq.||) seq0[4:8]");
@@ -427,10 +422,9 @@ TEST_CASE("SliceProject shallow publication allocates no payload",
           "[component:bioseq][layer:integration][feature:planner][resource:postgres]") {
     auto ctx = fresh_context({k_table});
     seed_small_bioseq_column(ctx, k_table);
-    /* Source-backed slice intermediates remain lazy through reverse
-     * and concat.  Their global allocation totals are not a contract of this
-     * case; measure only SliceProject's memcpy + RO publication seam with the
-     * wrapper-local deltas. */
+    /* Reverse and concat keep these slices lazy. Measure allocations made
+     * while SliceProject passes the values to its parent using the publication
+     * counters, which exclude allocations elsewhere in the query. */
     exec_sql(ctx,
              fmt::format("SET max_parallel_workers_per_gather=0; "
                          "SET bioseq.index.insert_maintenance.enabled=off; "

@@ -1,6 +1,6 @@
 /**
  * @file index_admin_generation_test.cpp
- * @brief Exercises generation audit, invalidation, clearing, and coordinator contracts.
+ * @brief Checks stored minimizer generations, invalidation, and index removal.
  */
 
 #include <libpq-fe.h>
@@ -59,8 +59,8 @@ TEST_CASE("cold no-index audit is metadata-only and detects physical minimizer r
     REQUIRE(present.size() == 3);
     REQUIRE(std::stoll(present[0].value()) > 0);
     REQUIRE(std::stoll(present[1].value()) > 0);
-    // The default fragment writer does not publish a generation head;
-    // the audit must count its physical rows without inventing one.
+    // This writer stores fragment rows without publishing a generation head.
+    // The audit must report those rows and a zero generation count.
     REQUIRE(present[2].value() == "0");
 
     const auto after_sidecars = query_rows(ctx,
@@ -191,8 +191,7 @@ TEST_CASE("published generation inspection rejects invalid inputs before access"
     REQUIRE(err.contains("requires a USING bioseq table"));
     exec_sql(ctx, "DROP TABLE index_admin_inspect_heap;");
 
-    // Every ERROR path must release its registered snapshot/read state and leave
-    // the libpq session usable.
+    // The connection must remain usable after these rejected inspection requests.
     REQUIRE(query_scalar_int(ctx, "SELECT 1;") == 1);
 }
 
@@ -297,9 +296,8 @@ TEST_CASE("generation clear savepoint restores relation head and exact age row",
         "WHERE user_relid='{}'::regclass "
         "ORDER BY main_relfilenode, column_attno, index_name;",
         table));
-    // The three explicit rows cover the exact per-fragment age plus the
-    // per-sequence and hostile adjacent-attno per-fragment collateral. Their rollback image must be preserved
-    // byte-for-byte below.
+    // Save the age rows for this fragment index, the sequence index, and a neighboring
+    // column. Rolling back the clear must restore all three exactly.
     REQUIRE(age_before.size() == 3);
 
     const auto cleared = query_one(ctx, fmt::format(
@@ -445,7 +443,7 @@ TEST_CASE("committed generation clear drops every sidecar and evicts another bac
         "AND NOT attisdropped)) "
         "ORDER BY main_relfilenode, column_attno, index_name;",
         table, table));
-    // The exact per-sequence row and hostile adjacent-attno per-fragment row are collateral.
+    // Clearing this fragment index must preserve the age rows for the sequence index and neighboring column.
     REQUIRE(collateral_age_before.size() == 2);
 
     connection_test_context session_a;
@@ -551,7 +549,7 @@ TEST_CASE("committed generation clear drops every sidecar and evicts another bac
         "FROM bioseq_internal.metadata_age_log m "
         "WHERE m.user_relid='{}'::regclass "
         "ORDER BY main_relfilenode, column_attno, index_name;",
-        table)).size() == 2); // exact-attno per-sequence + adjacent-attno per-fragment
+        table)).size() == 2); // age rows for the sequence index and neighboring column remain
     exec_sqlf(session_b,
         "DROP TABLE bioseq_internal.{};", commit_lookalike);
     REQUIRE(query_scalar_int(session_b, "SELECT 1;") == 1);
@@ -737,9 +735,8 @@ TEST_CASE("PostgreSQL full-generation reader rejects same-scheme producer relabe
     const row_t scalar = build("scalar");
     REQUIRE(scalar[6].value() == "scalar");
     REQUIRE(query_one(ctx, read("scalar")).size() == 16u);
-    // Scalar, two-stack ntHash and Vulkan use the same biological minimizer scheme.
-    // Exact producer identity is nevertheless mandatory, so neither request may
-    // consume a generation produced by Scalar.
+    // A stored generation must match the requested producer as well as the minimizer scheme.
+    // Reject scalar data when the caller requests SIMD or Vulkan.
     expect_producer_rejection("exact_simd");
     expect_producer_rejection("vulkan_segment");
 
@@ -849,9 +846,8 @@ TEST_CASE("sequence-minimizer coordinator publishes PostgreSQL spill generations
 
         REQUIRE(replay_scans == replay_reroutes + 3);
         REQUIRE(std::stoll(observed[54].value()) == replay_scans);
-        // fragment-minimizer replays the immutable PostgreSQL spill three times: once
-        // for planning, once for control emission, and once for position
-        // emission. All three scans must complete over the same payload.
+        // Planning, control output, and position output each read the spill once.
+        // Check that all three reads finish using the same stored data.
         REQUIRE(observed[56].value() == "3");
         REQUIRE(std::stoll(observed[57].value()) == replay_reroutes);
         REQUIRE(observed[58] == observed[57]);
