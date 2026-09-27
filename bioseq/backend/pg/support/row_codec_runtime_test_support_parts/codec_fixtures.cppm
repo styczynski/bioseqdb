@@ -1,6 +1,6 @@
 /**
  * @file codec_fixtures.cppm
- * @brief Defines the complete generated-codec fixture matrix and 14-codec receipt.
+ * @brief Test rows and expected results for fourteen generated row codecs.
  */
 module;
 
@@ -68,8 +68,8 @@ import :toast_faults;
 namespace bioseq::postgres::support::row_codec_runtime_test_support {
 
 /**
- * @brief Builds a fully populated @c bioseq_aligner_options row for codec exercise.
- * @return Aligner options with distinct probe values in every field.
+ * @return Aligner options with every field populated for conversion tests.
+ * Numeric fields use different values to expose swapped columns.
  */
 [[nodiscard]] table_rows::bioseq_aligner_options full_aligner_options() {
     return {
@@ -113,8 +113,8 @@ namespace bioseq::postgres::support::row_codec_runtime_test_support {
 }
 
 /**
- * @brief Exercises the generated @c index_table_shard codec including external TOAST text.
- * @return Runtime receipt for the indexing shard catalog row.
+ * Test the index_table_shard codec with inline and external TOAST text.
+ * @return Field counts and completed checks for this catalog row.
  */
 [[nodiscard]] runtime_receipt_entry exercise_index_table_shard() {
     using row = indexing_rows::index_table_shard;
@@ -182,8 +182,9 @@ namespace bioseq::postgres::support::row_codec_runtime_test_support {
 }
 
 /**
- * @brief Exercises all fourteen generated row codecs and runs the reaper TOAST fault probe.
- * @return One runtime receipt per codec in exercise order.
+ * Test fourteen generated row codecs, then check reaper rows with large
+ * filenames stored in TOAST.
+ * @return One report per codec, in test order.
  */
 [[nodiscard]] std::vector<runtime_receipt_entry> exercise_all_codecs() {
     advance_probe_invocation();

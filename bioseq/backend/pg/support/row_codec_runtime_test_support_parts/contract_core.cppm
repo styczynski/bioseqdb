@@ -1,6 +1,6 @@
 /**
  * @file contract_core.cppm
- * @brief Defines the generated row-codec contract, value, and comparison helpers.
+ * @brief Build test values and check row contents, descriptors and memory ownership.
  */
 module;
 
