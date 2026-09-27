@@ -1,9 +1,9 @@
 /**
  * @file external/uniprot.cppm
- * @brief UniProt OpenAPI descriptor assembled from provider partitions.
+ * @brief Assemble the OpenAPI description used to generate the UniProt client.
  *
- * This primary module is the generated client source key.
- * The spec_fragments declaration defines the complete descriptor byte sequence.
+ * The generator reads the fragments in spec_fragments order and identifies
+ * the client by this primary module.
  */
 module;
 
@@ -24,10 +24,10 @@ import :publication_schemas;
 import :integration;
 
 /**
- * @brief Counts bytes in an ordered descriptor fragment list.
- * @tparam p_fragment_count Number of fragments in the list.
- * @param fragments Fragment views in composition order.
- * @return Sum of the fragment byte counts.
+ * @brief Count the bytes in the OpenAPI fragments.
+ * @tparam p_fragment_count Number of fragments.
+ * @param fragments Fragments in document order.
+ * @return Total number of bytes in the fragments.
  */
 template <std::size_t p_fragment_count>
 [[nodiscard]] consteval std::size_t
@@ -40,11 +40,11 @@ descriptor_size(const std::array<std::string_view, p_fragment_count>& fragments)
 }
 
 /**
- * @brief Copies ordered descriptor fragments into null-terminated storage.
- * @tparam p_payload_size Combined descriptor byte count.
- * @tparam p_fragment_count Number of fragments in the list.
- * @param fragments Fragment views in composition order.
- * @return Constant storage containing every fragment in order.
+ * @brief Join OpenAPI fragments in null-terminated storage.
+ * @tparam p_payload_size Combined size of the fragment contents.
+ * @tparam p_fragment_count Number of fragments.
+ * @param fragments Fragments in document order.
+ * @return Constant array containing the fragments followed by a zero byte.
  */
 template <std::size_t p_payload_size, std::size_t p_fragment_count>
 [[nodiscard]] consteval auto
@@ -57,7 +57,7 @@ concatenate_descriptor(const std::array<std::string_view, p_fragment_count>& fra
     return descriptor;
 }
 
-/** @brief Raw descriptor fragments in parser and composition order. */
+/** @brief OpenAPI fragments in the order they appear in the document. */
 static constexpr auto spec_fragments = std::to_array<std::string_view>({
     bioseq::external::uniprot::descriptor::document_preamble,
     bioseq::external::uniprot::descriptor::operation_paths,
@@ -73,9 +73,9 @@ static constexpr auto spec_fragments = std::to_array<std::string_view>({
 static constexpr auto spec_storage =
     concatenate_descriptor<descriptor_size(spec_fragments)>(spec_fragments);
 
-/** @brief Exact OpenAPI document consumed by UniProt client generation. */
+/** @brief Complete OpenAPI document used to generate the UniProt client. */
 static constexpr std::string_view spec{spec_storage.data(), spec_storage.size() - 1};
 
-/** @brief Code-generation anchor for the UniProt client. */
+/** @brief Generate the UniProt client from the listed OpenAPI fragments. */
 [[bioseq::api_client(spec)]] [[bioseq::api_client_fragments(
     spec_fragments)]] export struct bioseq_external_api_client;
