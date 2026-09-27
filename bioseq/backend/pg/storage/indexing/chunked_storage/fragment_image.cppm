@@ -1,12 +1,10 @@
 /**
  * @file fragment_image.cppm
- * @brief Header-last mapped fragment-image persistence and publication for
- *        chunked minimizer generations.
+ * @brief Write minimizer index files and map published files for reading.
  *
- * Index chunks are raw BYTEA tuples in heap relations (heap_form_tuple /
- * CatalogTupleInsert + systable_beginscan), bypassing columnarisation
- * (Invariant C). The per-sequence layouts co-locate with the sequence's
- * `(bucket, shard)`. The table layout shards via `index_table_shard`.
+ * The writer builds the payload and metadata before writing the final header.
+ * Readers check the file against its catalog descriptor and keep its mapping
+ * registered with PostgreSQL for cleanup after an error.
  */
 module;
 
@@ -40,7 +38,7 @@ import std;
 export import bioseq.postgres.storage.indexing.minimizer_fragment_mapping_lease;
 import bioseq.common.logging;
 import bioseq.postgres.support;
-import bioseq.indexing.minimizer_fragment_image; // explicit fixed-endian minimizer fragment image image ABI
+import bioseq.indexing.minimizer_fragment_image; // minimizer fragment file format
 import bioseq.indexing.compact_hash32_direct_index;
 import bioseq.indexing.minimizer_fragment_compact_hash32_adapter;
 import :catalog;
@@ -51,10 +49,9 @@ export namespace bioseq::storage::indexing {
 
 namespace minimizer_fragment_image_pg_detail {
 
-/// Avoid the allocating PostgreSQL error bridge on the ordinary no-interrupt path.
-/// A pending query-cancel ERROR crosses the bridge; backend-termination/FATAL
-/// retains PostgreSQL's native terminal semantics. The callback shape also binds
-/// directly to the portable compact-H32 adapter.
+/// Check PostgreSQL interrupts through the C++ error bridge when one is pending.
+/// Query cancellation can then unwind C++ objects. Skip the bridge allocation
+/// during ordinary reads and writes.
 inline void check_fragment_image_interrupts_as_cpp(void*) {
     if (!INTERRUPTS_PENDING_CONDITION()) {
         return;
@@ -126,8 +123,8 @@ inline void write_zero_padding(const int fd, const std::uint64_t begin, const st
                begin);
 }
 
-/// Extend the private temporary inode to one checked, mmap-representable
-/// image length. No final name is visible while this operation can fail.
+/// Resize the temporary file after checking that its size fits mmap and off_t.
+/// Publication has not yet given the file its final name.
 inline void resize_temporary_image(const int fd, const std::uint64_t image_bytes) {
     if (fd < 0 || image_bytes > static_cast<std::uint64_t>((std::numeric_limits<off_t>::max)()) ||
         image_bytes > static_cast<std::uint64_t>((std::numeric_limits<std::size_t>::max)())) {
@@ -145,8 +142,8 @@ inline void resize_temporary_image(const int fd, const std::uint64_t image_bytes
     check_fragment_image_interrupts_as_cpp(nullptr);
 }
 
-/// Scope-bound offset-zero shared mapping. Offset zero is page-aligned on
-/// every supported PostgreSQL host, while callers expose only exact sections.
+/// Map a file from offset zero and unmap it when this object is destroyed.
+/// Callers take section views from the whole-file mapping.
 class scoped_mapped_region {
   private:
     void* mapping_ = MAP_FAILED;
@@ -186,7 +183,7 @@ class scoped_mapped_region {
         return {static_cast<std::byte*>(mapping_), bytes_};
     }
 
-    /// Persist every dirty page before the outer header can authorize it.
+    /// Flush mapped writes before writing the final file header.
     void sync() const {
         check_fragment_image_interrupts_as_cpp(nullptr);
         while (msync(mapping_, bytes_, MS_SYNC) != 0) {
@@ -276,10 +273,8 @@ struct page_aligned_mapping_range {
     operator==(const page_aligned_mapping_range&) const noexcept = default;
 };
 
-/// Translate one byte-exact authenticated section into the page interval
-/// accepted by madvise-style APIs. The final interval never exceeds the
-/// mapping. Its first/last page may also contain adjacent wire bytes because
-/// the VM can only advise complete pages.
+/// Expand a byte range to page boundaries and clip it to the mapping.
+/// Readahead works on pages, so a boundary page may include nearby sections.
 [[nodiscard]] constexpr std::optional<page_aligned_mapping_range>
 page_aligned_advice_range(const std::size_t mapping_bytes,
                           const std::size_t raw_begin,
@@ -321,10 +316,9 @@ static_assert(file_advice_chunk_bytes(static_cast<std::size_t>((std::numeric_lim
                                       1u) ==
               static_cast<std::size_t>((std::numeric_limits<int>::max)()));
 
-/// Ask the host to begin fetching one already-validated file range without
-/// making success part of correctness. No error is logged or propagated: a
-/// filesystem/kernel which rejects the preferred async file hint receives a
-/// best-effort mapped-page hint, and rejection of that hint is also harmless.
+/// Ask the operating system to read a mapped file range in advance.
+/// Try file readahead first, then a mapped-page hint if needed. Ignore failures
+/// because normal reads can still fetch the data.
 inline void
 advise_mapping_range_async_best_effort(const mapping_lease& lease,
                                        const page_aligned_mapping_range range) noexcept {
@@ -379,10 +373,9 @@ advise_mapping_range_async_best_effort(const mapping_lease& lease,
 #endif
 }
 
-/// Borrowed callback used by the PostgreSQL-free selected-page coalescer.
-/// Advice rejection is intentionally invisible to query correctness.  The
-/// absolute interval is translated only after proving it still belongs to the
-/// stable mapping_lease which supplied the callback token.
+/// Readahead callback for selected posting pages.
+/// Check that the borrowed mapping is still registered, then convert the
+/// requested addresses to file offsets and clip them to the mapping.
 inline void advise_borrowed_mapping_page_range(void* const context,
                                                const std::uintptr_t page_begin,
                                                const std::uintptr_t page_end) noexcept {
@@ -412,8 +405,10 @@ inline void advise_borrowed_mapping_page_range(void* const context,
 
 } // namespace minimizer_fragment_image_pg_detail
 
-/// Shared header-last writer. Relation generations feed this from their
-/// authenticated heap reread through the common grouped-SoA encoder callbacks.
+/// Build a minimizer file from validated generation rows.
+/// Append payload bytes first, then write the directory and manifest. When
+/// the hash format supports it, add a compact H32 index for direct lookup.
+/// Write the final header only after these sections are complete.
 class minimizer_fragment_image_writer {
   private:
     minimizer_generation_file_identity identity_{};
@@ -539,8 +534,7 @@ class minimizer_fragment_image_writer {
                 minimizer_generation_storage_error_as_cpp(
                     "minimizer fragment image compact-H32 source adapter rejected grouped-SoA");
             }
-            // Establish the move-only adapter's final address before issuing the
-            // replay source which borrows its move-stable source token.
+            // Store the adapter before borrowing its replay source.
             compact_adapter.emplace(std::move(*opened_adapter));
             const std::uint32_t persisted_max_occ_cap =
                 static_cast<std::uint32_t>(profile->max_occ_cap);
@@ -762,16 +756,16 @@ class minimizer_fragment_image_writer {
 };
 
 enum class minimizer_fragment_image_mapped_open_validation : std::uint8_t {
-    /// Timed restart path: authenticate only the fixed outer header, layout,
-    /// descriptor identity and section receipts. No section payload is read.
+    /// Check the outer header against the catalog and expected section layout.
+    /// Leave section bytes unread for the query path.
     bounded_header_only = 0u,
-    /// Explicit publication/scrub validation. Payload CRC remains
-    /// deferred, while directory/manifest metadata receive complete
-    /// validation.
+    /// Also validate the directory and manifest, leaving the payload CRC deferred.
     full_metadata = 1u,
 };
 
-/// Validated mapped image with borrowed section views and an explicit lease transfer.
+/// Own a mapped minimizer file and provide views into its checked sections.
+/// Keep this image or its transferred lease guard alive while using the views.
+/// PostgreSQL ResourceOwner cleanup also ends the mapping lifetime.
 class mapped_minimizer_fragment_image {
   private:
     minimizer_fragment_image_pg_detail::mapping_lease* lease_ = nullptr;
@@ -815,25 +809,22 @@ class mapped_minimizer_fragment_image {
         return payload_raw_checksum_;
     }
 
-    /// Authenticated lazy span for the optional nested compact-H32 direct
-    /// image. The bounded outer open formed this span arithmetically without
-    /// reading any nested payload byte.
+    /// Return the optional compact H32 section.
+    /// Opening the outer file checks its bounds without reading or validating
+    /// the nested index contents.
     [[nodiscard]] std::span<const std::byte> compact_h32_direct() const noexcept {
         return compact_h32_direct_;
     }
 
-    /// Raw CRC64/ECMA receipt over the finalized fixed 256-byte nested header,
-    /// persisted in and authenticated by the outer minimizer fragment image header.
+    /// Return the stored CRC64 of the compact H32 header, if present.
+    /// The checked outer header contains this checksum.
     [[nodiscard]] std::optional<std::uint64_t> compact_h32_direct_header_receipt() const noexcept {
         return compact_h32_direct_header_receipt_;
     }
 
-    /// Issue fail-open asynchronous readahead for the authenticated compact-
-    /// H32 metadata only. Selected posting pages are advised later, while the
-    /// existing descriptor layout traversal already knows their exact spans.
-    /// The unrelated outer minimizer-fragment payload and unselected posting pages are never
-    /// named as byte ranges. Page granularity may include adjacent bytes on a
-    /// boundary page.
+    /// Request readahead for compact H32 membership, rank and descriptor data.
+    /// Posting pages are requested later for the selected hashes. Page rounding
+    /// can include adjacent bytes. Ignore readahead failures.
     void advise_compact_h32_direct_metadata_readahead(
         const bioseq::indexing::compact_hash32_direct_index_view& authenticated_direct)
         const noexcept {
@@ -920,9 +911,9 @@ class mapped_minimizer_fragment_image {
         }
     }
 
-    /// Form a non-owning adviser before this image transfers its lease into
-    /// the longer-lived guard. The context is the mapping_lease allocation
-    /// itself, whose address remains stable across that transfer.
+    /// Borrow a callback for readahead of selected posting pages.
+    /// Its mapping record stays at the same address when ownership moves to a guard.
+    /// Keep the image or guard, and its PostgreSQL ResourceOwner, alive while using it.
     [[nodiscard]] bioseq::indexing::compact_direct_selected_page_adviser
     borrow_compact_h32_selected_page_adviser(
         const bioseq::indexing::compact_hash32_direct_index_view& authenticated_direct)
@@ -958,15 +949,16 @@ class mapped_minimizer_fragment_image {
         };
     }
 
-    /// Borrow the PG-free reader's shared_ptr-shaped lifetime token while
-    /// retaining this image as the prompt normal-path lease authority.
+    /// Borrow a reader token that does not extend the mapping lifetime.
+    /// Keep this image or its transferred lease guard, and its PostgreSQL
+    /// ResourceOwner, alive while using the token.
     [[nodiscard]] std::shared_ptr<const void> borrow_mapping_token() const noexcept {
         return minimizer_fragment_image_pg_detail::borrow_mapping_token(lease_);
     }
 
-    /// Transfer only the mmap/fd lifetime authority into a compact guard.  Any
-    /// spans copied before this call remain valid until the returned guard is
-    /// destroyed. This moved-from image no longer exposes mapped spans.
+    /// Transfer the mapping and file descriptor to a guard, clearing this image.
+    /// Previously borrowed views remain usable while the guard and its
+    /// PostgreSQL ResourceOwner remain alive.
     [[nodiscard]] mapped_minimizer_fragment_lease_guard release_mapping_lease_guard() && noexcept {
         auto* const lease = std::exchange(lease_, nullptr);
         clear_views_();
@@ -1030,8 +1022,8 @@ class mapped_minimizer_fragment_image {
     }
     lease->device = observed.st_dev;
     lease->inode = observed.st_ino;
-    // No PostgreSQL call is permitted between the raw fd/inode acquisition
-    // above and this pre-enlarged ResourceOwner registration.
+    // Register the file before any PostgreSQL call can raise an error and
+    // skip C++ cleanup. ResourceOwner capacity was reserved before opening it.
     ResourceOwnerRemember(
         lease->owner,
         PointerGetDatum(lease),
