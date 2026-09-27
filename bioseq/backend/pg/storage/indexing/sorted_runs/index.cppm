@@ -1,6 +1,6 @@
 /**
  * @file sorted_runs/index.cppm
- * @brief Exported PostgreSQL sorted-run facade.
+ * @brief Export sorted-run storage and merge callbacks for PostgreSQL index builds.
  */
 export module bioseq.postgres.storage.indexing.sorted_runs;
 

@@ -1,6 +1,6 @@
 /**
  * @file sql_rows.cppm
- * @brief Fixed catalog-row layouts for PostgreSQL index administration.
+ * @brief Catalog rows for index settings, refresh times and table shards.
  */
 module;
 
@@ -15,7 +15,7 @@ import bioseq.codegen.sql.annotation_model;
 
 export namespace bioseq::storage::indexing::catalog_rows {
 
-/// @brief Per-column index policy persisted by the extension.
+/// @brief Saved settings for one index on a sequence column.
 struct [[bioseq_sql::table({
             .schema =
                 bioseq::sql::fixed_schema<"bioseq_internal">,
@@ -40,23 +40,23 @@ struct [[bioseq_sql::table({
                 bioseq::sql::checked_sql{"is_active_read"},
         }),
         bioseq_sql::config_dump]] index_policy {
-    /// User-visible relation governed by the policy.
+    /// User table OID.
     Oid user_relid;
-    /// File identity used to reject stale policy bindings.
+    /// Table file number used to detect settings left over from a table rewrite.
     Oid main_relfilenode;
-    /// One-based indexed attribute number.
+    /// Indexed column number, starting at one.
     std::int16_t column_attno;
-    /// PostgreSQL-owned text naming the index policy.
+    /// Index name stored as PostgreSQL text.
     text* index_name;
-    /// Whether maintenance may use this policy.
+    /// Whether index maintenance may build this index.
     bool enabled = true;
     /// Whether inserts trigger maintenance.
     bool update_on_insert = false;
-    /// Whether this is the relation's active read policy.
+    /// Whether queries should use this index for the sequence column.
     bool is_active_read = false;
 };
 
-/// @brief Last successful refresh time for each persisted index.
+/// @brief Last recorded refresh time for an index on a sequence column.
 struct [[bioseq_sql::table({
             .schema =
                 bioseq::sql::fixed_schema<"bioseq_internal">,
@@ -72,23 +72,23 @@ struct [[bioseq_sql::table({
             },
         }),
         bioseq_sql::config_dump]] metadata_age_log {
-    /// User-visible relation whose metadata was refreshed.
+    /// User table whose index was refreshed.
     Oid user_relid;
-    /// File identity of the refreshed relation.
+    /// Table file number recorded for this refresh.
     Oid main_relfilenode;
-    /// One-based indexed attribute number.
+    /// Indexed column number, starting at one.
     std::int16_t column_attno;
-    /// PostgreSQL-owned index-policy name.
+    /// Index name stored as PostgreSQL text.
     text* index_name;
 
     [[bioseq_sql::column({
         .default_value = bioseq::sql::checked_sql{"now()"},
     })]]
-    /// PostgreSQL timestamp of the successful refresh.
+    /// Time recorded when the index metadata was refreshed.
     TimestampTz last_updated;
 };
 
-/// @brief Physical relation allocated to one table-index shard.
+/// @brief Location and size of one shard of a table index.
 struct [[bioseq_sql::table({
             .schema =
                 bioseq::sql::fixed_schema<"bioseq_internal">,
@@ -106,21 +106,21 @@ struct [[bioseq_sql::table({
             },
         }),
         bioseq_sql::config_dump]] index_table_shard {
-    /// Database component of the parent physical identity.
+    /// Database containing the indexed table.
     Oid database_oid;
-    /// Tablespace component of the parent physical identity.
+    /// Tablespace containing the indexed table.
     Oid tablespace_oid;
-    /// File component of the parent physical identity.
+    /// File number of the indexed table.
     Oid main_relfilenode;
-    /// One-based indexed attribute number.
+    /// Indexed column number, starting at one.
     std::int16_t column_attno;
-    /// PostgreSQL-owned index-policy name.
+    /// Index name stored as PostgreSQL text.
     text* index_name;
     /// Zero-based physical shard number.
     std::int32_t shard_idx;
-    /// Physical index relation OID.
+    /// OID of the table holding this shard's index data.
     Oid index_relid;
-    /// Persisted payload written to the shard in bytes.
+    /// Number of payload bytes written to this shard.
     std::int64_t bytes_written = 0;
     /// Whether new writes must use a later shard.
     bool is_full = false;

@@ -1,6 +1,6 @@
 /**
  * @file postgres_error.cppm
- * @brief PostgreSQL ERROR boundary for the sorted-run module.
+ * @brief Report sorted-run failures as PostgreSQL errors.
  */
 module;
 
@@ -10,9 +10,9 @@ module bioseq.postgres.storage.indexing.sorted_runs;
 
 extern "C" {
 
-/** @brief Raises the PostgreSQL error selected by the sorted-run boundary code. */
-/// @param error_code Stable internal failure code supplied by the C++ module.
-/// @throws PostgreSQL ERROR unconditionally.
+/** @brief Raise the PostgreSQL error identified by a sorted-run failure code. */
+/// @param error_code Internal sorted-run failure code.
+/// @throws PostgreSQL ERROR on every call.
 [[noreturn]] void bioseq_sorted_run_error_pg_leaf(
         unsigned error_code) {
     const char* message = "bioseq sorted runs: unknown error";
