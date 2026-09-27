@@ -1,6 +1,6 @@
 /**
  * @file external/provider/concepts.cppm
- * @brief Compile-time contracts for external sequence providers.
+ * @brief Compile-time requirements for providers and their sessions.
  */
 module;
 
@@ -25,14 +25,12 @@ import bioseq.external.provider.budget;
 import bioseq.common.context;
 import bioseq.parallelism.pool;
 
-/// @brief Compile-time provider and session contracts.
-// The metadata provider concept has
-// no retrieval-associated type, so discovery providers compile and run without
-// transfer/archive/parser/alphabet targets and a provider/retrieval ownership
-// cycle is impossible. No virtual methods, no inheritance.
+/// Required provider and session operations.
+// Metadata providers need no retrieval implementation type. They can
+// describe sequence downloads without depending on a decoder or parser.
 export namespace bioseq::external::provider {
 
-/// Session contract for cancellable provider message production.
+/// A session can send messages and accept a stop request.
 template <class p_session_type>
 concept external_api_session_compatible =
     requires(p_session_type &session, provider_message_sink_ref messages,
@@ -43,7 +41,7 @@ concept external_api_session_compatible =
       { session.request_stop() } noexcept -> std::same_as<void>;
     };
 
-/// Provider contract for capability discovery, planning, and session creation.
+/// A provider describes its features, plans a query, and opens a session.
 template <class p_provider_type>
 concept external_api_provider_compatible = requires(
     const normalized_external_query &query,

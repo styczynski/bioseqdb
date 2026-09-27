@@ -1,6 +1,6 @@
 /**
  * @file external/provider/capabilities.cppm
- * @brief Provider capability descriptions and query compatibility checks.
+ * @brief Provider features, planning limits, and request statistics.
  */
 module;
 
@@ -16,12 +16,10 @@ export module bioseq.external.provider.capabilities;
 
 import bioseq.external.provider.base;
 
-/// @brief Provider capability contracts and planning/transfer statistics.
+/// Provider features and statistics used during planning and retrieval.
 export namespace bioseq::external::provider {
 
-// ---------------------------------------------------------------------------
 // Planning and transfer statistics.
-// ---------------------------------------------------------------------------
 /// Counts and completeness reported by one provider session.
 struct provider_statistics {
     std::uint64_t requests{};
@@ -33,14 +31,14 @@ struct provider_statistics {
     bool is_complete{};
 };
 
-/// Byte and shape limits applied during provider planning.
+/// Limits on query size and stored provider plans.
 struct external_planning_limits {
     std::size_t maximum_predicate_nodes;
     std::size_t maximum_query_string_bytes;
     std::size_t maximum_plan_bytes_per_provider;
 };
 
-/// Conservative resource estimate produced before plan admission.
+/// Estimated plan and buffer sizes before reserving execution memory.
 struct provider_plan_estimate {
     std::size_t plan_bytes;
     std::size_t metadata_page_bytes;
@@ -48,7 +46,7 @@ struct provider_plan_estimate {
     std::size_t transfer_count;
 };
 
-/// Wire-level counters reported by a transfer operation.
+/// Request and byte counts reported by a transfer.
 struct transfer_statistics {
     std::uint64_t requests{};
     std::uint64_t wire_bytes{};
@@ -57,9 +55,7 @@ struct transfer_statistics {
     std::uint64_t resumes{};
 };
 
-// ---------------------------------------------------------------------------
-// Capabilities.
-// ---------------------------------------------------------------------------
+// Provider features.
 /// Query or delivery feature that a provider may advertise.
 enum class provider_capability : std::uint8_t {
     taxonomy_search,
@@ -76,7 +72,7 @@ enum class provider_capability : std::uint8_t {
     count
 };
 
-/// Provider-wide capability flags and cardinality limits.
+/// Provider features and limits on page size and identifier batches.
 struct provider_capabilities {
     std::bitset<static_cast<std::size_t>(provider_capability::count)> flags;
     std::size_t maximum_metadata_page;
@@ -111,7 +107,7 @@ struct owning_domain_capability {
     bool supports_identifier_list;
     bool has_confirmed_deep_cursor;
     std::size_t maximum_page;
-    /// @brief Measures owned memory including dynamic allocations.
+    /// Estimate storage for this domain and its advertised field names.
     [[nodiscard]] std::size_t measure_deep_size_bytes() const noexcept {
         std::size_t total = sizeof(owning_domain_capability);
         total += domain.size();
@@ -133,7 +129,7 @@ struct owning_provider_capability_snapshot {
     provider_capabilities provider_level;
     std::vector<owning_domain_capability> domains;
     bool is_offline_baseline;
-    /// @brief Measures owned memory including dynamic allocations.
+    /// Estimate storage for the snapshot and its domain data.
     [[nodiscard]] std::size_t measure_deep_size_bytes() const noexcept {
         std::size_t total = sizeof(owning_provider_capability_snapshot);
         total += provider_name.size();
@@ -145,10 +141,8 @@ struct owning_provider_capability_snapshot {
         return total;
     }
 
-    /// @brief Projects provider-level capability data into a borrowed view.
-    ///
-    /// Domain detail remains available through `domains`. Returning a span
-    /// would require separate backing storage for converted domain views.
+    /// Borrow provider-level data, leaving the domain list empty.
+    /// Domain details remain in the owning snapshot's domains member.
     [[nodiscard]] provider_capability_snapshot make_view() const noexcept {
         return provider_capability_snapshot{
             .provider = provider,
