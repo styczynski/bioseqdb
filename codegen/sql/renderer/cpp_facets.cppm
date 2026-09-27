@@ -401,8 +401,9 @@ struct normalized_row_cpp_type {
 }
 
 /**
- * Fail closed when a generated owning-text codec bypasses the audited
- * PostgreSQL ERROR bridges or drops one of its ownership conversions.
+ * Checks that generated text conversions use the PostgreSQL error bridges
+ * and include every required encode and decode operation. Reject direct text
+ * calls that could skip C++ cleanup on ERROR.
  */
 inline void validate_row_codec_text_lifetime_contract(
         std::string_view rendered,
@@ -432,7 +433,7 @@ inline void validate_row_codec_text_lifetime_contract(
     }
 }
 
-/// Renders one strongly typed PostgreSQL row codec from normalized fields.
+/// Generates conversions between an annotated C++ row and PostgreSQL tuples.
 [[nodiscard]] inline std::string render_row_codec(
     const normalized_entity& row,
     std::vector<const normalized_entity*> columns) {
@@ -1300,7 +1301,7 @@ inline void validate_row_codec_text_lifetime_contract(
     return rendered;
 }
 
-/// Renders a module containing its deterministic set of row codecs.
+/// Generates a C++ module containing the supplied row codecs.
 [[nodiscard]] inline std::string render_row_codec_module(
     const rendered_row_codec_module& module,
     const std::vector<std::pair<

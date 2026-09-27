@@ -52,11 +52,11 @@ struct checked_sql {
     [[nodiscard]] consteval bool operator==(const checked_sql&) const = default;
 };
 
-/// A compiler-checked direct declaration reference used by options whose
-/// semantic target is recovered from the annotated source expression.
+/// Reference to a C++ declaration used in a SQL annotation.
 ///
-/// The value intentionally carries no authored SQL spelling: collection
-/// resolves the referenced C++ declaration and derives its SQL identity.
+/// The compiler checks the expression. The collector reads that expression
+/// to find the declaration and derive its SQL identity, so callers do not
+/// repeat the SQL name here.
 struct declaration_reference {
     bool present{};
 
@@ -68,10 +68,9 @@ struct declaration_reference {
     }
 };
 
-/// Type-erased compile-time holder for a heterogeneous `entities(...)` result.
-/// The collector retains and resolves every declaration token from the source
-/// expression; this object exists only to make the annotation aggregate
-/// compiler-checkable without introducing a string/name registry.
+/// Makes an entities(...) expression usable in an annotation with references
+/// of different C++ types. The collector recovers each referenced declaration
+/// from the source expression.
 struct entity_reference_list {
     bool present{};
 

@@ -277,8 +277,9 @@ namespace detail {
         }
     }
     if (matched_declarations.size() == 1 && has_natural_owner) {
-        // A declaration reference names the emitting annotation, not a grant,
-        // operator, or other companion co-located on that declaration.
+        // When a reference matches one C++ declaration, select its main SQL
+        // object. Ignore attached grants, operators and other annotations when
+        // that object is present.
         std::erase_if(
             result,
             [&entities](std::size_t index) {
