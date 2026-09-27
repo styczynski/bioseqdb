@@ -1,6 +1,6 @@
 /**
  * @file external/ebi/document.cppm
- * @brief EBI Search OpenAPI metadata fragments.
+ * @brief Opening section of the EBI Search OpenAPI document.
  */
 module;
 
@@ -10,7 +10,7 @@ export module bioseq.external.ebi:document;
 
 export namespace bioseq::external::ebi::descriptor {
 
-/** @brief OpenAPI metadata, servers, tags, and the paths mapping prefix. */
+/** API metadata and server URLs, followed by the opening paths mapping. */
 inline constexpr std::string_view document_preamble = R"bioseq_openapi(
 ---
 openapi: 3.0.1

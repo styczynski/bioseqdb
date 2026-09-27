@@ -1,6 +1,6 @@
 /**
  * @file external/ebi/entry_paths.cppm
- * @brief EBI Search entry endpoint fragments.
+ * @brief OpenAPI definitions for retrieving EBI Search entries and related data.
  */
 module;
 
@@ -10,7 +10,7 @@ export module bioseq.external.ebi:entry_paths;
 
 export namespace bioseq::external::ebi::descriptor {
 
-/** @brief Cross-reference, download, entry, and raw-data path entries. */
+/** Paths for entry lookup, cross-references, metadata downloads, and raw data. */
 inline constexpr std::string_view entry_lookup_paths =
     R"bioseq_openapi(  "/{domain}/entry/{entryids}/xref/{targetdomainid}":
     get:
@@ -508,7 +508,7 @@ inline constexpr std::string_view entry_lookup_paths =
                 type: string
 )bioseq_openapi";
 
-/** @brief Related-entry and more-like-this path entries. */
+/** Paths for finding similar entries in the same domain or a selected target domain. */
 inline constexpr std::string_view related_entry_paths =
     R"bioseq_openapi(  "/{domain}/entry/{entryid}/morelikethis":
     get:

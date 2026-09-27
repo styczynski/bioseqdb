@@ -1,6 +1,6 @@
 /**
  * @file external/ebi/integration.cppm
- * @brief EBI Search generated-client identity and integration fragments.
+ * @brief EBI client name and a request used to check its integration.
  */
 module;
 
@@ -10,7 +10,7 @@ export module bioseq.external.ebi:integration;
 
 export namespace bioseq::external::ebi::descriptor {
 
-/** @brief Generated-client name and integration request contract. */
+/** Names the generated client and defines a BRCA1 root-search check expecting hitCount. */
 inline constexpr std::string_view integration_contracts = R"bioseq_openapi(x-bioseq-client-name: EBI
 x-bioseq-integration:
   - name: root-search
