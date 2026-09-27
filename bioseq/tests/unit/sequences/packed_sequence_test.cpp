@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Verifies packed-sequence conversion, storage widths, and alphabet dispatch.
+ * @brief Check packed-sequence conversion and selection by alphabet and storage width.
  */
 
 #include <cstring>
@@ -30,25 +30,20 @@ using test_supported_alphabets =
 using test_stdc_t = compact_sequence_stdc<test_supported_alphabets>;
 
 /**
- * @brief Owns zeroed varlena buffers allocated by packed-sequence factories.
+ * @brief Keep factory-allocated test buffers alive until the arena is destroyed.
  *
- * Each allocator call returns a distinct block whose lifetime matches the arena.
+ * Each allocation returns a separate zeroed block.
  */
 struct test_arena {
     std::vector<std::unique_ptr<std::byte[]>> blocks;
 
-    /**
-     * @brief Creates an allocator that appends owned zeroed blocks.
-     * @return Callable compatible with packed-sequence factory allocation.
-     */
+    /** Return a factory allocator that keeps its zeroed buffers in this arena. */
     [[nodiscard]] auto alloc_fn() {
         return [this](std::size_t byte_count) -> test_stdc_t* {
             auto buffer = std::make_unique<std::byte[]>(byte_count);
             std::memset(buffer.get(), 0, byte_count);
             auto* header = reinterpret_cast<test_stdc_t*>(buffer.get());
-            // vl_len_ is overwritten by the factory after this returns,
-            // but we set the byte count here so any factory that forgets
-            // is at least self-consistent.
+            // Initialize the byte count before the factory fills the header.
             header->vl_len_ = static_cast<test_stdc_t::varlena_header_t>(byte_count);
             blocks.push_back(std::move(buffer));
             return header;
@@ -73,7 +68,7 @@ TEST_CASE("compact sequence conversion preserves ASCII text",
             REQUIRE(hdr != nullptr);
             REQUIRE(static_cast<std::size_t>(hdr->bp_size) == input.size());
             REQUIRE(hdr->storage_unit_byte_width == bw);
-            REQUIRE(hdr->alphabet_code == 0u); // dna4 is pack-index 0
+            REQUIRE(hdr->alphabet_code == 0u); // dna4 is first in the test alphabet list.
 
             std::string decoded;
             hdr->convert_to(
@@ -158,7 +153,7 @@ TEST_CASE("storage send and receive preserve packed bytes",
             bw, static_cast<test_stdc_t::bp_size_t>(input.size()), input.data(), arena.alloc_fn());
         REQUIRE(src != nullptr);
 
-        // Capture the units written to a uint64_t-vector via send_to.
+        // Save the units sent by the storage format for a receive round trip.
         std::vector<std::uint64_t> wire_units;
         wire_units.reserve(src->unit_count());
         src->send_to(wire_units,
@@ -167,8 +162,8 @@ TEST_CASE("storage send and receive preserve packed bytes",
                                        std::uint8_t /*byte_width*/) { buf.push_back(unit); });
         REQUIRE(wire_units.size() == src->unit_count());
 
-        // Replay through convert_from(recv) using a cursor into wire_units.
-        /// Index of the next packed unit consumed by the receive oracle.
+        // Feed the saved units into convert_from in the same order.
+        /// Track the next saved unit to read.
         struct cursor {
             std::size_t idx;
         };
@@ -189,7 +184,7 @@ TEST_CASE("storage send and receive preserve packed bytes",
         REQUIRE(dst->bp_size == src->bp_size);
         REQUIRE(dst->padding_letters == src->padding_letters);
         REQUIRE(dst->storage_unit_byte_width == src->storage_unit_byte_width);
-        // Payload byte equality.
+        // The round trip must preserve every payload byte.
         REQUIRE(std::memcmp(src->data, dst->data, src->unit_count() * bw) == 0);
     }
 }
@@ -199,12 +194,12 @@ TEST_CASE("same-alphabet storage-width recasting preserves packed bytes",
     const std::string input = "ACGTACGTACGTACGTACGTACGTACGT";
     test_arena arena;
 
-    // Encode at (dna4, 8 bytes).
+    // Start with 64-bit packed words.
     auto* src_8 = stdc_convert_from_cstr<test_stdc_t, seq::dna4>(
         8u, static_cast<test_stdc_t::bp_size_t>(input.size()), input.data(), arena.alloc_fn());
     REQUIRE(src_8 != nullptr);
 
-    // Recast to (dna4, 1 byte) and back to (dna4, 8 bytes).
+    // Convert to byte-sized units and back to check that repacking preserves data.
     auto* mid_1 = src_8->recast_storage_width(1u, arena.alloc_fn());
     REQUIRE(mid_1 != nullptr);
     REQUIRE(mid_1->alphabet_code == src_8->alphabet_code);
@@ -224,7 +219,7 @@ TEST_CASE("zero-copy compact sequence views preserve decoded text",
             bw, static_cast<test_stdc_t::bp_size_t>(input.size()), input.data(), arena.alloc_fn());
         REQUIRE(hdr != nullptr);
 
-        // Compare the dispatched view with the directly encoded input.
+        // Decode the selected view and compare it with the original text.
         std::string view_str;
         hdr->convert_to(
             [&view_str]<class p_sequence>(const compact_sequence_range<p_sequence>& seq) {
@@ -306,7 +301,7 @@ TEST_CASE("supported alphabet packs enforce unique types and names",
     STATIC_REQUIRE(std::is_same_v<sa::entry_for<seq::dna5>::alphabet_type, seq::dna5>);
     STATIC_REQUIRE(sa::entry_for<seq::dna4>::alphabet_name_sv == "dna4");
 
-    // Pin the predicates independently of the enclosing pack declaration.
+    // Check the type and name uniqueness rules directly.
     STATIC_REQUIRE(
         ::bioseq::common::templating::unique_types_in_tuple_v<typename sa::alphabets_tuple>);
     STATIC_REQUIRE(dispatch_detail::unique_names_in_pack<alphabet_entry<seq::dna4, "dna4">,
@@ -327,7 +322,7 @@ TEST_CASE("alphabet name dispatch selects the matching entry type",
     const bool matched_unknown = test_supported_alphabets::dispatch_alphabet_by_name(
         "rna7", [&saw_unknown]<class /*p_entry*/>() { saw_unknown = false; });
     REQUIRE_FALSE(matched_unknown);
-    REQUIRE(saw_unknown); // No-match dispatch leaves the handler untouched.
+    REQUIRE(saw_unknown); // An unknown name must leave the callback uncalled.
 }
 
 }; // namespace bioseq::simd::HWY_NAMESPACE

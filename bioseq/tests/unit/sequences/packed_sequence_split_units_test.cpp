@@ -1,6 +1,6 @@
 /**
  * @file packed_sequence_split_units_test.cpp
- * @brief Unit-aligned sequence partitioning and reassembly checks.
+ * @brief Check that splitting packed sequences preserves their bases and final padding.
  */
 #include <fmt/format.h>
 #include <catch2/catch_test_macros.hpp>
@@ -21,7 +21,7 @@ void check_split(std::size_t bp_size, std::size_t records_of_units) {
     using traits   = typename range_t::traits;
     const std::size_t lpu = traits::letters_per_unit;
 
-    // Build a deterministic non-degenerate sequence.
+    // Cycle through the alphabet to create a repeatable test sequence.
     std::vector<p_alphabet> letters(bp_size);
     static constexpr char alphabet_chars[] = "ACGTN";
     for (std::size_t i = 0; i < bp_size; ++i) {
@@ -32,12 +32,12 @@ void check_split(std::size_t bp_size, std::size_t records_of_units) {
     const std::string original = seq.to_string();
     ASSERT(original.size() == bp_size, "fixture decode length mismatch", bp_size);
 
-    const std::size_t record_bp = records_of_units * lpu;   // unit-aligned
+    const std::size_t record_bp = records_of_units * lpu;   // A whole number of packed units.
     const auto triples = seq.split_units(record_bp);
     ASSERT(!triples.empty(), "split_units returned no records", bp_size);
 
-    // (a) offsets are contiguous + cover the whole range; (b) only the last
-    // record carries the range padding; (c) reassembly reproduces the original.
+    // Rebuild the sequence from consecutive records. Only the last record
+    // should carry padding.
     std::size_t expected_off = 0;
     std::string reassembled;
     for (std::size_t r = 0; r < triples.size(); ++r) {
@@ -48,7 +48,7 @@ void check_split(std::size_t bp_size, std::size_t records_of_units) {
         const bool is_last = (r + 1 == triples.size());
         ASSERT(pad == (is_last ? seq.padding() : std::size_t{0}),
                fmt::format("record {} pad {} (is_last={})", r, pad, is_last), pad);
-        // Interior record boundary must be unit-aligned to record_bp units.
+        // Every record before the last must contain the requested number of units.
         if (!is_last) {
             ASSERT(cnt == records_of_units,
                    fmt::format("interior record {} unit count {} != {}", r, cnt,
@@ -74,12 +74,12 @@ void check_split(std::size_t bp_size, std::size_t records_of_units) {
 
 TEST_CASE("split_units splits dna4 uint64 sequences evenly",
           "[component:bioseq][layer:unit][feature:sequence]") {
-    // 5 units/record over a 13-unit (416 bp, no padding) sequence -> 3 records.
+    // The final record contains the remaining three units.
     check_split<seq::dna4, std::uint64_t>(/*bp=*/13 * 32, /*records_of_units=*/5);
 }
 TEST_CASE("split_units preserves dna4 uint64 trailing padding",
           "[component:bioseq][layer:unit][feature:sequence]") {
-    // 416 - 5 bp = 411 bp -> last unit padded; split 4 units/record.
+    // The final unit has five unused base positions.
     check_split<seq::dna4, std::uint64_t>(/*bp=*/13 * 32 - 5, /*records_of_units=*/4);
 }
 TEST_CASE("split_units preserves dna5 uint64 N symbols and trailing padding",

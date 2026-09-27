@@ -1,6 +1,6 @@
 /**
  * @file sequence_generator_test.cpp
- * @brief Generic sequence generator checks.
+ * @brief Check generated sequences, known match coordinates, and CPU/GPU byte equality.
  */
 #include <fmt/format.h>
 #include <catch2/catch_test_macros.hpp>
@@ -264,7 +264,7 @@ TEST_CASE("sequence generation dispatches generate_units through the Vulkan runt
     }
 
     constexpr std::uint32_t symbols = 1024u;
-    constexpr std::uint32_t letters_per_unit = 32u;  // dna4 packed into uint64_t
+    constexpr std::uint32_t letters_per_unit = 32u;  // DNA4 uses two bits per base.
     constexpr std::uint32_t units =
         (symbols + letters_per_unit - 1u) / letters_per_unit;
     const std::array<std::uint32_t, 4> uniform_cdf{
@@ -697,7 +697,7 @@ TEST_CASE("sequence generation preserves large-scale statistical and coordinate 
                     wide_coordinate_pairs.size(), saw_high_start));
 }
 
-// GPU and CPU paths must produce identical packed bytes before throughput is measured.
+// Check CPU/GPU byte equality before comparing generation speed.
 TEST_CASE("GPU and CPU sequence generation reports throughput",
           "[component:bioseq][layer:unit][feature:sequence]"
           "[resource:gpu][resource:large_memory]") {
@@ -713,7 +713,7 @@ TEST_CASE("GPU and CPU sequence generation reports throughput",
         return;
     }
 
-    // Warm the generation pipeline and memory before timing.
+    // Generate a sequence once to prepare the Vulkan pipeline before timing.
     {
         gen::generator_params warm{};
         warm.reference_length = 1'000'000;
@@ -733,7 +733,7 @@ TEST_CASE("GPU and CPU sequence generation reports throughput",
         gp.seed = 0xBEEFull;
         gp.use_vulkan = true;
 
-        // Require a real dispatch and identical packed bytes before timing.
+        // Check that the GPU ran and produced the same packed bytes as the CPU.
         const auto before = runtime.generate_units_dispatch_count();
         const auto gpu_seq = generator_type(gp).generate_sequences(1);
         const auto after = runtime.generate_units_dispatch_count();
