@@ -1,6 +1,6 @@
 /**
  * @file bioseq_caching/core/index.cppm
- * @brief Generic, PostgreSQL-free SQL cache correctness primitives.
+ * @brief Exports cache storage, reuse and dependency logic that can run without PostgreSQL.
  */
 export module bioseq.cache.core;
 

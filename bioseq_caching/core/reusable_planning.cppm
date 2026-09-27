@@ -1,12 +1,11 @@
 /**
  * @file bioseq_caching/core/reusable_planning.cppm
- * @brief Bounded, provider-neutral reusable-coverage planning primitives.
+ * @brief Chooses and validates cached sources for query reuse.
  *
- * This module intentionally has no PostgreSQL header dependency.  It owns the
- * contracts that must remain testable without a backend: collision-safe
- * candidate discovery, provider POD validation, runtime digest sinks,
- * occurrence-disjoint SQL-3VL branch ownership, late-fetch sink validation,
- * and no-throw candidate-reference cleanup.
+ * These helpers run without a PostgreSQL backend. They check provider
+ * data and cache keys, assign each row to one source, and validate
+ * values fetched from the original rows. Explicit cleanup records keep
+ * source references releasable when a PostgreSQL error skips destructors.
  */
 module;
 
@@ -33,16 +32,16 @@ export namespace bioseq::cache::pg::reuse {
 inline constexpr std::uint32_t k_reusable_plan_format_revision = 1;
 inline constexpr std::uint8_t k_late_fetch_status_unset = 0xffU;
 
-/** Planning and shared-registry code use one padding-independent contract. */
+/** Security identity shared by planning and the cache registry. */
 using coverage_security_namespace = reusable_security_namespace;
 
-/** Provider callback payload being framed into one canonical reusable key. */
+/** Selects a key for a reusable query domain or one cached generation. */
 enum class coverage_canonical_key_kind : std::uint8_t {
     domain = 1,
     generation = 2,
 };
 
-/** Binding-neutral identity of the one supported provider fragment. */
+/** Identifies the provider fragment and its relation occurrence within the query. */
 struct coverage_fragment_binding_signature {
     std::uint32_t format_revision = k_reusable_plan_format_revision;
     std::uint32_t fragment_binding_ordinal = 0;
@@ -61,7 +60,7 @@ struct coverage_fragment_binding_signature {
 static_assert(std::is_standard_layout_v<coverage_fragment_binding_signature>);
 static_assert(std::is_trivially_copyable_v<coverage_fragment_binding_signature>);
 
-/** Structural checks that do not depend on PostgreSQL planner memory. */
+/** Checks the provider fragment's IDs, occurrence number and format revision. */
 [[nodiscard]] constexpr bool
 valid_coverage_fragment_binding(const coverage_fragment_binding_signature& binding) noexcept {
     return binding.format_revision == k_reusable_plan_format_revision &&
@@ -82,7 +81,7 @@ inline constexpr std::array<std::byte, 4> k_coverage_binding_semantic_magic{
     std::byte{0x46}, std::byte{0x56}, std::byte{0x54}, std::byte{0x31}};
 inline constexpr std::size_t k_coverage_binding_semantic_fixed_bytes = 77;
 
-/** Fail-closed canonical framing errors; callers retain the provider path. */
+/** Errors that prevent building a reusable cache key. */
 enum class coverage_canonical_key_error : std::uint8_t {
     invalid_kind = 1,
     invalid_security_namespace,
@@ -134,9 +133,10 @@ append_u64_le(std::span<std::byte> output, std::size_t& offset, std::uint64_t va
 } // namespace canonical_key_detail
 
 /**
- * Write the cache-owned fragment-binding trailer appended after provider
- * semantic bytes. Generation trailers additionally carry the exact already-
- * normalized predicate bytes; domain trailers deliberately exclude Pi.
+ * Writes the query-fragment identity added to provider key bytes.
+ * A generation key also includes the normalized predicate. Domain keys
+ * leave the predicate out so results from different filters can be
+ * considered for reuse.
  */
 [[nodiscard]] inline std::expected<std::size_t, coverage_binding_semantic_error>
 write_coverage_binding_semantics(coverage_canonical_key_kind kind,
@@ -194,7 +194,7 @@ write_coverage_binding_semantics(coverage_canonical_key_kind kind,
     return offset;
 }
 
-/** Copy the provider-owned fixed digest after validate_path_domain succeeds. */
+/** Copies the provider security digest from a previously validated path description. */
 [[nodiscard]] inline cache_digest_256
 provider_security_digest(const bioseq_cache_path_domain& domain) noexcept {
     cache_digest_256 result{};
@@ -203,8 +203,9 @@ provider_security_digest(const bioseq_cache_path_domain& domain) noexcept {
 }
 
 /**
- * Frame security fields and provider semantic bytes in a fixed tagged order.
- * Integers are normalized to little endian and struct padding is never read.
+ * Writes security fields and provider key bytes in a fixed tagged
+ * order. Integer fields use little-endian encoding, so the key does
+ * not depend on host byte order or structure padding.
  */
 [[nodiscard]] inline std::expected<std::size_t, coverage_canonical_key_error>
 write_coverage_canonical_key(coverage_canonical_key_kind kind,
@@ -263,7 +264,7 @@ write_coverage_canonical_key(coverage_canonical_key_kind kind,
     return offset;
 }
 
-/** One collision bucket request. Canonical bytes establish equality. */
+/** Describes the domain, security identity and provider capabilities needed from cached sources. */
 struct coverage_candidate_probe {
     cache_digest_256 domain_digest{};
     std::span<const std::byte> canonical_domain_key{};
@@ -273,7 +274,7 @@ struct coverage_candidate_probe {
     std::uint64_t required_capability_mask = 0;
 };
 
-/** Immutable planner snapshot of one member in a bounded coverage bucket. */
+/** A cached-source snapshot used during planning, with borrowed key bytes. */
 struct coverage_candidate_view {
     cache_entry_id entry_id{};
     cache_digest_256 domain_digest{};
@@ -289,7 +290,7 @@ struct coverage_candidate_view {
     std::uint64_t stored_bytes = 0;
 };
 
-/** Diagnostics and stable indices into the caller's candidate snapshot. */
+/** Selected indices into the caller's candidate list, with rejection counts and truncation flags. */
 struct bounded_candidate_selection {
     std::array<std::size_t, k_maximum_sources_per_coverage_node> indices{};
     std::size_t selected_count = 0;
@@ -307,7 +308,7 @@ struct bounded_candidate_selection {
     return !bytes.empty() && bytes.size() <= limit;
 }
 
-/** Exact-current coalescing always proves digest, length, then every byte. */
+/** Compares both the digest and full key bytes before sharing an exact result. */
 [[nodiscard]] inline bool
 exact_current_key_equal(const cache_digest_256& requested_digest,
                         std::span<const std::byte> requested_bytes,
@@ -335,8 +336,10 @@ candidate_order_key(const coverage_candidate_view& candidate) noexcept {
 }
 
 /**
- * Visit at most 64 bucket members and retain the best 32.  Security and full
- * domain-key equality are established before a caller may pin or map a source.
+ * Checks up to 64 cached sources and keeps the best 32 that match the
+ * requested domain, security identity and provider capabilities. Full
+ * key comparisons reject hash collisions before the caller acquires
+ * source references.
  */
 [[nodiscard]] inline bounded_candidate_selection
 select_candidates(const coverage_candidate_probe& probe,
@@ -524,7 +527,7 @@ provider_column_equal(const bioseq_cache_column_schema& left,
     return true;
 }
 
-/** Decorated output must reproduce the complete advertised schema contract. */
+/** Checks that a provider's decorated path exposes its declared output and row-identity columns. */
 [[nodiscard]] inline std::expected<void, provider_contract_error>
 validate_decorated_path(const bioseq_cache_path_domain* domain,
                         const bioseq_cache_decorated_path* decorated) noexcept {
@@ -555,7 +558,7 @@ validate_decorated_path(const bioseq_cache_path_domain* domain,
     return {};
 }
 
-/** Validate the copyable, bounded finalized-plan/runtime recipe envelope. */
+/** Checks a finalized-plan digest recipe's format, required nodes and size limits. */
 [[nodiscard]] constexpr std::expected<void, provider_contract_error>
 validate_plan_digest_recipe(const bioseq_cache_plan_digest_recipe* recipe,
                             std::uint32_t recipe_count,
@@ -578,10 +581,7 @@ validate_plan_digest_recipe(const bioseq_cache_plan_digest_recipe* recipe,
     return {};
 }
 
-/**
- * Pure, all-or-nothing snapshot of one validated finalized-plan recipe.
- * PostgreSQL-owned recipe nodes remain outside this provider-neutral value.
- */
+/** Validated recipe sizes and the expected generation digest, without PostgreSQL node pointers. */
 struct finalized_plan_recipe_contract {
     cache_digest_256 expected_generation_digest{};
     std::uint32_t digest_format_revision = 0;
@@ -591,8 +591,9 @@ struct finalized_plan_recipe_contract {
 };
 
 /**
- * Accept recipe shape and expected output digest as one value.  Coverage may
- * additionally require the finalized digest to equal its path-time digest.
+ * Validates a plan recipe and records its expected generation digest.
+ * When a path-time digest is supplied, both digests must match before
+ * the result can be reused.
  */
 [[nodiscard]] constexpr std::expected<finalized_plan_recipe_contract, provider_contract_error>
 finalize_plan_digest_recipe(const bioseq_cache_plan_digest_recipe* recipe,
@@ -624,7 +625,7 @@ finalize_plan_digest_recipe(const bioseq_cache_plan_digest_recipe* recipe,
     return finalized;
 }
 
-/** Caller-owned fixed buffer used directly as a provider digest sink. */
+/** Caller-owned buffer that receives provider bytes for digest calculation. */
 struct bounded_digest_sink_buffer {
     std::span<std::byte> bytes{};
     std::size_t size = 0;
@@ -681,7 +682,12 @@ struct coverage_branch_choice {
     std::uint32_t source_index = 0;
 };
 
-/** Apply `P AND Pi AND earlier(Pj IS NOT TRUE)` using PostgreSQL 3VL. */
+/**
+ * Drops rows that fail the requested predicate. Each remaining row
+ * belongs to the first valid cached source whose predicate is true,
+ * or to fresh computation if none matches. SQL unknown values fail
+ * the predicate check.
+ */
 [[nodiscard]] constexpr coverage_branch_choice
 choose_coverage_branch(sql_bool requested_predicate,
                        std::span<const sql_bool> source_predicates,
@@ -705,7 +711,7 @@ choose_coverage_branch(sql_bool requested_predicate,
     };
 }
 
-/** Whether a row read from source i belongs to i's disjoint branch. */
+/** Checks whether this source is the first valid source that supplies the requested row. */
 [[nodiscard]] constexpr bool
 source_owns_occurrence(std::size_t source_index,
                        sql_bool requested_predicate,
@@ -716,7 +722,7 @@ source_owns_occurrence(std::size_t source_index,
     return choice.kind == coverage_branch_kind::cached && choice.source_index == source_index;
 }
 
-/** Keep self-join/binding identity in the occurrence equality contract. */
+/** Compares row-occurrence identities, keeping separate query bindings distinct in self-joins. */
 [[nodiscard]] constexpr bool occurrence_equal(const bioseq_cache_occurrence& left,
                                               const bioseq_cache_occurrence& right) noexcept {
     return left.struct_size >= sizeof(bioseq_cache_occurrence) &&
@@ -730,7 +736,7 @@ source_owns_occurrence(std::size_t source_index,
            left.occurrence_low == right.occurrence_low;
 }
 
-/** Storage supplied by the executor for validating one late-fetch callback. */
+/** Executor buffers used to check values and completion statuses returned by a late fetch. */
 struct late_fetch_sink_state {
     std::size_t reference_count = 0;
     std::size_t attribute_count = 0;
@@ -817,7 +823,7 @@ make_late_fetch_sink(late_fetch_sink_state& state) noexcept {
     };
 }
 
-/** Require one terminal per reference and one value/null event per OK field. */
+/** Requires a successful completion status and every requested value, including nulls, for each row reference. */
 [[nodiscard]] inline bool late_fetch_complete_and_valid(late_fetch_sink_state& state) noexcept {
     if (state.malformed || state.any_reference_failure) {
         return false;
@@ -848,7 +854,7 @@ using candidate_release_no_error = void (*)(void* opaque,
                                             const cache_entry_id& entry_id,
                                             candidate_reference_kind reference_kind) noexcept;
 
-/** Longjmp-safe record: no destructor participates in reference release. */
+/** Tracks a source reference for explicit cleanup when PostgreSQL errors skip C++ destructors. */
 struct planner_candidate_cleanup_record {
     planner_candidate_cleanup_record* next = nullptr;
     cache_entry_id entry_id{};
@@ -874,7 +880,7 @@ struct planner_candidate_cleanup_record {
     return true;
 }
 
-/** Idempotent and reentrancy-safe: clear the record before registry release. */
+/** Clears the active record before releasing its reference, so repeated or nested cleanup calls do nothing. */
 inline void release_candidate_reference_noerror(planner_candidate_cleanup_record& record) noexcept {
     if (!record.active) {
         return;
@@ -898,7 +904,7 @@ enum class reuse_preflight_state : std::uint8_t {
     frozen = 2,
 };
 
-/** Gates remain observably false until every independent source is decided. */
+/** Stages source-validity decisions and exposes them together when preflight finishes. */
 struct reuse_gate_freeze {
     std::array<std::uint8_t, k_maximum_sources_per_coverage_node> staged{};
     std::array<std::uint8_t, k_maximum_sources_per_coverage_node> published{};
@@ -937,7 +943,7 @@ struct reuse_gate_freeze {
     return true;
 }
 
-/** Fail open as one atomic all-false decision. */
+/** Finishes preflight with every cached source disabled, allowing normal execution. */
 inline void freeze_all_sources_invalid(reuse_gate_freeze& gates) noexcept {
     if (gates.state != reuse_preflight_state::collecting) {
         return;

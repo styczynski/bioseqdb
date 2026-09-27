@@ -1,12 +1,11 @@
 /**
  * @file bioseq_caching/core/object_definition_dependencies.cppm
- * @brief Bounded transaction-local object-definition dependency collection.
+ * @brief Tracks definition changes within a transaction and its savepoints.
  *
- * The collector owns no PostgreSQL pointer or allocator.  Callers translate
- * object-access, syscache, and utility events into fixed-width mutations, then
- * retain the returned database-definition guard in the top transaction.  Any
- * ambiguity makes that guard sticky; precise object keys are only an
- * optimization and are never required for correctness.
+ * PostgreSQL hooks supply object changes as plain values. The collector
+ * keeps individual dependencies while they fit and are unambiguous.
+ * Otherwise it requires a database-wide definition check until reset,
+ * even if the savepoint that caused the problem is rolled back.
  */
 module;
 
@@ -27,7 +26,7 @@ inline constexpr std::size_t
         k_maximum_precise_dirty_dependencies_per_backend - 2U;
 inline constexpr std::size_t k_maximum_object_definition_frames = 64;
 
-/** The net physical-identity effect represented by one mutation. */
+/** How a mutation changes the object's physical identity. */
 enum class definition_physical_change : std::uint8_t {
   unchanged = 0,
   created = 1,
@@ -35,7 +34,7 @@ enum class definition_physical_change : std::uint8_t {
   dropped = 3,
 };
 
-/** Stable outcome for one allocation-free collection operation. */
+/** Errors reported while collecting definition dependencies. */
 enum class object_definition_dependency_error : std::uint8_t {
   none = 0,
   invalid_argument,
@@ -47,7 +46,7 @@ enum class object_definition_dependency_error : std::uint8_t {
   destination_too_small,
 };
 
-/** Whether a precise mutation changed the transaction-local set. */
+/** How recording a mutation affected the tracked dependencies. */
 enum class object_definition_observation : std::uint8_t {
   recorded = 0,
   updated,
@@ -55,7 +54,7 @@ enum class object_definition_observation : std::uint8_t {
   database_definition_guard_only,
 };
 
-/** One object-definition key and its old/current physical identity. */
+/** An object dependency with its physical identity before and after a change. */
 struct object_definition_mutation {
   dependency_key key{};
   physical_identity previous_physical_identity{};
@@ -68,7 +67,7 @@ struct object_definition_mutation {
       const object_definition_mutation &) const noexcept = default;
 };
 
-/** Result returned to a PostgreSQL hook before it calls the shared runtime. */
+/** Tells a PostgreSQL hook which database-wide and object-specific dependencies to update. */
 struct object_definition_observation_result {
   object_definition_dependency_error error =
       object_definition_dependency_error::none;
@@ -86,7 +85,7 @@ struct object_definition_observation_result {
   }
 };
 
-/** Canonical committed-set copy result; a returned prefix is authoritative. */
+/** Reports how many dependencies were copied and whether collection fell back to a database-wide check. */
 struct object_definition_copy_result {
   object_definition_dependency_error error =
       object_definition_dependency_error::none;
@@ -99,7 +98,7 @@ struct object_definition_copy_result {
   }
 };
 
-/** Build the mandatory per-database definition-epoch backstop key. */
+/** Builds the key for tracking definition changes across the whole database. */
 [[nodiscard]] constexpr dependency_key database_definition_guard_key(
     std::uint32_t database_oid) noexcept {
   return dependency_key{
@@ -112,7 +111,7 @@ struct object_definition_copy_result {
   };
 }
 
-/** Validate the exact shape of the database-definition guard. */
+/** Checks the fields of a database-wide definition dependency key. */
 [[nodiscard]] constexpr bool database_definition_guard_key_valid(
     const dependency_key &key) noexcept {
   return key.database_oid != 0 && key.class_oid == 0 &&
@@ -121,7 +120,7 @@ struct object_definition_copy_result {
          key.reserved == 0;
 }
 
-/** Identify the object/syscache kinds whose precise epochs are supported. */
+/** Reports which catalog-object kinds support individual definition tracking. */
 [[nodiscard]] constexpr bool object_definition_dependency_kind(
     dependency_kind kind) noexcept {
   switch (kind) {
@@ -139,7 +138,7 @@ struct object_definition_copy_result {
   }
 }
 
-/** Validate one precise object key before it enters transaction state. */
+/** Checks an individual object or syscache dependency key. */
 [[nodiscard]] constexpr bool object_definition_dependency_key_valid(
     const dependency_key &key) noexcept {
   if (key.database_oid == 0 || key.object_sub_id != 0 ||
@@ -160,7 +159,7 @@ struct object_definition_copy_result {
          identity.length == 0 && physical_identity_valid(identity);
 }
 
-/** Derive the net old-to-current physical transition without ambiguity. */
+/** Classifies the change from the previous physical identity to the current one. */
 [[nodiscard]] constexpr definition_physical_change
 classify_definition_physical_change(
     const physical_identity &previous,
@@ -177,7 +176,7 @@ classify_definition_physical_change(
   return definition_physical_change::replaced;
 }
 
-/** Construct a canonical object mutation from fixed-width identities. */
+/** Builds a mutation and classifies its physical-identity change. */
 [[nodiscard]] constexpr object_definition_mutation
 make_object_definition_mutation(
     dependency_key key, physical_identity previous = {},
@@ -190,7 +189,7 @@ make_object_definition_mutation(
   };
 }
 
-/** Construct the exact PlanInvalItem/syscache hash dependency encoding. */
+/** Builds a dependency from a database ID, syscache ID and invalidation hash. */
 [[nodiscard]] constexpr object_definition_mutation
 make_syscache_definition_mutation(
     std::uint32_t database_oid, std::uint32_t cache_id,
@@ -205,7 +204,7 @@ make_syscache_definition_mutation(
   });
 }
 
-/** Validate reserved bytes, key identity, and physical-transition metadata. */
+/** Checks the dependency key and physical identities, including the recorded change type. */
 [[nodiscard]] constexpr bool object_definition_mutation_valid(
     const object_definition_mutation &mutation) noexcept {
   for (const std::uint8_t value : mutation.reserved) {
@@ -224,13 +223,12 @@ make_syscache_definition_mutation(
 }
 
 /**
- * Fixed-capacity object-definition collector with nested savepoint semantics.
+ * Collects definition changes in fixed arrays, with nested savepoints.
+ * The default capacity leaves room for database-wide definition and
+ * write dependencies within the runtime's dependency limit.
  *
- * `p_specific_capacity` excludes the mandatory database-definition guard and
- * leaves one owner slot for the database-write guard staged by the runtime,
- * so the default precise output remains within its 256-key owner budget.
- * Once `guard_only()` becomes true it stays true until `reset()`;
- * rolling back the savepoint that exposed ambiguity cannot weaken it.
+ * Once individual tracking becomes unsafe, guard_only() stays true
+ * until reset(). Rolling back a savepoint does not clear that requirement.
  */
 template <std::size_t p_specific_capacity =
               k_maximum_object_definition_specific_dependencies,
@@ -240,7 +238,7 @@ class object_definition_dependency_collector {
  public:
   using subtransaction_id = std::uint32_t;
 
-  /** Initialize one top transaction and its preallocated guard identity. */
+  /** Starts tracking a top-level transaction, clearing any previous state. */
   [[nodiscard]] object_definition_dependency_error initialize(
       std::uint32_t database_oid,
       subtransaction_id top_subtransaction_id) noexcept {
@@ -260,7 +258,7 @@ class object_definition_dependency_collector {
     return object_definition_dependency_error::none;
   }
 
-  /** Push a strictly nested savepoint frame without allocating. */
+  /** Adds a child savepoint under the current frame, using the fixed frame array. */
   [[nodiscard]] object_definition_dependency_error begin_savepoint(
       subtransaction_id child, subtransaction_id parent) noexcept {
     if (!initialized_) {
@@ -285,11 +283,10 @@ class object_definition_dependency_collector {
   }
 
   /**
-   * Record or compose one event in the current savepoint.
-   *
-   * The result always names the root guard after any classified event.  A
-   * PostgreSQL adapter must retain that guard in the top-transaction frame,
-   * not merely in the current child frame.
+   * Records a definition change in the current savepoint, combining
+   * successive changes to the same object. The PostgreSQL adapter must
+   * keep the returned database-wide definition dependency in the top-level
+   * transaction so a savepoint rollback cannot discard it.
    */
   [[nodiscard]] object_definition_observation_result observe(
       subtransaction_id current_subtransaction_id,
@@ -390,7 +387,7 @@ class object_definition_dependency_collector {
     return result;
   }
 
-  /** Release or roll back the current savepoint using strict LIFO identity. */
+  /** Releases or rolls back the current savepoint. Its child and parent IDs must match the top two frames. */
   [[nodiscard]] object_definition_dependency_error finish_savepoint(
       subtransaction_id child, subtransaction_id parent,
       bool committed) noexcept {
@@ -423,14 +420,13 @@ class object_definition_dependency_collector {
     return error;
   }
 
-  /** Force the per-database guard after an adapter-side ambiguity. */
+  /** Requires a database-wide definition check after the adapter reports an uncertain change. */
   void force_database_definition_guard() noexcept { enter_guard_only(); }
 
   /**
-   * Copy the top-transaction dependency set in canonical key order.
-   *
-   * If the destination cannot hold the precise set, the collector becomes
-   * guard-only and emits that one authoritative guard whenever space permits.
+   * Copies dependencies for the top-level transaction in sorted key
+   * order. If the output is too small, the collector switches to the
+   * database-wide definition dependency and writes it if space allows.
    */
   [[nodiscard]] object_definition_copy_result copy_committed_dependencies(
       std::span<object_definition_mutation> output) noexcept {
@@ -502,28 +498,28 @@ class object_definition_dependency_collector {
     };
   }
 
-  /** Remove every top-transaction and savepoint observation. */
+  /** Clears all observations and returns the collector to its uninitialized state. */
   void reset() noexcept { *this = {}; }
 
-  /** Return the configured database-definition guard key. */
+  /** Returns the dependency key used to check definitions across the database. */
   [[nodiscard]] dependency_key guard_key() const noexcept {
     return database_definition_guard_key(database_oid_);
   }
 
-  /** Report whether any surviving event or sticky ambiguity exists. */
+  /** Reports whether a surviving change or an unresolved tracking problem requires invalidation. */
   [[nodiscard]] bool transaction_dirty() const noexcept {
     return transaction_dirty_;
   }
 
-  /** Report whether precise object epochs must be ignored. */
+  /** Reports whether only database-wide definition tracking remains. */
   [[nodiscard]] bool guard_only() const noexcept { return guard_only_; }
 
-  /** Return the number of retained precise mutations. */
+  /** Returns the number of saved object-specific changes. */
   [[nodiscard]] std::size_t observation_count() const noexcept {
     return observation_count_;
   }
 
-  /** Return the number of tracked nested transaction frames. */
+  /** Returns the number of active transaction frames, including the top-level transaction. */
   [[nodiscard]] std::size_t frame_count() const noexcept {
     return frame_count_;
   }
@@ -542,12 +538,12 @@ class object_definition_dependency_collector {
     bool active = false;
   };
 
-  /** Return one canonical guard mutation for commit iteration. */
+  /** Builds the database-wide definition mutation for commit processing. */
   [[nodiscard]] object_definition_mutation guard_mutation() const noexcept {
     return make_object_definition_mutation(guard_key());
   }
 
-  /** Find an exact key owned by one frame. */
+  /** Finds a dependency in the specified transaction frame, or returns null. */
   [[nodiscard]] observation *find_in_frame(
       const dependency_key &key, std::size_t owner_frame) noexcept {
     for (observation &observation : observations_) {
@@ -560,7 +556,7 @@ class object_definition_dependency_collector {
     return nullptr;
   }
 
-  /** Find an exact key in any strict ancestor frame. */
+  /** Finds a matching dependency in an earlier transaction frame, or returns null. */
   [[nodiscard]] const observation *find_in_ancestors(
       const dependency_key &key, std::size_t child_frame) const noexcept {
     for (const observation &observation : observations_) {
@@ -573,7 +569,7 @@ class object_definition_dependency_collector {
     return nullptr;
   }
 
-  /** Return the first inactive fixed-capacity observation slot. */
+  /** Returns the first unused observation slot, or null if the array is full. */
   [[nodiscard]] observation *first_free_observation() noexcept {
     for (observation &observation : observations_) {
       if (!observation.active) {
@@ -583,7 +579,7 @@ class object_definition_dependency_collector {
     return nullptr;
   }
 
-  /** Compose sequential physical transitions for the same dependency key. */
+  /** Combines changes to the same object when the later change starts from the earlier result. */
   [[nodiscard]] static bool compose_mutations(
       const object_definition_mutation &earlier,
       const object_definition_mutation &later,
@@ -599,7 +595,7 @@ class object_definition_dependency_collector {
     return true;
   }
 
-  /** Remove every precise mutation owned by one frame. */
+  /** Removes the object-specific changes recorded in one transaction frame. */
   void remove_frame_observations(std::size_t owner_frame) noexcept {
     for (observation &observation : observations_) {
       if (observation.active && observation.owner_frame == owner_frame) {
@@ -609,7 +605,7 @@ class object_definition_dependency_collector {
     }
   }
 
-  /** Merge one released child into its parent, composing exact keys. */
+  /** Moves a released savepoint's changes into its parent, combining changes to the same object. */
   [[nodiscard]] object_definition_dependency_error merge_frame(
       std::size_t child_frame, std::size_t parent_frame) noexcept {
     for (observation &child : observations_) {
@@ -640,7 +636,7 @@ class object_definition_dependency_collector {
     return object_definition_dependency_error::none;
   }
 
-  /** Recompute ordinary dirtiness after a non-sticky savepoint rollback. */
+  /** Rechecks surviving changes after a savepoint ends, preserving any database-wide fallback. */
   void recompute_transaction_dirty() noexcept {
     if (guard_only_) {
       transaction_dirty_ = true;
@@ -655,7 +651,7 @@ class object_definition_dependency_collector {
     }
   }
 
-  /** Discard precise state and retain the preallocated root guard promise. */
+  /** Clears the per-object changes and marks the database definitions as changed until reset(). */
   void enter_guard_only() noexcept {
     if (!initialized_) {
       return;
