@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Relation-local metadata for sequence columns used by table hot paths.
+ * @brief Cache the sequence-column positions of an open table.
  */
 module;
 
@@ -24,11 +24,10 @@ import bioseq.postgres.types.compact_sequence;
 export namespace bioseq::storage {
 
 /**
- * @brief Metadata cached in `Relation::rd_amcache` for a Bioseq table.
+ * @brief Sequence columns cached in Relation::rd_amcache.
  *
- * Attribute numbers are PostgreSQL's one-based `AttrNumber` values. The
- * vector is populated once per relation-cache instance so row hot paths do
- * not repeatedly inspect the tuple descriptor.
+ * Store one-based PostgreSQL attribute numbers so row operations can find
+ * sequence values without scanning the tuple descriptor every time.
  */
 struct table_access_cache {
     std::vector<std::int16_t> sequence_attribute_numbers{};
@@ -36,18 +35,17 @@ struct table_access_cache {
 };
 
 /**
- * @brief Return the lazily populated table-access cache for `relation`.
- * @param relation Open PostgreSQL relation whose descriptor remains valid.
- * @return Cache owned by `CacheMemoryContext` and the relation-cache entry.
+ * @brief Get the table's sequence columns, reading its descriptor on first use.
+ * @param relation Open relation with a valid tuple descriptor.
+ * @return Cache associated with the current relation-cache entry.
  */
 [[nodiscard]] const table_access_cache& get_table_access_cache(Relation relation);
 
 /**
- * @brief PostgreSQL relcache callback for Bioseq table-access metadata.
+ * @brief Leave cache rebuilding to the next table access.
  *
- * PostgreSQL clears `rd_amcache` during invalidation. Re-opening a relation
- * from this callback would recursively enter relcache invalidation, so cache
- * recreation is intentionally deferred to `get_table_access_cache()`.
+ * PostgreSQL clears rd_amcache during invalidation. Opening the relation here
+ * could re-enter that process, so this callback does nothing.
  */
 void invalidate_table_access_cache(Datum callback_argument, Oid relation_id);
 
@@ -80,10 +78,7 @@ void populate_sequence_attributes(table_access_cache& cache, Relation relation) 
 
 } // namespace
 
-/**
- * @brief Return relation-scoped sequence-column metadata, populating `rd_amcache` on demand.
- * @return Cache storage owned by PostgreSQL's `CacheMemoryContext`.
- */
+/** Get cached sequence-column positions, filling rd_amcache on first use. */
 const table_access_cache& get_table_access_cache(Relation relation) {
     if (relation->rd_amcache != nullptr) {
         auto* cache = static_cast<table_access_cache*>(relation->rd_amcache);
@@ -101,12 +96,10 @@ const table_access_cache& get_table_access_cache(Relation relation) {
     return *cache;
 }
 
-/** @brief Observe relcache invalidation after PostgreSQL has detached the cached pointer. */
+/** Leave the invalidated cache empty until the next table access. */
 void invalidate_table_access_cache(Datum /*callback_argument*/, Oid /*relation_id*/) {
-    // PostgreSQL has already detached rd_amcache. Allocations are bounded by
-    // the relations observed by this backend and reclaimed with
-    // CacheMemoryContext; touching the relation here can corrupt the active
-    // ResourceOwner during a relcache flush.
+    // Reopening the relation during invalidation could re-enter relcache
+    // cleanup. get_table_access_cache rebuilds the cache when it is next used.
 }
 
 } // namespace bioseq::storage

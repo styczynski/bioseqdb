@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Lightweight public declarations for the Bioseq table module.
+ * @brief Public declarations for Bioseq table scans and planner hooks.
  */
 module;
 
@@ -11,48 +11,43 @@ export module bioseq.postgres.table:api;
 
 export import :table_access_method_contracts;
 
-/*
- * Public table-module surface used outside bioseq.postgres.table.
- *
- * C++ module partitions are only importable by units of the same named module,
- * so external modules import bioseq.postgres.table and see this small API partition
- * re-exported by the primary interface. The heavy implementation partitions stay
- * out of the primary module's re-export graph for GCC 16.1.
- */
+/* Other modules import bioseq.postgres.table, which re-exports these
+ * declarations. Keeping implementation partitions out of that interface
+ * avoids importing their dependencies into every caller. */
 /** @brief Register Bioseq's table access method with PostgreSQL. */
 export void bioseq_tableam_init(void);
 
 /** @brief Return custom-scan methods for Bioseq sequence search. */
 export const CustomScanMethods* bioseq_customscan_methods(void);
-/** @brief Check whether a sequence-search plan carries a valid semantic payload. */
+/** Check whether a sequence-search plan has valid saved execution settings. */
 export bool bioseq_customscan_has_valid_semantic_payload(
     const CustomScan* scan) noexcept;
-/** @brief Return the cached private payload for a sequence-search plan. */
+/** Copy sequence-search plan data for caching, removing statement-local tokens. */
 export List* bioseq_customscan_cache_private_payload(
     const CustomScan* scan);
 /** @brief Return custom-scan methods for a Bioseq batch join. */
 export const CustomScanMethods* bioseq_batch_join_customscan_methods(void);
-/** @brief Check whether a batch-join plan carries a valid semantic payload. */
+/** Check whether a batch-join plan contains the fields required for execution. */
 export bool bioseq_batch_join_customscan_has_valid_semantic_payload(
     const CustomScan* scan) noexcept;
-/** @brief Return the cached plan payload for a batch join. */
+/** Copy batch-join plan data for caching, removing statement-local tokens and costs. */
 export List* bioseq_batch_join_cache_plan_payload(
     const CustomScan* scan);
-/** @brief Return the semantic cache snapshot for a batch-join plan. */
+/** Rebuild the batch join's saved alignment settings for its cache entry. */
 export List* bioseq_batch_join_cache_semantic_snapshot(
     const CustomScan* scan);
-/** @brief Report whether an expression uses a Bioseq projection. */
+/** Check for a match-result helper, mmsearch, or symbol_count in an expression. */
 export bool bioseq_expr_uses_bioseq_projection(Node* node);
-/** @brief Register Bioseq custom-scan methods with PostgreSQL. */
+/** Install Bioseq planner hooks and register its custom scans. */
 export void bioseq_customscan_init(void);
-/** @brief Reject unsupported raw mmsearch options in a parsed query. */
+/** Reject volatile SQL functions in mmsearch options before planner simplification. */
 export void bioseq_validate_raw_mmsearch_options(Query* query);
-/** @brief Bind match-helper references after PostgreSQL planning. */
+/** Connect match-result helpers to the scan that computes them in the completed plan. */
 export void bioseq_finalize_match_helper_bindings(PlannedStmt* statement);
-/** @brief Arm the named DSM fixture mode for a test execution. */
+/** Select an incomplete or malformed shared-memory test fixture for SliceProject. */
 export void bioseq_arm_slice_dsm_fixture_for_test(std::string_view mode);
 
-/** @brief Create a CustomScan node for a Bioseq index scan. */
+/** Create an empty Bioseq index-scan node for the planner to fill. */
 export CustomScan* bioseq_create_index_scan_node(void);
 /** @brief Register Bioseq's index-scan CustomScan node. */
 export void bioseq_register_index_scan_node(void);

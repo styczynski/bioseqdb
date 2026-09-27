@@ -1,15 +1,14 @@
 /**
  * @file
- * @brief Blocking PostgreSQL custom scan for ordering sequence values.
+ * @brief Sort all child rows by a sequence value before returning any output.
  *
- * The planner replaces an eligible core sequence Sort with this outer scan.
- * Execution buffers child rows, orders representation-erased sequence views,
- * then emits the original rows through the computed permutation.
+ * When enabled, the planner uses this scan for an eligible sequence ORDER BY.
+ * It buffers the rows, sorts their sequence views, and returns the original
+ * rows in the resulting order.
  */
 module;
 
-// Anchor Highway in this global module fragment before importing modules that
-// expose target-specific Highway types.
+// Include Highway before importing modules that expose its target-specific types.
 #include <bioseq/pg_compat.h>
 #include <hwy/highway.h>
 extern "C" {
@@ -35,27 +34,27 @@ module bioseq.postgres.table.batch_sort_scan;
 import bioseq.common.logging; // bioseq_log
 import bioseq.common.checked_arithmetic;
 import bioseq.storage.batch_sort;              // sequence_batch_sorter, sequence_sort_options
-import bioseq.storage.lazy_sequence;           // canonical lazy sequence facade
+import bioseq.storage.lazy_sequence;           // Lazy sequence views and packed sequence copies.
 import bioseq.storage.scanner;                 // sequence_access_requirement
 import bioseq.postgres.storage.manager;        // is_locator_stub
 import bioseq.sequences;                       // compact_sequence_range
 import bioseq.postgres.types.compact_sequence; // bioseq::pg_types::seq, dispatch_instance
 import bioseq.postgres.configuration.aligner;
 import bioseq.postgres.configuration.core;
-import bioseq.parallelism.pool; // global_pool::parallel_sort
+import bioseq.parallelism.pool; 
 import bioseq.gpu.vulkan.runtime;
-import bioseq.postgres.scheduler.supervisor; // readiness-first PG Runtime entry
+import bioseq.postgres.scheduler.supervisor; // Initialize the PostgreSQL Vulkan runtime.
 import bioseq.postgres.scheduler.supervisor.vulkan;
 import bioseq.postgres.support;
-import bioseq.postgres.storage.scanner;     // source-route leases + locator promotion
-import bioseq.parallelism.memory_admission; // resident admission before workers
+import bioseq.postgres.storage.scanner;     // Sequence reader references and locator conversion.
+import bioseq.parallelism.memory_admission; // Reserve memory before copying sequences for workers.
 
 namespace {
 
 batch_sort_source_path_provider batch_sort_source_path_provider_callback = nullptr;
 batch_sort_source_route_provider batch_sort_source_route_provider_callback = nullptr;
 
-/** @brief Defines stable positions in the planner-to-executor private payload. */
+/** Positions of the fields passed from the planner to the sort executor. */
 enum class batch_sort_private_field : int {
     descending = 0,
     nulls_first,
@@ -65,12 +64,12 @@ enum class batch_sort_private_field : int {
     count,
 };
 
-/** Convert a private-payload field to its stable list index. */
+/** Return a private field's list position. */
 [[nodiscard]] constexpr int private_field_index(batch_sort_private_field field) noexcept {
     return static_cast<int>(field);
 }
 
-/** Number of scalar fields in the stable planner-to-executor payload. */
+/** Number of fields in the batch-sort path and plan data. */
 constexpr int k_batch_sort_private_field_count =
     private_field_index(batch_sort_private_field::count);
 
@@ -90,19 +89,19 @@ constexpr int k_batch_sort_private_field_count =
     return intVal(encoded);
 }
 
-/** C++ runtime retained behind the standard-layout PostgreSQL state. */
+/** Buffered rows, sequence readers, and sorting state owned by one scan. */
 struct bioseq_batch_sort_runtime {
-    bool sorted = false;                           //< child drained + ordered?
-    std::size_t emit_idx = 0;                      //< next index into `order`
-    AttrNumber seq_attno = 0;                      //< 1-based seq column in scan tuple
-    bioseq::storage::sequence_sort_options spec{}; //< ORDER BY direction + GPU enablement
-    MemoryContext tuple_cxt = nullptr;             //< owns the buffered MinimalTuples
-    std::vector<MinimalTuple> tuples;              //< all child output rows (scan order)
-    std::vector<Datum> retained_sequences;         //< transferred EOH sort keys, or 0
-    std::vector<std::size_t> order;                //< emit permutation from the processor
-    TupleTableSlot* deformslot = nullptr;          //< MinimalTuple slot used to deform rows
-    TupleTableSlot* sortslot = nullptr;            //< virtual slot used for output
-    TupleTableSlot* staging_slot = nullptr;        //< virtual copy excluding retained EOH
+    bool sorted = false;                           ///< Whether the child has been fully read and sorted.
+    std::size_t emit_idx = 0;                      ///< Next position to emit from order.
+    AttrNumber seq_attno = 0;                      ///< One-based sequence-column position in the scan tuple.
+    bioseq::storage::sequence_sort_options spec{}; ///< Sort direction, null order, and GPU settings.
+    MemoryContext tuple_cxt = nullptr;             ///< Context that owns buffered rows and saved sequences.
+    std::vector<MinimalTuple> tuples;              ///< Child rows in their original order.
+    std::vector<Datum> retained_sequences;         ///< Saved expanded sequence keys, or zero for keys stored in the tuple.
+    std::vector<std::size_t> order;                ///< Buffered-row indices in sorted order.
+    TupleTableSlot* deformslot = nullptr;          ///< Slot used to read buffered MinimalTuples.
+    TupleTableSlot* sortslot = nullptr;            ///< Slot used to return sorted rows.
+    TupleTableSlot* staging_slot = nullptr;        ///< Row copy with separately saved sequence keys omitted.
     const char* accelerator = "not executed";
     std::size_t sorted_rows = 0;
     std::uint64_t gpu_dispatch_delta = 0;
@@ -125,7 +124,7 @@ struct bioseq_batch_sort_runtime {
 /** State passed across PostgreSQL's C ABI with `CustomScanState` first. */
 struct bioseq_batch_sort_state {
     CustomScanState css;
-    void* runtime; //< bioseq_batch_sort_runtime*, owned; freed in End + reset callback
+    void* runtime; ///< Owned runtime, destroyed at scan end or query-context reset.
 };
 static_assert(
     std::is_standard_layout_v<bioseq_batch_sort_state>,
@@ -139,19 +138,18 @@ static_assert(offsetof(bioseq_batch_sort_state, css) == 0,
         reinterpret_cast<bioseq_batch_sort_state*>(node)->runtime);
 }
 
-/** Restore the caller context and delete batch scratch through translated PG calls. */
+/** Restore the previous context and delete scratch space, converting PostgreSQL errors to C++ exceptions. */
 inline void release_batch_sort_scratch_as_cpp(MemoryContext old_context, MemoryContext scratch) {
     bioseq::postgres::support::invoke_pg_as_cpp(
         [old_context] { MemoryContextSwitchTo(old_context); });
     bioseq::postgres::support::invoke_pg_as_cpp([scratch] { MemoryContextDelete(scratch); });
 }
 
-/** Free the C++ runtime from the query-context reset callback.
+/** Destroy the C++ runtime when the query context is reset.
  *
- * This runs on error paths so
- * the std::vector control blocks don't leak the backend's heap. The buffered
- * MinimalTuples live in tuple_cxt (a child of es_query_cxt) and are reclaimed
- * by the context teardown itself, so only the C++ object is destroyed here.
+ * This also runs after errors, releasing vector storage and source readers.
+ * PostgreSQL frees the buffered tuples and runtime allocation with their
+ * memory contexts.
  */
 void cleanup_batch_sort_runtime(void* arg) {
     auto* state = static_cast<bioseq_batch_sort_state*>(arg);
@@ -164,11 +162,10 @@ void cleanup_batch_sort_runtime(void* arg) {
     }
 }
 
-/** Release retained source routes after every child provider has closed.
+/** Release our sequence-reader references after the child providers close.
  *
- * Registered before `ExecInitNode(child)`. Child provider reset callbacks are
- * consequently newer and run first. The upper lease is released only after
- * every provider has closed.
+ * Register this callback before initializing the child. PostgreSQL runs newer
+ * reset callbacks first, so the child closes before we release its readers.
  */
 void release_batch_sort_source_routes(void* arg) {
     auto* state = static_cast<bioseq_batch_sort_state*>(arg);
@@ -186,7 +183,7 @@ struct batch_sort_datum {
     bool is_null = true;
 };
 
-/** Raise one PostgreSQL error through the C++ translation boundary. */
+/** Raise a PostgreSQL error as a C++ exception so local objects can be cleaned up. */
 [[noreturn]] void batch_sort_raise_as_cpp(int sqlstate, const char* message) {
     bioseq::postgres::support::invoke_pg_as_cpp([sqlstate, message] {
         ereport(ERROR, (errcode(sqlstate), errmsg_internal("%s", message)));
@@ -208,7 +205,12 @@ struct batch_sort_datum {
     });
 }
 
-/** Build lazy sequence views and return the emit permutation over buffered rows. */
+/** Sort buffered sequence values and return their row indices in output order.
+ *
+ * Keep null rows aside and compare sequence views with a common alphabet.
+ * Copy source-backed values into reserved memory when workers can use them.
+ * If that reservation fails, compare the original views in the backend.
+ */
 [[nodiscard]] std::vector<std::size_t> build_batch_order(CustomScanState*,
                                                          bioseq_batch_sort_runtime* rt) {
     const std::size_t row_count = rt->tuples.size();
@@ -434,11 +436,11 @@ struct batch_sort_datum {
     return order;
 }
 
-/* ================================================================== */
-/* Executor callbacks                                                  */
-/* ================================================================== */
 
-/** Initialize the child, runtime owner, source routes, and tuple slots. */
+/* Executor callbacks. */
+
+
+/** Prepare the child scan and the buffers and sequence readers needed for sorting. */
 void begin_batch_sort_scan_impl(CustomScanState* node, EState* estate, int eflags) {
     bioseq_log<logging_level::debug>("[bioseq] pg: begin_batch_sort_scan() entered");
     auto* cscan = reinterpret_cast<CustomScan*>(node->ss.ps.plan);
@@ -453,9 +455,9 @@ void begin_batch_sort_scan_impl(CustomScanState* node, EState* estate, int eflag
         MemoryContextAlloc(estate->es_query_cxt, sizeof(bioseq_batch_sort_runtime))));
     reinterpret_cast<bioseq_batch_sort_state*>(node)->runtime = rt;
 
-    /* Register deletion first and the upper-route release second.  Child
-     * callbacks are registered by ExecInitNode afterwards, so reset order is
-     * child/provider close -> upper lease release -> C++ runtime deletion. */
+    /* Reset callbacks run newest first. Register these before the child so
+     * cleanup closes child providers, releases our reader references, and then
+     * destroys the C++ runtime. */
     auto* cb = static_cast<MemoryContextCallback*>(
         MemoryContextAlloc(estate->es_query_cxt, sizeof(MemoryContextCallback)));
     cb->func = &cleanup_batch_sort_runtime;
@@ -489,7 +491,7 @@ void begin_batch_sort_scan_impl(CustomScanState* node, EState* estate, int eflag
     }
     rt->spec.vulkan_enabled = bioseq::aligner::settings::vulkan::enabled;
 
-    /* Initialise the single child only after the upper callbacks exist. */
+    /* Initialize the child after registering its parent's cleanup callbacks. */
     auto* child_plan = reinterpret_cast<Plan*>(linitial(cscan->custom_plans));
     outerPlanState(node) = ExecInitNode(child_plan, estate, eflags);
     rt->child_initialized = true;
@@ -516,7 +518,7 @@ void begin_batch_sort_scan_impl(CustomScanState* node, EState* estate, int eflag
     rt->staging_slot = ExecInitExtraTupleSlot(estate, descriptor, &TTSOpsVirtual);
 }
 
-/** Enter batch-sort execution without leaking C++ exceptions through PostgreSQL. */
+/** Initialize the sort scan and report C++ failures as PostgreSQL errors. */
 void begin_batch_sort_scan(CustomScanState* node, EState* estate, int eflags) {
     MemoryContext saved_context = CurrentMemoryContext;
     ErrorData* volatile original_error = nullptr;
@@ -578,13 +580,13 @@ void begin_batch_sort_scan(CustomScanState* node, EState* estate, int eflags) {
     }
 }
 
-/** Drain, sort, and emit one tuple from the batch-sort runtime. */
+/** Buffer and sort the child on first use, then return one sorted row per call. */
 TupleTableSlot* execute_batch_sort_scan_impl(CustomScanState* node) {
     auto* rt = runtime_of(node);
     ExprContext* econtext = node->ss.ps.ps_ExprContext;
 
     if (!rt->sorted) {
-        /* ---- drain the child, buffering every row (scan order) ---- */
+        /* Save every child row before sorting. */
         PlanState* child = outerPlanState(node);
         for (;;) {
             TupleTableSlot* slot = ExecProcNode(child);
@@ -597,11 +599,9 @@ TupleTableSlot* execute_batch_sort_scan_impl(CustomScanState* node) {
             const bool sequence_is_null = slot->tts_isnull[rt->seq_attno - 1];
             if (!sequence_is_null && VARATT_IS_EXTERNAL_EXPANDED(DatumGetPointer(sequence))) {
                 Datum retained = bioseq::postgres::support::invoke_pg_as_cpp([sequence] {
-                    /* Child slots expose read-only expanded Datums whose
-                     * object context belongs to their per-tuple lifetime.
-                     * Copy only the tiny piece-tree wrapper into our
-                     * already-selected tuple context; retained edges keep
-                     * source domains alive without flattening payloads. */
+                    /* The child's expanded sequence can expire at its next tuple reset.
+                     * Copy its piece-tree wrapper into our tuple context and keep references
+                     * to its sources, leaving the sequence bytes unread until needed. */
                     const Datum read_only = MakeExpandedObjectReadOnly(sequence, false, -1);
                     auto acquired = acquire_writable_pg_sequence(read_only);
                     return pg_sequence_ro_datum(acquired.value);
@@ -628,7 +628,7 @@ TupleTableSlot* execute_batch_sort_scan_impl(CustomScanState* node) {
             MemoryContextSwitchTo(old_cxt);
         }
 
-        /* ---- batch the lazy sequences and obtain the emit order ---- */
+        /* Sort the sequence keys to obtain the output row order. */
         rt->order = build_batch_order(node, rt);
         rt->sorted = true;
         rt->emit_idx = 0;
@@ -636,7 +636,7 @@ TupleTableSlot* execute_batch_sort_scan_impl(CustomScanState* node) {
                                          rt->tuples.size());
     }
 
-    /* ---- emit buffered rows in the computed order ---- */
+    /* Return the next row in sorted order. */
     if (rt->emit_idx >= rt->order.size()) {
         return ExecClearTuple(node->ss.ps.ps_ResultTupleSlot);
     }
@@ -690,7 +690,7 @@ TupleTableSlot* execute_batch_sort_scan_impl(CustomScanState* node) {
     return rt->sortslot;
 }
 
-/** Execute one batch-sort step and preserve PostgreSQL's original ERROR payload. */
+/** Return the next sorted row while preserving PostgreSQL error details. */
 TupleTableSlot* execute_batch_sort_scan(CustomScanState* node) {
     TupleTableSlot* result = nullptr;
     MemoryContext saved_context = CurrentMemoryContext;
@@ -741,7 +741,7 @@ TupleTableSlot* execute_batch_sort_scan(CustomScanState* node) {
     return result;
 }
 
-/** Release the child, source routes, and C++ runtime. */
+/** Close the child, release sequence readers, and destroy the C++ runtime. */
 void end_batch_sort_scan(CustomScanState* node) {
     if (PlanState* child = outerPlanState(node)) {
         ExecEndNode(child);
@@ -760,7 +760,7 @@ void end_batch_sort_scan(CustomScanState* node) {
     outerPlanState(node) = nullptr;
 }
 
-/** Reset buffered rows and sweep retained source domains before a rescan. */
+/** Discard buffered rows, restart the child, and free unused sequence sources. */
 void rescan_batch_sort_scan(CustomScanState* node) {
     auto* rt = runtime_of(node);
     rt->sorted = false;
@@ -798,7 +798,7 @@ void rescan_batch_sort_scan(CustomScanState* node) {
     }
 }
 
-/** Publish accelerator, dispatch, timing, and admission counters to EXPLAIN. */
+/** Show sort timing, GPU work, and source-memory usage in EXPLAIN. */
 void explain_batch_sort_scan(CustomScanState* node, List* ancestors, ExplainState* es) {
     (void)ancestors;
     auto* rt = runtime_of(node);
@@ -840,7 +840,7 @@ void explain_batch_sort_scan(CustomScanState* node, List* ancestors, ExplainStat
     ExplainPropertyBool("Bioseq Source Routes Acquired", rt->source_routes_acquired, es);
 }
 
-/** Return the stable executor callback table after all callbacks are defined. */
+/** Return PostgreSQL's execution callbacks for the batch-sort scan. */
 [[nodiscard]] const CustomExecMethods& batch_sort_execution_methods() noexcept {
     static const CustomExecMethods methods = {
         .CustomName = "BioseqBatchSortScan",
@@ -853,7 +853,7 @@ void explain_batch_sort_scan(CustomScanState* node, List* ancestors, ExplainStat
     return methods;
 }
 
-/** Allocate the standard-layout executor state for a planned batch sort. */
+/** Allocate PostgreSQL's state for a planned batch sort. */
 Node* create_batch_sort_scan_state(CustomScan* cscan) {
     auto* state = reinterpret_cast<bioseq_batch_sort_state*>(
         newNode(sizeof(bioseq_batch_sort_state), T_CustomScanState));
@@ -862,7 +862,7 @@ Node* create_batch_sort_scan_state(CustomScan* cscan) {
     return reinterpret_cast<Node*>(&state->css);
 }
 
-/** Return the stable planned-scan callback table after its factory is defined. */
+/** Return the callback that creates a batch-sort executor node. */
 [[nodiscard]] const CustomScanMethods& batch_sort_scan_methods() noexcept {
     static const CustomScanMethods methods = {
         .CustomName = "BioseqBatchSortScan",
@@ -871,7 +871,7 @@ Node* create_batch_sort_scan_state(CustomScan* cscan) {
     return methods;
 }
 
-/** Convert a batch-sort custom path into its validated custom plan payload. */
+/** Build a sort plan and resolve its sequence key to one child-output column. */
 Plan* plan_batch_sort_path(PlannerInfo* root,
                            RelOptInfo* rel,
                            CustomPath* best_path,
@@ -921,7 +921,7 @@ Plan* plan_batch_sort_path(PlannerInfo* root,
     cscan->methods = &batch_sort_scan_methods();
     cscan->flags = best_path->flags;
 
-    /* Upper node (not a base relation scan). */
+    /* This node reads its child's output. */
     cscan->scan.scanrelid = 0;
     cscan->scan.plan.qual = NIL;
     cscan->custom_exprs = NIL;
@@ -932,10 +932,9 @@ Plan* plan_batch_sort_path(PlannerInfo* root,
                                        makeInteger(source_attno));
     cscan->custom_plans = custom_plans;
 
-    /* Passthrough output: our path's pathtarget equals the child's, so `tlist`
-     * matches the child's targetlist column-for-column. custom_scan_tlist
-     * describes the scan tuple (= child output); setrefs rewrites the output
-     * targetlist into INDEX_VAR references over it. */
+    /* Preserve the child's output columns. custom_scan_tlist describes that
+     * input tuple, and PostgreSQL rewrites the result target list to reference
+     * those columns through INDEX_VAR. */
     cscan->scan.plan.targetlist = tlist;
     cscan->custom_scan_tlist = static_cast<List*>(copyObject(child_plan->targetlist));
     cscan->custom_relids = bms_copy(rel->relids);
@@ -943,7 +942,7 @@ Plan* plan_batch_sort_path(PlannerInfo* root,
     return reinterpret_cast<Plan*>(cscan);
 }
 
-/** Return the stable planner callback table after its plan builder is defined. */
+/** Return the callback that turns a batch-sort path into a plan. */
 [[nodiscard]] const CustomPathMethods& batch_sort_path_methods() noexcept {
     static const CustomPathMethods methods = {
         .CustomName = "BioseqBatchSortScan",
@@ -952,9 +951,9 @@ Plan* plan_batch_sort_path(PlannerInfo* root,
     return methods;
 }
 
-/* ================================================================== */
-/* Planner hook — install our ordered path for sequence ORDER BY       */
-/* ================================================================== */
+
+/* Planner hook for sequence ORDER BY. */
+
 
 create_upper_paths_hook_type previous_create_upper_paths_hook = nullptr;
 slice_project_upper_path_provider slice_project_upper_path_provider_callback = nullptr;
@@ -985,7 +984,7 @@ struct bioseq_sequence_sort_key {
     return {};
 }
 
-/** Interpret the version-specific PostgreSQL pathkey direction. */
+/** Check whether the sort key requests descending order. */
 [[nodiscard]] bool pathkey_descending(PathKey* pathkey) {
 #if POSTGRESQL_VERSION_MAJOR >= 18
     return pathkey->pk_cmptype == COMPARE_GT;
@@ -994,7 +993,7 @@ struct bioseq_sequence_sort_key {
 #endif
 }
 
-/** Replace one eligible sequence Sort path with the Bioseq batch-sort path. */
+/** Replace eligible single-key sequence sort paths when batch sorting is enabled. */
 void create_batch_sort_upper_paths(PlannerInfo* root,
                                    UpperRelationKind stage,
                                    RelOptInfo* input_rel,
@@ -1003,8 +1002,8 @@ void create_batch_sort_upper_paths(PlannerInfo* root,
     if (previous_create_upper_paths_hook != nullptr) {
         previous_create_upper_paths_hook(root, stage, input_rel, output_rel, extra);
     }
-    /* One dispatcher owns create_upper_paths_hook. SliceProject registers a
-     * provider here instead of replacing/chaining the global hook itself. */
+    /* Share this upper-path hook with SliceProject through its registered
+     * callback. */
     if (slice_project_upper_path_provider_callback != nullptr) {
         slice_project_upper_path_provider_callback(root, stage, input_rel, output_rel, extra);
     }
@@ -1013,9 +1012,8 @@ void create_batch_sort_upper_paths(PlannerInfo* root,
         list_length(root->sort_pathkeys) != 1) {
         return;
     }
-    /* Opt-in (default OFF): leave PostgreSQL's own Sort in place unless the
-     * operator turns this prototype on. Doubles as the A/B toggle (off => core
-     * Sort sorts the sequence; on => this custom batch sort node). */
+    /* The sequence_sort_scan setting lets users choose this experimental
+     * sorter for comparisons with PostgreSQL's sort. */
     if (!bioseq::settings::planner::sequence_sort_scan::enabled) {
         return;
     }
@@ -1027,11 +1025,10 @@ void create_batch_sort_upper_paths(PlannerInfo* root,
     const bioseq_sequence_sort_key sort_key =
         OidIsValid(seq_oid) ? sort_sequence_pathkey(root, seq_oid) : bioseq_sequence_sort_key{};
     if (sort_key.pathkey == nullptr || sort_key.expression == nullptr) {
-        return; /* not sorting sequences — leave PostgreSQL's plan untouched */
+        return; /* No sequence sort key. */
     }
 
-    /* Carry the sort direction in the validated private payload consumed by
-     * the executor callback. */
+    /* Save the requested direction and null order for execution. */
     const bool descending = pathkey_descending(sort_key.pathkey);
     const bool nulls_first = sort_key.pathkey->pk_nulls_first;
 
@@ -1073,19 +1070,18 @@ void create_batch_sort_upper_paths(PlannerInfo* root,
     cpath->path.pathtarget = owned_input_path->pathtarget; /* passthrough */
     cpath->path.param_info = nullptr;
     cpath->path.parallel_aware = false;
-    cpath->path.parallel_safe = false; /* blocking sort: serial */
+    cpath->path.parallel_safe = false; /* serial execution */
     cpath->path.parallel_workers = 0;
     cpath->path.rows = owned_input_path->rows;
-    /* Blocking operator: all input is consumed before the first output row, so
-     * startup == input's total. total_cost is deliberately set to the input's
-     * total (a "free" sort) so this path dominates and replaces any core Sort. */
+    /* The first row waits for the whole input. These experimental costs
+     * charge for that input and omit the sort work. */
     cpath->path.startup_cost = owned_input_path->total_cost;
     cpath->path.total_cost = owned_input_path->total_cost;
-    cpath->path.pathkeys = root->sort_pathkeys; /* we satisfy the ordering */
+    cpath->path.pathkeys = root->sort_pathkeys; /* requested output order */
     cpath->flags = 0;
     cpath->custom_paths = list_make1(owned_input_path);
-    /* Path ABI carries the original key identity; PlanCustomPath resolves its
-     * exact child output resno before setrefs and serializes only scalars. */
+    /* Keep the sort expression in the path. PlanCustomPath later finds its
+     * child-output column and stores that number in the plan. */
     cpath->custom_private = list_make5(makeInteger(descending ? 1 : 0),
                                        makeInteger(nulls_first ? 1 : 0),
                                        copyObject(sort_key.expression),
@@ -1094,8 +1090,7 @@ void create_batch_sort_upper_paths(PlannerInfo* root,
     cpath->custom_restrictinfo = NIL;
     cpath->methods = &batch_sort_path_methods();
 
-    /* Deterministically REPLACE the ordered rel's paths so the planner never
-     * sorts sequences itself (requirement: always select our outer scan). */
+    /* Force eligible ORDER BY queries to use this sorter while it is enabled. */
     output_rel->pathlist = NIL;
     output_rel->partial_pathlist = NIL;
     output_rel->cheapest_startup_path = nullptr;
@@ -1110,7 +1105,7 @@ void create_batch_sort_upper_paths(PlannerInfo* root,
 
 } // anonymous namespace
 
-/** Register the SliceProject participant in the shared upper-path dispatcher. */
+/** Register the SliceProject callback in the shared upper-path hook. */
 void
 bioseq_register_slice_project_upper_path_provider(slice_project_upper_path_provider provider) {
     if (provider == nullptr) {
@@ -1127,7 +1122,7 @@ bioseq_register_slice_project_upper_path_provider(slice_project_upper_path_provi
     slice_project_upper_path_provider_callback = provider;
 }
 
-/** Register source-path tagging and source-route acquisition callbacks. */
+/** Register callbacks for finding source paths and keeping their sequence readers alive. */
 void
 bioseq_register_batch_sort_source_providers(batch_sort_source_path_provider path_provider,
                                             batch_sort_source_route_provider route_provider) {
@@ -1148,7 +1143,7 @@ bioseq_register_batch_sort_source_providers(batch_sort_source_path_provider path
     batch_sort_source_route_provider_callback = route_provider;
 }
 
-/** Install the ordered-path hook and register the stable custom-scan methods. */
+/** Install the sequence-sort planner hook and register its custom scan with PostgreSQL. */
 void initialize_batch_sort_scan() {
     previous_create_upper_paths_hook = create_upper_paths_hook;
     create_upper_paths_hook = create_batch_sort_upper_paths;
