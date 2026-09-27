@@ -295,10 +295,9 @@ parse_minimizer_registry_command_line(
         }
     }
     std::filesystem::create_directories(command.pcm_root);
-    // Retarget the neutral attached-primary command to every registered
-    // canonical module, then build their complete module graph only inside
-    // the codegen-owned scratch PCM authority. No authored scan target or
-    // linked object provider is involved.
+    // Reuse the neutral module's compiler settings for each registered source.
+    // Build the imported modules in the generator's scratch directory so Clang
+    // can inspect them. These temporary modules do not become linked build output.
     structural_analysis::dependency_compilation_environment prepared =
         structural_analysis::prepare_compilation_environment(
             source_paths,
@@ -416,10 +415,9 @@ parse_minimizer_registry_command_line(
 
     const std::vector<std::filesystem::path> source_paths =
         source_paths_of(sources);
-    // The isolated database contains donor-derived commands and scratch BMIs
-    // for the registered canonical module graph. These artifacts are codegen
-    // authority only (never CMake-attached or linked); structural collection
-    // retains compiler-proven callable geometry for generated HWY_ATTR sites.
+    // The prepared database points Clang to temporary compiled modules. Use it
+    // to find callable positions for HWY_ATTR insertion. The temporary modules
+    // belong to this analysis step and are not linked into the application.
     constexpr std::string_view compiler_profile = "production";
     const structural_analysis::dependency_compilation_validation prepared =
         structural_analysis::validate_dependency_compilation_environment(

@@ -26,7 +26,7 @@ namespace http_validation = bioseq::common::http::validation;
 
 namespace bioseq::codegen::external {
 
-/// @brief Exercises pure parser/renderer contracts without network or project sources.
+/// @brief Tests API parsing and generated source using local fixtures.
 auto run_generator_contract_self_tests() -> void {
     const auto require = [](bool condition, std::string_view message) -> void {
         if (!condition) {

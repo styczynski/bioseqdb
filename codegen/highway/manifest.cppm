@@ -256,7 +256,7 @@ inline void require_field_count(
 
 }  // namespace detail
 
-/** Render the source-derived record/owner/profile manifest consumed by Highway. */
+/** Writes the minimizer layouts, implementations and runtime bindings to TSV. */
 [[nodiscard]] inline std::string render_minimizer_registry_manifest(
     const minimizer_registry_spec& registry) {
     std::ostringstream output;
@@ -303,7 +303,7 @@ inline void require_field_count(
     return output.str();
 }
 
-/** Parse the early generated registry; it is the sole main-generator input. */
+/** Reads the generated minimizer registry used by the Highway generator. */
 [[nodiscard]] inline minimizer_registry_spec parse_minimizer_registry_manifest(
     const std::filesystem::path& path) {
     minimizer_registry_spec result;
@@ -631,9 +631,9 @@ inline void require_field_count(
     return result;
 }
 
-/// Renders the deterministic Highway-specific evidence object embedded in
-/// the shared publication envelope. Ownership and stale cleanup deliberately
-/// remain outside this policy schema.
+/// Writes Highway targets, source hashes and generated-file hashes into the
+/// shared publication manifest. The shared publisher tracks file ownership
+/// and removes obsolete output.
 [[nodiscard]] inline std::string render_policy_evidence(
     const generation_plan& plan,
     const std::vector<generated_artifact>& artifacts) {

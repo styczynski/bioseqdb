@@ -87,7 +87,7 @@ build_target_coordinates(const target_manifest& inventory) {
     return result;
 }
 
-/// Renders the global module fragment shared by fixed-target artifacts.
+/// Writes the includes and target macros shared by files for one Highway target.
 [[nodiscard]] inline std::string fixed_target_fragment(
     const target_manifest& inventory,
     const target_spec& target) {
@@ -317,7 +317,7 @@ inline void replace_all(
         "unknown generated minimizer dispatch kind '" + std::string{kind} + "'");
 }
 
-/// Renders all fixed-target owners in one CMake-stable ordinary unit.
+/// Generates one implementation file containing the minimizer exports for a target.
 [[nodiscard]] inline std::string render_minimizer_representation_instantiations(
     const generation_plan& plan,
     const target_spec& target,
@@ -438,12 +438,11 @@ inline constexpr std::string_view alignment_family_prefix = "alignment_";
 }
 
 /**
- * Extract the sole simple type argument from a target callable template-id.
+ * Reads the alphabet type from a target function's template argument.
  *
- * Alignment function pointers are alphabet-specific, so the generated binder
- * materializes one strongly typed alignment_kernels<Alphabet> object per
- * scheduler alphabet. Restricting the registry spelling to a qualified type
- * name keeps manifest data from becoming arbitrary generated C++.
+ * The binder builds an alignment_kernels<Alphabet> table for each alphabet.
+ * Accepting only a qualified type name prevents a manifest entry from inserting
+ * arbitrary C++ into the generated source.
  */
 [[nodiscard]] inline std::string alignment_alphabet_type(
     const slot_spec& slot) {
@@ -873,12 +872,10 @@ struct alphabet_identity_binding final {
 };
 
 /**
- * Reconcile every typed consumer against one generated alphabet identity axis.
+ * Checks that alignment and minimizer kernels use the same alphabet IDs.
  *
- * Alignment and minimizer records are separately useful renderer fixtures, so
- * either family may stand alone. When both are present (the production
- * registry), their code/type maps must be identical before any erased
- * alignment pointer or minimizer wrapper is emitted.
+ * Tests may supply either family alone. When both are present, their ID-to-type
+ * mappings must agree before the binder generates tables or wrappers.
  */
 [[nodiscard]] inline std::vector<alphabet_identity_binding>
 collect_alphabet_identities(
@@ -1061,7 +1058,7 @@ inline void render_minimap2_reference_wrapper(
         << "}\n\n";
 }
 
-/// Emits the alphabet/storage switch for one minimizer dispatch member.
+/// Generates a minimizer wrapper that selects the kernel by alphabet and storage width.
 inline void render_minimizer_wrapper(
     std::ostringstream& output,
     const std::vector<minimizer_case_binding>& cases,
@@ -1186,7 +1183,7 @@ collect_slot_owners(const source_manifest& inventory) {
     return owners;
 }
 
-/// Renders the exported fixed-target declaration and private owner hooks.
+/// Generates the public target-binding declaration and private table-fill functions.
 [[nodiscard]] inline std::string render_primary(
     const source_manifest& inventory,
     const namespace_materialization::materialization_coordinate& coordinate) {
@@ -1434,7 +1431,7 @@ collect_slot_owners(const source_manifest& inventory) {
     return output.str();
 }
 
-/// Renders the fixed-target tables while preserving manifest iteration order.
+/// Generates the kernel tables and binding function for one Highway target.
 [[nodiscard]] inline std::string render_binder(
     const generation_plan& plan,
     const target_spec& target,
@@ -1534,10 +1531,10 @@ collect_slot_owners(const source_manifest& inventory) {
                   "::std::to_array<::bioseq::simd::alignment_table_entry>({\n";
         for (const alignment_family_binding& family : alignment_families) {
             const auto code = static_cast<unsigned int>(family.alphabet_code);
-            // Keep these checks inside the fixed-target function. Calling the
-            // shared alphabet-only template here emits one linkonce symbol in
-            // multiple ISA units; the linker may retain an AVX-512 definition
-            // that an AVX2 (or baseline) binder then calls.
+            // Keep the completeness checks in this target-specific function. A shared
+            // alphabet template can produce the same linker symbol for several CPU
+            // targets. If the linker keeps its AVX-512 version, an AVX2 or baseline
+            // binder could call instructions that the CPU does not support.
             output << "        {.alphabet_code = " << code
                    << "U, .typed_table_complete = (";
             for (std::size_t index = 0;
@@ -1587,7 +1584,7 @@ collect_slot_owners(const source_manifest& inventory) {
     return output.str();
 }
 
-/// Renders the sole dynamic-dispatch export and validated target selection.
+/// Generates the Highway dynamic-dispatch entry point and checks its chosen target.
 [[nodiscard]] inline std::string render_dispatch_registry_partition(
     const generation_plan& plan,
     const std::vector<namespace_materialization::materialization_coordinate>&
@@ -1633,7 +1630,7 @@ collect_slot_owners(const source_manifest& inventory) {
     return output.str();
 }
 
-/// Renders the cold exact-target inventory in authenticated target order.
+/// Generates exact-target lookup in the order listed by the validated manifest.
 [[nodiscard]] inline std::string render_dispatch_inventory(
     const generation_plan& plan) {
     const std::uint64_t compiled_mask =
@@ -1690,7 +1687,7 @@ collect_slot_owners(const source_manifest& inventory) {
     return output.str();
 }
 
-/// Renders the fixed-target accessors used by deterministic tests.
+/// Generates test accessors that always use the configured static target.
 [[nodiscard]] inline std::string render_test_support(
     const generation_plan& plan,
     const std::vector<namespace_materialization::materialization_coordinate>&
@@ -1860,7 +1857,7 @@ inline void validate_rendered_artifact(
 
 }  // namespace detail
 
-/** Render the target-neutral generated record/profile contract. */
+/** Generates minimizer layout IDs and runtime bindings shared by all CPU targets. */
 [[nodiscard]] inline std::string render_minimizer_physical_records_module(
     const minimizer_registry_spec& registry,
     const std::string_view manifest_identity) {
@@ -2103,7 +2100,7 @@ inline void validate_rendered_artifact(
     return output.str();
 }
 
-/** Render the later representation-aware tag-to-concrete-type visitor. */
+/** Generates a visitor that selects a concrete minimizer record type from its ID. */
 [[nodiscard]] inline std::string render_minimizer_physical_registry_module(
     const minimizer_registry_spec& registry,
     const std::string_view manifest_identity) {

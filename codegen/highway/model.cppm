@@ -50,7 +50,7 @@ struct required_slot_spec {
     std::string slot_field;
 };
 
-/** Unit-test-only ordinary implementation-unit template. */
+/** Template for a C++ implementation file used only by unit tests. */
 struct probe_spec {
     std::string key;
     std::filesystem::path path;
@@ -61,7 +61,7 @@ enum class minimizer_registry_profile : std::uint8_t {
     extended,
 };
 
-/** One algorithm-neutral physical record type. */
+/** A minimizer record layout shared by algorithms that can use it. */
 struct minimizer_physical_record_spec {
     std::uint16_t id{};
     std::string key;
@@ -76,7 +76,7 @@ struct minimizer_physical_record_spec {
         const minimizer_physical_record_spec&) const = default;
 };
 
-/** One target-scoped Highway owner of one or more typed exports. */
+/** A minimizer implementation compiled for each Highway target. */
 struct minimizer_highway_owner_spec {
     std::uint16_t id{};
     std::string owner_key;
@@ -92,7 +92,7 @@ struct minimizer_highway_owner_spec {
         const minimizer_highway_owner_spec&) const = default;
 };
 
-/** One trait-ranked alphabet enabled through the generic reference adapter. */
+/** An alphabet supported by the generic minimap2-reference adapter. */
 struct generic_reference_alphabet_spec final {
     std::string_view cpp_type;
     std::uint16_t id;
@@ -100,13 +100,13 @@ struct generic_reference_alphabet_spec final {
     std::uint8_t state_bits_per_rank;
 };
 
-/** Append-only generic reference alphabet registration. */
+/** Append new generic reference alphabets here to preserve existing IDs. */
 inline constexpr generic_reference_alphabet_spec
     generic_reference_alphabets[]{
         {"::seq::dna5", 1u, "dna5", 3u},
     };
 
-/** One bounded runtime request domain to physical-record/dispatch binding. */
+/** Maps supported runtime settings to a record layout and kernel entry point. */
 struct minimizer_runtime_profile_spec {
     std::string requested_algorithm;
     std::string effective_algorithm;
@@ -127,7 +127,7 @@ struct minimizer_runtime_profile_spec {
         const minimizer_runtime_profile_spec&) const = default;
 };
 
-/** The single generated physical-record, owner, and profile authority. */
+/** Registered minimizer layouts, compiled implementations and runtime choices. */
 struct minimizer_registry_spec {
     minimizer_registry_profile profile{minimizer_registry_profile::baseline};
     std::vector<minimizer_physical_record_spec> records;
@@ -153,7 +153,7 @@ struct minimizer_registry_spec {
         "unknown minimizer registry profile '" + std::string{name} + "'");
 }
 
-/** Build the bounded source registry without instantiating record templates. */
+/** Builds the minimizer registry as data, without instantiating record templates. */
 [[nodiscard]] inline minimizer_registry_spec make_minimizer_registry(
     const minimizer_registry_profile profile) {
     minimizer_registry_spec result{.profile = profile};
@@ -224,9 +224,9 @@ struct minimizer_registry_spec {
         });
     };
     const std::vector<std::string> both_storages{"u32", "u64"};
-    // The legacy DNA4 owners below retain their stable IDs, symbols, and
-    // source-width specializations.  Trait-ranked alphabets using the generic
-    // state-lane adapter are enabled by the descriptor registry above.
+    // DNA4 implementations have fixed IDs and exported names. Alphabets in
+    // generic_reference_alphabets add reference implementations through the
+    // adapter that stores alphabet ranks in state lanes.
     add_owner(1u, "minimap2_reference_l15_k15", "minimap2_reference",
               "minimizer_minimap2_reference", "minimizer_record_l15_k15",
               both_storages, "::seq::dna4", 0u,
@@ -403,9 +403,9 @@ struct minimizer_registry_spec {
         {29u, 63u, "minimizer_record_l63_k15", "bounded_nthash_l63_k15", "bounded_nthash_l63_dna5"},
     };
     for (const auto& band : fixed_bands) {
-        // Zero-valued K/W markers denote the generated bounded domain.  They
-        // are model data, not wildcard matching: the renderer emits explicit
-        // inclusive limits and all consumers use the shared shape predicate.
+        // Zero K/W values mark the bounded ntHash profile. The generated code
+        // replaces them with inclusive limits and checks requests with the shared
+        // shape predicate.
         add_export_profiles(owner(band.dna4_bounded_owner), 0u, 0u,
                             band.minimum_l, band.maximum_l, "u32",
                             "bounded_nthash_simd");
@@ -431,9 +431,9 @@ struct minimizer_registry_spec {
             }
         }
     };
-    // Two-stack writes raw 2*K hashes through the concrete record mask.
-    // Earlier rows retain the compact physical choice. Split-record fallbacks
-    // follow them so first-match selection remains compact whenever possible.
+    // Two-stack hashes need two bits per base in the record. Put compact
+    // layouts first so the first matching profile uses them. Larger split
+    // records handle requests that do not fit those layouts.
     add_two_stack_slice("minimizer_record_l15_k15", 0u, 15u, 8u, "u16");
     add_two_stack_slice("minimizer_record_l15_k15", 0u, 15u, 16u, "u32");
     add_two_stack_slice("minimizer_record_l15_k15", 0u, 15u, 24u, "u64");
@@ -547,7 +547,7 @@ struct minimizer_runtime_profile_capabilities final {
     std::uint16_t maximum_runtime_window_size{};
 };
 
-/** Derive value-only runtime limits from one finite physical binding. */
+/** Finds the supported k-mer and window sizes for one record binding. */
 [[nodiscard]] inline minimizer_runtime_profile_capabilities
 minimizer_runtime_profile_capabilities_for(
     const minimizer_registry_spec& registry,
@@ -634,13 +634,13 @@ minimizer_runtime_profile_capabilities_for(
     return {minimum_k, maximum_k, 1u, 256u};
 }
 
-/** Ordered external domain topology supplied by configure-time authority. */
+/** A named external topology manifest supplied during CMake configuration. */
 struct domain_topology_manifest_input {
     std::string name;
     std::filesystem::path path;
 };
 
-/** Validated external-domain provenance; never a Highway target axis. */
+/** Verified identity and hashes of an external topology manifest. */
 struct domain_topology_provenance {
     std::string name;
     std::filesystem::path path;
@@ -648,7 +648,7 @@ struct domain_topology_provenance {
     std::string content_sha256;
 };
 
-/** Configure-sealed expectation repeated in target and source manifests. */
+/** Topology identity recorded in both target and source manifests. */
 using domain_topology_expectation = domain_topology_provenance;
 
 struct target_manifest {
