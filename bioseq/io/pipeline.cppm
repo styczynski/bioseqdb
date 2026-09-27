@@ -1,9 +1,9 @@
 /**
  * @file pipeline.cppm
- * @brief Asynchronous batch dispatch for sequence input.
+ * @brief Parses sequence input and sends completed batches to worker tasks.
  *
- * The calling thread reads and parses records while worker tasks handle
- * completed batches. All submitted tasks finish before return.
+ * The caller reads and parses the file. Batch handlers may run concurrently,
+ * and the function waits for submitted work before returning.
  */
 module;
 
@@ -35,26 +35,23 @@ import bioseq.parallelism.pool;
 export namespace bioseq::io {
 
 /**
- * @brief Run a record-by-record async dispatch loop.
+ * @brief Reads and parses records while workers handle completed batches.
  *
- * The function returns when the parser has reached EOF and every
- * pending batch has completed in the shared task pool.
+ * Each task owns its batch. The shared handler must support concurrent calls,
+ * and all queued work finishes before a result is returned. A parse or source
+ * error is reported once through the failure callback.
  *
- * Parameter shape mirrors `run_sync_pipeline` in the reader module,
- * so the dispatcher can pick async vs sync via a single
- * `if (worker_count > 0) ...` branch.
- *
- * @tparam p_alphabet Alphabet used to encode record bodies
- * @tparam p_file_format Input record format
- * @tparam p_source Source satisfying the I/O source protocol
- * @tparam p_batch Movable batch receiving parsed records
- * @tparam p_handler Callable accepting a completed batch by rvalue
- * @tparam p_failure Callable accepting the first terminal diagnostic
- * @param[in] source Source consumed until EOF or failure
- * @param[in,out] handler_fn Handler kept alive until all queued tasks finish
- * @param[in,out] failure_fn Failure callback invoked at most once
- * @param[in] options Buffer, batch, and worker configuration
- * @return Emitted record count or the terminal diagnostic
+ * @tparam p_alphabet Alphabet used to encode sequence bodies.
+ * @tparam p_file_format FASTA or FASTQ.
+ * @tparam p_source Byte source.
+ * @tparam p_batch Movable batch type.
+ * @tparam p_handler Handler accepting a batch by rvalue.
+ * @tparam p_failure Callback accepting a diagnostic string.
+ * @param[in] source Input consumed until EOF or error.
+ * @param[in,out] handler_fn Shared handler kept alive until queued work finishes.
+ * @param[in,out] failure_fn Receives the first input or parse error.
+ * @param[in] options Buffer sizes, batch size, and worker settings.
+ * @return Emitted record count, or the input or parse error.
  */
 template <sequence_alphabet p_alphabet,
           sequence_file_format p_file_format,
@@ -90,7 +87,7 @@ run_async_pipeline(p_source source,
     }
     auto task_group = pool.make_task_group();
 
-    // ---- Producer/parser side ---- //
+    // Read and parse on the calling thread.
     buffer_slab slab(options.io.initial_buffer_size);
     p_batch current_batch;
     std::size_t records_emitted = 0;
@@ -98,7 +95,7 @@ run_async_pipeline(p_source source,
     std::string captured_error;
     std::size_t global_offset_base = 0;
 
-    // Retain and report only the first terminal pipeline error.
+    // Save and report only the first terminal pipeline error.
     auto failure_capture = [&aborted, &captured_error, &failure_fn](std::string&& msg) {
         if (!aborted) {
             captured_error = msg;
@@ -310,7 +307,7 @@ run_async_pipeline(p_source source,
         }
     }
 
-    // Final flush of any partial batch before workers tear down.
+    // Send the remaining completed records before waiting for workers.
     dispatch_batch();
 
     task_group.wait();
