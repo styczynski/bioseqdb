@@ -1,6 +1,6 @@
 /**
  * @file typed_support_parts/policy_stats.cppm
- * @brief Defines shared dispatch policy, execution statistics, and persisted GPU ledger helpers.
+ * @brief Selects dispatch policies and collects checked execution statistics.
  */
 module;
 
@@ -63,9 +63,9 @@ inline constexpr std::string_view minimizers_per_sequence_index_name =
 inline constexpr sequence_size_t postgres_segmentation_threshold_bp = 256'000'000;
 inline constexpr sequence_size_t opportunistic_index_minimum_bp = 4096;
 
-// GetConfigOptionByName returns a palloc-owned string and can ereport.  Keep the
-// PostgreSQL call and release in separate PG leaves; copy only after the getter
-// leaf has restored PG state so the owning std::string always unwinds normally.
+// Read and free the PostgreSQL string through invoke_pg_as_cpp so PostgreSQL
+// errors become C++ exceptions. Copy it between those calls so std::string
+// cleanup can run normally.
 [[nodiscard]] inline std::optional<std::string> pg_guc_value_as_cpp(const char* name) {
     char* raw_value = bioseq::postgres::support::invoke_pg_as_cpp(
         [name] { return GetConfigOptionByName(name, nullptr, true); });
@@ -132,9 +132,9 @@ pg_gpu_index_identity(std::uint64_t rowno,
 }
 
 /**
- * @brief Derives a GPU cache identity from an assembled-index key.
- * @param[in] key Relation, scheme and query identity fields for one assembled index.
- * @return Stable nonzero cache identity for the key.
+ * @brief Hashes an assembled-index key for lookup in the GPU cache.
+ * @param[in] key Relation, minimizer scheme, query, and sequence-window identity.
+ * @return A stable nonzero cache key.
  */
 template <class p_assembled_index_key>
 [[nodiscard]] inline bioseq::indexing::gpu_index_cache_identity
@@ -208,16 +208,9 @@ choose_deferred_minimizer_persist_index(const auto& ctx) {
 }
 
 /*
- * Scale k/w for the small-query regime typical inside Postgres — short
- * motifs vs per-row sequences under 1 kb. Runs once per row before the
- * core pipeline. Factored out of the hot lambda so all code paths
- * (recompute vs prebuilt index) share a single size-heuristic knob and
- * so EXPLAIN can replay the same derivation for its param printout.
- *
- * The heuristic only fires when the user left the fields at their
- * minimap2 defaults. Any aligner_options() override or non-default GUC
- * value short-circuits the adjustment so we never silently overwrite a
- * user-supplied tuning value.
+ * Adjust the default minimizer and chaining settings for short sequence pairs.
+ * The shared helper changes them only when k, w, the minimum chain score, and
+ * the minimum seed count still have their default values.
  */
 [[nodiscard]] inline minimap2_parameters apply_size_heuristic(const minimap2_parameters& base,
                                                               size_t min_bp) {
@@ -269,9 +262,8 @@ backend_from_selected_params(const minimap2_parameters& params) noexcept {
 }
 
 #if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
-/// Resolve the campaign aggregate from the already classified statement plan.
-/// It requests a label only; completed stage and environment evidence below
-/// must still prove that this route actually ran.
+/// Gets the requested backend label from the statement plan. Execution
+/// statistics must still confirm which stages ran and on which device.
 [[nodiscard]] inline ::bioseq::pipeline_stats::executed_backend
 backend_from_statement_plan(const pipe::statement_execution_plan& execution_plan) noexcept {
     using backend = ::bioseq::pipeline_stats::executed_backend;
@@ -388,16 +380,13 @@ observed_simd_chaining_policy_identity(const match_result_collection* execution_
         return identity_type::none;
     }
     const auto& policy = execution_stats->simd_chaining_stats.policy;
-    // identity_type answers only which named policy emitted operation calls.
-    // Rejections, saturation, forbidden scalar work, and missing vector work
-    // are retained as separate fail-closed validation stats below; folding them into
-    // identity would mislabel a rejected exact (or bounded) execution as a
-    // mixed-policy execution and hide the actual reason for rejection.
+    // Identify the chaining policy from its recorded calls. Keep rejection
+    // reasons and invalid work in their separate counters so a failed policy
+    // can still be identified correctly.
     const bool exact = policy.exact_visited_calls != 0;
     const bool bounded = policy.bounded_batch_approximate_calls != 0;
     if (exact == bounded) {
-        // Neither identity, or an impossible validation accepting both identities,
-        // is not a policy absence. Preserve it as mixed-invalid state.
+        // Available statistics must identify exactly one policy.
         return identity_type::mixed_invalid;
     }
     return exact ? identity_type::exact_visited : identity_type::bounded_batch_approximate;
@@ -486,7 +475,7 @@ record_block_aligner_execution_stats(::bioseq::pipeline_stats::pipeline_executio
 }
 
 #if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
-/** Derive the same logical target/query coordinates used by job attestation. */
+/** Finds the target row and query number used to identify this alignment job. */
 template <class p_scanner_pg_context>
 [[nodiscard]] inline benchmark_e2e_operation_origin
 benchmark_e2e_operation_origin_for_row(const p_scanner_pg_context* scanner_pg_ctx,
@@ -505,7 +494,7 @@ benchmark_e2e_operation_origin_for_row(const p_scanner_pg_context* scanner_pg_ct
     return origin;
 }
 
-/** Return the scope that attributes one job without mutating its statement plan. */
+/** Binds subsequent benchmark events to this job and its checked statement plan. */
 template <class p_scanner_pg_context>
 [[nodiscard]] inline benchmark_e2e_operation_scope
 bind_benchmark_e2e_operation_origin(const pipe::statement_execution_plan_owner& execution_plan,
@@ -592,18 +581,12 @@ record_unattested_job(::bioseq::pipeline_stats::pipeline_execution_stats& stats,
             malformed_prefilter_stats.is_saturated = true;
             stats.operational.record_prefilter_execution_stats(malformed_prefilter_stats);
         }
-        // CPU/SIMD stages write into the operation-local result collection;
-        // consume that delta once here, after any parallel row has joined.
-        // chain_stage is intentionally inclusive, so chain_backtrack remains
-        // zero. The left_extension timing slot likewise owns the coarse
-        // alignment-through-result interval; gap/right remain available for a
-        // later measured split. These owners do not overlap within one result
-        // collection; statement aggregation is intentionally a work sum, not
-        // a wall interval.
-        // query_sketch is only the per-operation sketch recorded below or by
-        // minimizer_stage; the batch join query-union preparation that precedes
-        // persisted payload delivery has a different lifetime owner and must
-        // be published separately rather than charged here twice.
+        // Add each completed job's measured stage times once, after its workers join.
+        // Chaining includes backtracking. The left_extension slot holds the full
+        // alignment-to-result time, leaving gap/right timing slots empty. Sums
+        // across parallel jobs measure total work.
+        // Query-union preparation is accounted separately because several jobs
+        // can share it.
         using stage_type = ::bioseq::pipeline_stats::pipeline_stage;
         add_stage_host_time(
             stats, stage_type::query_sketch, execution_stats->query_sketch_host_wall_ns);
@@ -828,10 +811,9 @@ record_unattested_job(::bioseq::pipeline_stats::pipeline_execution_stats& stats,
                                                           params.simd_chaining_policy,
                                                           require_collection_target_sketch,
                                                           /*require_nonempty_vector_work=*/true);
-    // do_cigar selects the scalar alignment stage, but a completed zero-anchor
-    // chain has no alignment regions to execute. Relax only the validator's
-    // positive-KSW2-work requirement when operation-local receipts prove that
-    // neither chaining nor alignment produced work or results.
+    // A scalar chain completed with zero anchors has no regions to align.
+    // Accept that completed empty result without requiring a KSW2 call, after
+    // checking that its counters contain no chaining or alignment work.
     const bool completed_zero_anchor_scalar_chain =
         selected_all_scalar && params.do_cigar && execution_stats != nullptr &&
         execution_stats->scalar_pipeline_execution_stats_available &&
@@ -918,20 +900,17 @@ record_unattested_job(::bioseq::pipeline_stats::pipeline_execution_stats& stats,
     }
     record_block_aligner_execution_stats(stats, execution_stats);
     const auto record_exact_nthash_vector_activity = [&stats](const auto& range_stats) noexcept {
-        // Continuation batches and whole-range resident vector_stream calls
-        // remain separate stats. A resident call is authentic vector work,
-        // but it is not one continuation batch.
+        // Count continuation batches and whole-sequence vector calls separately.
+        // Both perform vector work, with different units of measurement.
         add_operational_counter(
             stats, stats.operational.nthash_vector_batches, range_stats.vector_batches);
         add_operational_counter(stats,
                                 stats.operational.nthash_resident_vector_stream_kernel_calls,
                                 range_stats.resident_vector_stream_kernel_calls);
     };
-    // A broadcast persisted-query sketch is one physical operation shared by
-    // logical jobs. Account it at its first validation-approved consumer even when
-    // that job later has no chain/alignment; downstream route attestation is
-    // a separate question. Recompute rows cannot enter this block because
-    // their consumed_shared_cached_query_stats flag is false.
+    // A broadcast query sketch can serve several jobs. Count its work once,
+    // at the first consumer whose execution checks pass. Recomputed query
+    // sketches are counted with their own jobs below.
     const bool accepted_shared_query_sketch =
         consumed_shared_cached_query_stats && !cached_query_minimizer_stats_accounted &&
         execution_stats != nullptr &&
@@ -968,9 +947,8 @@ record_unattested_job(::bioseq::pipeline_stats::pipeline_execution_stats& stats,
         }
         cached_query_minimizer_stats_accounted = true;
     }
-    // A SIMD identity is published only after the per-job collection proves
-    // two_stack_nthash sketching, local SIMD score/backtracking, and Block alignment.
-    // Every partial, missing, or inconsistent validation remains mixed-invalid.
+    // Report the backend only after the completed stage records pass validation.
+    // Missing or inconsistent records leave the job marked mixed_invalid.
     job.actual_backend =
         accepted_all_simd     ? ::bioseq::pipeline_stats::executed_backend::simd_cpu
         : accepted_all_scalar ? ::bioseq::pipeline_stats::executed_backend::scalar_cpu
@@ -1066,8 +1044,8 @@ record_unattested_job(::bioseq::pipeline_stats::pipeline_execution_stats& stats,
 #if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
             if (!accepted_hybrid_gpu_seed ||
                 shared_vulkan_target->target_index_build_executed()) {
-                // No-index Vulkan target collection feeds the existing bounded
-                // host spill/replay constructor; it is not a GPU index build.
+                // Vulkan supplies target minimizers. The host builds their index by
+                // writing and replaying bounded runs.
                 mark(stage_type::target_index_build, engine_type::scalar_cpu);
             }
 #else
@@ -1211,14 +1189,12 @@ record_unattested_job(::bioseq::pipeline_stats::pipeline_execution_stats& stats,
         add_operational_counter(stats,
                                 stats.operational.gpu_chain_dispatches,
                                 execution_stats->partial_vulkan_stats.chain_score_dispatches);
-        // Tiled-DP downloads predecessors and runs the existing host
-        // backtracker; it never publishes a GPU-backtrack dispatch.
+        // Tiled DP returns predecessor links for CPU backtracking.
     }
     if (accepted_hybrid_host_seed) {
-        // The complete host suffix has returned and retained the real score
-        // dispatch authority. A selected GPU label or aggregate counter cannot
-        // enter this finalizer. GPU-seed waves use their separate whole-wave
-        // boundary; this branch never manufactures their missing proof.
+        // The host-seed job has finished and kept the GPU chaining completion
+        // record. Validate its device and cache statistics before publishing
+        // them. Jobs with GPU seeding are finalized with their full query wave.
         struct publication_validation {
             ::bioseq::pipeline_stats::pipeline_job_execution_stats* job;
             const minimap2_parameters* params;
@@ -1262,8 +1238,8 @@ record_unattested_job(::bioseq::pipeline_stats::pipeline_execution_stats& stats,
                                  std::span<bioseq::gpu::vulkan::runtime_pipeline_operation_token>{
                                      execution_stats->additional_completed_vulkan_chaining.data(),
                                      execution_stats->additional_completed_vulkan_chaining.size()});
-        // SQL bounds and stage acceptance were checked before the report-once
-        // commit. Only nonthrowing aggregation/consumption follows it.
+        // Validation finished before the one-time publication. The remaining
+        // statistics merge and record consumption cannot throw.
         stats.merge_operational(publication.cache_delta);
         add_operational_counter(
             stats,
@@ -1313,9 +1289,8 @@ record_unattested_job(::bioseq::pipeline_stats::pipeline_execution_stats& stats,
         *completed_cpu_target_stats_published = true;
     }
 #endif
-    // Unsupported tuples and incomplete scalar/SIMD paths deliberately remain
-    // unattested. Persisted identity remains fail-closed until its reader
-    // publishes the generation validation.
+    // Keep incomplete execution records in the statistics so validation can
+    // reject them. Stored-index jobs also need a checked generation identity.
     stats.merge_job(job
 #if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
                     , authenticated_query_empty_recomputed_bypass
@@ -1323,12 +1298,12 @@ record_unattested_job(::bioseq::pipeline_stats::pipeline_execution_stats& stats,
                     );
 }
 
-/// @brief SQL-visible source-direct acceptance with report-once cache metrics.
+/// @brief Checked GPU environment and cache metrics awaiting one-time reporting.
 struct source_direct_vulkan_execution_acceptance {
     ::bioseq::pipeline_stats::execution_environment_snapshot environment{};
     bioseq::gpu::vulkan::runtime_gpu_cache_metrics_delta cache_metrics{};
 
-    /// @brief Validates the environment and unconsumed cache-metric authority.
+    /// @brief Checks the GPU environment and whether the cache metrics can still be reported.
     [[nodiscard]] bool is_valid() const noexcept {
         return ::bioseq::pipeline_stats::is_environment_valid_for_backend(
                    environment, ::bioseq::pipeline_stats::executed_backend::vulkan_gpu) &&
@@ -1336,12 +1311,12 @@ struct source_direct_vulkan_execution_acceptance {
     }
 };
 
-/// @brief Consume one exact source-direct runtime receipt into SQL evidence.
-/// @param[in] params Selected full-pipeline parameters.
-/// @param[in,out] receipt One-shot runtime receipt bound to @p batch_stats and @p results.
-/// @param[in] batch_stats Completed source-direct batch counters.
-/// @param[in] results Completed source-direct coordinate results.
-/// @return Validated full-Vulkan evidence, or no value after any mismatch.
+/// @brief Checks completed GPU batch results and consumes their execution record.
+/// @param[in] params Selected GPU pipeline settings.
+/// @param[in,out] receipt One-use record tied to these counters and results.
+/// @param[in] batch_stats Completed batch counters.
+/// @param[in] results Completed coordinate results.
+/// @return The checked device information and cache metrics, or no value on mismatch.
 [[nodiscard]] inline std::optional<source_direct_vulkan_execution_acceptance>
 consume_source_direct_vulkan_environment(
     const minimap2_parameters& params,
@@ -1396,10 +1371,10 @@ consume_source_direct_vulkan_environment(
                : std::nullopt;
 }
 
-/// @brief Publishes a source-direct operation's cache metrics exactly once.
-/// @param[in,out] stats Statement statistics receiving the operational delta.
-/// @param[in,out] execution Validated execution whose metric authority is consumed.
-/// @return `true` only when a valid one-shot delta was merged and burned.
+/// @brief Adds this GPU operation's cache metrics to the statement once.
+/// @param[in,out] stats Statement statistics receiving the counts.
+/// @param[in,out] execution Checked execution record whose metrics are consumed.
+/// @return True if valid metrics were added. Reusing the record returns false.
 [[nodiscard]] inline bool commit_source_direct_vulkan_cache_metrics(
     ::bioseq::pipeline_stats::pipeline_execution_stats& stats,
     source_direct_vulkan_execution_acceptance& execution) noexcept {
@@ -1422,19 +1397,12 @@ consume_source_direct_vulkan_environment(
     return true;
 }
 
-/// @brief Publish one logical recomputed-target job from a sealed Vulkan batch.
-/// @param[in,out] stats Statement execution statistics.
-/// @param[in] params Selected full-Vulkan parameters.
-/// @param[in] requested_source Requested target-index source.
-/// @param[in] environment Runtime-sealed and SQL-validated GPU environment.
-/// @param[in] scanner_pg_ctx Optional PostgreSQL scan context.
-/// @param[in] row_index Logical batch row.
-/// @param[in] per_row_query_mode Whether queries are row-local.
-/// @param[in] broadcast_query_ordinal Broadcast-query identity.
-/// @param[in] seed_lookup_executed Whether this row owned a nonempty seed job.
-/// @param[in] chaining_executed Whether this row produced a valid coordinate result.
-/// @param[in] cigar_executed Whether this row completed GPU CIGAR projection.
-/// @return `true` only after a complete job attestation is merged.
+/// @brief Records one job from a completed GPU batch that built its target index.
+///
+/// Uses the supplied device information and stage flags to describe the work
+/// performed for this target row and query number. Checks that the selected
+/// pipeline and requested index source agree, then adds the job to stats.
+/// @return True when the job passes validation and its statistics are added.
 template <class p_scanner_pg_context>
 [[nodiscard]] inline bool record_source_direct_vulkan_job(
     ::bioseq::pipeline_stats::pipeline_execution_stats& stats,
@@ -1513,11 +1481,10 @@ template <class p_scanner_pg_context>
     return true;
 }
 
-/// Consume one runtime-sealed persisted grouped-SoA coordinate receipt into a local
-/// job value.  Nothing caller-visible is mutated here: a missing, tampered or
-/// repeated consume burns only the runtime record and returns no staged job.
-/// The accepted operation authority supplies the immutable GPU environment
-/// after every job and the complete causal receipt union have been validated.
+/// Checks and consumes a stored-index GPU coordinate record to prepare job
+/// statistics. Returns no value if the record or requested settings disagree.
+/// The caller still needs to validate the complete operation and attach its
+/// GPU environment before publishing these statistics.
 [[nodiscard]] inline std::optional<::bioseq::pipeline_stats::pipeline_job_execution_stats>
 stage_persisted_grouped_soa_coordinate_job(
     const minimap2_parameters& params,
@@ -1578,7 +1545,7 @@ stage_persisted_grouped_soa_coordinate_job(
     return job;
 }
 
-/// Copy one runtime cache audit into the pointer-free SQL ledger wire.
+/// Copies GPU cache counters into the statistics record used by SQL.
 [[nodiscard]] inline ::bioseq::pipeline_stats::persisted_gpu_cache_metrics
 make_persisted_gpu_cache_metrics_stats(
     const bioseq::gpu::vulkan::runtime_gpu_cache_metrics_audit& source) noexcept {
@@ -1604,9 +1571,9 @@ copy_persisted_gpu_stats_text(std::array<char, p_capacity>& destination,
     return static_cast<std::uint32_t>(source.size());
 }
 
-/// Copy the pointer/path/handle-free process qualification into the admitted
-/// SQL ledger. An oversized helper identity becomes an invalid zero-length
-/// field instead of allocating or truncating provenance.
+/// Copies the shader-cache validation results into SQL statistics. Helper
+/// identity strings that exceed the fixed storage get length zero, which
+/// makes the record invalid.
 [[nodiscard]] inline ::bioseq::pipeline_stats::persisted_gpu_cache_validation_result
 make_persisted_gpu_cache_validation_stats(
     const bioseq::gpu::vulkan::runtime_metal_archive_process_qualification& source) noexcept {
@@ -1647,7 +1614,7 @@ make_persisted_gpu_cache_validation_stats(
     return validation_stats;
 }
 
-/// Copy one full-stage runtime job preview into the admitted ledger slot.
+/// Copies one completed GPU job's work counts and coordinates into SQL statistics.
 [[nodiscard]] inline ::bioseq::pipeline_stats::persisted_gpu_job_stats make_persisted_gpu_job_stats(
     const bioseq::gpu::vulkan::persisted_grouped_soa_coordinate_job_receipt_preview&
         source) noexcept {
@@ -1715,7 +1682,7 @@ make_persisted_gpu_cache_validation_stats(
     return job_stats;
 }
 
-/// Populate the fixed operation envelope from the pre-finalizer runtime view.
+/// Builds operation statistics from the GPU runtime preview and publication details.
 [[nodiscard]] inline ::bioseq::pipeline_stats::persisted_gpu_operation_stats
 make_persisted_gpu_operation_stats(
     const bioseq::gpu::vulkan::persisted_grouped_soa_coordinate_operation_receipt_preview& source,
@@ -1764,9 +1731,9 @@ make_persisted_gpu_operation_stats(
     };
 }
 
-/// Conservative admission envelope for the fixed N-job capacities that coexist
-/// between persisted grouped-SoA execution and atomic SQL publication. CIGAR
-/// storage is admitted separately from the actual coordinate spans.
+/// Estimates memory for the job records held while a stored-index GPU batch
+/// prepares its SQL results. CIGAR input storage is reserved separately once
+/// its sequence windows are known.
 [[nodiscard]] inline std::uint64_t
 persisted_grouped_soa_publication_staging_bytes(const std::uint64_t job_count) noexcept {
     using staged_job_type = ::bioseq::pipeline_stats::pipeline_job_execution_stats;
@@ -1778,14 +1745,13 @@ persisted_grouped_soa_publication_staging_bytes(const std::uint64_t job_count) n
     add(sizeof(bioseq::gpu::vulkan::gpu_seed_coordinate_job));
     add(sizeof(std::size_t));
     add(sizeof(bioseq::gpu::vulkan::gpu_coordinate_result_wire));
-    // Runtime retains its GPU stats and causal audit-job vectors separately.
-    // This charge is the distinct SQL-side std::vector<staged_job_type> in
-    // vulkan_target_routes, not the runtime's independently owned records.
+    // Reserve the SQL-side staged-job vector here. The GPU runtime reserves
+    // memory for its own statistics and execution records separately.
     add(sizeof(staged_job_type));
 #if !defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
     using result_map_value_type = typename match_result_map::value_type;
-    // Ordinary builds retain the historical coarse node/vector envelope.
-    // E2E nodes and vectors now own disjoint exact physical permits.
+    // Ordinary builds estimate result-map nodes and vectors together.
+    // Benchmark builds reserve their actual allocations separately.
     add(sizeof(result_map_value_type));
     add(4u * sizeof(void*));
     add(bioseq::common::saturating_mul(2u, sizeof(match_result)));
@@ -1795,15 +1761,15 @@ persisted_grouped_soa_publication_staging_bytes(const std::uint64_t job_count) n
         bioseq::parallelism::k_vector_preallocation_headroom_factor);
 }
 
-/// Conservative retained host-input bytes for one persisted CIGAR job with known spans.
+/// Estimates CPU memory held for one GPU CIGAR job from its sequence windows.
 [[nodiscard]] inline std::uint64_t
 persisted_grouped_soa_cigar_staging_bytes(const std::uint64_t query_span,
                                           const std::uint64_t target_span) noexcept {
-    // Packed windows use at most one byte per symbol plus one seven-byte alignment tail.
+    // Each packed window needs at most one byte per symbol and seven padding bytes.
     const std::uint64_t window_bytes = bioseq::common::saturating_add(
         bioseq::common::saturating_add(query_span, target_span), 14u);
-    // Runtime readback is separately admitted and compacted to actual operations.
-    // This statement permit covers only the retained packed inputs and route metadata.
+    // Reserve packed inputs and job metadata here. The runtime separately
+    // reserves memory for downloaded CIGAR operations.
     std::uint64_t bytes = window_bytes;
     bytes = bioseq::common::saturating_add(
         bytes, sizeof(bioseq::gpu::vulkan::gpu_alignment_cigar_job_wire));

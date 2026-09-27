@@ -1,6 +1,6 @@
 /**
  * @file typed_support_parts/root_coordination.cppm
- * @brief Coordinates one typed scheduler batch while preserving generated row identities.
+ * @brief Checks a typed batch and runs its selected CPU or Vulkan pipeline.
  */
 module;
 
@@ -65,12 +65,11 @@ using std::vector;
 }  // namespace root_std
 
 /**
- * Executes the typed root batch around compile-time scanner and in-memory row
- * callables supplied by the generated coordinate owner.
- *
- * The callables preserve generated source identities without introducing
- * runtime dispatch. PostgreSQL exception conversion, memory permits, worker
- * unwinding, and Vulkan publication remain in their original lexical regions.
+ * Runs a batch using the statement's chosen algorithms and target-index policy.
+ * Checks the sequence format and required index readers before dispatch. Vulkan
+ * jobs keep their results and execution records until the whole batch is ready
+ * to report. CPU seeding uses the supplied typed row dispatcher, including when
+ * Vulkan is selected for chaining.
  */
 template <class p_sequence,
           std::size_t p_batch_capacity,
@@ -113,11 +112,9 @@ template <class p_sequence,
         pg_guc_value_as_cpp("bioseq.testing.chunked_scanner.enabled");
     const bool chunked_scanner_forced =
         chunked_scanner_guc.has_value() && *chunked_scanner_guc == "on";
-    // Test parity knob. When on, the dispatch
-    // loop forces the in-memory baseline (with_lazy_in_memory). Otherwise
-    // (default) and given a non-null scanner_pg_context, the loop uses
-    // the canonical PostgreSQL-backed facade (for stub targets,
-    // in-memory for the query literal / inline targets).
+    // Test settings can select flat or chunked baseline scanners. Expanded
+    // sequence expressions still use the PostgreSQL scanner so their lazy
+    // views remain available.
     const std::optional<std::string> inmemory_scanner_guc =
         pg_guc_value_as_cpp("bioseq.testing.in_memory_scanner.enabled");
     const bool inmemory_scanner_forced =
@@ -229,11 +226,8 @@ template <class p_sequence,
             : std::string_view{"no_scanner_context"});
 
     /*
-     * Query minimizers are computed once per batch for the
-     * prebuilt-index path (every row reuses the same query).
-     * Recompute-path rows use minimap_port_raw_pg_checked(), which does its
-     * own sketching; the extra allocation here is avoided
-     * for those rows via the optional nested-scope.
+     * A stored-index batch may share one broadcast query sketch. Track whether
+     * its work has been counted so each row can reuse it without inflating stats.
      */
     bool cached_query_minimizer_stats_accounted = false;
     bioseq::gpu::vulkan::runtime* selected_vulkan_runtime = nullptr;
@@ -512,9 +506,9 @@ template <class p_sequence,
                         "Vulkan seed wave changed canonical row or query-id order");
                 }
             }
-            // Complete every potentially allocating result-map append while all
-            // query/seed/chain authorities are still private. A failed append
-            // therefore cannot follow a report-once runtime claim.
+            // Allocate all result-map entries before reporting GPU execution. If an
+            // allocation fails, none of this batch's one-time records have been
+            // consumed yet.
             for (auto& completed : completed_suffix_rows) {
                 append_canonical_results(results, completed.query_id, completed.collection);
             }
@@ -857,8 +851,8 @@ template <class p_sequence,
                 }
             }
 
-            // All source/field/extent/order/digest and numeric checks above
-            // precede moving the one-shot authorities into one transaction set.
+            // Check the completed jobs and counters before gathering their one-use
+            // execution records for publication as a batch.
             if (ordinary_mpf_route) {
                 for (auto& proof : ordinary_route_completion.row_proofs) {
                     append_mpf_query_authorization(proof.mpf_query_authorization);
@@ -1153,9 +1147,8 @@ template <class p_sequence,
         }
     }
 
-    /* A GPU-seed request cannot silently enter a host-seed producer.
-     * Host seeding followed by the selected Vulkan chainer intentionally uses
-     * the generic row dispatcher; that is its selected route, not fallback. */
+    /* Host seeding uses the row dispatcher, including the host-seed/Vulkan-chain
+     * combination. A GPU-seed request must have completed in the branch above. */
     if (selected_vulkan_seed) {
         add_operational_counter(stats, stats.operational.backend_declines);
         raise_vulkan_pg_error(

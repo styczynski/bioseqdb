@@ -1,6 +1,6 @@
 /**
  * @file typed_support_parts/resident_target_materialization.cppm
- * @brief Admits and materializes one immutable target for segment workers.
+ * @brief Copies a target into memory shared by CPU workers when the budget allows.
  */
 module;
 
@@ -18,16 +18,16 @@ import bioseq.parallelism.memory_admission;
 
 export namespace bioseq::simd::typed_dispatch::typed_support_detail {
 
-/** Owns the admitted packed target shared by segment workers. */
+/** Keeps the packed target and its memory reservation alive while workers use it. */
 template <sequence_alphabet p_alphabet> struct resident_target_for_workers {
     bioseq::storage::admitted_packed_sequence<p_alphabet> owner;
 };
 
 /**
- * Materialize a bounded-random-access target when memory admission succeeds.
- *
- * A rejected admission returns an empty optional so the established serial
- * scanner route can handle the row.
+ * Copies the target into packed memory that workers can read without PostgreSQL
+ * calls. Returns no value if the memory budget cannot cover it, allowing the
+ * caller to process the target serially through the scanner. Allocation or
+ * sequence-reading errors still propagate.
  */
 template <sequence_alphabet p_alphabet>
 [[nodiscard]] std::optional<resident_target_for_workers<p_alphabet>>

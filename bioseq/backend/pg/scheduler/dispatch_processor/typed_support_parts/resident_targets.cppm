@@ -1,6 +1,6 @@
 /**
  * @file typed_support_parts/resident_targets.cppm
- * @brief Defines transient indexed alignment and admitted resident-target materialization.
+ * @brief Builds temporary target indexes for CPU alignment.
  */
 module;
 
@@ -55,7 +55,7 @@ import bioseq.postgres.scheduler.supervisor;
 #if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS) || defined(BIOSEQ_TEST_INDEXES)
 namespace bioseq::simd::typed_dispatch::typed_support_detail {
 
-/** Flush one transient-MPF phase failure without replacing its owning failure. */
+/** Logs a temporary fragment-index failure while preserving the original error. */
 inline void emit_transient_mpf_failure(
     const char* site,
     std::uint64_t target_bp,
@@ -128,9 +128,9 @@ inline void emit_transient_mpf_failure(
 
 export namespace bioseq::simd::typed_dispatch::typed_support_detail {
 
-/** One generated physical query owner plus optional native-width grouped-reader keys. */
+/** Owns query minimizers and optional sorted hashes used to select target entries. */
 struct transient_physical_query {
-    // Permit first: both hash vectors and the generated shared owner die before accounting.
+    // Destroy the minimizers and hash vectors before releasing their memory reservation.
     bioseq::parallelism::memory_permit permit;
     bioseq::minimizers::minimizer_physical_batch_owner minimizers;
     pipe::minimizer_range_execution_stats execution_stats{};
@@ -151,7 +151,7 @@ struct transient_physical_query {
     transient_physical_query& operator=(transient_physical_query&&) = delete;
 };
 
-/** Raise one checked PostgreSQL error for a transient generation contract failure. */
+/** Reports a temporary index build failure as an out-of-memory or data-corruption error. */
 [[noreturn]] inline void raise_transient_generation_error(
     std::string_view stage,
     bioseq::indexing::minimizer_generation_encoding_error error) {
@@ -165,7 +165,11 @@ struct transient_physical_query {
     raise_typed_dispatch_pg_error_as_cpp(sqlstate, diagnostic.c_str());
 }
 
-/** Collect one query through the generated record selected before instantiation. */
+/**
+ * Sketches the query into the selected minimizer record format under a memory
+ * reservation. Optionally keeps sorted unique hashes so target preparation can
+ * discard minimizers whose hashes are absent from this query.
+ */
 template <sequence_alphabet p_alphabet>
 [[nodiscard]] transient_physical_query prepare_transient_physical_query(
     bioseq::storage::lazy_sequence_view<p_alphabet> query_view,
@@ -339,7 +343,7 @@ template <sequence_alphabet p_alphabet>
         });
 }
 
-/** Attach only operation-originated query stats after the indexed suffix succeeds. */
+/** Checks and attaches the query-sketch statistics after indexed alignment succeeds. */
 inline void record_transient_query_execution(
     match_result_collection& collection,
     const transient_physical_query& query) {
@@ -371,7 +375,7 @@ inline void record_transient_query_execution(
 }
 
 #if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS) || defined(BIOSEQ_TEST_INDEXES)
-/** Retain one authenticated ordinary transient-target authority for job finalization. */
+/** Keeps the checked target-build record with the result for later job validation. */
 inline void record_transient_cpu_target_generation_authority(
     match_result_collection& collection,
     const transient_cpu_target_generation_representation representation,
@@ -385,9 +389,9 @@ inline void record_transient_cpu_target_generation_authority(
 }
 
 /**
- * @brief Retains operation-originated bounded target counters after a transient suffix succeeds.
- * @param collection Completed suffix receiving the one physical target operation.
- * @param stats Authenticated index producer counters, projected without numerical changes.
+ * @brief Adds bounded ntHash target-sketch counts to the completed alignment.
+ * @param collection Result receiving these counts once.
+ * @param stats Checked counts from the target index build.
  */
 inline void record_transient_bounded_target_execution(
     match_result_collection& collection,
@@ -442,14 +446,14 @@ inline void record_transient_bounded_target_execution(
 }
 #endif
 
-/** Generated target layout, persisted identity, and concrete host producer backend. */
+/** Selected target record format, algorithm identity, and CPU sketching backend. */
 struct transient_target_generation_selection {
     bioseq::minimizers::minimizer_physical_layout_selection layout{};
     bioseq::indexing::minimizer_generation_algorithm_identity identity{};
     minimizer_sketch_backend backend = minimizer_sketch_backend::scalar;
 };
 
-/** Select the generated target record and its concrete host producer backend. */
+/** Selects a CPU minimizer implementation and record format that can hold this target. */
 template <sequence_alphabet p_alphabet>
 [[nodiscard]] transient_target_generation_selection
 select_transient_target_generation(const minimap2_parameters& params,
@@ -489,10 +493,9 @@ select_transient_target_generation(const minimap2_parameters& params,
 }
 
 /**
- * Verify biological hash identity, not the independently validated record capacity.
- * physical_kmer_size sizes a packed record; it is not the runtime sketch k.
- * For example a short two-stack query can use L15/K15 while a large target
- * uses L63/K20, both carrying the same runtime-k hash without truncation.
+ * Checks that query and target use the same hash definition and runtime k/w.
+ * Their records may use different position capacities. For example, a short
+ * query and a large target can store the same hashes in different record formats.
  */
 [[nodiscard]] inline bool transient_query_matches_target_identity(
     const transient_physical_query& query,
@@ -505,7 +508,7 @@ select_transient_target_generation(const minimap2_parameters& params,
            query.layout.runtime_window_size == target.runtime_window_size;
 }
 
-/** Verify a retained query's biological identity, independent of record capacity. */
+/** Checks that a saved query layout uses the target's hash definition and runtime k/w. */
 [[nodiscard]] inline bool transient_query_layout_matches_target_identity(
     const bioseq::minimizers::minimizer_physical_layout_selection& query,
     const bioseq::indexing::minimizer_generation_algorithm_identity& target) noexcept {
@@ -517,7 +520,10 @@ select_transient_target_generation(const minimap2_parameters& params,
            query.runtime_window_size == target.runtime_window_size;
 }
 
-/** Spill one target after filtering by the statement's native-width canonical query union. */
+/**
+ * Writes target minimizers to temporary sorted runs, keeping only hashes in
+ * the prepared query set. Uses the query set's 32-bit or 64-bit hash storage.
+ */
 template <sequence_alphabet p_alphabet>
 [[nodiscard]] auto spill_transient_target_for_prepared_queries(
     opportunistic_sequence_index_storage& storage,
@@ -573,7 +579,7 @@ template <sequence_alphabet p_alphabet>
     pg_unreachable();
 }
 
-/** Allocate one shared target facade while charging its allocator-reported control extent. */
+/** Allocates a shared target object and reserves memory for its actual allocation. */
 template <class p_target, class... p_arguments>
 [[nodiscard]] std::shared_ptr<p_target> make_admitted_transient_target_owner(
     bioseq::parallelism::memory_permit& permit,
@@ -601,7 +607,7 @@ template <class p_target, class... p_arguments>
     return result;
 }
 
-/** One admitted MPF owner; the shared index is destroyed before its accounting permit. */
+/** Keeps a temporary fragment index alive and releases its memory reservation last. */
 struct admitted_transient_mpf_index {
     bioseq::parallelism::memory_permit permit;
     std::shared_ptr<bioseq::indexing::minimizer_hashmap_fragment_index> index;
@@ -610,7 +616,12 @@ struct admitted_transient_mpf_index {
 #endif
 };
 
-/** Build one exact query-filtered MPF target under its complete physical admission. */
+/**
+ * Builds a temporary fragment index containing the target minimizers needed by
+ * the query set. Writes sorted runs first to count the selected entries, then
+ * allocates their records and hash table within the memory budget. Checks the
+ * replayed records before making the index available for alignment.
+ */
 template <sequence_alphabet p_alphabet>
 [[nodiscard]] admitted_transient_mpf_index build_admitted_transient_mpf_index(
     bioseq::storage::lazy_sequence_view<p_alphabet> target_view,
@@ -964,7 +975,11 @@ template <sequence_alphabet p_alphabet>
     return result;
 }
 
-/** Build or reuse one exact query-filtered MPF target for a prepared statement group. */
+/**
+ * Aligns a prepared query against a temporary fragment index. Builds the index
+ * once from the group's combined query hashes and keeps it for later queries.
+ * Reuse requires the same query-set checksum and a valid memory reservation.
+ */
 template <sequence_alphabet p_alphabet, class p_query, class p_group, class p_prepared_target>
 [[nodiscard]] match_result_collection build_and_align_prepared_transient_minimizer_fragment(
     bioseq::storage::lazy_sequence_view<p_alphabet> query_view,
@@ -1089,7 +1104,11 @@ template <sequence_alphabet p_alphabet, class p_query, class p_group, class p_pr
 #endif
 }
 
-/** Build or reuse one authenticated grouped-SoA target for a prepared statement group. */
+/**
+ * Aligns a prepared query through a temporary grouped-SoA target index. Builds
+ * and checks the index once using the group's combined query hashes, then
+ * keeps its reader for the remaining queries in the group.
+ */
 template <sequence_alphabet p_alphabet, class p_query, class p_group, class p_prepared_target>
 [[nodiscard]] match_result_collection build_and_align_prepared_transient_minimizer_sequence(
     bioseq::storage::lazy_sequence_view<p_alphabet> query_view,
@@ -1319,7 +1338,11 @@ template <sequence_alphabet p_alphabet, class p_query, class p_group, class p_pr
         });
 }
 
-/** Build and align a transient MPF target without any persisted-index read. */
+/**
+ * Sketches one query, builds a temporary fragment index filtered by its hashes,
+ * and aligns against that index. The index lives for this call. This path
+ * reads the target sequence and leaves stored indexes untouched.
+ */
 template <sequence_alphabet p_alphabet>
 [[nodiscard]] match_result_collection build_and_align_transient_minimizer_fragment(
     bioseq::storage::lazy_sequence_view<p_alphabet> query_view,
@@ -1466,7 +1489,11 @@ template <sequence_alphabet p_alphabet>
     return collection;
 }
 
-/** Build an authenticated transient grouped-SoA MPS target and align through its reader. */
+/**
+ * Builds a temporary grouped-SoA index from the target sequence, checks its
+ * encoded rows, and aligns this query through a reader that keeps positions
+ * for the query hashes. The index is discarded when the call finishes.
+ */
 template <sequence_alphabet p_alphabet>
 [[nodiscard]] match_result_collection build_and_align_transient_minimizer_sequence(
     bioseq::storage::lazy_sequence_view<p_alphabet> query_view,
@@ -1740,9 +1767,9 @@ stage_recompute_minimizer_sequence_build_if_selected(const p_scanner_pg_context&
         return false;
     }
 
-    // The legacy async request carries only a backend enum. Admit it only when that enum is a
-    // lossless encoding of the generated requested identity; reference identities require the
-    // newer plan-owned publisher and must not be relabelled as scalar or two-stack work.
+    // The asynchronous request stores only a backend enum. Queue a build only
+    // if that enum preserves the requested algorithm identity. Reference
+    // algorithms need the publisher that carries the full statement plan.
     if (storage_unit_byte_width != sizeof(std::uint32_t) &&
         storage_unit_byte_width != sizeof(std::uint64_t)) {
         return false;
@@ -1818,9 +1845,8 @@ template <sequence_alphabet p_alphabet, class p_scanner_pg_context>
         throw std::invalid_argument("transient index operation requires a statement plan owner");
     }
     if (choice.kind == deferred_minimizer_index_kind::per_sequence) {
-        // Real minimizer-sequence no-index route: build a transient minimizers_per_sequence
-        // index through the generated host producer, authenticate its reader, and run the
-        // indexed suffix. The external GPU target owner is deliberately not synthesized here.
+        // Build and check a temporary minimizers_per_sequence index on the CPU,
+        // then align through its reader.
         (void)ctx;
         (void)last_fragment_padding;
         match_result_collection collection = build_and_align_transient_minimizer_sequence(
