@@ -1,6 +1,6 @@
 /**
  * @file pipeline/pipe_parts/segmented_finalization.cppm
- * @brief Merges fragment emissions and finalizes persisted fragments.
+ * @brief Combines segment minimizers and writes completed fragment indexes.
  */
 module;
 
@@ -63,16 +63,17 @@ export {
 
     namespace bioseq::simd {
 
-    /// Pending minimizers accumulated for one persistent fragment.
+    /// Minimizers waiting to be written for one stored fragment.
     template <class p_minimizer> struct pending_fragment_build {
         sequence_size_t fragment_len_bp = 0;
         std::vector<p_minimizer> minimizers{};
     };
 
-    /// Flush ordered fragment-index payloads while segmented target work advances.
+    /// Collect minimizers across segments and write each fragment once complete.
+    /// Feed segments in core order so a flushed fragment receives no later data.
     template <class p_fragment_storage, class p_minimizer> class fragment_persist_accumulator {
       public:
-        /// Bind the destination and fixed fragment geometry.
+        /// Borrow the destination and set the sequence and fragment lengths.
         fragment_persist_accumulator(p_fragment_storage& storage,
                                      sequence_size_t total_bp,
                                      sequence_size_t fragment_bp)
@@ -80,7 +81,7 @@ export {
               fragment_count_(
                   static_cast<std::size_t>((total_bp + fragment_bp - 1) / fragment_bp)) {}
 
-        /// Merge one segment's fragment emissions into pending fragment owners.
+        /// Append a segment's minimizers to their destination fragments.
         void ingest(std::span<const segment_fragment_emission<p_minimizer>> emissions) {
             for (const segment_fragment_emission<p_minimizer>& emission : emissions) {
                 pending_fragment_build<p_minimizer>& pending = pending_[emission.fragment_no];
@@ -91,7 +92,7 @@ export {
             }
         }
 
-        /// Flush fragments fully covered by processed segment cores.
+        /// Write fragments ending at or before the processed core boundary.
         void flush_ready(sequence_size_t processed_core_hi_bp) {
             while (next_flush_fragment_ < fragment_count_) {
                 if (fragment_hi_bp(next_flush_fragment_) > processed_core_hi_bp) {
@@ -101,7 +102,7 @@ export {
             }
         }
 
-        /// Flush remaining fragments and publish the fragment-count manifest.
+        /// Write remaining fragments, then store the total fragment count.
         void finish() {
             while (next_flush_fragment_ < fragment_count_) {
                 flush_one(next_flush_fragment_++);
@@ -119,17 +120,17 @@ export {
         }
 
       private:
-        /// Return the inclusive biological start of one fragment.
+        /// Return the fragment's first base position in the full sequence.
         [[nodiscard]] sequence_size_t fragment_lo_bp(std::size_t fragment_no) const {
             return static_cast<sequence_size_t>(fragment_no) * fragment_bp_;
         }
 
-        /// Return the exclusive biological end of one fragment.
+        /// Return the base position just after the fragment, clipped to sequence end.
         [[nodiscard]] sequence_size_t fragment_hi_bp(std::size_t fragment_no) const {
             return std::min(fragment_lo_bp(fragment_no) + fragment_bp_, total_bp_);
         }
 
-        /// Serialize and write one complete fragment index.
+        /// Build and store one fragment index, including fragments with no minimizers.
         void flush_one(std::size_t fragment_no) {
             pending_fragment_build<p_minimizer> pending{};
             if (auto it = pending_.find(fragment_no); it != pending_.end()) {

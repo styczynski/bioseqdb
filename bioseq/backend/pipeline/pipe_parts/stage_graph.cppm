@@ -1,6 +1,6 @@
 /**
  * @file pipeline/pipe_parts/stage_graph.cppm
- * @brief Compile-time stage protocol and composition for the alignment pipeline.
+ * @brief Connects alignment stages and passes batches between them.
  */
 module;
 
@@ -62,35 +62,33 @@ export {
     namespace bioseq::simd::pipe {
 
     namespace prefilter = ::bioseq::prefilter;
-    // Keep the canonical minimizer-index concepts visible to stage templates.
+    // Make the shared index types and requirements available to stages.
     using bioseq::indexing::minimizer_hashmap_fragment_index;
     using bioseq::indexing::minimizer_lookup_index;
     using bioseq::indexing::minimizer_seed_index;
 
-    // Export exception aliases through the pipeline module so PG importers do not
-    // redundantly import the Highway-heavy implementation modules.
+    // Export these error types so PostgreSQL callers can catch them through
+    // the pipeline module without importing the SIMD implementations.
     using exact_simd_runtime_error = ::bioseq::minimizers::exact_simd_runtime_error;
     using simd_chaining_runtime_error = ::bioseq::chaining::simd_chaining_runtime_error;
     using simd_chaining_status = ::bioseq::chaining::simd_chaining_status;
 
-    /// Fail-closed error for the selected bounded ntHash route.  PostgreSQL-facing
-    /// callers catch this concrete type before entering the longjmp ERROR boundary.
-    /// no bounded ntHash rejection is allowed to escape the C++ frame or select another
-    /// minimizer implementation.
+    /// Reports a rejected bounded-ntHash request. PostgreSQL callers catch this
+    /// C++ exception before raising ERROR, so C++ cleanup can finish first.
     class bounded_nthash_runtime_error final : public std::runtime_error {
       public:
-        /// Describe a fail-closed bounded-ntHash rejection.
+        /// Add the bounded-ntHash algorithm name to the rejection details.
         explicit bounded_nthash_runtime_error(std::string detail)
             : std::runtime_error(std::string{"bounded_nthash_simd minimizer execution rejected: "} +
                                  std::move(detail)) {}
     };
 
-    // — pipeline lengths/positions use the 64-bit sequence_size_t.
+    // Store pipeline lengths and positions in the 64-bit sequence_size_t.
     using bioseq::storage::sequence_size_t;
 
     using host_stage_clock = std::chrono::steady_clock;
 
-    /// Sample the monotonic host-stage clock as a positive nanosecond value.
+    /// Read the steady clock in nanoseconds, with a minimum value of one.
     [[nodiscard]] inline std::uint64_t host_stage_now_ns() noexcept {
         const auto now = std::chrono::duration_cast<std::chrono::nanoseconds>(
                              host_stage_clock::now().time_since_epoch())
@@ -98,19 +96,17 @@ export {
         return now > 0 ? static_cast<std::uint64_t>(now) : 1u;
     }
 
-    /// Return a positive elapsed host-stage duration for one sampled start.
+    /// Measure elapsed nanoseconds since started_ns, with a minimum of one.
     [[nodiscard]] inline std::uint64_t
     elapsed_host_stage_ns(const std::uint64_t started_ns) noexcept {
         const std::uint64_t finished_ns = host_stage_now_ns();
         const std::uint64_t elapsed = finished_ns >= started_ns ? finished_ns - started_ns : 0u;
-        // A stage that executed is a positive observation even on a platform whose
-        // steady-clock tick is coarser than one nanosecond. The clamp can add at
-        // most one nanosecond and keeps focused tests independent of clock
-        // resolution without sleeping.
+        // Use one nanosecond when the clock cannot distinguish the two samples,
+        // so a completed stage still has a positive recorded duration.
         return elapsed > 0 ? elapsed : 1u;
     }
 
-    /// Report the structured decline emitted by a mandatory Vulkan sketch.
+    /// Throw the reported Vulkan sketch error, or a general decline if none is set.
     [[noreturn]] inline void
     throw_vulkan_sketch_declined(std::string_view stage,
                                  const bioseq::gpu::vulkan::vulkan_sketch_decline& decline) {
@@ -120,11 +116,7 @@ export {
         bioseq::gpu::vulkan::throw_vulkan_strict_decline(stage, decline);
     }
 
-    // — the chain primitive is load-bearing on relaxed
-    // template-template parameter matching (P0522R0) and C++20 class-type
-    // NTTPs (carrying `auto...` packs that interleave enum NTTPs with
-    // `std::size_t`).  Guard the build mode so a misconfigured build fails
-    // loudly rather than producing subtly-wrong codegen.
+    // Require the C++23 build mode used by these pipeline templates.
     static_assert(__cplusplus >= 202302L, "bioseq pipeline templates require C++23");
 
     // Import types from the surrounding modules so the stage bodies can refer
@@ -137,20 +129,16 @@ export {
     using ::bioseq::chaining::chaining_parameters;
     using ::bioseq::chaining::make_arena_slab;
 
-    // =============================================================================
-    // Compile-time parameter packs
-    // =============================================================================
+    // Parameters shared by the stages of a compiled pipeline.
 
     /**
-     * @brief Type-level parameter pack for a fully specialised pipeline instance.
+     * @brief Fix sketch parameters and record storage for a compiled pipeline.
      *
-     * @tparam p_window_size           Minimizer window size (must be > 0).
-     * @tparam p_runtime_kmer_size   Biological k-mer length used by the kernel.
-     * @tparam p_sequence_length_log2  ceil(log2(max(query_bp, target_bp))).  Selects the
-     *                     `minimizer_representation<p_sequence_length_log2, p_physical_kmer_size>` storage
-     * bucket — same dispatch already happens at runtime in `minimap_port`.
-     * @tparam p_physical_kmer_size  Record-format K; fixed-u32 sketches retain
-     *                              their legacy K15 format even at runtime k20.
+     * @tparam p_window_size Positive minimizer window size.
+     * @tparam p_runtime_kmer_size K-mer length used by the algorithm.
+     * @tparam p_sequence_length_log2 Selected position-width bucket.
+     * @tparam p_physical_kmer_size K used to choose the record format. A
+     *         fixed-32-bit hash can use the K15 format while sketching k=20.
      */
     template <std::size_t p_window_size,
               std::size_t p_runtime_kmer_size,
@@ -173,10 +161,10 @@ export {
     };
 
     /**
-     * @brief Fallback parameter pack for non-canonical (p_window_size, p_kmer_size).
+     * @brief Select record storage while reading k and w at runtime.
      *
-     * Stages branch on `generic_fallback` to read window/kmer from runtime params
-     * instead of the type-level constants.
+     * generic_fallback tells stages to use the request's k-mer and window
+     * sizes. The zero constants here are placeholders.
      */
     template <std::size_t p_sequence_length_log2,
               std::size_t p_physical_kmer_size = 15u>
@@ -196,7 +184,7 @@ export {
         }
     };
 
-    /// Recognize a compile-time aligner parameter bundle.
+    /// Require the parameter fields and minimizer type expected by pipeline stages.
     template <class p_type>
     concept is_constexpr_aligner_params = requires {
         { p_type::window_len } -> std::convertible_to<std::size_t>;
@@ -219,21 +207,17 @@ export {
         ::bioseq::minimizers::minimizer_representation<23u, 20u>>);
 
     /**
-     * @brief Pipeline-builder entry-point tag.
+     * @brief Choose whether the pipeline receives a sketch or a sequence.
      *
-     * `with_prebuilt_minimizers` — pipeline accepts a `std::span<const p_minimizer>`
-     * directly. The index_stage is at the head.
-     * `from_sequence` — pipeline accepts the query sequence range and a
-     * `minimizer_stage` is front-loaded to sketch on the fly.
+     * with_prebuilt_minimizers starts at index lookup with an owned minimizer
+     * batch. from_sequence adds a minimizer stage to sketch the query first.
      */
     enum class pipeline_entry_point : std::uint8_t {
         with_prebuilt_minimizers,
         from_sequence,
     };
 
-    // =============================================================================
-    // Concepts and stage skeleton
-    // =============================================================================
+    // Stage interfaces and composition helpers.
 
     namespace detail {
     template <class p_sink_type>
@@ -241,10 +225,9 @@ export {
     } // namespace detail
 
     /**
-     * @brief Base tag inherited by every concrete stage.
+     * @brief Marks a stage that has not yet been attached to a downstream sink.
      *
-     * Lets `make_pipeline` distinguish bare-stage arguments from the terminal
-     * sink via the `bare_stage_marker` typedef.
+     * make_pipeline uses this marker to distinguish stages from the final sink.
      */
     template <class p_derived> struct bare_stage {
         using bare_stage_marker = void;
@@ -254,13 +237,10 @@ export {
     template <is_constexpr_aligner_params p_aligner_parameters, class p_self, class p_sink>
     struct stage;
 
-    // =============================================================================
-    // — owner-carrying minimizer batch with an optional device span.
-    // =============================================================================
-    //
-    // The immutable host owner and checked scalar bounds survive every retaining
-    // handoff. No stored host span can outlive its backing vector. The optional
-    // device span independently retains its existing shared device owner.
+    /// Keeps a checked range of host minimizers and an optional device copy.
+    /// Copies share the host vector and device owner, so passing a batch through
+    /// stages keeps its backing storage alive. Spans returned by as_span borrow
+    /// from that host vector.
     template <class p_minimizer> class minimizer_batch_view {
         std::shared_ptr<const std::vector<p_minimizer>> host_owner_;
         std::size_t offset_;
@@ -279,7 +259,7 @@ export {
 
         std::optional<bioseq::gpu::vulkan::vulkan_device_minimizer_span<p_minimizer>> device{};
 
-        /// Retain a real vector owner without copying any minimizer elements.
+        /// Share an in-bounds vector range without copying its minimizers.
         [[nodiscard]] static minimizer_batch_view from_shared_host(
             std::shared_ptr<const std::vector<p_minimizer>> owner,
             const std::size_t offset,
@@ -293,11 +273,11 @@ export {
                 std::move(owner), offset, count, std::move(device_span)};
         }
 
-        /// Check that this value was not consumed by a move.
+        /// Check whether this batch still keeps its host vector alive.
         [[nodiscard]] bool has_host_owner() const noexcept {
             return static_cast<bool>(host_owner_);
         }
-        /// Return the first host minimizer, or null for an empty batch.
+        /// Return the host range's data pointer. Use size() before dereferencing it.
         [[nodiscard]] const p_minimizer* data() const noexcept {
             return as_span().data();
         }
@@ -305,17 +285,17 @@ export {
         [[nodiscard]] std::size_t size() const noexcept {
             return as_span().size();
         }
-        /// View the host minimizers without transferring device ownership.
+        /// Borrow the host range while this batch keeps its storage alive.
         [[nodiscard]] std::span<const p_minimizer> as_span() const noexcept {
             return host_owner_
                 ? std::span<const p_minimizer>{*host_owner_}.subspan(offset_, count_)
                 : std::span<const p_minimizer>{};
         }
-        /// Return the host-range begin iterator.
+        /// Return the beginning of the host range.
         [[nodiscard]] auto begin() const noexcept {
             return as_span().begin();
         }
-        /// Return the host-range end iterator.
+        /// Return the end of the host range.
         [[nodiscard]] auto end() const noexcept {
             return as_span().end();
         }
@@ -328,16 +308,11 @@ export {
     inline constexpr bool is_minimizer_batch_view_v =
         is_minimizer_batch_view<std::remove_cvref_t<p_type>>::value;
 
-    // =============================================================================
-    // — Concept-driven sink validation.
-    // =============================================================================
+    // Check that downstream sinks accept each kind of batch.
 
     /**
-     * @brief Single-batch sink concept.  Required by emit_token::emit_batch.
-     *
-     * Matched by every concrete sink that consumes a `std::span<p_element>` (most
-     * pipeline tails).  Substitution failures inside `emit_token::emit_batch`
-     * name the concept and the missing method.
+     * @brief Require a sink that accepts one span and a completion callback.
+     * emit_token::emit_batch checks this before calling the downstream sink.
      */
     template <class p_sink_type, class p_element>
     concept batch_sink = requires(p_sink_type& sink, std::span<p_element> batch) {
@@ -346,11 +321,9 @@ export {
     };
 
     /**
-     * @brief Pair-batch sink concept.  Required by emit_token::emit_batch_pair.
-     *
-     * The pair shape is used by the chain → region → primary/secondary →
-     * filter → divergence → align cascade where each stage forwards both the
-     * regions span and the (read-only) anchors span downstream.
+     * @brief Require a sink that accepts two spans together.
+     * Chaining and alignment stages use this to pass regions alongside their
+     * anchor data. The sink must also accept a completion callback.
      */
     template <class p_sink_type, class p_first_element, class p_second_element>
     concept pair_batch_sink =
@@ -360,11 +333,9 @@ export {
         };
 
     /**
-     * @brief Index-decorated batch sink concept.  Required by
-     * emit_token::emit_batch_with_index.
-     *
-     * Used by index_stage to hand a sketches span downstream alongside a
-     * (const-reference) target index.  seed_hit_stage is the canonical consumer.
+     * @brief Require a sink that accepts a span with a target index.
+     * The call also carries the GPU index-cache identity. Completion uses
+     * the same callback as other batch sinks.
      */
     template <class p_sink_type, class p_element, class p_index>
     concept indexed_batch_sink = requires(p_sink_type& sink,
@@ -375,7 +346,7 @@ export {
         { sink.on_completed() } -> std::same_as<void>;
     };
 
-    /// — minimizer-batch sink (minimizer_stage → index_stage hand-off).
+    /// Accept an owned minimizer batch from the sketch stage, then completion.
     template <class p_sink_type, class p_minimizer>
     concept minimizer_batch_sink =
         requires(p_sink_type& sink, minimizer_batch_view<p_minimizer> batch) {
@@ -383,8 +354,8 @@ export {
             { sink.on_completed() } -> std::same_as<void>;
         };
 
-    /// — index-decorated minimizer-batch sink (index_stage →
-    /// seed_hit_stage hand-off carrying the GPU index cache identity).
+    /// Accept an owned minimizer batch with a target index and GPU cache identity.
+    /// The sink must also handle completion.
     template <class p_sink_type, class p_minimizer, class p_index>
     concept indexed_minimizer_batch_sink =
         requires(p_sink_type& sink,
@@ -395,33 +366,17 @@ export {
             { sink.on_completed() } -> std::same_as<void>;
         };
 
-    // =============================================================================
-    // — Compile-time single-emission enforcement (emit_token /
-    // emitted_token).
-    // =============================================================================
+    // Tokens track whether a stage forwarded its output.
 
     template <class p_sink> class emitted_token;
 
     /**
-     * @brief Move-only, single-use, friend-constructible-only token granting
-     * downstream-emission permission.  The `emit_batch*` family of
-     * rvalue-qualified methods consumes the token (nulling its internal
-     * pointer) and returns the friend-only-constructible `emitted_token<p_sink>`
-     * stats.
+     * @brief Lets a stage forward one batch to its downstream sink.
      *
-     * The token's only constructor is private. Only `stage<p_aligner_parameters, p_self, p_sink>`
-     * is befriended, which means concrete-stage `process*<p_aligner_parameters>` bodies see
-     * the token by rvalue reference but cannot manufacture one themselves —
-     * the type system rules out skipping the emit (no way to construct the
-     * required `emitted_token<p_sink>` return value).
-     *
-     * Single-emission enforcement:
-     *   - At least once: HARD compile-time.  `process*<p_aligner_parameters>` must return
-     *     `emitted_token<p_sink>`. The only way to construct one is to call
-     *     `emit_token<p_sink>::emit_batch*`.
-     *   - At most once: soft compile-time + runtime trip-wire.  `[[nodiscard]]`
-     *     makes the ergonomic shape `return std::move(token).emit_batch*(...)`.
-     *     emitting twice trips the `DEBUG_ASSERT(sink_ptr_ != nullptr)` in debug.
+     * Only stage can construct this token. Its process function receives an
+     * rvalue reference and returns the emitted_token produced by an emit call.
+     * The emit call clears the sink pointer, and debug assertions catch reuse.
+     * The token itself can be neither copied nor moved.
      */
     template <class p_sink> class emit_token {
       public:
@@ -436,7 +391,7 @@ export {
         emit_token& operator=(const emit_token&) = delete;
         emit_token& operator=(emit_token&&) = delete;
 
-        /// Emit one ordinary batch and consume this permission token.
+        /// Forward one span and mark this token as used.
         template <class p_element>
         [[nodiscard, gnu::always_inline]]
         emitted_token<p_sink> emit_batch(std::span<p_element> data) && {
@@ -451,7 +406,7 @@ export {
             return emitted_token<p_sink>::make();
         }
 
-        /// Emit one paired batch and consume this permission token.
+        /// Forward two spans together and mark this token as used.
         template <class p_first_element, class p_second_element>
         [[nodiscard, gnu::always_inline]]
         emitted_token<p_sink> emit_batch_pair(std::span<p_first_element> first_batch,
@@ -466,7 +421,7 @@ export {
             return emitted_token<p_sink>::make();
         }
 
-        /// Emit an index-decorated batch and consume this permission token.
+        /// Forward a span with its target index and GPU cache identity.
         template <class p_element, class p_index>
         [[nodiscard, gnu::always_inline]]
         emitted_token<p_sink>
@@ -483,8 +438,8 @@ export {
             return emitted_token<p_sink>::make();
         }
 
-        // — narrow minimizer-batch emit (carries optional device span).
-        /// Emit a host/device minimizer batch and consume this permission token.
+        // Minimizer batches can keep an optional device buffer.
+        /// Forward an owned host/device sketch and mark this token as used.
         template <class p_minimizer>
         [[nodiscard, gnu::always_inline]]
         emitted_token<p_sink> emit_minimizer_batch(minimizer_batch_view<p_minimizer> batch) && {
@@ -497,7 +452,7 @@ export {
             return emitted_token<p_sink>::make();
         }
 
-        /// Emit an index-decorated host/device batch and consume this token.
+        /// Forward an owned sketch with its target index and GPU cache identity.
         template <class p_minimizer, class p_index>
         [[nodiscard, gnu::always_inline]]
         emitted_token<p_sink>
@@ -519,10 +474,9 @@ export {
     };
 
     /**
-     * @brief Stats-of-emission token.  Returned by
-     * `emit_token<p_sink>::emit_batch*`. Every concrete stage's `process*<p_aligner_parameters>`
-     * must return one.  The only path to constructing one is the
-     * friend-accessible `make()` factory.
+     * @brief Return value showing that a stage forwarded a batch.
+     * Only emit_token can construct it. A stage's process function returns
+     * this value after calling one of the emit methods.
      */
     template <class p_sink> class [[nodiscard]] emitted_token {
       public:
@@ -530,51 +484,41 @@ export {
         emitted_token& operator=(const emitted_token&) = delete;
         emitted_token& operator=(emitted_token&&) = delete;
 
-        /// Move constructor exists only for mandatory-copy-elision worst-case
-        /// materialisation.  The canonical path is direct-return from
-        /// emit_batch*, where C++17 copy elision skips it entirely.
+        /// Allow a completed emission result to be returned by move when needed.
         emitted_token(emitted_token&&) noexcept = default;
 
       private:
         friend class emit_token<p_sink>;
-        /// Friend-only default constructor — the public surface is
-        /// non-default-constructible because the only call site of this
-        /// ctor lives behind the `make()` factory below.
+        /// Create an emission result only through emit_token's private access.
         constexpr emitted_token() noexcept = default;
         [[nodiscard, gnu::always_inline]] static constexpr emitted_token make() noexcept {
             return emitted_token{};
         }
     };
 
-    // =============================================================================
-    // — Input-side kernel-to-arena adapter.
-    // =============================================================================
+    // Collect kernel output directly into an arena slab.
 
     /**
-     * @brief Drop-in `basic_sketch_collector<p_element>`-shaped adapter that routes the
-     * kernel's `collect(...)` traffic into a caller-provided
-     * `arena_slab<p_element>`.  Implements the minimal surface the kernels rely on
-     * (`collect(p_element&&)`, `collect(const p_element&)`, `reserve(size_t)`).
+     * @brief Write minimizers directly into the caller's chaining arena slab.
      *
-     * `arena_slab<p_element>::push_back` requires `std::is_trivially_copyable_v<p_element>` —
-     * satisfied by every `minimizer_representation<p_bucket_width, p_kmer_size>`.  The existing
-     * slab `arena_slab`'s `static_assert` covers the constraint and would fire if a non-trivial
-     * minimizer type were ever introduced.
+     * Implements the collector methods used by sketch kernels, including
+     * batch appends. Elements must be trivially copyable because the slab
+     * copies their storage when it grows.
      */
     template <class p_element> struct sketch_collector_arena_adapter {
         using minimizer_type = p_element;
 
         ::bioseq::chaining::arena_slab<p_element>* slab_;
 
-        /// Append one movable minimizer to the arena slab.
+        /// Append a minimizer value to the slab.
         [[gnu::always_inline]] void collect(p_element sketch) {
             slab_->push_back(std::move(sketch));
         }
-        /// Append one borrowed minimizer to the arena slab.
+        /// Copy a minimizer into the slab.
         [[gnu::always_inline]] void collect(const p_element& sketch) {
             slab_->push_back(sketch);
         }
-        /// Reserve space for the caller's conservative output estimate.
+        /// Reserve space for at least expected_count minimizers.
         [[gnu::always_inline]] void reserve(std::size_t expected_count) {
             slab_->reserve(expected_count);
         }
@@ -583,13 +527,13 @@ export {
             return slab_->size();
         }
 
-        /// Append a trivially copyable batch without per-record dispatch.
+        /// Append a batch by copying its records together.
         [[nodiscard, gnu::always_inline]] bool
         append_records(const std::span<const p_element> records) {
             return slab_->append_trivial_records(records);
         }
 
-        /// Append exact raw storage when its layout matches the minimizer type.
+        /// Append raw record words when their size matches the minimizer type.
         template <class p_minimizer_type = p_element>
         [[nodiscard, gnu::always_inline]] bool
         append_raw_storage(const typename p_minimizer_type::storage_type* raw, std::size_t count)
@@ -604,37 +548,33 @@ export {
     };
 
     /**
-     * @brief CRTP helper absorbing the boilerplate shared by every concrete stage.
+     * @brief Adds attachment and default completion handling to a stage.
      *
-     * `p_derived` must define `static constexpr std::string_view stage_name`.  The
-     * default `attach<p_aligner_parameters, p_sink>(...)` returns a bound
-     * `stage<p_aligner_parameters, p_derived, p_sink>` value owning `*this` and the downstream
-     * sink.
+     * The derived stage supplies stage_name and its process methods. attach
+     * moves it into a bound stage together with the downstream sink.
      */
     template <class p_derived, class p_output> struct stage_base : bare_stage<p_derived> {
         using out_element_type = p_output;
 
-        /// Bind this stage to its downstream sink and parameter bundle.
+        /// Move this stage and its downstream sink into a bound pipeline stage.
         template <is_constexpr_aligner_params p_aligner_parameters, class p_sink>
         [[gnu::always_inline]] auto attach(p_sink sink) noexcept {
             return stage<p_aligner_parameters, p_derived, p_sink>{
                 std::move(sink), std::move(static_cast<p_derived&>(*this))};
         }
 
-        /// Complete a stage that has no terminal action of its own.
+        /// Default completion hook for stages with no final work.
         template <class p_sink> [[gnu::always_inline]] void finalize(p_sink&) noexcept {
             /* default: no-op */
         }
     };
 
     /**
-     * @brief Bound stage — owns its downstream sink and bare-stage config by value.
+     * @brief Owns a configured stage and the sink that receives its output.
      *
-     * `p_aligner_parameters` is fixed at `make_pipeline<p_aligner_parameters>(...)` time and
-     * identical across every stage in a given pipeline instance.  The bound stage's `on_batch*`
-     * members forward to the bare stage's `process*<p_aligner_parameters>` body. Both are
-     * `[[gnu::always_inline]]` so the chain collapses to a straight-line sequence
-     * of kernel calls at `-O3`.
+     * Every stage in the pipeline shares p_aligner_parameters. Batch callbacks
+     * call the configured stage's process methods, which forward results through
+     * an emit_token. Template composition lets the compiler inline these calls.
      */
     template <is_constexpr_aligner_params p_aligner_parameters, class p_self, class p_sink>
     struct stage {
@@ -643,21 +583,19 @@ export {
         p_sink sink_;
         p_self self_;
 
-        /// Own one configured stage and its downstream sink.
+        /// Take ownership of a configured stage and its downstream sink.
         constexpr stage(p_sink sink_arg, p_self self_arg) noexcept
             : sink_(std::move(sink_arg)), self_(std::move(self_arg)) {}
 
-        //: the bound stage constructs an `emit_token<p_sink>` on its
-        // own stack and hands it to `process*<p_aligner_parameters>` by rvalue reference; the
-        // concrete-stage body returns the (discarded) `emitted_token<p_sink>` stats
-        // type whose construction is friend-private to `emit_token<p_sink>`.
-        /// Forward one ordinary batch through the bound stage.
+        // Give each process call a fresh token, then discard the returned
+        // marker that records the forwarded output.
+        /// Pass one batch to this stage's process method.
         template <class p_batch> [[gnu::always_inline]] void on_batch(p_batch&& batch) {
             (void)self_.template process<p_aligner_parameters>(std::forward<p_batch>(batch),
                                                                emit_token<p_sink>{sink_});
         }
 
-        /// Forward one paired batch through the bound stage.
+        /// Pass two related batches to this stage's process_pair method.
         template <class p_first_batch, class p_second_batch>
         [[gnu::always_inline]] void on_batch_pair(p_first_batch&& first_batch,
                                                   p_second_batch&& second_batch) {
@@ -667,7 +605,7 @@ export {
                 emit_token<p_sink>{sink_});
         }
 
-        /// Forward one index-decorated batch through the bound stage.
+        /// Process a batch with its target index and GPU cache identity.
         template <class p_batch, class p_index>
         [[gnu::always_inline]] void
         on_batch_with_index(p_batch&& batch,
@@ -677,14 +615,14 @@ export {
                 std::forward<p_batch>(batch), index_ref, identity, emit_token<p_sink>{sink_});
         }
 
-        // — forwarders for the narrow minimizer-batch shape.
-        /// Forward one host/device minimizer batch through the bound stage.
+        // Forward minimizer batches while keeping their backing storage alive.
+        /// Pass an owned host/device sketch to this stage.
         template <class p_minimizer>
         [[gnu::always_inline]] void on_minimizer_batch(minimizer_batch_view<p_minimizer> batch) {
             (void)self_.template process<p_aligner_parameters>(batch, emit_token<p_sink>{sink_});
         }
 
-        /// Forward one index-decorated host/device batch through the bound stage.
+        /// Process an owned sketch with its target index and GPU cache identity.
         template <class p_minimizer, class p_index>
         [[gnu::always_inline]] void
         on_minimizer_batch_with_index(minimizer_batch_view<p_minimizer> batch,
@@ -704,13 +642,12 @@ export {
     };
 
     /**
-     * @brief Variadic pipeline composer — fixes `p_aligner_parameters` once for the whole chain.
+     * @brief Connect stages in order, using one parameter type throughout.
      *
-     * The base case (terminal sink) returns the sink unchanged. The recursive case
-     * peels one bare stage off the front, builds the downstream pipeline from the
-     * remaining arguments, and attaches.
+     * The final argument is the result sink. Build the downstream chain first,
+     * then attach each preceding stage to it.
      */
-    /// Terminate pipeline composition at the supplied sink.
+    /// Finish composition at the terminal sink. A stage cannot be the last argument.
     template <is_constexpr_aligner_params p_aligner_parameters, class p_sink>
     [[gnu::always_inline]] constexpr auto make_pipeline(p_sink sink) noexcept {
         static_assert(!detail::is_bare_stage<p_sink>,
@@ -719,7 +656,7 @@ export {
         return sink;
     }
 
-    /// Attach one stage to the recursively composed downstream pipeline.
+    /// Attach this stage to the pipeline built from the remaining arguments.
     template <is_constexpr_aligner_params p_aligner_parameters,
               class p_first_stage,
               class... p_remaining_stages>
@@ -730,13 +667,8 @@ export {
         return std::move(head).template attach<p_aligner_parameters>(std::move(downstream));
     }
 
-    // =============================================================================
-    // Batch storage — owning arena slab
-    // =============================================================================
-    //
-    // `arena_slab<p_element>` is owned by `bioseq.chaining.core` so chaining,
-    // seed, and region kernels share one caller-owned output contract. The using
-    // declarations above expose the slab and its factory to stage bodies.
+    // Stages share arena_slab from bioseq.chaining.core for seed, chain, and
+    // region output. The aliases above expose it and its factory here.
 
     } // namespace bioseq::simd::pipe
 
