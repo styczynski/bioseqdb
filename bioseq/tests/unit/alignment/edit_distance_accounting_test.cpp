@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Verifies exact edit accounting across KSW2 and Block Aligner routes.
+ * @brief Checks edit counts and alignment memory plans for KSW2 and Block Aligner.
  */
 
 #include <catch2/catch_test_macros.hpp>
@@ -31,9 +31,8 @@ using dna4_u64 = sequence_custom_alphabet<seq::dna4, std::uint64_t>;
 using range_type = compact_sequence_range<dna4_u64>;
 
 /**
- * @brief Resolves the generated DNA4 alignment table for the fixed test target.
- * @return Complete typed alignment kernel table.
- * @throws std::logic_error If the generated table lacks its DNA4 identity or entry.
+ * Returns DNA4 alignment kernels for the test CPU target.
+ * Throws std::logic_error if the generated table lacks the DNA4 entry.
  */
 [[nodiscard]] auto fixed_alignment_kernels() -> const alignment_kernels<seq::dna4>& {
     const auto& root = ::bioseq::simd_dispatch::highway_test_kernel_table();
@@ -51,11 +50,7 @@ using range_type = compact_sequence_range<dna4_u64>;
     throw std::logic_error{"generated fixed-target test table lacks DNA4 alignment"};
 }
 
-/**
- * @brief Converts ASCII symbols into a DNA4 fixture sequence.
- * @param[in] text DNA4 text accepted by SeqAn.
- * @return DNA4 symbols in source order.
- */
+/** Converts ASCII bases to DNA4 symbols for a test sequence. */
 [[nodiscard]] auto dna4_from_ascii(std::string_view text) -> std::vector<seq::dna4> {
     std::vector<seq::dna4> sequence(text.size());
     for (std::size_t i = 0; i < text.size(); ++i) {
@@ -65,12 +60,8 @@ using range_type = compact_sequence_range<dna4_u64>;
 }
 
 /**
- * @brief Constructs an anchor with independent query and reference coordinates.
- * @param[in] query_position Inclusive query seed end coordinate.
- * @param[in] ref_position Inclusive reference seed end coordinate.
- * @param[in] reverse Strand flag.
- * @param[in] span Seed span in symbols.
- * @return Initialized chaining anchor.
+ * Builds an anchor from inclusive query and reference seed-end coordinates.
+ * The strand and span describe the seed used by the alignment fixture.
  */
 [[nodiscard]] auto make_anchor(std::uint64_t query_position,
                                std::uint64_t ref_position,
@@ -86,22 +77,15 @@ using range_type = compact_sequence_range<dna4_u64>;
     };
 }
 
-/**
- * @brief Constructs a diagonal anchor with equal query and reference coordinates.
- * @param[in] position Shared query and reference coordinate.
- * @param[in] reverse Strand flag.
- * @param[in] span Seed span in symbols.
- * @return Initialized chaining anchor.
- */
+/** Builds an anchor with the same seed-end coordinate in query and reference. */
 [[nodiscard]] auto make_anchor(std::uint64_t position, bool reverse, std::uint8_t span = 8)
     -> ::bioseq::chaining::anchor {
     return make_anchor(position, position, reverse, span);
 }
 
 /**
- * @brief Builds fixed-target alignment parameters with exact edit accounting enabled.
- * @return Prepared fixture parameters for all three alignment routes.
- * @throws std::logic_error If the generated binding lacks its DNA4 identity.
+ * Builds DNA4 alignment settings with exact edit counting enabled.
+ * Uses the test CPU target and throws if its DNA4 entry is missing.
  */
 [[nodiscard]] auto exact_alignment_params() -> minimap2_parameters {
     minimap2_parameters parameters{};
@@ -133,12 +117,7 @@ using range_type = compact_sequence_range<dna4_u64>;
     return parameters;
 }
 
-/**
- * @brief Initializes one alignment region from a contiguous anchor span.
- * @param[in] anchors Anchors owned by the caller for the duration of the call.
- * @param[in] query_length Full query length in symbols.
- * @return Region with coordinates derived from `anchors`.
- */
+/** Sets one region's seed range and coordinates from the supplied anchors. */
 [[nodiscard]] auto make_region(std::span<const ::bioseq::chaining::anchor> anchors,
                                sequence_size_t query_length) -> alignment_region {
     alignment_region region{};
@@ -154,11 +133,7 @@ struct cigar_consumption {
     sequence_size_t target = 0;
 };
 
-/**
- * @brief Counts query and target symbols consumed by a CIGAR.
- * @param[in] cigar Operations to inspect in source order.
- * @return Independent query and target consumption totals.
- */
+/** Counts the query and target bases consumed by the CIGAR, failing on unsupported operations. */
 [[nodiscard]] auto measure_cigar_consumption(std::span<const cigar_operation> cigar)
     -> cigar_consumption {
     cigar_consumption consumption{};
@@ -184,14 +159,14 @@ struct cigar_consumption {
     return consumption;
 }
 
-/** @brief Alignment regions produced by the three compared backend routes. */
+/** Results from ordinary KSW2, Block Aligner and batched KSW2. */
 struct backend_regions {
     alignment_region ksw2;
     alignment_region block;
     alignment_region batched;
 };
 
-/** @brief Selects the coordinate and mismatch layout for one alignment fixture. */
+/** Chooses the seed positions and sequence differences used in a test. */
 enum class fixture_kind {
     single_seed_collision,
     multi_seed_mismatch,
@@ -201,12 +176,12 @@ enum class fixture_kind {
 };
 
 /**
- * @brief Runs one deterministic fixture through KSW2, Block Aligner, and batched KSW2.
- * @param[in] reverse Strand flag applied to fixture anchors.
- * @param[in] kind Fixture geometry and mismatch layout.
- * @param[in] max_gap Maximum gap passed to the alignment routes.
- * @param[in] do_cigar Whether the caller explicitly requests a CIGAR.
- * @return Owned alignment regions from all three routes.
+ * Runs the selected fixture through KSW2, Block Aligner and batched KSW2.
+ * Each run uses the same sequences, anchors and alignment settings.
+ * @param reverse Use reverse-strand anchors.
+ * @param kind Choose the seed positions and sequence differences.
+ * @param max_gap Limit extension beyond the seed region.
+ * @param do_cigar Request a CIGAR explicitly. Exact edit counting can require one too.
  */
 [[nodiscard]] auto
 run_fixture(bool reverse, fixture_kind kind, std::int32_t max_gap = 0, bool do_cigar = true)
@@ -222,8 +197,8 @@ run_fixture(bool reverse, fixture_kind kind, std::int32_t max_gap = 0, bool do_c
     std::vector<::bioseq::chaining::anchor> anchors;
     if (kind == fixture_kind::single_seed_collision) {
         anchors.push_back(make_anchor(31, reverse));
-        // The anchor claims [24, 32) as a seed, but two underlying ranks
-        // differ.  Hash equality must not be treated as exact equality.
+        // The seed covers [24, 32), but two bases differ. Edit counting must
+        // compare the bases even when the anchor says their hashes match.
         target_text[26] = 'C';
         target_text[29] = 'C';
     } else if (kind == fixture_kind::multi_seed_mismatch) {
@@ -296,13 +271,7 @@ run_fixture(bool reverse, fixture_kind kind, std::int32_t max_gap = 0, bool do_c
     return fixture_regions;
 }
 
-/**
- * @brief Checks exact edit distance and coordinate consumption for one region.
- * @param[in] region Completed alignment region.
- * @param[in] expected_edit_distance Expected mismatch and gap count.
- * @param[in] expected_query_length Expected consumed query symbols.
- * @param[in] expected_target_length Expected consumed target symbols.
- */
+/** Checks the edit count, consumed sequence lengths and region boundaries. */
 auto check_exact_region(const alignment_region& region,
                         sequence_size_t expected_edit_distance,
                         sequence_size_t expected_query_length,
@@ -543,8 +512,8 @@ TEST_CASE("alignment storage plan handles empty jobs and checked ownership witho
     CHECK(plan.outer_query_extent == 8u);
     CHECK(plan.outer_reference_extent == 8u);
     CHECK(plan.final_cigar_step_bound == 16u);
-    // The small upfront reserve may exceed the emitted-step bound. It remains
-    // physical capacity to reconcile, not a claim about logical output size.
+    // The initial allocation can hold extra CIGAR operations. Account for that
+    // capacity even when the alignment can emit fewer steps.
     CHECK(plan.initial_cigar_reserve == 32u);
     CHECK(plan.final_cigar_capacity_bytes == 32u * sizeof(cigar_operation));
 

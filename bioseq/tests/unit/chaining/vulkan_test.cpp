@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Verifies Vulkan chaining, CIGAR, coordinate, and shader-layout contracts.
+ * @brief Checks Vulkan chaining, alignment CIGARs and CPU/GPU data layouts.
  */
 
 #include <catch2/catch_test_macros.hpp>
@@ -18,7 +18,7 @@ import bioseq.pipeline.minimap_port; // minimap2_parameters / match_result(_coll
 import bioseq.pipeline.pipe;         // pipeline entry point
 import bioseq.chaining.core;         // anchor / chain / chaining_parameters
 import bioseq.chaining.vulkan;       // chain_anchors_vulkan / is_vulkan_chaining_supported
-import bioseq.gpu.vulkan.runtime;    // runtime / scan_spirv_layout / pipeline key
+import bioseq.gpu.vulkan.runtime;    // Vulkan runtime and SPIR-V layout checks
 import bioseq.gpu.vulkan.shader_compiler;
 import bioseq.storage.lazy_sequence; // make_resident_lazy_sequence
 import bioseq.parallelism.memory_admission;
@@ -36,10 +36,7 @@ namespace gv = ::bioseq::gpu::vulkan;
 using dna4_u64 = sequence_custom_alphabet<seq::dna4, std::uint64_t>;
 using sequence_range_type = compact_sequence_range<dna4_u64>;
 
-/**
- * @brief Binds the generated fixed-width Highway implementation to test parameters.
- * @param[out] params Parameters receiving the target kernels and alphabet identity.
- */
+/** Selects DNA4 kernels for the test CPU target, failing if its alphabet entry is missing. */
 void bind_fixed_highway(bioseq::simd::minimap2_parameters& params) {
     const auto& binding = ::bioseq::simd_dispatch::highway_test_target_binding();
     params.highway_kernels = binding.kernels;
@@ -54,12 +51,7 @@ void bind_fixed_highway(bioseq::simd::minimap2_parameters& params) {
     params.alphabet_code = identity->alphabet_code;
 }
 
-/**
- * @brief Generates a deterministic DNA4 sequence for pipeline tests.
- * @param[in] sequence_length Number of bases to generate.
- * @param[in] seed Initial linear-congruential state.
- * @return Generated DNA4 bases.
- */
+/** Generates repeatable DNA4 bases from a length and random seed. */
 [[nodiscard]] std::vector<seq::dna4> make_dna4(std::size_t sequence_length, std::uint64_t seed) {
     std::vector<seq::dna4> bases(sequence_length);
     std::uint64_t random_state = seed;
@@ -73,15 +65,8 @@ void bind_fixed_highway(bioseq::simd::minimap2_parameters& params) {
 }
 
 /**
- * @brief Runs the complete pipeline over owned in-memory query and target sequences.
- *
- * Values remain mutable because `compact_sequence_range` binds the underlying
- * containers by non-const reference.
- *
- * @param[in] query_sequence Query bases owned by the invocation.
- * @param[in] target_sequence Target bases owned by the invocation.
- * @param[in] params Minimap pipeline parameters.
- * @return Pipeline matches.
+ * Runs the search pipeline with query and target data owned by this call.
+ * The vectors stay mutable because compact_sequence_range takes non-const references.
  */
 [[nodiscard]] match_result_collection
 run_pipeline(std::vector<seq::dna4> query_sequence,
@@ -96,14 +81,7 @@ run_pipeline(std::vector<seq::dna4> query_sequence,
     return minimap_port(query_view, target_view, params);
 }
 
-/**
- * @brief Builds one chaining anchor with explicit wire-visible fields.
- * @param[in] reference_position Target coordinate.
- * @param[in] query_position Query coordinate.
- * @param[in] is_reverse Strand discriminator.
- * @param[in] query_span Seed span in bases.
- * @return Initialized anchor.
- */
+/** Builds a test anchor from reference and query positions, strand and seed span. */
 [[nodiscard]] ch::anchor make_anchor(std::uint64_t reference_position,
                                      std::uint64_t query_position,
                                      std::uint32_t is_reverse,
@@ -118,30 +96,22 @@ run_pipeline(std::vector<seq::dna4> query_sequence,
     return anchor;
 }
 
-/** @brief Owns chain outputs copied before the local arena context unwinds. */
+/** Keeps chains and reordered anchors after the test arena is destroyed. */
 struct chain_outputs {
     std::vector<ch::chain> chains;
     std::vector<ch::anchor> reordered;
 };
 
-/**
- * @brief Runs Vulkan chaining in a fresh arena and copies results to owned vectors.
- * @param[in] anchors Input anchors.
- * @param[in] params Chaining parameters.
- * @return Owned chains and reordered anchors.
- */
+/** Runs Vulkan chaining in a fresh context and copies its output into vectors. */
 [[nodiscard]] chain_outputs run_vulkan_chain(std::span<const ch::anchor> anchors,
                                              const ch::chaining_parameters& params) {
     context::context runtime_context;
     context::installed_context_scope installed_context{runtime_context};
     auto chains_slab = ch::make_arena_slab<ch::chain>();
     auto reordered_slab = ch::make_arena_slab<ch::anchor>();
-    // Reserve a guaranteed upper bound before the call, matching the pipeline
-    // stage contract. The chaining kernel pushes its own internal
-    // arena::chain scope and `backtrack_chains` writes the output via
-    // push_back; without a prior reserve those allocations land ABOVE the
-    // kernel's scope marker and are freed (0xDD-poisoned) when the kernel
-    // returns. #chains and #reordered-anchors are each <= #input anchors.
+    // Reserve output space before the kernel opens its temporary arena scope.
+    // Otherwise its return could free the output allocations along with scratch data.
+    // Each output contains at most as many entries as the input anchors.
     const std::size_t upper_bound = anchors.size() + 1;
     chains_slab.reserve(upper_bound);
     reordered_slab.reserve(upper_bound);
@@ -152,17 +122,14 @@ struct chain_outputs {
     return outputs;
 }
 
-/** @brief Returns prepared default chaining parameters for focused tests. */
+/** Returns the default chaining settings with derived values prepared. */
 [[nodiscard]] ch::chaining_parameters default_chain_params() {
-    ch::chaining_parameters params; // kmer_size=15, max_gap=5000, bandwidth=500, ...
+    ch::chaining_parameters params; 
     params.prepare();
     return params;
 }
 
-/**
- * @brief Skips a hardware-only chaining case when no trusted device is available.
- * @return `true` when the caller must return from the current test case.
- */
+/** Returns true when the test should stop because no usable hardware Vulkan device exists. */
 [[nodiscard]] bool skip_untrusted_vulkan_chaining() {
     if (ch::is_vulkan_chaining_supported())
         return false;
@@ -170,12 +137,7 @@ struct chain_outputs {
     return true;
 }
 
-/**
- * @brief Asserts the structural invariants required of a chain set.
- * @param[in] outputs Owned chain output.
- * @param[in] anchors Original input anchors.
- * @param[in] params Chaining constraints.
- */
+/** Checks chain score and size limits, anchor order and allowed gaps. */
 void check_chain_invariants(const chain_outputs& outputs,
                             std::span<const ch::anchor> anchors,
                             const ch::chaining_parameters& params) {
@@ -193,10 +155,10 @@ void check_chain_invariants(const chain_outputs& outputs,
         for (std::size_t index = start + 1; index < start + count; ++index) {
             const ch::anchor& previous = outputs.reordered[index - 1];
             const ch::anchor& current = outputs.reordered[index];
-            // Monotonic in both ref and query position.
+            // Positions must increase along each chain.
             REQUIRE(current.ref_position > previous.ref_position);
             REQUIRE(current.query_position > previous.query_position);
-            // No chain crosses a hard range boundary.
+            // Consecutive anchors must share a strand partition and stay within the gap limit.
             REQUIRE(current.strand_partition_key() == previous.strand_partition_key());
             REQUIRE(current.ref_position - previous.ref_position <= max_dist_x);
         }
@@ -205,9 +167,7 @@ void check_chain_invariants(const chain_outputs& outputs,
 
 } // namespace
 
-// ===========================================================================
-// Mandatory Vulkan errors
-// ===========================================================================
+// Errors when Vulkan chaining cannot run.
 
 TEST_CASE("vulkan_tiled_dp with vulkan_enabled=false fails",
           "[component:bioseq][layer:unit][feature:chaining]") {
@@ -234,8 +194,7 @@ TEST_CASE("vulkan_tiled_dp with vulkan_enabled=false fails",
         for (std::size_t index = 0; index < query_sequence.size(); ++index) {
             target_sequence[300 + index] = query_sequence[index];
         }
-        // The immutable statement plan rejects a disabled selected backend
-        // before allocation or entry into the Vulkan runtime.
+        // Selecting a disabled Vulkan backend must fail during pipeline setup.
         REQUIRE_THROWS_AS(run_pipeline(query_sequence, target_sequence, vulkan_params),
                           std::invalid_argument);
     }
@@ -260,9 +219,7 @@ TEST_CASE("software Vulkan chaining fails loudly",
     REQUIRE_THROWS_AS(run_vulkan_chain(anchors, params), gv::vulkan_runtime_error);
 }
 
-// ===========================================================================
-// GPU chaining invariants (chain_anchors_vulkan directly)
-// ===========================================================================
+// Direct tests of GPU chaining and its memory reservations.
 
 TEST_CASE("admitted Vulkan chaining requires its hooked ordinary context",
           "[component:bioseq][layer:unit][feature:chaining]") {
@@ -323,7 +280,7 @@ TEST_CASE("admitted Vulkan chaining keeps only context storage after device comp
             REQUIRE(admission.reserved_bytes() == baseline + attempt.retention.retained_bytes() +
                 runtime.pipeline_cache_metadata_reserved_bytes() - cache_baseline);
         }
-        // Rewinding/destroying slabs never releases a still-retained context block.
+        // Arena rewind keeps the context block allocated, so its reservation must remain.
         REQUIRE(attempt.retention.retained_bytes() >= initial_retained);
         REQUIRE(admission.reserved_bytes() == baseline + attempt.retention.retained_bytes() +
             runtime.pipeline_cache_metadata_reserved_bytes() - cache_baseline);
@@ -386,7 +343,7 @@ TEST_CASE("Vulkan chaining output invariants",
         const auto out = run_vulkan_chain(anchors, params);
         check_chain_invariants(out, anchors, params);
         REQUIRE_FALSE(out.chains.empty());
-        // Every emitted anchor came from the input span.
+        // Output positions and strand must match an input anchor.
         for (const auto& emitted : out.reordered) {
             bool found = false;
             for (const auto& src : anchors) {
@@ -433,8 +390,7 @@ TEST_CASE("Vulkan chaining output invariants",
     }
 
     SECTION("equal-score predecessor candidates still form a chain (>= tie policy)") {
-        // Two equally-spaced predecessors yield equal pair scores into the same
-        // successor; the `>=` tie policy must still produce a chain.
+        // Equal predecessor scores must still produce a valid chain.
         std::vector<ch::anchor> anchors;
         for (std::uint64_t i = 0; i < 10; ++i) {
             anchors.push_back(make_anchor(3000 + i * 15, 2000 + i * 15, 0, 15));
@@ -446,23 +402,21 @@ TEST_CASE("Vulkan chaining output invariants",
 
     SECTION("hard range split: a large ref gap splits chains") {
         std::vector<ch::anchor> anchors;
-        // First cluster.
+        
         for (std::uint64_t i = 0; i < 6; ++i) {
             anchors.push_back(make_anchor(1000 + i * 12, 500 + i * 12, 0, 15));
         }
-        // Second cluster, separated by >> max_gap so it is a distinct hard range.
+        // Put the second cluster beyond the gap limit so it must form a separate chain.
         const std::uint64_t gap = static_cast<std::uint64_t>(params.max_gap) * 4;
         for (std::uint64_t i = 0; i < 6; ++i) {
             anchors.push_back(make_anchor(1000 + gap + i * 12, 9000 + i * 12, 0, 15));
         }
         const auto out = run_vulkan_chain(anchors, params);
-        check_chain_invariants(out, anchors, params); // boundary invariant enforced here
+        check_chain_invariants(out, anchors, params); 
     }
 }
 
-// ===========================================================================
-// End-to-end GPU smoke (requires a usable device)
-// ===========================================================================
+// Search and alignment tests that need a usable GPU.
 
 TEST_CASE("end-to-end GPU chaining smoke",
           "[component:bioseq][layer:unit][feature:chaining][resource:gpu]") {
@@ -488,8 +442,8 @@ TEST_CASE("end-to-end GPU chaining smoke",
 
     INFO("dispatch_count before=" << before << " after=" << after
                                   << " matches=" << matches.results.size());
-    REQUIRE(after > before);                // the GPU kernel actually ran
-    REQUIRE_FALSE(matches.results.empty()); // at least one match emitted
+    REQUIRE(after > before);                // Confirm a GPU chaining dispatch occurred.
+    REQUIRE_FALSE(matches.results.empty()); 
     for (const auto& match : matches.results) {
         REQUIRE(match.query_start >= 0);
         REQUIRE(match.query_end <= static_cast<int32_t>(query_sequence.size()));
@@ -1326,9 +1280,7 @@ TEST_CASE("Vulkan gridded CIGAR handles long many-gap traceback",
     CHECK(inserted_bases == 0u);
 }
 
-// ===========================================================================
-// Large coordinates (> 2^32) are not truncated
-// ===========================================================================
+// Preserve reference coordinates above 2^32.
 
 TEST_CASE("Vulkan chaining preserves ref_position > 2^32",
           "[component:bioseq][layer:unit][feature:chaining][resource:gpu]") {
@@ -1343,25 +1295,21 @@ TEST_CASE("Vulkan chaining preserves ref_position > 2^32",
     const auto out = run_vulkan_chain(anchors, params);
     check_chain_invariants(out, anchors, params);
     REQUIRE_FALSE(out.chains.empty());
-    // Every emitted ref_position is still above 2^32 — no narrowing to 32 bits.
+    // Catch accidental narrowing of reference positions to 32 bits.
     for (const auto& emitted : out.reordered) {
         REQUIRE(emitted.ref_position > (std::uint64_t{1} << 32));
         REQUIRE(emitted.ref_position >= base);
     }
 }
 
-// ===========================================================================
-// Shader compile and SPIR-V direct-anchor layout
-// ===========================================================================
+// Shader compilation and the anchor layout shared with the CPU.
 
 TEST_CASE("chain_tiled_dp shader compiles with the anchor layout contract",
           "[component:bioseq][layer:unit][feature:chaining]") {
-    // The push-constant block includes max_chain_skip and is pinned to 36 bytes;
-    // the gpu_anchor_wire stride and offsets below are pinned independently.
+    // Check the 36-byte push constants separately from the anchor buffer layout.
     static_assert(sizeof(gv::chaining_push_constants) == 36);
 
-    // Fixtures spanning the selector's three branches plus the keys
-    // choose_vulkan_chaining_pipeline picks for small/medium/large devices.
+    // Compile each shader size and the variants selected for different device limits.
     std::vector<gv::chaining_pipeline_key> keys = {
         {384u, 128u},
         {512u, 128u},
@@ -1373,9 +1321,9 @@ TEST_CASE("chain_tiled_dp shader compiles with the anchor layout contract",
         f.max_shared_memory_bytes = shared;
         return ch::choose_vulkan_chaining_pipeline(f);
     };
-    keys.push_back(fixture_key(128u, 16u * 1024u));  // -> 384/128
-    keys.push_back(fixture_key(512u, 32u * 1024u));  // -> 512/128
-    keys.push_back(fixture_key(1024u, 48u * 1024u)); // -> 1024/256
+    keys.push_back(fixture_key(128u, 16u * 1024u));  // Tile size 384, workgroup size 128.
+    keys.push_back(fixture_key(512u, 32u * 1024u));  // Tile size 512, workgroup size 128.
+    keys.push_back(fixture_key(1024u, 48u * 1024u)); // Tile size 1024, workgroup size 256.
 
     for (const auto& key : keys) {
         INFO("tile_size=" << key.tile_size << " local_size=" << key.local_size);
@@ -1384,11 +1332,11 @@ TEST_CASE("chain_tiled_dp shader compiles with the anchor layout contract",
         REQUIRE_FALSE(spirv.empty());
 
         const auto scan = gv::scan_spirv_layout(spirv);
-        // Anchors runtime-array stride is exactly the 24-byte anchor.
+        // GPU anchor records must use the CPU's 24-byte stride.
         REQUIRE(scan.has_array_stride(24));
-        // gpu_anchor_wire member offsets are {ref(0), query(8), is_reverse(16), span(20)}.
+        // Match the reference, query, strand and span offsets in gpu_anchor_wire.
         REQUIRE(scan.has_struct_offsets({0u, 8u, 16u, 20u}));
-        // All four descriptor bindings are present.
+        // The shader must expose all four buffer bindings.
         REQUIRE(scan.has_binding(0));
         REQUIRE(scan.has_binding(1));
         REQUIRE(scan.has_binding(2));

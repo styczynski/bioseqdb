@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Verifies fixed-target SIMD chaining policies against scalar oracles.
+ * @brief Compares SIMD chaining with scalar results and checks its memory plans and counters.
  */
 
 #include <hwy/highway.h>
@@ -28,9 +28,8 @@ using ch::simd_chaining_runtime_error;
 using ch::simd_chaining_status;
 
 /**
- * @brief Returns the generated fixed-target chaining entry used by Highway tests.
- * @return Callable bound to the selected fixed target.
- * @throws std::logic_error If the generated table lacks SIMD chaining.
+ * Returns the SIMD chaining function for the test CPU target.
+ * Throws std::logic_error if the generated table has no chaining entry.
  */
 [[nodiscard]] ch::chain_anchors_simd_kernel fixed_chaining_kernel() {
     const auto kernel =
@@ -100,7 +99,7 @@ TEST_CASE("chaining storage plans preserve selected workspace geometry without a
     REQUIRE(empty->nodes_per_tree == 0u);
     REQUIRE(empty->logical_arena_scratch_bytes == 0u);
     REQUIRE(empty->logical_initial_tree_bytes == 0u);
-    REQUIRE(empty->output.initial_chain_capacity == 1u); // unchanged initial reserve heuristic
+    REQUIRE(empty->output.initial_chain_capacity == 1u); // Empty input still reserves room for one chain.
     const auto maximum = (std::numeric_limits<std::size_t>::max)();
     REQUIRE_FALSE(ch::derive_scalar_chaining_storage_plan(maximum, params));
     REQUIRE_FALSE(ch::derive_rmq_chaining_storage_plan(maximum, params));
@@ -121,7 +120,7 @@ TEST_CASE("ArenaSlab geometric growth is amortized and chain scopes release heap
         auto chain_scope = ctx.push<context::arena::chain>();
         auto slab = ch::make_arena_slab<std::uint64_t>();
 
-        slab.reserve(140'000); // 1.12 MiB: force the oversize heap path.
+        slab.reserve(140'000); // Exceed the arena block size to force a heap allocation.
         slab.resize(140'000);
         const auto first_capacity = slab.capacity();
         REQUIRE(ctx.chain_heap_fallback_bytes() == first_capacity * sizeof(std::uint64_t));
@@ -131,8 +130,7 @@ TEST_CASE("ArenaSlab geometric growth is amortized and chain scopes release heap
         REQUIRE(ctx.chain_heap_fallback_bytes() ==
                 (first_capacity + slab.capacity()) * sizeof(std::uint64_t));
 
-        // Further append-sized requests within the doubled capacity must not
-        // allocate or copy another prefix.
+        // Requests that fit the new capacity must reuse the allocation.
         const auto allocated_bytes = ctx.chain_heap_fallback_bytes();
         slab.reserve_geometric(first_capacity + 1024);
         REQUIRE(ctx.chain_heap_fallback_bytes() == allocated_bytes);
@@ -140,7 +138,7 @@ TEST_CASE("ArenaSlab geometric growth is amortized and chain scopes release heap
     REQUIRE(ctx.chain_heap_fallback_bytes() == 0);
 }
 
-/// Construct one canonical chaining anchor for fixture generation.
+/// Builds a test anchor from its positions, span and strand.
 [[nodiscard]] ch::anchor make_anchor(std::uint64_t reference_position,
                                      std::uint64_t query_position,
                                      std::uint8_t span = 15,
@@ -155,7 +153,7 @@ TEST_CASE("ArenaSlab geometric growth is amortized and chain scopes release heap
     };
 }
 
-/// Generate a deterministic irregular diagonal anchor stream.
+/// Generates repeatable anchors with uneven spacing and reference positions crossing 2^32.
 [[nodiscard]] std::vector<ch::anchor> irregular_fixture(std::size_t count,
                                                         std::uint64_t seed = 0xA57D1E5ULL) {
     std::vector<ch::anchor> anchors;
@@ -184,7 +182,7 @@ TEST_CASE("ArenaSlab geometric growth is amortized and chain scopes release heap
     return anchors;
 }
 
-/// Generate an earlier exact winner followed by off-diagonal distractors.
+/// Places the best predecessor before many off-diagonal anchors that cannot improve the final chain.
 [[nodiscard]] std::vector<ch::anchor> earlier_winner_fixture(std::size_t main_count,
                                                              std::size_t distractor_count) {
     constexpr std::uint64_t current_ref = 10000;
@@ -225,7 +223,7 @@ TEST_CASE("ArenaSlab geometric growth is amortized and chain scopes release heap
     return anchors;
 }
 
-/// Return permissive exact-SIMD chaining parameters for fixtures.
+/// Builds exact SIMD test settings with large predecessor-search limits.
 [[nodiscard]] ch::chaining_parameters exact_params() {
     ch::chaining_parameters params;
     params.max_gap = 1000;
@@ -241,7 +239,7 @@ TEST_CASE("ArenaSlab geometric growth is amortized and chain scopes release heap
     return params;
 }
 
-/// Return bounded-batch chaining parameters derived from the exact fixture.
+/// Selects approximate SIMD chaining with a smaller limit on unhelpful batches.
 [[nodiscard]] ch::chaining_parameters bounded_params() {
     auto params = exact_params();
     params.max_chain_skip = 25;
@@ -249,22 +247,20 @@ TEST_CASE("ArenaSlab geometric growth is amortized and chain scopes release heap
     return params;
 }
 
-/// An earlier exact winner that is not the active-window global-best score.
-/// The intervening off-diagonal chain can be extended arbitrarily, so a
-/// bounded batch cutoff has no universal endpoint-error bound. This is a
-/// counterexample fixture, not endpoint-qualification corpus data.
+/// Builds a case where early stopping misses the best predecessor.
+/// A longer off-diagonal chain hides it from the highest-score rescue check.
 [[nodiscard]] std::vector<ch::anchor> unbounded_endpoint_error_fixture() {
     std::vector<ch::anchor> anchors;
     anchors.reserve(221u);
 
-    // Exact winner: score 100, but a 64-span final anchor contributes 64 to
-    // the last current-anchor edge and makes the resulting chain score 164.
+    // This chain gives the best predecessor for the final anchor. Its last seed
+    // has a larger span, giving that final link a higher score.
     for (std::size_t i = 0; i < 100u; ++i) {
         anchors.push_back(make_anchor(7000u + i * 10u, 7000u + i * 10u, i == 99u ? 64u : 1u));
     }
 
-    // Active-window global best: score 120. It is strongly off diagonal from
-    // the final anchor, so the rescue probe cannot use it.
+    // This longer chain has the highest stored score, but its query positions
+    // are too far away to link to the final anchor.
     for (std::size_t i = 0; i < 120u; ++i) {
         anchors.push_back(make_anchor(8500u + i * 10u, 1000u + i * 10u, 1u));
     }
@@ -272,14 +268,14 @@ TEST_CASE("ArenaSlab geometric growth is amortized and chain scopes release heap
     return anchors;
 }
 
-/// Owned chains, reordered anchors, and execution stats from one fixture run.
+/// Chains, reordered anchors and counters copied out of one test run.
 struct chain_outputs {
     std::vector<ch::chain> chains;
     std::vector<ch::anchor> anchors;
     simd_chaining_execution_stats stats{};
 };
 
-/// Run the scalar correctness oracle inside a fresh chaining arena.
+/// Runs scalar chaining as the reference result in a fresh test context.
 [[nodiscard]] chain_outputs run_scalar(std::span<const ch::anchor> anchors,
                                        const ch::chaining_parameters& params) {
     context::context ctx;
@@ -295,7 +291,7 @@ struct chain_outputs {
     return result;
 }
 
-/// Run the fixed-target SIMD route inside a fresh chaining arena.
+/// Runs SIMD chaining for the test CPU target and copies the results out of its arena.
 [[nodiscard]] chain_outputs run_simd(std::span<const ch::anchor> anchors,
                                      const ch::chaining_parameters& params,
                                      bool aggregate_stats = false) {
@@ -318,7 +314,7 @@ struct chain_outputs {
     return result;
 }
 
-/// Require exact chain and reordered-anchor parity between two runs.
+/// Checks that both runs produce the same chains and reordered anchors.
 void require_same_outputs(const chain_outputs& actual,
                           const chain_outputs& expected,
                           const std::string& fixture) {
@@ -344,7 +340,7 @@ void require_same_outputs(const chain_outputs& actual,
     }
 }
 
-/// Require that a selected SIMD route did not execute scalar fallback work.
+/// Checks that SIMD chaining neither used scalar fallback nor rejected the request.
 void require_no_forbidden_scalar_work(const simd_chaining_execution_stats& stats) {
     REQUIRE(stats.scalar_score_branches == 0);
     REQUIRE(stats.scalar_backtrack_branches == 0);
@@ -352,7 +348,7 @@ void require_no_forbidden_scalar_work(const simd_chaining_execution_stats& stats
     REQUIRE(stats.fail_closed_rejections == 0);
 }
 
-/// Require coherent execution statistics for the selected SIMD policy.
+/// Checks that counters describe exactly one call using the selected SIMD policy.
 void require_selected_policy(const simd_chaining_execution_stats& stats,
                              ch::simd_chaining_policy selected,
                              bool require_accelerated_work = false) {
@@ -369,7 +365,7 @@ void require_selected_policy(const simd_chaining_execution_stats& stats,
     }
 }
 
-/// Return whether two runs differ in chain or reordered-anchor identity.
+/// Detects differences in chain scores, anchor ranges, positions or fixture flags.
 [[nodiscard]] bool outputs_differ(const chain_outputs& lhs, const chain_outputs& rhs) {
     if (lhs.chains.size() != rhs.chains.size() || lhs.anchors.size() != rhs.anchors.size()) {
         return true;
@@ -584,9 +580,8 @@ TEST_CASE("bounded SIMD recomputes the largest global best after window expiry",
                                       9u,
                                       /*reverse=*/1u));
     }
-    // These anchors cannot extend the preceding reverse-strand chain. Its
-    // cached winner therefore remains unchanged until max_chain_iter advances the
-    // active window past it and forces a vector global-best recomputation.
+    // These anchors cannot extend the preceding reverse-strand chain.
+    // When its cached best anchor leaves the search window, SIMD must find a new one.
     for (std::size_t i = 0; i < 31u; ++i) {
         anchors.push_back(make_anchor(2100u + i,
                                       100u,
@@ -713,8 +708,8 @@ TEST_CASE("exact SIMD chaining preserves ties parents and output order",
     REQUIRE(actual.chains.front().anchor_count == static_cast<std::int32_t>(anchors.size()));
     REQUIRE(actual.anchors.size() == anchors.size());
     for (std::size_t i = 0; i < anchors.size(); ++i) {
-        // The strict-greater predecessor policy keeps the nearest descending
-        // predecessor on ties, yielding the complete parent chain in order.
+        // On equal scores, keep the first predecessor seen while scanning backwards.
+        // This preserves every anchor in the diagonal chain.
         REQUIRE(actual.anchors[i].ref_position == anchors[i].ref_position);
         REQUIRE(actual.anchors[i].query_position == anchors[i].query_position);
     }
@@ -778,8 +773,7 @@ TEST_CASE("SIMD backtracking keeps zero-threshold visited starts observable",
 TEST_CASE("long-read exact SIMD hybrid preserves diagonal outputs and stats",
           "[component:bioseq][layer:unit][feature:chaining][resource:highway]") {
     auto params = exact_params();
-    // Keep the skip budget above this fixture's full predecessor search so the
-    // hybrid route and strict scalar oracle have identical parents.
+    // Let both implementations search all predecessors so their parent choices can be compared.
     params.max_chain_skip = 10000;
     const std::size_t count = 273u;
     const auto anchors = diagonal_fixture(count);
@@ -889,7 +883,7 @@ TEST_CASE("long-read exact SIMD hybrid honors production max-skip bounds",
 
 TEST_CASE("exact SIMD hybrid reaches an earlier winner behind unvisited losers",
           "[component:bioseq][layer:unit][feature:chaining][resource:highway]") {
-    /// Exact-winner fixture dimensions and predecessor skip policy.
+    /// Anchor counts and skip limit for the hidden-best-predecessor cases.
     struct fixture_case {
         std::size_t main_count;
         std::size_t distractor_count;
@@ -923,7 +917,7 @@ TEST_CASE("exact SIMD hybrid reaches an earlier winner behind unvisited losers",
 
 TEST_CASE("exact SIMD hybrid matches randomized long inputs and nonzero penalty",
           "[component:bioseq][layer:unit][feature:chaining][resource:highway]") {
-    /// Randomized fixture dimensions, seed, and skip penalty configuration.
+    /// Input size, random seed and skip settings for repeatable long-input tests.
     struct fixture_case {
         std::size_t count;
         std::uint64_t seed;
@@ -989,9 +983,8 @@ TEST_CASE("exact SIMD hybrid preserves strict equal-score predecessor order",
             1u);
     }
     REQUIRE(actual.stats.improvement_replay_batches > 0);
-    // Duplicate anchors make every full predecessor batch contain an invalid
-    // same-position lane, so the contiguous-store predicate must reject it and
-    // preserve the exact masked-scatter fallback.
+    // Duplicate positions create invalid predecessor lanes. The vector store
+    // must respect those lanes instead of writing one contiguous block.
     REQUIRE(actual.stats.visited_marks > 0);
     REQUIRE(actual.stats.contiguous_predecessor_store_batches == 0);
     REQUIRE(actual.stats.backtrack_primary_contiguous_batches == 0);

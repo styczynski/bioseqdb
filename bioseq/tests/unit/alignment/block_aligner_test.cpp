@@ -1,6 +1,6 @@
 /**
  * @file block_aligner_test.cpp
- * @brief Exercises block-aligner scoring and gap certificates.
+ * @brief Checks block alignment scores and the shortcut for provably optimal ungapped alignments.
  */
 #include <catch2/catch_test_macros.hpp>
 
@@ -41,7 +41,7 @@ TEST_CASE("Block Aligner Global score/endpoints/CIGAR match scan_block.rs",
     context::installed_context_scope scope(ctx);
     const auto nw1 = scoring_matrix<dna4_u64>::generate(1, 1, 1);
 
-    // scan_block.rs::test_trace, NW1/Gaps{-2,-1}, block 16.
+    // Reference traceback fixture with a 16-cell block and gap scores -2/-1.
     const reference_run first = run_block(
         "TTTTTTTTAAAAAAATTTTTTTTT",
         "TTAAAAAAATTTTTTTTTTTT",
@@ -60,7 +60,7 @@ TEST_CASE("Block Aligner Global score/endpoints/CIGAR match scan_block.rs",
     CHECK(first.stats.forbidden_ksw2_calls == 0);
     CHECK(first.stats.forbidden_scalar_biological_fallbacks == 0);
 
-    // scan_block.rs::test_trace, NW1/Gaps{-2,-1}, block 32.
+    // Reference traceback fixture with a 32-cell block and gap scores -2/-1.
     const reference_run second = run_block(
         "AAAAAAAAATTGCGCT", "AAAAAAAAAGCGC",
         nw1, global_params(32, 32));
@@ -69,9 +69,8 @@ TEST_CASE("Block Aligner Global score/endpoints/CIGAR match scan_block.rs",
     CHECK(second.result.max_t == 12);
     CHECK(packed_cigar_string(second.result.cigar) == "9M2I4M1I");
 
-    // A 20-base insertion exceeds the initial 16-cell block and forces the
-    // adaptive 16..=32 grow/checkpoint path. The exact affine score is
-    // 32 matches - (open 2 + 19 extensions) = 11.
+    // The 20-base insertion makes the initial 16-cell block grow.
+    // The expected alignment keeps all 32 matches and pays for one gap.
     const reference_run adaptive = run_block(
         std::string(16, 'A') + std::string(20, 'C') + std::string(16, 'A'),
         std::string(32, 'A'),
@@ -150,9 +149,8 @@ TEST_CASE("Block Global diagonal certificate is byte-identical to forced DP",
         "TGCATGCAACGTACGTCCCCAAAATTTTGGGG";
     compare_dna4(exact, exact, true);
 
-    // Cross the fixed 1024-symbol scan boundary and leave one active byte in
-    // the final hardware vector for every admitted lane shape. This is the
-    // NEON full-load tail safety oracle.
+    // Cross the 1024-symbol scan boundary and leave one byte in the last SIMD batch.
+    // Exercise reads at the sequence end, including NEON full-vector loads.
     std::string long_unaligned_exact(1057, 'A');
     constexpr std::string_view dna4_cycle = "ACGT";
     for (std::size_t i = 0; i < long_unaligned_exact.size(); ++i) {
@@ -196,9 +194,8 @@ TEST_CASE("Block Global diagonal certificate is byte-identical to forced DP",
     two_substitutions[46] = two_substitutions[46] == 'A' ? 'C' : 'A';
     compare_dna4(exact, two_substitutions, true);
 
-    // Moving one distinct base inside a repeat resembles a compensating
-    // insertion/deletion but has only two coordinate mismatches.  The strict
-    // bound, not biological provenance, establishes that the diagonal is unique.
+    // Moving C by one position creates two mismatches. The score bound still
+    // proves that aligning without gaps gives the unique best result.
     std::string repeat_query(64, 'A');
     repeat_query[31] = 'C';
     std::string repeat_shifted = repeat_query;
@@ -206,20 +203,17 @@ TEST_CASE("Block Global diagonal certificate is byte-identical to forced DP",
     repeat_shifted[32] = 'C';
     compare_dna4(repeat_query, repeat_shifted, true);
 
-    // Three default-scoring substitutions fall below the strict certificate
-    // bound. Arbitrary seed/hash agreement cannot change that: actual bytes
-    // force the scalar DP path.
+    // Three substitutions fail the score bound, so alignment must use dynamic programming.
     std::string three_substitutions = two_substitutions;
     three_substitutions[55] = three_substitutions[55] == 'A' ? 'C' : 'A';
     compare_dna4(exact, three_substitutions, false);
 
-    // Equal-length compensating-indel geometry with many displaced bytes and
-    // unequal-length single-indel geometry are both explicit fallbacks.
+    // A shifted sequence and unequal lengths must both use dynamic programming.
     const std::string displaced = "T" + exact.substr(0, exact.size() - 1);
     compare_dna4(exact, displaced, false);
     compare_dna4(exact, exact + "A", false);
 
-    // D == U is deliberately not enough: retain the canonical tie policy.
+    // A tied score bound must use dynamic programming to preserve traceback choices.
     block_aligner_parameters tie_params = params;
     tie_params.gap_open = 1;
     tie_params.gap_extend = 1;
@@ -233,8 +227,7 @@ TEST_CASE("Block Global diagonal certificate is byte-identical to forced DP",
     CHECK(tie_optimized.stats.simd_diagonal_certificate_calls == 0);
     CHECK(tie_optimized.stats.simd_dp_cells > 0);
 
-    // A valid but non-generated score layout is outside the SIMD scan's
-    // exact classification and therefore cannot be certified.
+    // This custom matrix is valid for alignment but unsupported by the diagonal shortcut.
     auto unsupported_scoring = scoring;
     unsupported_scoring.at(0, 1) = 3;
     unsupported_scoring.simd_scores[1] = 3;
@@ -267,8 +260,7 @@ TEST_CASE("Block Global diagonal certificate is byte-identical to forced DP",
     CHECK(dna5_optimized.construction.padded_sequence_allocations == 0);
     CHECK(dna5_optimized.construction.scratch_allocations == 0);
 
-    // Reverse-strand template coordinates are encoded to canonical reverse
-    // complement before the scan. Compare those exact consumed bytes too.
+    // Check the shortcut against dynamic programming on reverse-complement query bases.
     const std::string reverse_source =
         "AACCGTACGTTTGGGCCCAAATTTACGTACGT"
         "GGGGAAAACCCCTTTTACGTTGCATGCACGTA";
@@ -288,8 +280,8 @@ TEST_CASE("Block Global diagonal certificate is byte-identical to forced DP",
     CHECK(reverse_optimized.construction.padded_sequence_allocations == 0);
     CHECK(reverse_optimized.construction.scratch_allocations == 0);
 
-    // Nonzero reverse-complement coordinates must remain continuous when the
-    // early scan splits the requested subregion at its 1024-symbol boundary.
+    // Check that a reverse-complement subregion stays continuous across the
+    // 1024-symbol scan boundary, even when it starts inside the sequence.
     std::string reverse_subregion_source(1129, 'A');
     for (std::size_t i = 0; i < reverse_subregion_source.size(); ++i) {
         reverse_subregion_source[i] =
@@ -417,9 +409,8 @@ TEST_CASE("Packed DNA4 gap certificate handles unaligned forward and reverse win
               == std::to_string(length) + "M");
     }
 
-    // Nonzero reverse logical coordinates cross both packed-word and 1024
-    // boundaries.  The target is the exact canonical RC window consumed by
-    // the forced scalar aligner.
+    // Use an offset reverse-complement window that crosses packed-word and
+    // 1024-symbol boundaries, then compare its score with dynamic programming.
     constexpr std::size_t reverse_query_start = 17u;
     constexpr std::size_t reverse_target_start = 31u;
     constexpr std::size_t reverse_length = 1057u;
@@ -476,10 +467,9 @@ TEST_CASE("Packed DNA4 gap certificate handles unaligned forward and reverse win
     CHECK(packed_cigar_string(reverse_forced.result.cigar)
           == std::to_string(reverse_length) + "M");
 
-    // The packed path scores substitutions exactly.  One substitution still
-    // establishes the diagonal under q=4/e=2; three do not. Under q=1/e=1 the
-    // one-substitution score equals the alternative bound and must reject to
-    // preserve the canonical traceback tie policy.
+    // With these gap penalties, one substitution still proves an ungapped optimum.
+    // Three substitutions fail the bound. Lower gap penalties make the one-substitution
+    // case tie the bound, so it must use dynamic programming for traceback.
     constexpr std::size_t decision_length = 65u;
     constexpr std::size_t decision_query_start = 31u;
     constexpr std::size_t decision_target_start = 17u;
@@ -716,7 +706,7 @@ TEST_CASE("Packed gap certificate preserves fragmented DNA5 and matrix fallbacks
     CHECK(fragmented_current_stats.is_internally_consistent());
     CHECK(fragmented_forced_stats.is_internally_consistent());
 
-    // Reverse fragmented coordinates use the canonical byte encoder too.
+    // Fragmented reverse-complement inputs must produce the same result as forced DP.
     const std::string reverse_target_text =
         reverse_complement_ascii(sequence);
     auto reverse_target_data = dna4_from_ascii(reverse_target_text);
