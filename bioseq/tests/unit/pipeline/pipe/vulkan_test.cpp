@@ -1,6 +1,6 @@
 /**
  * @file vulkan_test.cpp
- * @brief Exercises Vulkan pipeline routes.
+ * @brief Check Vulkan pipeline selection, alignment results, and memory cleanup.
  */
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers.hpp>
@@ -65,8 +65,8 @@ TEST_CASE("canonical Vulkan selection separates capability from a complete all-G
     REQUIRE(complete_all_gpu_tuple_selected(params));
 
     params.compute_mapq = true;
-    // Vulkan materializes its documented constant MAPQ without executing or
-    // falling back to the generic CPU/SIMD MAPQ stage.
+    // Enabling MAPQ keeps this selection valid. The dedicated GPU route
+    // handles mapping quality internally.
     REQUIRE(complete_all_gpu_tuple_selected(params));
     params.compute_mapq = false;
     params.base_alignment_algorithm = ::bioseq::simd::base_alignment_algorithm::ksw2;
@@ -230,7 +230,7 @@ TEST_CASE("bounded Vulkan pipe matches complete CPU biological results",
     using ::bioseq::simd::pipe::minimizer_range_stats_matches_backend;
 
     auto target = vulkan_pipeline_test_support::make_dna4(4000, 0xC0FFEEu);
-    // Query = a forward sub-region of the target (a guaranteed match).
+    // Copy a forward target region to make a query with an exact match.
     std::vector<seq::dna4> query(target.begin() + 500, target.begin() + 1300);
 
     minimap2_parameters cpu;
@@ -257,11 +257,8 @@ TEST_CASE("bounded Vulkan pipe matches complete CPU biological results",
     minimizer_range_execution_stats exact_range{};
     exact_range.exact_simd = cpu_res.exact_simd_query_execution_stats;
     exact_range.exact_simd_available = true;
-    // This parity fixture deliberately uses dna4/u64 (`vulkan_pipeline_test_support::range_t`).
-    // The resident vector_stream route is restricted to dna4/u32,
-    // so the authentic exact SIMD stats here is the chronological continuation
-    // route.  Resident routing has its own u32 test above; relabelling this u64
-    // stats as resident would weaken the persisted-scheme boundary.
+    // This fixture runs two-stack minimizers through continuation kernels.
+    // Check that its statistics identify that algorithm.
     REQUIRE(exact_range.exact_simd.resident_vector_stream_kernel_calls == 0u);
     REQUIRE((exact_range.exact_simd.generic_u64_kernel_calls > 0u ||
              exact_range.exact_simd.kmer_15_window_10_byte_8_uint32_hash_kernel_calls > 0u));
@@ -331,7 +328,7 @@ TEST_CASE("vulkan_minimap_integer with vulkan_enabled=false fails",
     disabled.chaining_algorithm = chaining_algorithm::vulkan_tiled_dynamic_programming;
     disabled.vulkan_enabled = false;
 
-    // Statement-plan validation rejects this selection before runtime entry.
+    // Reject the selected Vulkan algorithms while Vulkan is disabled.
     REQUIRE_THROWS_AS(vulkan_pipeline_test_support::run(query, target, disabled),
                       std::invalid_argument);
 }
@@ -551,11 +548,9 @@ TEST_CASE("bounded real-GPU prepared resident matches independent ordered sketch
         ordered_results =
             ::bioseq::simd::minimap_port(ordered_query_view, ordered_target_view, ordered_params);
 
-        // A nonempty query shorter than k has no minimizers, but the already
-        // materialized source-direct resident still owns the two required
-        // mapped-payload authority passes. Rebuild the small bounded resident
-        // and exercise the production wrapper so the generic early-empty seed
-        // shortcut cannot regress over this case.
+        // A query shorter than k produces no minimizers. The target handoff must
+        // still run both seed-count checks before returning an empty result,
+        // even though these checks need no index lookups.
         std::vector<seq::dna4> short_query_letters(target_letters.begin(),
                                                    target_letters.begin() + 8);
         vulkan_pipeline_test_support::range_t short_query_range(short_query_letters);
