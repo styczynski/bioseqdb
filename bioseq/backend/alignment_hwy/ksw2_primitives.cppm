@@ -1,6 +1,6 @@
 /**
  * @file ksw2_primitives.cppm
- * @brief Defines the SIMD state, cell, and traceback primitives used by KSW2.
+ * @brief SIMD score updates, temporary buffers and CIGAR traceback for KSW2.
  */
 module;
 
@@ -32,19 +32,15 @@ export namespace bioseq::simd {
 namespace [[bioseq::simd]] target {
 namespace hn = hwy::HWY_NAMESPACE;
 
-// =============================================================================
-// ksw_aligner_mode — selects single- or dual-affine-gap formulation.
-// =============================================================================
+// Select one or two affine gap-penalty pairs.
 
-/** Affine-gap recurrence selected for one KSW2 invocation. */
+/** Gap-penalty model for one KSW2 call. */
 enum class ksw_aligner_mode {
     single_affine,  ///< cost(k) = q + k*e
     dual_affine,    ///< cost(k) = min(q + k*e, q2 + k*e2)
 };
 
-// =============================================================================
-// SIMD helpers — templated by tag p_simd_tag so no global type aliases are needed.
-// =============================================================================
+// SIMD helpers parameterized by the Highway vector tag.
 
 /** Return the per-lane maximum under unsigned-byte ordering. */
 template <class p_simd_tag, class p_vector_type = hn::Vec<p_simd_tag>>
@@ -75,7 +71,13 @@ template <class p_simd_tag, class p_vector_type = hn::Vec<p_simd_tag>>
         hn::FirstN(simd_tag, 1u), hn::Set(simd_tag, value), hn::Zero(simd_tag));
 }
 
-/** Shift a vector left by one lane while carrying across vector boundaries. */
+/**
+ * Shift lanes toward higher indices and insert the previous vector's carry.
+ *
+ * inserted_lane holds the incoming value in lane zero and zeros elsewhere.
+ * Replace it with the outgoing last lane so the next vector can continue
+ * the shift.
+ */
 template <class p_simd_tag, class p_vector_type = hn::Vec<p_simd_tag>>
 [[always_inline]] inline p_vector_type shift_left_insert(
     const p_simd_tag& simd_tag,
@@ -97,9 +99,8 @@ template <class p_simd_tag, class p_vector_type = hn::Vec<p_simd_tag>>
     } else {
         auto shifted = hn::SlideUpLanes(simd_tag, vector, 1u);
         shifted = hn::IfThenElse(hn::FirstN(simd_tag, 1u), inserted_lane, shifted);
-        // Lanes(simd_tag), rather than its constexpr upper bound, is required for
-        // scalable SVE/RVV vectors. SlideDown leaves the vacated last lane in
-        // lane zero and zeros the remaining lanes, matching ShiftRightBytes.
+        // Use the active lane count on SVE and RVV, where vector length can vary.
+        // Move the last active lane to lane zero to carry it into the next vector.
         inserted_lane = hn::SlideDownLanes(
             simd_tag,
             vector,
@@ -108,15 +109,17 @@ template <class p_simd_tag, class p_vector_type = hn::Vec<p_simd_tag>>
     }
 }
 
-// =============================================================================
-// Flags + parameter bundles
-// =============================================================================
 
-// =============================================================================
-// Z-drop heuristic
-// =============================================================================
 
-/** Update maximum-score coordinates and report whether Z-drop terminated. */
+// Stop extensions whose score has fallen too far.
+
+/**
+ * Update the best score and decide whether this extension should stop.
+ *
+ * After the best position, allow a score drop up to z_drop_threshold plus
+ * the gap-extension cost of the change in diagonal. A negative threshold
+ * disables stopping. Return true when Z-drop stops the extension.
+ */
 [[nodiscard]] inline bool apply_z_drop_heuristic(
     ksw_alignment_result& result,
     bool use_rotated_coordinates,
@@ -158,25 +161,23 @@ template <class p_simd_tag, class p_vector_type = hn::Vec<p_simd_tag>>
     return false;
 }
 
-// =============================================================================
-// ksw_dp_state — named-field DP arena.
-// =============================================================================
+// Temporary score-difference and gap arrays.
 
-/** Arena-backed dynamic-programming state for the single-affine recurrence. */
+/** Temporary arrays for KSW2 with one gap-penalty pair. */
 class ksw_dp_state {
 public:
     ksw2_partial_score_type* diff_up_base = nullptr;  ///< Vertical score-difference rows.
     ksw2_partial_score_type* diff_left_base = nullptr;  ///< Horizontal score-difference rows.
     ksw2_partial_score_type* gap_e_offset_base = nullptr;  ///< Horizontal gap offsets.
     ksw2_partial_score_type* gap_f_offset_base = nullptr;  ///< Vertical gap offsets.
-    ksw2_partial_score_type* diag_score_base = nullptr;  ///< Generic-score diagonal rows.
+    ksw2_partial_score_type* diag_score_base = nullptr;  ///< Precomputed symbol-pair scores for custom scoring matrices.
     uint8_t* target_bytes       = nullptr;  ///< Encoded target ranks.
     uint8_t* query_reversed     = nullptr;  ///< Encoded query ranks in DP order.
 
     /** Construct an empty state handle. */
     ksw_dp_state() = default;
 
-    /** Allocate single-affine state for the requested sequence extents. */
+    /** Allocate the single-affine buffers described by plan. */
     explicit ksw_dp_state(const ksw2_storage_plan& plan)
         : ksw_dp_state(plan, /*zero_state_arrays=*/true) {}
 
@@ -184,7 +185,7 @@ public:
     [[nodiscard]] int target_vector_count() const noexcept { return target_vec_count_; }
     /** Return the number of vector slots needed for the query encoding. */
     [[nodiscard]] int query_vector_count()  const noexcept { return query_vec_count_; }
-    /** Return the byte size of one target-oriented state array. */
+    /** Return the byte size of one DP state array. */
     [[nodiscard]] size_t array_byte_count() const noexcept {
         return static_cast<size_t>(target_vec_count_) * vec_bytes_;
     }
@@ -200,18 +201,11 @@ public:
     }
 
 protected:
-    // Storage comes from the per-alignment arena. Only DP state that can be
-    // observed before its first write is zeroed; the encoded query and target
-    // byte regions are overwritten immediately by the encoding step.
-    //
-    // The `zero_state_arrays` constructor switch lets the dual-affine
-    // subclass opt out of the broad memset(0): ksw_dual_affine_dp_state immediately
-    // overwrites arrays 0..3 with `-q-e` and arrays 4..5 with
-    // `-q2-e2`, so zeroing them first is wasted bandwidth — for very-long
-    // alignments this is megabyte-scale memset traffic per call. The
-    // diag_score array (the last DP-state slot) is still zero-filled
-    // because the generic-score code path may read it before writing,
-    // and it's only one stride wide.
+    // Allocate all buffers in the alignment arena. Single-affine state starts
+    // at zero. The dual-affine caller supplies its own gap values, so it skips
+    // that zero-fill. Always clear the diagonal-score array because custom
+    // scoring can read its padding before writing it. Sequence encoding fills
+    // the query and target buffers separately.
     ksw_dp_state(const ksw2_storage_plan& plan, bool zero_state_arrays)
         : target_vec_count_(static_cast<int>(plan.target_vector_count))
         , query_vec_count_(static_cast<int>(plan.query_vector_count))
@@ -225,14 +219,12 @@ protected:
         if (zero_state_arrays) {
             std::memset(storage_.data(), 0, initialized_state_bytes);
         } else {
-            // Only zero the diag_score slot (the last state slab). Arrays
-            // 0..(state_array_count-2) are filled by the caller before first
-            // read.
+            // Clear the diagonal-score array, including padding.
+            // The caller initializes the other arrays.
             std::memset(storage_.data() + static_cast<size_t>(state_array_count - 1) * state_array_byte_count,
                         0, state_array_byte_count);
         }
-        // Wipe the single extra byte read just past the DP-state arrays through
-        // diag_score_base so the boundary remains deterministic.
+        // Clear the extra byte that a boundary read through diag_score_base can use.
         if (storage_.size() > initialized_state_bytes) {
             storage_[initialized_state_bytes] = 0;
         }
@@ -260,7 +252,7 @@ protected:
     std::span<ksw2_partial_score_type> storage_;
 };
 
-/** Extended DP state carrying the second affine-gap recurrence. */
+/** Add the second pair of gap arrays for dual-affine KSW2. */
 class ksw_dual_affine_dp_state : public ksw_dp_state {
 public:
     ksw2_partial_score_type* gap_e2_offset_base = nullptr;  ///< Long horizontal-gap offsets.
@@ -269,13 +261,10 @@ public:
     /** Construct an empty dual-affine state handle. */
     ksw_dual_affine_dp_state() = default;
 
-    /** Allocate dual-affine state for the requested sequence extents. */
+    /** Allocate the dual-affine buffers described by plan. */
     explicit ksw_dual_affine_dp_state(const ksw2_storage_plan& plan)
-        // Skip the broad zero-fill: align_ksw2_core fills arrays 0..5
-        // explicitly via fill_leading_arrays(4, -q-e) +
-        // fill_array(x2|y2, -q2-e2) right after construction. The
-        // diag_score slot (array 6) still gets a one-stride zero-fill
-        // inside the parent constructor.
+        // The core initializes both gap models after allocation. Skip clearing
+        // those arrays here, while the parent still clears the diagonal-score array.
         : ksw_dp_state(plan, /*zero_state_arrays=*/false)
     {
         gap_e2_offset_base = array_pointer(4);
@@ -290,17 +279,15 @@ using ksw_state_for = std::conditional_t<
     ksw_dual_affine_dp_state,
     ksw_dp_state>;
 
-// =============================================================================
-// ksw_backtrack_matrix
-// =============================================================================
+// Traceback directions and the bounds of each matrix band.
 
-/** Arena-backed banded traceback matrix and per-row band bounds. */
+/** Traceback data and band bounds stored in the alignment arena. */
 class ksw_backtrack_matrix {
 public:
     /** Construct an empty traceback matrix. */
     ksw_backtrack_matrix() noexcept = default;
 
-    /** Allocate storage for the admitted anti-diagonals and band capacity. */
+    /** Allocate traceback storage from the checked alignment plan. */
     void allocate(const ksw2_storage_plan& plan) {
         vec_bytes_ = plan.vector_bytes;
         cols_in_vectors_ = static_cast<int>(plan.band_vector_capacity);
@@ -355,11 +342,15 @@ private:
     size_t total_vector_slots_ = 0;
 };
 
-// =============================================================================
-// CIGAR traceback
-// =============================================================================
+// Walk the saved traceback to build a CIGAR.
 
-/** Reconstruct a packed CIGAR from the banded traceback matrix. */
+/**
+ * Build a packed CIGAR by walking backwards from the selected matrix cell.
+ *
+ * Use band bounds to force a gap when the walk leaves saved cells. Merge
+ * adjacent operations into runs and reverse the output unless output_reversed
+ * is set. A positive minimum_intron_length allows reference-skip operations.
+ */
 #if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
 inline void ksw_backtrack_cigar(
     const ksw_backtrack_matrix& matrix,
@@ -381,17 +372,9 @@ inline void ksw_backtrack_cigar(
 #endif
 {
     output_cigar.clear();
-    // The traceback walks (starting_row + starting_column + 1) cells. Each cell
-    // emits one packed-cigar push, but `push_packed_cigar` merges with
-    // the previous op when the opcode matches — so for a typical
-    // low-error long-read alignment the final CIGAR is ~5 ops per 100 bp
-    // (~5 % of cells emit a fresh op). Reserve `(cells + 7) / 8` to
-    // sidestep the geometric-realloc chain during the backward build:
-    // every doubling realloc memcpys the previous contents, which on a
-    // 1 Mbp alignment dominates the traceback wall-clock. Slight over-
-    // estimation is fine — the vector is short-lived (lives on the
-    // result struct, returned by value) and the alternative is the
-    // repeated geometric reallocation for long reads.
+    // Reserve an initial CIGAR estimate to reduce reallocations during
+    // traceback. Consecutive steps with the same opcode share one packed run,
+    // and the vector can still grow if the alignment needs more runs.
     const size_t cell_estimate = static_cast<size_t>(starting_row + starting_column + 1);
     output_cigar.reserve(std::max<size_t>(64, (cell_estimate + 7) / 8));
 
@@ -441,11 +424,9 @@ inline void ksw_backtrack_cigar(
     if (!output_reversed) std::reverse(output_cigar.begin(), output_cigar.end());
 }
 
-// =============================================================================
-// ksw_dp_cell — values loaded for one DP update.
-// =============================================================================
+// Vector values needed for one DP update.
 
-/** Vector state returned by one KSW2 DP load step. */
+/** Candidate scores and neighboring differences for one vector of DP cells. */
 template <class p_simd_tag>
 struct ksw_dp_cell {
     hn::Vec<p_simd_tag> selected_scores;  ///< Selected score for every lane.
@@ -462,15 +443,10 @@ struct ksw_dp_cell {
     [[gnu::always_inline]] ksw_dp_cell() noexcept {}
 };
 
-// =============================================================================
-// load_ksw_dp_cell — load one SIMD DP cell.
-//
-// When p_is_fused_score == true the cell score is computed inline from sequence
-// data while preserving fused diagonal-score storage.
-// When false the score is loaded from diag_score_base (generic_score path).
-// =============================================================================
+// Build scores directly from sequence ranks for standard scoring.
+// Custom scoring reads precomputed values from diag_score_base.
 
-/** Load recurrence state and construct one vector of candidate scores. */
+/** Load neighboring DP state and compute candidate scores for each SIMD lane. */
 template <
     ksw_aligner_mode p_mode,
     bool p_is_fused_score,
@@ -493,7 +469,7 @@ template <
     using partial_score_type = hn::TFromD<p_simd_tag>;
     ksw_dp_cell<p_simd_tag> cell;
 
-    // --- Cell score ---
+    // Score the aligned symbol pair in each lane.
     if constexpr (p_is_fused_score) {
         auto target_ranks = hn::LoadU(simd_tag,
             reinterpret_cast<const partial_score_type*>(&state.target_bytes[state_offset]));
@@ -515,7 +491,7 @@ template <
         cell.selected_scores = hn::Add(cell.selected_scores, double_gap_costs);
     }
 
-    // --- Gap / diff state ---
+    // Combine gap state with neighboring score differences.
     auto shifted_horizontal_gap_offsets = hn::Load(simd_tag, state.gap_e_offset_base + state_offset);
     shifted_horizontal_gap_offsets = shift_left_insert(simd_tag, shifted_horizontal_gap_offsets, horizontal_gap_carry);
     cell.shifted_left_differences = hn::Load(simd_tag, state.diff_left_base + state_offset);
@@ -538,11 +514,9 @@ template <
     return cell;
 }
 
-// =============================================================================
-// reduce_ksw_dp_maximum — reduce per-lane maxima into the result state.
-// =============================================================================
+// Select the best candidate independently in each lane.
 
-/** Reduce one vector of recurrence candidates to the selected cell scores. */
+/** Choose each cell's best score from diagonal and gap candidates. */
 template <ksw_aligner_mode p_mode, class p_simd_tag>
 [[always_inline]] inline void reduce_ksw_dp_maximum(
     p_simd_tag simd_tag, ksw_dp_cell<p_simd_tag>& cell,
@@ -564,11 +538,9 @@ template <ksw_aligner_mode p_mode, class p_simd_tag>
     }
 }
 
-// =============================================================================
-// store_ksw_dp_cell — store one SIMD DP update.
-// =============================================================================
+// Save the state needed by the next anti-diagonal.
 
-/** Store one vector of selected scores and updated gap offsets. */
+/** Save score differences and gap offsets for the next DP update. */
 template <
     ksw_aligner_mode p_mode,
     class p_simd_tag,

@@ -1,6 +1,6 @@
 /**
  * @file utils_kernel.cppm
- * @brief Target-specific score lookup helpers for alignment kernels.
+ * @brief SIMD table lookups for alignment substitution scores.
  */
 module;
 
@@ -24,13 +24,15 @@ namespace [[bioseq::simd]] target {
 namespace hn = hwy::HWY_NAMESPACE;
 
 /**
- * @brief Loads SIMD shuffle tables for one scoring-matrix row.
- * @tparam p_alphabet Logical sequence alphabet.
- * @tparam p_simd_tag Highway descriptor for signed 16-bit score lanes.
- * @param[in] matrix Canonical score matrix.
- * @param[in] simd_tag Active score descriptor.
- * @param[in] rank Zero-based score-matrix row.
- * @return Fixed-size array of target-native byte lookup vectors.
+ * @brief Loads one score row into SIMD byte-lookup tables.
+ *
+ * The tables can be reused when aligning several query vectors against
+ * the same reference rank. Scores are prepared for signed 16-bit lanes.
+ *
+ * @param[in] matrix Score matrix with SIMD padding.
+ * @param[in] simd_tag Highway tag for signed 16-bit scores.
+ * @param[in] rank Matrix row for the reference symbol.
+ * @return One SIMD lookup vector per 16 entries in the padded row.
  */
 template <sequence_alphabet p_alphabet, class p_simd_tag>
 HWY_INLINE auto load_score_lookup_tables(
@@ -64,15 +66,15 @@ HWY_INLINE auto load_score_lookup_tables(
 }
 
 /**
- * @brief Looks up per-lane scores from already loaded shuffle tables.
- * @tparam p_alphabet Logical sequence alphabet.
- * @tparam p_simd_tag Highway descriptor for signed 16-bit score lanes.
- * @tparam p_lookup_tables Fixed lookup-table collection type.
- * @param[in] matrix Matrix whose alphabet determines lookup semantics.
- * @param[in] simd_tag Active score descriptor.
- * @param[in] lookup_tables Loaded byte shuffle tables.
- * @param[in] query_pointer Readable query ranks for every active lane.
- * @return Signed 16-bit score vector for the query ranks.
+ * @brief Scores query ranks using a previously loaded matrix row.
+ *
+ * Each lane looks up its rank and expands the signed byte score to 16 bits.
+ *
+ * @param[in] matrix Supplies the alphabet and table dimensions.
+ * @param[in] simd_tag Highway tag for signed 16-bit scores.
+ * @param[in] lookup_tables Tables returned by load_score_lookup_tables.
+ * @param[in] query_pointer Query ranks readable for every active lane.
+ * @return One signed 16-bit substitution score per query rank.
  */
 template <
     sequence_alphabet p_alphabet,
@@ -122,14 +124,15 @@ HWY_INLINE hn::Vec<p_simd_tag> get_scores_with_lookup_tables(
 }
 
 /**
- * @brief Loads one scoring row and returns scores for the query ranks.
- * @tparam p_alphabet Logical sequence alphabet.
- * @tparam p_simd_tag Highway descriptor for signed 16-bit score lanes.
- * @param[in] matrix Canonical score matrix.
- * @param[in] simd_tag Active score descriptor.
- * @param[in] rank Zero-based score-matrix row.
- * @param[in] query_pointer Readable query ranks for every active lane.
- * @return Signed 16-bit score vector for the query ranks.
+ * @brief Returns SIMD scores for query ranks against one reference rank.
+ *
+ * Loads the matrix row, then looks up each query rank.
+ *
+ * @param[in] matrix Score matrix with SIMD padding.
+ * @param[in] simd_tag Highway tag for signed 16-bit scores.
+ * @param[in] rank Matrix row for the reference symbol.
+ * @param[in] query_pointer Query ranks readable for every active lane.
+ * @return One signed 16-bit substitution score per query rank.
  */
 template <sequence_alphabet p_alphabet, class p_simd_tag>
 HWY_INLINE hn::Vec<p_simd_tag> get_scores(

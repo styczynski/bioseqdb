@@ -1,6 +1,6 @@
 /**
  * @file utils.cppm
- * @brief Canonical scoring-matrix storage shared by SIMD alignment kernels.
+ * @brief Substitution scores shared by scalar and SIMD alignment code.
  */
 module;
 
@@ -18,10 +18,10 @@ import bioseq.sequences;
 export namespace bioseq::simd {
 
 /**
- * @brief Stores canonical scalar scores and their Highway shuffle projection.
+ * @brief Stores substitution scores and padded copies for SIMD lookup.
  *
- * @tparam p_alphabet Logical sequence alphabet.
- * @tparam p_alphabet_dimension Alphabet size including the wildcard rank.
+ * @tparam p_alphabet Sequence alphabet.
+ * @tparam p_alphabet_dimension Number of ranks, including the wildcard.
  */
 template <sequence_alphabet p_alphabet, std::size_t p_alphabet_dimension>
 struct scoring_matrix_storage {
@@ -37,7 +37,7 @@ struct scoring_matrix_storage {
     static constexpr int k_dimension =
         static_cast<int>(p_alphabet_dimension);
 
-    /** @brief Row-major scalar scoring entries. */
+    /** @brief Substitution scores indexed by row and column rank. */
     std::array<std::int8_t, k_entry_count> entries{};
 
     static constexpr std::size_t k_simd_rows = p_alphabet_dimension + 1;
@@ -52,7 +52,7 @@ struct scoring_matrix_storage {
             < std::numeric_limits<std::uint8_t>::max(),
         "Scoring rank and null sentinel must fit in uint8_t");
 
-    /** @brief Shuffle-table rows used by Highway score lookup. */
+    /** @brief Score rows padded for byte-table SIMD lookup. */
     alignas(64) std::array<
         std::int8_t,
         k_simd_rows * k_simd_columns> simd_scores{};
@@ -62,10 +62,8 @@ struct scoring_matrix_storage {
         "SIMD scoring storage must not add element overhead");
 
     /**
-     * @brief Returns a scalar score by row and column.
-     * @param[in] row Zero-based alphabet row.
-     * @param[in] column Zero-based alphabet column.
-     * @return Stored score at the requested coordinate.
+     * @brief Reads the score for a pair of ranks.
+     * @pre Ranks must be nonnegative and below dimension. No bounds check is performed.
      */
     [[nodiscard]] constexpr std::int8_t at(
         int row,
@@ -75,10 +73,8 @@ struct scoring_matrix_storage {
     }
 
     /**
-     * @brief Returns a mutable scalar score by row and column.
-     * @param[in] row Zero-based alphabet row.
-     * @param[in] column Zero-based alphabet column.
-     * @return Mutable stored score at the requested coordinate.
+     * @brief Returns a mutable score for a pair of ranks.
+     * @pre Ranks must be nonnegative and below dimension. Update simd_scores separately when needed.
      */
     [[nodiscard]] constexpr std::int8_t& at(
         int row,
@@ -88,33 +84,30 @@ struct scoring_matrix_storage {
     }
 
     /**
-     * @brief Returns the canonical match score.
-     * @return Score at the first diagonal matrix coordinate.
+     * @brief Returns the first diagonal score, used as the match score.
      */
     [[nodiscard]] constexpr std::int8_t match_score() const noexcept {
         return entries[0];
     }
 
     /**
-     * @brief Returns the canonical mismatch score.
-     * @return Score at the first off-diagonal matrix coordinate.
+     * @brief Returns the first off-diagonal score, used as the mismatch score.
      */
     [[nodiscard]] constexpr std::int8_t mismatch_score() const noexcept {
         return entries[1];
     }
 
     /**
-     * @brief Returns the wildcard score.
-     * @return Score at the final matrix coordinate.
+     * @brief Returns the score for aligning two wildcard ranks.
      */
     [[nodiscard]] constexpr std::int8_t wildcard_score() const noexcept {
         return entries[k_entry_count - 1];
     }
 
     /**
-     * @brief Returns the first byte of a SIMD lookup row.
-     * @param[in] row Zero-based row including the sentinel row.
-     * @return Pointer into the aligned shuffle-table storage.
+     * @brief Returns a padded SIMD lookup row.
+     * @param[in] row Rank to look up, including the extra sentinel rank.
+     * @return Pointer into this matrix's aligned score storage.
      */
     [[nodiscard]] const std::int8_t* simd_row_pointer(
         std::size_t row) const noexcept {
@@ -122,8 +115,7 @@ struct scoring_matrix_storage {
     }
 
     /**
-     * @brief Validates that shuffle rows exactly project the scalar matrix.
-     * @return `true` when scores and sentinel padding match the canonical layout.
+     * @brief Checks that SIMD scores match entries and all padding is INT8_MIN.
      */
     // Each Highway translation unit has a different ISA. Keep this small
     // imported template predicate in its caller so the linker cannot coalesce
@@ -157,8 +149,9 @@ struct scoring_matrix_storage {
     }
 
     /**
-     * @brief Computes a stable identity for every score consumed by Block Aligner.
-     * @return FNV-1a identity over the dimension and row-major scalar scores.
+     * @brief Hashes the matrix dimension and scores to identify a scoring setup.
+     *
+     * Block Aligner uses this value when checking a prepared execution plan.
      */
     [[nodiscard]] std::uint64_t block_semantic_identity() const noexcept {
         std::uint64_t hash = 1469598103934665603ULL;
@@ -174,15 +167,16 @@ struct scoring_matrix_storage {
     }
 
     /**
-     * @brief Generates scalar scores and their SIMD lookup projection.
+     * @brief Builds scalar and SIMD substitution tables from match and penalty values.
      *
-     * Positive match input remains positive. Mismatch and ambiguity inputs
-     * are normalized to penalties. The last rank is the wildcard rank.
+     * Stores the match magnitude as a reward and mismatch and wildcard values
+     * as nonpositive penalties. Any pair containing the final wildcard rank
+     * receives the wildcard penalty. SIMD padding is INT8_MIN.
      *
-     * @param[in] match Match score or its negated representation.
+     * @param[in] match Match score in either sign convention. Its magnitude must fit in int8_t.
      * @param[in] mismatch_penalty Mismatch penalty in either sign convention.
      * @param[in] ambiguity_penalty Wildcard penalty in either sign convention.
-     * @return Complete scalar matrix and aligned shuffle projection.
+     * @return Matrix with matching scalar and SIMD score tables.
      */
     [[nodiscard]] static scoring_matrix_storage generate(
         std::int8_t match,
@@ -229,10 +223,10 @@ struct scoring_matrix_storage {
 };
 
 /**
- * @brief Names scoring storage normalized to a source's logical alphabet.
+ * @brief Selects score storage from an alphabet or compact-sequence source.
  *
- * @tparam p_source Logical alphabet or compatible compact-sequence source.
- * @tparam p_alphabet_dimension Logical alphabet dimension.
+ * @tparam p_source Alphabet or compatible compact-sequence source.
+ * @tparam p_alphabet_dimension Number of matrix ranks.
  */
 template <
     supports_compact_sequence_range p_source,
