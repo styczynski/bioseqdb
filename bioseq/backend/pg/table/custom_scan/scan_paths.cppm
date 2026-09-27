@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Aggregates scan admission, parameterized path construction, and final costs.
+ * @brief Choose eligible Bioseq scan paths and estimate their costs.
  */
 export module bioseq.postgres.table:custom_scan_scan_paths;
 

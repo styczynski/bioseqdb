@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Aggregates SliceProject planning, rewrite, and executor partitions.
+ * @brief Planner and executor callbacks for lazy sequence projections.
  */
 export module bioseq.postgres.table:custom_scan_slice_projection;
 
