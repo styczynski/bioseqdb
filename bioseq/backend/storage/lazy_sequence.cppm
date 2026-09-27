@@ -1,6 +1,6 @@
 /**
  * @file storage/lazy_sequence.cppm
- * @brief Public facade for bounded lazy-sequence access.
+ * @brief Exports lazy sequence views, owners, and access helpers.
  */
 export module bioseq.storage.lazy_sequence;
 
