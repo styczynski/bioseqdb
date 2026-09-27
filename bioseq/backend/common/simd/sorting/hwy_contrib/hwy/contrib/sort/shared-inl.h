@@ -38,44 +38,38 @@ static HWY_INLINE uint64_t RandomBits(uint64_t* HWY_RESTRICT state) {
   return next;
 }
 
-// Internal constants - these are to avoid magic numbers/literals and cannot be
-// changed without also changing the associated code.
+// Sizes used by the sorting networks and partition loops. Changes here
+// require matching changes in the code that loads and stores those groups.
 struct SortConstants {
-  // SortingNetwork reshapes its input into a matrix. This is the maximum number
-  // of *lanes* per vector. Must be at least 8 because SortSamples assumes the
-  // sorting network can handle 128 bytes with 8 rows, so 16 bytes per vector,
-  // which means 8 lanes for 16-bit types.
+  // Maximum lanes in one row of the sorting network. At least 8 are needed
+  // so an 8-row network can sort the 128-byte pivot sample with 16-bit lanes.
 #if HWY_COMPILER_MSVC || HWY_IS_DEBUG_BUILD
   static constexpr size_t kMaxCols = 8;  // avoid build timeout/stack overflow
 #else
   static constexpr size_t kMaxCols = 16;  // enough for u32 in 512-bit vector
 #endif
 
-  // 16 rows is a compromise between using the 32 AVX-512/SVE/RVV registers,
-  // fitting within 16 AVX2 registers with only a few spills, keeping BaseCase
-  // code size reasonable, and minimizing the extra logN factor for larger
-  // networks (for which only loose upper bounds on size are known).
+  // Sixteen rows keep the network small enough for AVX2 while using the extra
+  // registers available on AVX-512, SVE, and RVV. Larger networks also need more
+  // comparison steps and generate more code.
   static constexpr size_t kMaxRows = 16;
 
-  // Template argument ensures there is no actual division instruction.
+  // A compile-time lanes-per-key value lets the compiler simplify the division.
   template <size_t kLPK>
   static constexpr HWY_INLINE size_t BaseCaseNumLanes(size_t N) {
-    // We use 8, 8x2, 8x4, and 16x{4..} networks, in units of keys. For N/kLPK
-    // < 4, we cannot use the 16-row networks.
+    // Use 8-row networks for fewer than four keys per vector and 16 rows for
+    // wider vectors.
     return (((N / kLPK) >= 4) ? kMaxRows : 8) * HWY_MIN(N, kMaxCols);
   }
 
-  // Unrolling is important (pipelining and amortizing branch mispredictions);
-  // 2x is sufficient to reach full memory bandwidth on SKX in Partition, but
-  // somewhat slower for sorting than 4x.
-  //
-  // To change, must also update left + 3 * N etc. in the loop.
+  // Partition handles four vectors per iteration to spread loop overhead
+  // over more work. The explicit offsets in that loop must change with this
+  // constant.
   static constexpr size_t kPartitionUnroll = 4;
 
-  // Chunk := group of keys loaded for sampling a pivot. Matches the typical
-  // cache line size of 64 bytes to get maximum benefit per L2 miss. Sort()
-  // ensures vectors are no larger than that, so this can be independent of the
-  // vector size and thus constexpr.
+  // Number of lanes in a 64-byte group sampled for a pivot. Sort caps vector
+  // size at 64 bytes, so a sample group holds whole vectors and fits the usual
+  // cache-line size.
   static constexpr HWY_INLINE size_t LanesPerChunk(size_t sizeof_t) {
     return 64 / sizeof_t;
   }
@@ -86,14 +80,13 @@ struct SortConstants {
   }
 
   static constexpr HWY_INLINE size_t PartitionBufNum(size_t N) {
-    // The main loop reads kPartitionUnroll vectors, and first loads from
-    // both left and right beforehand, so it requires 2 * kPartitionUnroll
-    // vectors. To handle amounts between that and BaseCaseNumLanes(), we
-    // partition up 3 * kPartitionUnroll + 1 vectors into a two-part buffer.
+    // Reserve both sides of the temporary partition buffer. This also covers
+    // small inputs that skip the main loop and need up to 3 * kPartitionUnroll + 1
+    // vectors on each side.
     return 2 * (3 * kPartitionUnroll + 1) * N;
   }
 
-  // Max across the three buffer usages.
+  // Buffer capacity for pivot sampling, base-case sorting, and partitioning.
   template <typename T, size_t kLPK>
   static constexpr HWY_INLINE size_t BufNum(size_t N) {
     // BaseCase may write one padding vector, and SortSamples uses the space
@@ -108,7 +101,7 @@ struct SortConstants {
     return BufNum<T, kLPK>(vector_size / sizeof(T)) * sizeof(T);
   }
 
-  // Returns max for any type.
+  // Largest buffer size among the supported lane types.
   template <size_t kLPK>
   static constexpr HWY_INLINE size_t MaxBufBytes(size_t vector_size) {
     // If 2 lanes per key, it's a 128-bit key with u64 lanes.
@@ -138,11 +131,12 @@ static_assert(SortConstants::MaxBufBytes<2>(64) <= 1664, "Unexpectedly high");
 
 #include "hwy/highway.h"
 
-// vqsort isn't available on HWY_SCALAR, and builds time out on MSVC opt and
-// Armv7 debug, and Armv8 GCC 11 asan hits an internal compiler error likely
-// due to https://gcc.gnu.org/bugzilla/show_bug.cgi?id=97696. Armv8 Clang
-// hwasan/msan/tsan/asan also fail to build SVE (b/335157772), and SVE2
-// hits a compiler crash, though SVE2_128 is fine.
+// Disable VQSort for unsupported targets and compiler combinations with
+// known build failures. These include optimized MSVC, Armv7 debug, Arm64
+// ASan, and older RISC-V GCC builds. SVE also has sanitizer and scalable-vector
+// restrictions below.
+// GCC issue: https://gcc.gnu.org/bugzilla/show_bug.cgi?id=97696
+// Clang SVE sanitizer issue: b/335157772
 #undef VQSORT_ENABLED
 #undef VQSORT_COMPILER_COMPATIBLE
 
@@ -169,7 +163,7 @@ namespace HWY_NAMESPACE {
 
 // Default tag / vector width selector.
 #if HWY_TARGET == HWY_RVV
-// Use LMUL = 1/2; for SEW=64 this ends up emulated via VSETVLI.
+// Use LMUL = 1/2. For 64-bit lanes, VSETVLI emulates this width.
 template <typename T>
 using SortTag = ScalableTag<T, -1>;
 #else

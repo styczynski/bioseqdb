@@ -13,9 +13,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Tag arguments that determine the sort order. Used by both vqsort.h and the
-// VQSortStatic in vqsort-inl.h. Moved to a separate header so that the latter
-// can be used without pulling in the dllimport statements in vqsort.h.
+// Tags that select ascending or descending order for VQSort and VQSortStatic.
+// Keeping them here lets VQSortStatic use the tags without the dllimport
+// declarations in vqsort.h.
 
 #ifndef HIGHWAY_HWY_CONTRIB_SORT_ORDER_H_
 #define HIGHWAY_HWY_CONTRIB_SORT_ORDER_H_
