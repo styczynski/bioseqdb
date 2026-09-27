@@ -1,11 +1,6 @@
-/*-------------------------------------------------------------------------
- *
- * Primary interface for bioseq_cache provider discovery and callback
- * adaptation. PostgreSQL-independent provider contracts remain in
- * bioseq.cache.core; this module owns only backend-local registry and bridge
- * behavior.
- *
- *-------------------------------------------------------------------------
+/**
+ * @file
+ * @brief Exports provider registration and PostgreSQL callback adapters for cache reuse.
  */
 export module bioseq.cache.pg.provider;
 
