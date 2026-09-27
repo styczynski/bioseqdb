@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Aggregates Bioseq TableAM callbacks, state, initialization, and SQL entry points.
+ * @brief Register Bioseq table callbacks and SQL functions for storage options.
  */
 module;
 #include <algorithm>
@@ -51,22 +51,22 @@ export import :access_method_contract;
 bool previous_cache_enabled_state = false;
 
 namespace {
-/** Rendezvous name used to publish relation-option observers. */
+/** Name other extensions use to find the table-options change hook. */
 constexpr const char* column_set_options_hook_symbol = "BioseqColumnTableSetOptions_hook";
 } // namespace
 
-/** Callback published through the stable relation-options rendezvous slot. */
+/** Callback notified before new table storage options are saved. */
 using column_set_options_hook_type = void (*)(Oid relid, column_options options);
 
-/** Hook value published through find_rendezvous_variable. */
+/** Optional table-options callback shared through PostgreSQL's rendezvous API. */
 static column_set_options_hook_type column_set_options_hook = nullptr;
 
 namespace {
 
-/** Scope guard for relation pins whose PostgreSQL lock mode is tracked separately. */
+/** Close an opened relation at scope exit with the requested lock-release policy. */
 class sql_relation_lock final {
   public:
-    /** @brief Retain a relation pin and remember the matching close routine and lock mode. */
+    /** Take responsibility for closing this already-open relation. */
     sql_relation_lock(Relation relation, LOCKMODE close_lock, bool opened_as_table) noexcept
         : locked_relation{relation}, close_lock_mode{close_lock},
           uses_table_close{opened_as_table} {}
@@ -74,7 +74,7 @@ class sql_relation_lock final {
     sql_relation_lock(const sql_relation_lock&) = delete;
     sql_relation_lock& operator=(const sql_relation_lock&) = delete;
 
-    /** @brief Release the relation pin without changing the separately tracked lock policy. */
+    /** Close the relation and keep its lock when the close mode is NoLock. */
     ~sql_relation_lock() noexcept {
         if (locked_relation == nullptr)
             return;
@@ -150,7 +150,7 @@ std::int64_t get_storage_id([[bioseq_sql::param({
 
 } // namespace bioseq::table::sql_routines
 
-/** Return the stable table access-method callback table after its callbacks are defined. */
+/** PostgreSQL callbacks that read, write, and maintain Bioseq tables. */
 [[nodiscard]] const TableAmRoutine& bioseq_am_methods() noexcept {
     static const TableAmRoutine methods = {
         .type = T_TableAmRoutine,
@@ -226,7 +226,7 @@ export const TableAmRoutine* column_table_access_method(void) {
 
 export namespace bioseq::table::sql_routines {
 
-/** @brief Returns the table access-method handler for Bioseq tables. */
+
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq">,
     .create = bioseq::sql::create_mode::or_replace,
@@ -242,9 +242,7 @@ export namespace bioseq::table::sql_routines {
 })]] [[bioseq_sql::result({
     .sql_type = bioseq::sql::pg::table_am_handler,
 })]]
-/**
- * @brief Returns the table access-method handler for Bioseq tables.
- */
+/** Return Bioseq's table-access callbacks to PostgreSQL. */
 const TableAmRoutine* bioseq_handler([[bioseq_sql::param({
     .sql_type = bioseq::sql::pg::internal,
 })]] std::optional<bioseq::postgres::support::table_access_method_handler> handler_context) {
@@ -255,19 +253,16 @@ const TableAmRoutine* bioseq_handler([[bioseq_sql::param({
 
 } // namespace bioseq::table::sql_routines
 
-/** Publish table-AM callbacks, storage hooks, transaction hooks, and slot operations. */
+/** Register Bioseq table callbacks, transaction hooks, and tuple-slot operations. */
 export void bioseq_tableam_init() {
     bioseq_log<logging_level::debug>("[bioseq] pg: bioseq_tableam_init() entered");
 
-    // publish the bioseq TableAmRoutine identity to the
-    // bioseq_column_tam leaf so relation_oid_uses_column_table_access_method can recognise bioseq
-    // tables without depending back on this module (dependency inversion).
+    // Share the callback-table address with the relation-checking module.
+    // That module can recognize Bioseq tables without importing this one.
     register_column_table_access_method(column_table_access_method());
 
-    // wire the inverted write/read-state dependencies. The
-    // storage_metadata write/read-state partitions hold function-pointer slots
-    // (default nullptr); register the bioseq_table_io / bioseq_storage callees
-    // here so storage_metadata stays free of those module edges.
+    // Connect read and write callbacks stored by the metadata modules.
+    // Registering them here avoids circular module imports.
     register_column_write_state_hooks(&begin_column_write,
                                       &end_column_write,
                                       &bioseq_flush_pending_writes_adapter,
@@ -284,8 +279,8 @@ export void bioseq_tableam_init() {
 
     install_column_table_hooks();
 
-    // Custom-scan initialization is owned by the extension initializer so the
-    // table partitions retain an acyclic import graph.
+    // The extension initializer sets up custom scans separately to avoid
+    // circular imports between the table modules.
 
     initialize_column_tuple_slot_operations();
 }
@@ -407,7 +402,7 @@ export namespace bioseq::table::sql_routines {
     .schema = bioseq::sql::pg_catalog,
     .create = bioseq::sql::create_mode::or_replace,
 })]]
-/** @brief Resets selected Bioseq table options to their system defaults. */
+/** Reset selected table options to the current session's Bioseq settings. */
 void alter_bioseq_table_reset([[bioseq_sql::param({
                                   .sql_type = bioseq::sql::pg::regclass,
                               })]] std::optional<Oid> table_name,
@@ -473,7 +468,7 @@ export namespace bioseq::table::sql_routines {
     .schema = bioseq::sql::fixed_schema<"bioseq_internal">,
     .create = bioseq::sql::create_mode::or_replace,
 })]]
-/** @brief Upgrades Bioseq storage metadata when the relation uses an older layout. */
+/** Update an older storage metapage to this library's format and rebuild its allocation counters. */
 void upgrade_bioseq_storage([[bioseq_sql::param({
     .sql_type = bioseq::sql::pg::regclass,
 })]] Oid rel) {
@@ -489,7 +484,7 @@ void upgrade_bioseq_storage([[bioseq_sql::param({
     .schema = bioseq::sql::fixed_schema<"bioseq_internal">,
     .create = bioseq::sql::create_mode::or_replace,
 })]]
-/** @brief Downgrades Bioseq storage metadata when the relation uses a newer layout. */
+/** Update a newer storage metapage to this library's format and rebuild its allocation counters. */
 void downgrade_bioseq_storage([[bioseq_sql::param({
     .sql_type = bioseq::sql::pg::regclass,
 })]] Oid rel) {

@@ -45,25 +45,21 @@ namespace {
 static object_access_hook_type previous_object_access_hook = nullptr;
 static ProcessUtility_hook_type previous_process_utility_hook = nullptr;
 static bool extension_teardown_active = false;
-/* True only while the parent OAT_DROP hook issues PostgreSQL-owned DROP TABLE
- * commands for its generated children. Those recursive commands have already
- * passed the parent's read-only preflight and must not be mistaken for a new
- * user-authored DROP statement. */
+/* Set while dropping a Bioseq table's generated child tables. Their recursive
+ * DROP commands share the parent's completed checks. */
 static bool internal_drop_cleanup_active = false;
-/* The active external CREATE owns this backend-local capture window.  Nested
- * ProcessUtility calls save and restore both values, so only PostgreSQL's
- * OAT_POST_CREATE notification for the delegated statement can authorize the
- * subsequent metadata insert. */
+/* Remember the table created by the current external CREATE command so its
+ * options can be saved afterward. Nested utility calls save and restore both
+ * values. */
 static bool external_create_capture_active = false;
 static Oid captured_external_create_oid = InvalidOid;
 
-/** PostgreSQL's RemoveRelations() resolves a named partition with
- * RangeVarCallbackForDropRelation so its parent is locked before the child.
- * Query execution and partition DDL use that same parent-first order. This
- * callback preserves the ordering, permission, and relation-kind checks
- * required by the read-only preflight. Calling callback-free
- * RangeVarGetRelid(..., AccessExclusiveLock) here would introduce a child-first
- * deadlock edge before core gets a chance to run its own callback. */
+/** Parent relation locked while resolving a DROP target.
+ *
+ * PostgreSQL locks a partition's parent before the partition during DROP.
+ * Keep that order during our early checks too, or concurrent partition changes
+ * can deadlock before PostgreSQL runs its own checks.
+ */
 struct bioseq_drop_lock_state {
     Oid partition_parent_oid = InvalidOid;
 };
@@ -113,15 +109,13 @@ static void lock_bioseq_drop_target(const RangeVar* relation, Oid relid, Oid old
     }
 }
 
-/** Build the locked inheritance closure, including pending-detach partitions.
+/** Find and lock every inheritance child that DROP may remove.
  *
- * `find_all_inheritors()` omits a committed
- * DETACH PARTITION CONCURRENTLY member under an active snapshot. DROP's
- * dependency set can still own that pending-detach partition, so the early
- * cleanup preflight must use the extended direct-child API with
- * omit_detached=false. The returned direct children are OID-sorted and locked
- * by PostgreSQL. This breadth-first traversal retains those locks and dedupes
- * multiple-inheritance paths without C++ state that ereport could bypass. */
+ * Include partitions awaiting DETACH completion, since PostgreSQL's dependency
+ * list can still include them. Visit children breadth first and keep their
+ * locks. PostgreSQL lists hold the work queue so an ERROR cannot skip C++
+ * object cleanup. Shared children are visited once.
+ */
 static void append_drop_inheritance_closure(Oid root_relid, List** target_relids) {
     List* closure = list_make1_oid(root_relid);
     ListCell* agenda_cell = nullptr;
@@ -148,20 +142,20 @@ static void append_drop_inheritance_closure(Oid root_relid, List** target_relids
         }
     }
 }
-/**
- * Backend-local, read-only test observability.  These counters are deliberately
- * downstream of the classification decisions: neither value is ever consulted
- * to decide whether teardown is active.  They survive DROP/CREATE EXTENSION in
- * one backend because PostgreSQL does not unload an already-loaded library.
+/** Test counters for DROP handling in this backend.
+ *
+ * They record decisions after the checks and never affect those checks.
+ * PostgreSQL keeps the library loaded across DROP/CREATE EXTENSION, so the
+ * counts survive recreating the extension in the same backend.
  */
 static std::uint64_t drop_lock_fallback_count = 0;
 static std::uint64_t missing_relation_count = 0;
 
-/** Test whether the exact relation catalog row remains visible to the current command.
+/** Check pg_class with SnapshotSelf before handling a dropped relation.
  *
- * SnapshotSelf, rather than relcache/syscache state, is the authoritative
- * answer for PostgreSQL's precomputed dependency list: a recursive cleanup can
- * delete pg_class while a stale relcache entry remains pinned in this backend. */
+ * Recursive cleanup can remove the catalog row while a cached Relation still
+ * exists. The catalog scan sees the current command's changes.
+ */
 [[nodiscard]] static bool relation_catalog_row_exists(const Oid relid) {
     Relation class_relation = table_open(RelationRelationId, AccessShareLock);
     ScanKeyData key;
@@ -174,14 +168,11 @@ static std::uint64_t missing_relation_count = 0;
     return exists;
 }
 
-/**
- * A backend can load bioseq.dylib lazily while PostgreSQL is already inside
- * standard_ProcessUtility for DROP EXTENSION bioseq.  In that case installing
- * our ProcessUtility hook cannot retroactively wrap the active command, but
- * RemoveObjects() has already taken and retained an AccessExclusive database-
- * object lock on the exact pg_extension OID.  Reconstruct the same LOCKTAG as
- * LockDatabaseObject() so later OAT_DROP callbacks can prove this one narrow
- * teardown context without treating an ordinary missing catalog as benign.
+/** Check whether this backend holds the Bioseq extension's DROP lock.
+ *
+ * The library can first load during DROP EXTENSION, after its utility hook
+ * would have run. PostgreSQL has already locked the extension by then. The
+ * exact extension OID and AccessExclusiveLock identify that case.
  */
 [[nodiscard]] static bool extension_drop_lock_is_held() {
     const Oid extension_oid = get_extension_oid("bioseq", true);
@@ -196,10 +187,9 @@ static std::uint64_t missing_relation_count = 0;
                         /* orstronger = */ false);
 }
 
-/** Classify the current object-access callback as an attested extension teardown. */
+/** Check whether this callback runs during DROP EXTENSION bioseq. */
 [[nodiscard]] static bool in_extension_teardown() {
-    /* Preserve the direct-String ProcessUtility fast path for backends that
-     * loaded bioseq before entering DROP EXTENSION. */
+    /* The utility hook sets this flag when Bioseq was loaded before DROP. */
     if (extension_teardown_active) {
         return true;
     }
@@ -221,12 +211,8 @@ static std::uint64_t missing_relation_count = 0;
     }
     ListCell* cell = nullptr;
     foreach (cell, drop->objects) {
-        /*
-         * PostgreSQL represents each DROP EXTENSION target directly as a String
-         * (unlike object classes whose targets are qualified-name lists).  Match
-         * only the exact extension name so this teardown allowance cannot be
-         * activated by an unrelated DROP statement or a malformed parse tree.
-         */
+        /* DROP EXTENSION stores each target as a String. Only the exact name
+         * bioseq enables extension cleanup here. */
         Node* object = reinterpret_cast<Node*>(lfirst(cell));
         if (IsA(object, String) && std::strcmp(strVal(object), "bioseq") == 0) {
             return true;
@@ -235,28 +221,14 @@ static std::uint64_t missing_relation_count = 0;
     return false;
 }
 
-/**
- * OAT_DROP is suitable for last-moment cleanup and race revalidation, but a
- * relation DROP has already entered PostgreSQL/table-AM deletion machinery by
- * then.  A catalog-contract ERROR at that point can leave backend-local parent
- * storage state deformed even though SQL catalog changes roll back.
+/** Validate cleanup catalogs before PostgreSQL starts dropping Bioseq tables.
  *
- * Resolve and lock every named target first, preserving PostgreSQL's
- * missing_ok behaviour. A named table is not the complete deletion set:
- * PostgreSQL can implicitly process inheritance children and partitions. Use
- * its parent-first RangeVar callback contract for named partitions, then walk
- * direct children with omit_detached=false under AccessExclusiveLock and
- * deduplicate the resulting closure before classification. Only after the
- * complete locked closure is known do we read-only validate every bioseq
- * member's two cleanup catalogs.
+ * Lock named tables, then their inheritance children and partitions. Check both
+ * cleanup catalogs for every Bioseq table. A failure after dropping starts can
+ * leave backend-local storage state changed despite SQL rollback.
  *
- * This early guarantee is a shared-preload contract. If the dylib is first
- * loaded while standard_ProcessUtility is already executing a top-level DROP
- * TABLE, no hook installed by that load can retroactively preflight the
- * command. When this hook is already present in a non-preloaded backend, reject
- * the bioseq DROP before core mutation instead of pretending the impossible
- * first-command boundary is covered. standard_ProcessUtility is not entered
- * unless the entire closure preflight succeeds.
+ * Requires shared preloading. If this hook is present without it, reject the
+ * Bioseq DROP. A hook installed during DROP cannot check the command beforehand.
  */
 static void preflight_bioseq_table_drop(Node* parsetree) {
     if (!IsA(parsetree, DropStmt)) {
@@ -273,9 +245,8 @@ static void preflight_bioseq_table_drop(Node* parsetree) {
         /* For OBJECT_TABLE each object is PostgreSQL's qualified-name List. */
         List* qualified_name = reinterpret_cast<List*>(lfirst(cell));
         RangeVar* relation = makeRangeVarFromNameList(qualified_name);
-        /* Match RemoveRelations(): an already-held relation lock can otherwise
-         * let RangeVar lookup skip the invalidation flush and leave a stale
-         * relhassubclass=false in front of the closure scan. */
+        /* Refresh catalog invalidations even when the relation lock was already
+         * held, so the child scan sees the current relhassubclass value. */
         AcceptInvalidationMessages();
         bioseq_drop_lock_state lock_state{};
         const Oid relid = RangeVarGetRelidExtended(relation,
@@ -288,10 +259,9 @@ static void preflight_bioseq_table_drop(Node* parsetree) {
         }
     }
 
-    /* Resolve and lock every explicit root before taking any implicit child
-     * lock, so a child shared by multiple named inheritance roots cannot invert
-     * the caller's own named-target lock order. Process any invalidations that
-     * arrived while a named lock was awaited before consulting relhassubclass. */
+    /* Lock all named parents before their children to keep a shared child
+     * from changing the named-target lock order. Refresh catalog invalidations
+     * received while waiting for those locks before looking for children. */
     AcceptInvalidationMessages();
     List* target_relids = NIL;
     foreach (cell, named_relids) {
@@ -317,9 +287,7 @@ static void preflight_bioseq_table_drop(Node* parsetree) {
     }
 
     foreach (cell, bioseq_relids) {
-        /* The catalog contract is global today, but validate once per locked
-         * bioseq closure member so a future relation-scoped contract cannot be
-         * accidentally reduced to validation of only the named parent. */
+        /* Validate both cleanup catalogs for every locked Bioseq table. */
         (void)lfirst_oid(cell);
         bioseq::storage::bioseq_default_storage_manager::validate_drop_catalog_contracts();
     }
@@ -330,19 +298,13 @@ static void handle_column_table_drop(Oid relid) {
     bioseq_log<logging_level::debug>("[bioseq] pg: handle_column_table_drop() entered");
     const bool extension_teardown = in_extension_teardown();
 
-    /*
-     * DROP EXTENSION builds one dependency-deletion list before invoking the
-     * per-object hooks.  Dropping a parent bioseq table below also removes its
-     * generated sidecars (and therefore their implicit primary-key indexes).
-     * Extension teardown now leaves those children to PostgreSQL's one owning
-     * CASCADE list. Any missing entry is therefore an invariant violation, not
-     * an idempotent condition to hide from core deletion.
+    /* PostgreSQL computes the DROP EXTENSION dependency list in advance. Let
+     * it remove generated child tables and indexes from that list. A missing
+     * relation is an error even during extension removal.
      *
-     * Keep the returned relation reference only through AM classification and
-     * identity capture.  Its AccessShareLock is retained to transaction end,
-     * while the relcache pin is released before any catalog operation that can
-     * advance the command counter.
-     */
+     * Keep the relation open only long enough to identify its access method and
+     * storage. Release the cache reference before catalog changes can refresh
+     * it, and keep the relation lock until the transaction ends. */
     if (!relation_catalog_row_exists(relid)) {
         ++missing_relation_count;
         if (extension_teardown) {
@@ -378,9 +340,8 @@ static void handle_column_table_drop(Oid relid) {
         is_bioseq_relation ? drop_target->rd_locator : RelFileLocator{};
     const Oid relation_oid = RelationGetRelid(drop_target);
 
-    /* Release the relcache pin before source invalidation: that path performs a
-     * CommandCounterIncrement(), which may rebuild invalidated relcache entries.
-     * The AccessShareLock acquired by try_relation_open remains held to xact end. */
+    /* Source invalidation can advance the command counter and rebuild cached
+     * relations. Release our reference first, keeping the transaction lock. */
     relation_close(drop_target, NoLock);
     drop_target = nullptr;
 
@@ -389,11 +350,9 @@ static void handle_column_table_drop(Oid relid) {
                                                                   /* missing_ok = */ true);
     }
 
-    /* PostgreSQL owns the complete extension dependency-deletion list. During
-     * an attested DROP EXTENSION, source rows and their catalog disappear with
-     * that list, so invalidating them is both unnecessary and unsafe: a newly
-     * installed library must not deform an older on-disk catalog contract merely
-     * to let PostgreSQL remove it. Ordinary relation drops remain fail-closed. */
+    /* DROP EXTENSION removes source rows through PostgreSQL's dependency
+     * list. Skip source invalidation then, since the loaded library may be
+     * newer than the catalog layout being removed. */
     if (!extension_teardown &&
         bioseq::storage::internal_catalog_detail::bioseq_extension_installed() &&
         bioseq::storage::is_registered_sequence_fragment_relation(relid)) {
@@ -401,13 +360,9 @@ static void handle_column_table_drop(Oid relid) {
     }
 
     if (is_bioseq_relation) {
-        /* Ordinary parent DROP must validate both the fragment registry and
-         * source-version catalog before changing parent metadata or the
-         * backend-local dropped-relfilenode state. drop_sub_tables_for_main()
-         * performs those fail-closed validations before its own mutations.
-         * Running it first therefore leaves the visible parent untouched when
-         * either catalog is missing or malformed. Extension teardown continues
-         * to leave the complete dependency list to PostgreSQL. */
+        /* Check the fragment and source catalogs before changing parent metadata
+         * or marking its storage as dropped. Child cleanup performs those checks
+         * first. During DROP EXTENSION, PostgreSQL removes the children itself. */
         if (!extension_teardown) {
             const bool saved_internal_cleanup = internal_drop_cleanup_active;
             std::exception_ptr cpp_error;
@@ -510,7 +465,7 @@ static void handle_column_table_object_access(
     }
 }
 
-/** Translate C++ failures before returning through PostgreSQL's object-access ABI. */
+/** Convert C++ exceptions from the object-access hook into PostgreSQL errors. */
 static void column_table_object_access_hook(
     ObjectAccessType access, Oid class_id, Oid object_id, int sub_id, void* arg) {
     const bool saved_extension_teardown = extension_teardown_active;
@@ -539,7 +494,7 @@ static void column_table_object_access_hook(
              errdetail_internal("%s", detail.data())));
 }
 
-/** Reject text COPY into typmodless `bioseq.letter` columns before mutation. */
+/** Reject text COPY FROM into letter columns with no declared alphabet before writing rows. */
 static void preflight_typmodless_letter_copy(Node* parsetree) {
     if (!IsA(parsetree, CopyStmt)) {
         return;
@@ -601,7 +556,7 @@ static void preflight_typmodless_letter_copy(Node* parsetree) {
     table_close(relation, NoLock);
 }
 
-/** Process Bioseq utility semantics around PostgreSQL's owning utility callback. */
+/** Check Bioseq DDL and COPY commands, then pass them to the previous utility hook. */
 static void process_column_table_utility(PlannedStmt* pstmt,
                                          const char* query_string,
                                          bool read_only_tree,
@@ -619,9 +574,8 @@ static void process_column_table_utility(PlannedStmt* pstmt,
     CreateStmt* external_create = nullptr;
     if (IsA(parsetree, CreateStmt) && bioseq::postgres::external::is_external_create_statement(
                                           reinterpret_cast<CreateStmt*>(parsetree))) {
-        /* ProcessUtility trees are normally caller-owned. Copy the one narrow
-         * statement before removing the four AM-private options; an already
-         * copied read-only tree can be reused. */
+        /* Copy the caller's parse tree before removing external-table options.
+         * A read-only tree copied above is already ours to change. */
         if (!read_only_tree) {
             pstmt = copyObject(pstmt);
             parsetree = pstmt->utilityStmt;
@@ -656,11 +610,8 @@ static void process_column_table_utility(PlannedStmt* pstmt,
         preflight_bioseq_table_drop(parsetree);
     }
 
-    /*
-     * Recursive utility commands issued by the parent drop hook re-enter this
-     * hook. Save/restore the prior value rather than unconditionally clearing a
-     * flag, and restore it on PostgreSQL ERROR longjmp as well as success.
-     */
+    /* Nested DROP commands re-enter this hook. Restore the outer command's
+     * flags on success and on PostgreSQL errors. */
     const bool saved_teardown_context = extension_teardown_active;
     if (drops_bioseq_extension(parsetree)) {
         extension_teardown_active = true;
@@ -719,7 +670,7 @@ static void process_column_table_utility(PlannedStmt* pstmt,
     }
 }
 
-/** Translate C++ failures before returning through PostgreSQL's utility-hook ABI. */
+/** Convert C++ exceptions from the utility hook into PostgreSQL errors. */
 static void column_table_process_utility_hook(PlannedStmt* pstmt,
                                               const char* query_string,
                                               bool read_only_tree,
@@ -763,7 +714,7 @@ static void column_table_process_utility_hook(PlannedStmt* pstmt,
 
 } // namespace
 
-/** Install Bioseq object-access and utility hooks while retaining prior hooks. */
+/** Install Bioseq object-access and utility hooks, saving the previous hooks. */
 export void install_column_table_hooks() {
     previous_object_access_hook = object_access_hook;
     object_access_hook = column_table_object_access_hook;
@@ -784,10 +735,7 @@ export namespace bioseq::table {
     .privileges = bioseq::sql::privileges::all,
     .from = bioseq::sql::public_role,
 })]]
-/**
- * @brief Returns backend-local DROP EXTENSION lock-fallback and missing-relation
- * counters.
- */
+/** Return this backend's extension-lock fallback and missing-relation counts. */
 [[nodiscard]] bioseq::postgres::support::named_output<teardown_diagnostics_row>
     teardown_diagnostics() noexcept {
     const auto clamp_counter = [](std::uint64_t value) noexcept {

@@ -1,8 +1,8 @@
 /**
  * @file access_callback_state.cppm
- * @brief Declares state shared by paired PostgreSQL table-access callbacks.
+ * @brief Page-cache state saved across table-access callbacks.
  */
 export module bioseq.postgres.table:access_callback_state;
 
-/** Page-cache setting captured between paired scan and mutation callbacks. */
+/** Page-cache setting to restore when a scan or speculative insert finishes. */
 export extern bool previous_cache_enabled_state;
