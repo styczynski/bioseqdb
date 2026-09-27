@@ -1,24 +1,13 @@
 /**
  * @file bench_framework/example/index.cppm
- * @brief Demonstration of the benchmark framework.
+ * @brief Sorting and counting examples using example_bench_configuration.json.
  *
- * Three toy benchmarks driven by `example_bench_configuration.json`:
- *
- *   1. **bench_sort** — measures sorting performance for two algorithms
- *      (`std_sort`, `std_stable_sort`). One built-in `wall_clock_ns`
- *      metric, one rule comparing the two. Each iteration sleeps a few
- *      milliseconds so the demo runs ≥ 15 s of wall-clock time and a
- *      human can watch the dashboard.
- *
- *   2. **bench_count** — counts even integers in a vector. One
- *      `evaluation` metric (the count) and one rule asserting the
- *      computed count matches the known ground truth. Includes a
- *      "BUGGY_INPUT" test case that throws from `on_input` on the
- *      first 2 attempts so the operator can see the retry UI.
- *
- *   3. **bench_buggy_cleanup** — every `on_cleanup` call throws.
- *      Demonstrates the cleanup-retry UI and the
- *      `cleanup_function_failing` warning.
+ * bench_sort compares std_sort with std_stable_sort and includes about 250 ms
+ * of sleep per run so there is time to watch the dashboard.
+ * bench_count checks even-number counts. Its BUGGY_INPUT case fails the first
+ * two input-building attempts to demonstrate retries.
+ * bench_buggy_cleanup always throws during cleanup, showing retries and the
+ * final cleanup_function_failing warning.
  */
 module;
 
@@ -55,7 +44,7 @@ namespace {
 using bioseq::bench::framework::parameter_map;
 using bioseq::bench::framework::run_constraints;
 
-// -------- bench_sort I/O types --------
+// Sorting input and output.
 
 struct sort_input {
     std::vector<std::int64_t> values;
@@ -77,9 +66,8 @@ struct sort_output {
     const auto values_bytes = (length <= 0)
         ? std::size_t{0}
         : static_cast<std::size_t>(length) * sizeof(std::int64_t);
-    // base: sort_input.values lives until cleanup.
-    // extra: the working_copy in run_sort_algorithm doubles allocation
-    // for the duration of the iteration loop only.
+    // Keep the input vector until cleanup. Each run also needs a working
+    // copy, so reserve another vector for the iteration loop.
     return { .base_memory = values_bytes, .extra_memory = values_bytes };
 }
 
@@ -108,8 +96,8 @@ struct sort_output {
                                               const parameter_map& /*params*/,
                                               const sort_input& input)
 {
-    // One static region descriptor per algorithm so the framework's
-    // by_regions split has something to attribute samples to.
+    // Record copying and sorting separately so by_regions can report
+    // the time spent in each part.
     static const auto* const sort_region =
         bioseq::instrumentation::register_static_region("sort_run");
     static const auto* const copy_region =
@@ -122,11 +110,9 @@ struct sort_output {
     }
     {
         auto _sort_scope = bioseq::instrumentation::region(sort_region);
-        // Sleep ~250 ms per iteration so the dashboard is visible
-        // for ≥ 15 s end-to-end. The sleep lives inside the timing window
-        // intentionally so the rule `sort_within_2x_of_stable_sort`
-        // (tolerance 99%) keeps passing — both algorithms incur the same
-        // delay so their p50s converge.
+        // Include about 250 ms of sleep in each timed run so the dashboard
+        // stays visible. Both algorithms get the same delay, which also
+        // reduces the difference seen by the demo's timing rule.
         for (size_t dummy_iteration = 0; dummy_iteration < 250; ++dummy_iteration) {
             std::this_thread::sleep_for(std::chrono::milliseconds{1});
             if (algorithm_name == "std_sort") {
@@ -157,7 +143,7 @@ struct sort_output {
     return metrics;
 }
 
-// -------- bench_count I/O types --------
+// Even-number counting input and output.
 
 struct count_input {
     std::vector<std::int64_t> values;
@@ -178,25 +164,19 @@ struct count_output {
     const auto values_bytes = (length <= 0)
         ? std::size_t{0}
         : static_cast<std::size_t>(length) * sizeof(std::int64_t);
-    // count_input keeps `values`; run_count_algorithm only iterates,
-    // no extra allocation in the iteration loop.
+    // Keep the input vector until cleanup. Counting reads it directly,
+    // so the iteration loop needs no additional allocation.
     return { .base_memory = values_bytes, .extra_memory = 0 };
 }
 
-/// return the remaining count. When the test_case JSON object carries
-/// `"buggy_input": N`, the first `N` calls to `build_count_input` for
-/// that specific `test_case_name` throw a `std::runtime_error`. The
-/// framework's retry loop catches the exception, surfaces the retry
-/// row in the dashboard, and tries again — eventually succeeding.
+/// Claim one simulated input failure for this test case.
 ///
-/// The counter is keyed by `test_case_name` so adding more buggy-input
-/// test cases doesn't deplete a global shared budget. The whole
-/// fetch-and-decrement happens under `std::mutex` so concurrent
-/// builders for the same test_case_name don't race.
+/// Each name starts with `initial_failures`. A positive return value means
+/// the caller should throw, and zero means it can build the input. The return
+/// value is the count before decrementing it.
 ///
-/// Returns the remaining count BEFORE the decrement — i.e. > 0 means
-/// "throw"; <= 0 means "succeed". Caller never decrements outside the
-/// helper.
+/// The mutex keeps concurrent builders from claiming the same failure.
+/// Separate counters let each test case demonstrate its own retry sequence.
 inline int consume_buggy_input_failure(std::string_view test_case_name,
                                          int initial_failures) noexcept {
     static std::mutex mu;
@@ -214,9 +194,8 @@ inline int consume_buggy_input_failure(std::string_view test_case_name,
                                             simdjson::dom::element data_element,
                                             const run_constraints& /*constraints*/)
 {
-    // `"buggy_input": <int>` field giving the number of failures to
-    // inject for this specific test_case. We consume one slot from the
-    // per-test-case counter; when it falls to 0, on_input succeeds.
+    // `buggy_input` sets how many input-building attempts should fail
+    // for this test case before a retry succeeds.
     std::int64_t initial_failures = 0;
     (void)data_element["buggy_input"].get(initial_failures);
     if (initial_failures > 0) {
@@ -255,9 +234,8 @@ inline int consume_buggy_input_failure(std::string_view test_case_name,
                                                 const parameter_map& /*params*/,
                                                 const count_input& input)
 {
-    // Loop descriptor records one work unit for each inspected value. The
-    // value we inspected). Lets the loop_total_iterations / loop_total_work
-    // metrics produce non-zero data.
+    // Record one loop iteration and one work unit per value so the demo
+    // can report loop_total_iterations and loop_total_work.
     static const auto* const count_loop =
         bioseq::instrumentation::register_static_loop("count_main_loop");
 
@@ -270,10 +248,9 @@ inline int consume_buggy_input_failure(std::string_view test_case_name,
     return output;
 }
 
-/// Optional teardown hook. Runs once per `(bench_count, test_case,
-/// group)` after every iteration on that batch's cached input has
-/// finished. Cleanup may run multiple
-/// times for the same test_case (one call per parallel group).
+/// Log cleanup after a batch finishes using its cached input.
+/// Each parallel group owns a batch, so one test case can reach this hook
+/// several times. The framework releases the input after the hook returns.
 void cleanup_count_input(std::string_view /*data_dir*/,
                           std::string_view test_case_name,
                           simdjson::dom::element /*data_element*/,
@@ -283,9 +260,8 @@ void cleanup_count_input(std::string_view /*data_dir*/,
          test_case_name, input.values.size());
 }
 
-/// An `on_cleanup` callback that always throws drives the
-/// `▶ 🧹 ... [retry N/5]` UI row and the terminal
-/// `cleanup_function_failing` warning at end-of-run.
+/// Always fail cleanup to demonstrate retry messages and the final
+/// `cleanup_function_failing` warning.
 void cleanup_always_throws(std::string_view /*data_dir*/,
                             std::string_view test_case_name,
                             simdjson::dom::element /*data_element*/,
@@ -303,9 +279,9 @@ void cleanup_always_throws(std::string_view /*data_dir*/,
     const count_input& input,
     const count_output& output)
 {
-    // Run an independent reference count from the input and compare to
-    // the algorithm's output. The metric `even_count` mirrors the
-    // algorithm output; `even_count_match` is a 0/1 sentinel.
+    // Recount even values to check the result independently.
+    // even_count reports the output. even_count_match is 1 on agreement
+    // and 0 on a mismatch.
     std::int64_t reference = 0;
     for (const auto value : input.values) {
         if ((value & 1) == 0) ++reference;
@@ -359,7 +335,7 @@ int run(int argc, char** argv) {
                 evaluate_count_output},
             std::function<void(std::string_view, std::string_view, simdjson::dom::element, const count_input&)>{
                 cleanup_count_input}),
-        // Cleanup always throws, producing five retries and a warning.
+        // Cleanup fails all five attempts and produces a warning.
         bioseq::bench::framework::create_benchmark<count_input, count_output>(
             "Buggy cleanup demo",
             "bench_buggy_cleanup",
