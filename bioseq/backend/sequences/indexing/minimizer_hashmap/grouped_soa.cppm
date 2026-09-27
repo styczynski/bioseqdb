@@ -1,6 +1,6 @@
 /**
  * @file minimizer_hashmap/grouped_soa.cppm
- * @brief Aggregates grouped-SoA storage, validation, and transient lookup contracts.
+ * @brief Exports grouped index formats, codecs, validation and in-memory lookup.
  */
 export module bioseq.indexing.minimizer_hashmap:grouped_soa;
 

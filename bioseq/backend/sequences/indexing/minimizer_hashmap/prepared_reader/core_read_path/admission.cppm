@@ -1,6 +1,6 @@
 /**
  * @file admission.cppm
- * @brief Implements admitted position and control-buffer ownership.
+ * @brief Reserves memory before allocating query positions and control decode buffers.
  */
 export module bioseq.indexing.minimizer_hashmap:prepared_reader_core_read_path_admission;
 
