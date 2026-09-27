@@ -1,6 +1,6 @@
 /**
  * @file simple_cigar.cppm
- * @brief Defines the simple-CIGAR alignment-extension GLSL body.
+ * @brief GPU alignment shader that returns scores and packed CIGAR strings.
  */
 export module bioseq.gpu.vulkan.shader_compiler:alignment_prefilter_simple_cigar;
 
@@ -8,7 +8,11 @@ import std;
 
 export namespace bioseq::gpu::vulkan {
 
-/// @brief Extends alignments and emits bounded simple CIGAR programs.
+/// @brief Aligns sequence windows and writes packed CIGAR strings within each job's capacity.
+/// Tries simple alignments first, then uses dynamic programming and traceback.
+/// For large windows, it saves tile boundaries within the band and recomputes
+/// tiles during traceback to limit storage. Reports unsupported inputs and
+/// CIGAR overflow through the result status.
 inline constexpr std::string_view k_alignment_extension_simple_cigar_body = R"GLSL(
 layout(local_size_x = compile_time_workgroup_size_x, local_size_y = 1, local_size_z = 1) in;
 

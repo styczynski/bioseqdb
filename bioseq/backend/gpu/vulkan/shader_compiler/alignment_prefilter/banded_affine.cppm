@@ -1,6 +1,6 @@
 /**
  * @file banded_affine.cppm
- * @brief Defines the banded-affine alignment-extension GLSL body.
+ * @brief GPU shader for alignment scores and endpoints with affine gap penalties.
  */
 export module bioseq.gpu.vulkan.shader_compiler:alignment_prefilter_banded_affine;
 
@@ -8,10 +8,10 @@ import std;
 
 export namespace bioseq::gpu::vulkan {
 
-/// @brief Score/end-point-only banded affine extension. This prototype runs one
-/// scalar DP per job and dispatches the batch as grid-strided workgroups. The
-/// ABI is intentionally symbol-rank based (`uint` per symbol) so parent
-/// integration can feed any alphabet without dna4-specific decoding here.
+/// @brief Finds the best local alignment score and endpoints within a diagonal band.
+/// One GPU thread solves each job using dynamic programming. Workgroups take
+/// further jobs when the batch exceeds the dispatch size. Inputs use one integer
+/// rank per symbol, so the same shader supports different alphabets.
 inline constexpr std::string_view k_alignment_extension_banded_affine_body = R"GLSL(
 layout(local_size_x = 1, local_size_y = 1, local_size_z = 1) in;
 

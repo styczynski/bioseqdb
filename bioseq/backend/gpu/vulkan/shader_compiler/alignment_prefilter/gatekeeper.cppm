@@ -1,6 +1,6 @@
 /**
  * @file gatekeeper.cppm
- * @brief Defines the GateKeeper rank-prefilter GLSL body.
+ * @brief GPU GateKeeper filter for sequence pairs represented as symbol ranks.
  */
 export module bioseq.gpu.vulkan.shader_compiler:alignment_prefilter_gatekeeper;
 
@@ -8,9 +8,11 @@ import std;
 
 export namespace bioseq::gpu::vulkan {
 
-/// @brief Clean-room GateKeeper threshold filter over caller-normalised rank bytes.
-/// One invocation owns one job. Mismatch masks stream through four uint words.
-/// a mask rejection is authoritative only after the exact fixed-band guard.
+/// @brief Filters sequence pairs with GateKeeper mismatch masks.
+/// One thread handles each job. Shifted mismatch masks estimate whether a pair
+/// exceeds the edit limit. Before rejecting a mask candidate, an exact bounded
+/// edit-distance check confirms the result. Special variants handle fixed
+/// sequence lengths and edit limits.
 inline constexpr std::string_view k_gatekeeper_rank_batch_body = R"GLSL(
 const uint k_maximum_gatekeeper_length = 128u;
 const uint k_maximum_gatekeeper_edits = 8u;
