@@ -1,6 +1,6 @@
 /**
  * @file exact_vectors.cppm
- * @brief Exact SIMD target admission and shared continuation support.
+ * @brief Checks SIMD widths and output layouts for minimizer kernels.
  */
 module;
 
@@ -19,7 +19,7 @@ export namespace bioseq::simd {
 namespace [[bioseq::simd]] target {
 namespace hn = hwy::HWY_NAMESPACE;
 
-// =============================================================================
+
 namespace two_stack_internal {
 
 #if HWY_TARGET == HWY_SCALAR
@@ -31,20 +31,14 @@ inline constexpr bool exact_compiled_target_is_scalar = false;
 #endif
 
 /**
- * @brief Tests whether an output layout admits the packed K15/W10/B8 kernel.
+ * @brief Checks output layouts supported by the eight-candidate K15/W10 kernel.
  *
- * The packed kernel stores candidate hashes in u32 lanes and raw
- * minimizers in u64 lanes.  Both persisted-index representations used by the
- * index layouts satisfy that contract:
+ * The kernel uses 32-bit hash lanes and 64-bit output records. It accepts
+ * the field layouts of minimizer_representation<33, 15> for target postings
+ * and minimap_sketch_data for query sketches. These reserve 30 and 35 hash
+ * bits respectively, while the K15 hash uses 30 bits.
  *
- *  * `minimizer_representation<33, 15>` for target postings (30 hash bits).
- *  * `minimap_sketch_data == minimizer_representation<28, 15>` for query sketches
- *    (35 hash bits, of which minimap-int uses the low 30).
- *
- * Admission is limited to these two persisted-compatible layouts. The raw
- * construction is parameterized by `k_hash_shift`, `k_position_field_mask`,
- * and `k_position_shift`. Arbitrary `p_minimizer_type` encodings are rejected.
- * @tparam p_minimizer_type Candidate output representation.
+ * The masks and shifts must match one of those layouts.
  */
 template <class p_minimizer_type>
 inline constexpr bool exact_k15_w10_b8_representation_v =
@@ -68,11 +62,13 @@ inline constexpr bool exact_k15_w10_b8_representation_v =
         }
     }();
 
-/// @brief Selects the exact SIMD kernel admitted by type and input length.
-/// @tparam p_minimizer_type Candidate output representation.
-/// @tparam p_alphabet_traits Packed-sequence alphabet and storage traits.
-/// @param consumed_bp Number of biological symbols in the request.
-/// @return Specialized K15/W10 kernel when all layout constraints hold.
+/**
+ * @brief Selects the fast K15/W10 kernel when packing and SIMD width permit it.
+ *
+ * Requires DNA4 in 32-bit units, a supported output layout, four u32 lanes,
+ * and two u64 lanes. consumed_bp must fit in uint32_t. Other inputs select
+ * the generic u64 kernel. The caller checks the k-mer and window sizes.
+ */
 template<class p_minimizer_type, class p_alphabet_traits>
 [[nodiscard]] inline exact_simd_kernel select_exact_simd_kernel_kind(
     std::size_t consumed_bp) noexcept
@@ -90,10 +86,7 @@ template<class p_minimizer_type, class p_alphabet_traits>
     return exact_simd_kernel::generic_u64;
 }
 
-/// @brief Tests whether a u64 lane count has an admitted square geometry.
-/// @param lanes Active u64 lane count.
-/// @param lane_capacity Maximum lanes retained by continuation storage.
-/// @return Whether the lane count is supported and within capacity.
+/// @brief Accepts 2, 4, 8, or 16 u64 lanes when they fit in lane_capacity.
 [[nodiscard]] constexpr bool exact_vector_lane_count_supported(
     std::size_t lanes,
     std::size_t lane_capacity) noexcept
@@ -103,18 +96,12 @@ template<class p_minimizer_type, class p_alphabet_traits>
 }
 
 /**
- * @brief Validates the target geometry before exact continuation work begins.
+ * @brief Rejects scalar targets or unsupported SIMD transpose widths.
  *
- * The exact continuation is a SIMD-only contract. Target rejection differs
- * from an invalid biological request: it happens before reset/consume work and
- * therefore deliberately leaves every execution-stats counter at zero.
- * @tparam p_state_type Continuation state carrying rejection status.
- * @param state State updated when the shape is rejected.
- * @param lanes Active u64 lane count.
- * @param lane_capacity Maximum lanes retained by @p state.
- * @param compiled_target_is_scalar Whether the active backend is scalar.
- * @param transpose_shape_supported Whether the square transpose is available.
- * @return Exact continuation admission status.
+ * Stores unsupported_vector_shape in state on failure. This check leaves
+ * execution counters unchanged, so a freshly reset state still has zero
+ * work recorded.
+ * @return ok when the target can run the exact kernel.
  */
 template<class p_state_type>
 [[nodiscard]] constexpr two_stack_continuation_status
@@ -135,11 +122,12 @@ validate_exact_vector_shape(
 }
 
 
-/// @brief Records a fail-closed continuation status with saturating evidence.
-/// @tparam p_state_type Continuation state carrying status and counters.
-/// @param state State updated with the rejection.
-/// @param status Failure status to retain.
-/// @return @p status.
+/**
+ * @brief Stores a failure status and counts the rejection.
+ *
+ * The rejection counter stops at uint64_t maximum.
+ * @return status.
+ */
 template<class p_state_type>
 [[nodiscard]] inline two_stack_continuation_status reject_continuation(
     p_state_type& state,

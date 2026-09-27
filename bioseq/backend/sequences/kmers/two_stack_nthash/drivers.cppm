@@ -1,6 +1,6 @@
 /**
  * @file drivers.cppm
- * @brief Checked exact drivers and coarse route selection.
+ * @brief Runs exact minimizer kernels on resident or fragmented input.
  */
 module;
 
@@ -26,24 +26,13 @@ namespace [[bioseq::simd]] target {
 namespace hn = hwy::HWY_NAMESPACE;
 
 /**
- * @brief Runs the checked two-stack kernel over a resident unit range.
+ * @brief Collects minimizers from the packed-unit interval [lo_unit, hi_unit).
  *
- * Runtime (`p_window_size=p_kmer_size=0`) and constexpr routes share the same
- * reset/packed-consume/finalize implementation. Positions are relative to
- * `emitted_position_base`, matching scalar range collection.
- * @tparam p_window_size Compile-time window size, or zero for runtime selection.
- * @tparam p_kmer_size Compile-time k-mer size, or zero for runtime selection.
- * @tparam p_minimizer_type Collector record representation.
- * @tparam p_sequence Compact resident range type.
- * @tparam p_collector_type Collector receiving selected minimizers.
- * @param collector Destination for selected minimizers.
- * @param sequence Borrowed resident packed sequence.
- * @param lo_unit First packed storage unit to consume.
- * @param hi_unit One past the final packed storage unit.
- * @param runtime_w Requested minimizer window length in k-mers.
- * @param runtime_k Requested k-mer length in biological symbols.
- * @param emitted_position_base Offset added to emitted sequence coordinates.
- * @return Final status and execution evidence without throwing for rejection.
+ * The last unit is clipped to the sequence length. Output positions start
+ * at emitted_position_base for this interval. Fixed and runtime k-mer/window
+ * sizes use the same reset, consume, and finalize steps.
+ * @return Final status and execution counters. Configuration and range
+ * errors are reported in the result.
  */
 template<
     std::size_t p_window_size,
@@ -66,7 +55,7 @@ collect_minimizers_two_stack_nthash_exact_range_resident_impl_checked(
     using traits = typename sequence_type::traits;
     using storage_unit = typename traits::storage_unit;
 
-    // Creates a fail-closed result without entering the kernel.
+    // Return a rejection with no kernel work recorded.
     auto rejected = [](two_stack_continuation_status status) {
         two_stack_execution_stats stats{};
         stats.fail_closed_rejections = 1;
@@ -102,10 +91,8 @@ collect_minimizers_two_stack_nthash_exact_range_resident_impl_checked(
             return rejected(two_stack_continuation_status::invalid_range);
         }
 
-        // Time the selected two_stack_nthash kernel itself. This scope deliberately
-        // lives inside the admitted execution branch: rejected shapes do not
-        // manufacture a visit, and the pipeline does not wrap this call in a
-        // detached/label-only `mm_sketch_simd` scope.
+        // Measure reset, consumption, and finalization after the type and range
+        // checks pass.
         static const auto* exact_simd_region_desc =
             bioseq::instrumentation::register_static_region("mm_sketch_simd");
         auto exact_simd_region_scope =
@@ -161,22 +148,13 @@ collect_minimizers_two_stack_nthash_exact_range_resident_impl_checked(
 // BIOSEQ_PRIVATE_PACKED_ACCESS_END collect_minimizers_two_stack_nthash_exact_range_resident_impl_checked
 
 /**
- * @brief Runs a resident unit range and throws when exact execution is rejected.
- * @tparam p_window_size Compile-time window size, or zero for runtime selection.
- * @tparam p_kmer_size Compile-time k-mer size, or zero for runtime selection.
- * @tparam p_minimizer_type Collector record representation.
- * @tparam p_sequence Compact resident range type.
- * @tparam p_collector_type Collector receiving selected minimizers.
- * @param collector Destination for selected minimizers.
- * @param sequence Borrowed resident packed sequence.
- * @param lo_unit First packed storage unit to consume.
- * @param hi_unit One past the final packed storage unit.
- * @param runtime_w Requested minimizer window length in k-mers.
- * @param runtime_k Requested k-mer length in biological symbols.
- * @param emitted_position_base Offset added to emitted sequence coordinates.
- * @param operation Operation name included in an exception message.
- * @return Execution evidence for an admitted kernel.
- * @throws exact_simd_runtime_error When checked execution is rejected.
+ * @brief Collects a packed-unit range and throws if the request is rejected.
+ *
+ * Uses [lo_unit, hi_unit), with output positions starting at
+ * emitted_position_base. Runtime K15/W10 requests can use the fixed-size
+ * implementation.
+ * @return Execution counters.
+ * @throws exact_simd_runtime_error Includes the rejection status and operation name.
  */
 template<
     std::size_t p_window_size,
@@ -195,10 +173,8 @@ collect_minimizers_two_stack_nthash_exact_range_resident_impl_or_throw(
     std::size_t emitted_position_base = 0,
     std::string_view operation = "minimizer sketch")
 {
-    // The public pipeline accepts runtime w/k, but the overwhelmingly common
-    // minimap-compatible shape must enter a genuinely static implementation.
-    // Besides enabling loop folding, this keeps p_window_size=10 scratch arrays out of the
-    // dynamic p_window_size=256 frame.  Other shapes retain the checked generic route.
+    // Use the fixed K15/W10 instantiation for this common request. It lets the
+    // compiler simplify loops and size scratch arrays for a window of 10.
     two_stack_finalize_result result;
     if constexpr (p_window_size == 0 && p_kmer_size == 0
                   && exact_simd_minimizer_representation<p_minimizer_type>) {
@@ -241,25 +217,13 @@ collect_minimizers_two_stack_nthash_exact_range_resident_impl_or_throw(
 }
 
 /**
- * @brief Runs the canonical exact kernel over biological coordinates.
+ * @brief Collects minimizers from the symbol interval [lo_bp, hi_bp).
  *
- * Coordinates are biological positions in the
- * facade, never packed-unit offsets. A compatible resident is consumed
- * directly. Nonresident input fails closed: the caller must retain an
- * admitted_packed_sequence through this synchronous kernel invocation.
- * @tparam p_window_size Compile-time window size, or zero for runtime selection.
- * @tparam p_kmer_size Compile-time k-mer size, or zero for runtime selection.
- * @tparam p_minimizer_type Collector record representation.
- * @tparam p_alphabet Logical sequence alphabet.
- * @tparam p_collector_type Collector receiving selected minimizers.
- * @param collector Destination for selected minimizers.
- * @param sequence Lazy view that must expose compatible resident storage.
- * @param lo_bp First biological coordinate to consume.
- * @param hi_bp One past the final biological coordinate.
- * @param runtime_w Requested minimizer window length in k-mers.
- * @param runtime_k Requested k-mer length in biological symbols.
- * @param emitted_position_base Offset added to emitted sequence coordinates.
- * @return Final status and execution evidence without throwing for rejection.
+ * The lazy view must expose resident storage packed in 32-bit units for the
+ * whole interval. Keep its storage owner alive during the call. If that view
+ * is unavailable, returns non_contiguous_range.
+ * @param emitted_position_base First output coordinate for this interval.
+ * @return Final status and execution counters.
  */
 template<
     std::size_t p_window_size,
@@ -283,7 +247,7 @@ collect_minimizers_two_stack_nthash_exact_range_checked(
     using traits = typename packed_range::traits;
     using storage_unit = typename traits::storage_unit;
 
-    // Creates a fail-closed result without entering the kernel.
+    // Return a rejection with no kernel work recorded.
     auto rejected = [](two_stack_continuation_status status) {
         two_stack_execution_stats stats{};
         stats.fail_closed_rejections = 1;
@@ -361,22 +325,12 @@ collect_minimizers_two_stack_nthash_exact_range_checked(
 }
 
 /**
- * @brief Runs a biological coordinate range and throws on checked rejection.
- * @tparam p_window_size Compile-time window size, or zero for runtime selection.
- * @tparam p_kmer_size Compile-time k-mer size, or zero for runtime selection.
- * @tparam p_minimizer_type Collector record representation.
- * @tparam p_alphabet Logical sequence alphabet.
- * @tparam p_collector_type Collector receiving selected minimizers.
- * @param collector Destination for selected minimizers.
- * @param sequence Lazy view that must expose compatible resident storage.
- * @param lo_bp First biological coordinate to consume.
- * @param hi_bp One past the final biological coordinate.
- * @param runtime_w Requested minimizer window length in k-mers.
- * @param runtime_k Requested k-mer length in biological symbols.
- * @param emitted_position_base Offset added to emitted sequence coordinates.
- * @param operation Operation name included in an exception message.
- * @return Execution evidence for an admitted kernel.
- * @throws exact_simd_runtime_error When checked execution is rejected.
+ * @brief Collects a symbol interval and throws if the request is rejected.
+ *
+ * Uses [lo_bp, hi_bp) in a lazy view with resident 32-bit packed storage.
+ * Output coordinates start at emitted_position_base.
+ * @return Execution counters.
+ * @throws exact_simd_runtime_error Includes the rejection status and operation name.
  */
 template<
     std::size_t p_window_size,
@@ -423,9 +377,7 @@ collect_minimizers_two_stack_nthash_exact_range_or_throw(
 
 namespace coarse_two_stack_detail {
 
-/// @brief Maps a continuation status to the type-erased transport status.
-/// @param status Exact two-stack continuation status.
-/// @return Equivalent common kernel status.
+/// @brief Converts a two-stack error into the common minimizer status.
 [[nodiscard]] constexpr minimizer_kernel_status transport_status_for(
     const two_stack_continuation_status status) noexcept
 {
@@ -447,13 +399,13 @@ namespace coarse_two_stack_detail {
 }
 
 /**
- * @brief Runs one typed whole-resident chronological continuation route.
- * @tparam p_minimizer_type Selected output representation.
- * @tparam p_alphabet Packed input alphabet.
- * @tparam p_storage_unit Packed input storage unit.
- * @param invocation Type-erased kernel request and sink.
- * @param result Result populated with status and execution evidence.
- * @return `true` when the borrowed descriptor is internally consistent.
+ * @brief Runs the continuation kernel over one borrowed resident sequence.
+ *
+ * Selects the fixed K15/W10 implementation when possible, then flushes the
+ * collector. Writes the kernel status, counters, and committed output count
+ * to result.
+ * @return Whether the packed descriptor is valid. Check result.status for
+ * kernel or collector failure.
  */
 template<class p_minimizer_type,
          sequence_alphabet p_alphabet, class p_storage_unit>
@@ -527,14 +479,12 @@ template<class p_minimizer_type,
 
 // BIOSEQ_PRIVATE_PACKED_ACCESS_BEGIN run_fragmented_impl
 /**
- * @brief Runs a typed chronological continuation over scanner fragments.
- * @tparam p_window_size Compile-time window size, or zero for runtime selection.
- * @tparam p_kmer_size Compile-time k-mer size, or zero for runtime selection.
- * @tparam p_minimizer_type Selected output representation.
- * @tparam p_alphabet Packed input alphabet.
- * @tparam p_storage_unit Packed input storage unit.
- * @param invocation Type-erased request containing the fragment callbacks.
- * @param result Result populated after finalization and sink flushing.
+ * @brief Collects one sketch across scanner fragments.
+ *
+ * Reads and validates each borrowed fragment, consumes its requested interval,
+ * and releases it before moving on. The continuation joins adjacent intervals.
+ * On success, finalizes the sketch after the last fragment. Flushes the collector
+ * and writes status, counters, and committed output count to result.
  */
 template<std::size_t p_window_size, std::size_t p_kmer_size, class p_minimizer_type,
          sequence_alphabet p_alphabet, class p_storage_unit>
@@ -569,7 +519,7 @@ void run_fragmented_impl(
             && fragment_no < source.fragment_end;
          ++fragment_no) {
         const auto fragment = source.read(source.state, fragment_no);
-        // Releases the current borrowed fragment on every exit path.
+        // Release the borrowed fragment on validation failure, success, or exception.
         const auto release = [&source, fragment_no]() noexcept {
             source.release(source.state, fragment_no);
         };
@@ -637,13 +587,10 @@ void run_fragmented_impl(
 // BIOSEQ_PRIVATE_PACKED_ACCESS_END run_fragmented_impl
 
 /**
- * @brief Selects static or runtime geometry for a fragmented route.
- * @tparam p_minimizer_type Selected output representation.
- * @tparam p_alphabet Packed input alphabet.
- * @tparam p_storage_unit Packed input storage unit.
- * @param invocation Type-erased request containing the fragment callbacks.
- * @param result Result populated after the fragmented run.
- * @return `true` after the fragment source has been handled.
+ * @brief Chooses fixed K15/W10 or runtime sizes for a fragmented sketch.
+ *
+ * Writes the run outcome to result.
+ * @return true after dispatch, even if result reports a failure.
  */
 template<class p_minimizer_type,
          sequence_alphabet p_alphabet, class p_storage_unit>
@@ -669,11 +616,12 @@ template<class p_minimizer_type,
 }
 
 /**
- * @brief Runs the exact resident vector-stream route for DNA4 u32 storage.
- * @tparam p_minimizer_type Selected output representation.
- * @param invocation Type-erased whole-resident request and sink.
- * @param result Result populated with status and execution evidence.
- * @return `true` when the borrowed descriptor is internally consistent.
+ * @brief Runs the resident DNA4 stream kernel over 32-bit packed units.
+ *
+ * Converts exact_simd_runtime_error to result status, flushes the collector,
+ * and records the number of committed minimizers.
+ * @return Whether the packed descriptor is valid. Check result.status for
+ * kernel or collector failure.
  */
 template<class p_minimizer_type>
 [[nodiscard]] bool run_resident_vector_stream(
@@ -715,13 +663,13 @@ template<class p_minimizer_type>
 }
 
 /**
- * @brief Selects the chronological or resident route for one output layout.
- * @tparam p_minimizer_type Selected output representation.
- * @tparam p_alphabet Packed input alphabet.
- * @tparam p_storage_unit Packed input storage unit.
- * @param invocation Type-erased kernel request and selected route.
- * @param result Result populated by the selected implementation.
- * @return Whether the request reached a type-consistent route.
+ * @brief Checks the output record and dispatches the requested two-stack route.
+ *
+ * The hash and position masks must match p_minimizer_type. The resident
+ * stream route requires whole-sequence DNA4 in 32-bit units, K15/W10, and
+ * zero output offset. The continuation route also accepts scanner fragments.
+ * @return Whether dispatch reached a compatible implementation. The run
+ * status is stored in result.
  */
 template<class p_minimizer_type,
          sequence_alphabet p_alphabet, class p_storage_unit>
