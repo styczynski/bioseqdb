@@ -1,15 +1,12 @@
 /**
  * @file chunk_fetcher.cppm
- * @brief Plans, decodes, and drains gzip chunks in encoded order.
+ * @brief Decode gzip chunks and return them in input order.
  *
- * The single-worker path decodes members in order. The parallel path first
- * discovers member boundaries and independent dynamic-Huffman block starts,
- * then submits bounded decode work to the shared task pool. An ordered drain
- * propagates the 32 KiB dependency window before publishing chunks.
+ * Parallel workers can start with references to earlier output still unresolved.
+ * An ordered pass resolves each chunk's last 32 KiB so the next chunk can use
+ * it as history. Workers then resolve the remaining bytes.
  *
- * Every arena lifecycle transition holds `_state_mutex` and notifies
- * `_state_cv`. A monotonically increasing chunk tag prevents a recycled slot
- * from being consumed for the wrong decode request.
+ * Chunk tags distinguish successive uses of the same buffer slot.
  */
 module;
 
@@ -46,25 +43,23 @@ import bioseq.parallelism.pool;
 
 export namespace bioseq::io::compression {
 
-/// Maximum number of decoded chunks retained between workers and consumer.
+/// Maximum number of chunks held by workers and the consumer.
 inline constexpr std::size_t chunk_arena_capacity = 8;
 
-/// Default compressed-byte target used when the caller supplies zero.
+/// Default chunk target: output bytes for one worker, compressed bytes for planning.
 inline constexpr std::size_t default_chunk_target_bytes = 32 * 1024 * 1024;
 
 /// Upper bound on concurrent decoders sharing the fixed-capacity arena.
 inline constexpr std::size_t maximum_worker_count = 12;
 
-/// Hard cap on one chunk's decoded output. Exceeding it returns an error.
+/// Output-size threshold checked between parallel decode steps.
 inline constexpr std::size_t maximum_chunk_decompressed_bytes = 256 * 1024 * 1024;
 
 namespace detail {
 
-// =====================================================================
-// Slot lifecycle (parallel path)
-// =====================================================================
+// Chunk slot ownership states.
 
-/// Ownership state of one tagged chunk-arena slot.
+/// Which producer or consumer stage currently owns a chunk slot.
 enum class slot_lifecycle : std::uint8_t {
     free = 0,
     worker_filling = 1,
@@ -74,38 +69,23 @@ enum class slot_lifecycle : std::uint8_t {
     consumer_holding = 5,
 };
 
-// =====================================================================
-// Member pre-scan
-// =====================================================================
+// Find possible gzip member headers.
 
-/// Header boundary required to plan one gzip member.
+/// Header location and first DEFLATE bit for a possible gzip member.
 struct gzip_member_descriptor {
     /// Byte offset of the gzip-magic byte (0x1f).
     std::size_t header_byte = 0;
-    /// First bit of the first deflate block in this member (= header
-    /// end bit).
+    /// First bit after the gzip header, where DEFLATE decoding begins.
     std::size_t header_end_bit = 0;
 };
 
-/// Lightweight validation of a dynamic-Huffman block header at the
-/// reader's current position. Mirrors `deflate_block_decoder::read_header`
-/// but skips the literal/distance Huffman table builds and instead
-/// runs the Kraft completeness check on each table's code lengths.
+/// Check a dynamic-Huffman header and its code lengths. Advance the reader
+/// while validating the tables, without building literal or distance lookups.
 [[nodiscard]] inline bool validate_dynamic_huffman_only(bit_reader& reader) noexcept;
 
-/// Walk `compressed_view` linearly looking for gzip-magic candidates
-/// (`0x1f 0x8b 0x08 <flags ≤ 0x1f>`). Each candidate is fed through:
-///
-///   1. `parse_gzip_header` — magic bytes, method, NUL-terminated
-///      FNAME / FCOMMENT (when flagged).
-///   2. `validate_dynamic_huffman_only` at the would-be first deflate
-///      block — Kraft completeness check on the literal+distance
-///      trees.
-///
-/// The Huffman validation rejects magic-byte sequences embedded in compressed
-/// data before they become member boundaries. Parallel planning accepts only
-/// members whose first DEFLATE block is dynamic-Huffman. Other layouts require
-/// the single-worker producer.
+/// Find possible gzip members by checking magic bytes, headers, and the first
+/// block's Huffman code lengths. Only members starting with a dynamic-Huffman
+/// block are accepted here. The single-worker path supports other block types.
 [[nodiscard]] inline std::expected<std::vector<gzip_member_descriptor>, std::string>
 prescan_members(std::span<const std::uint8_t> compressed_view) noexcept {
     std::vector<gzip_member_descriptor> members;
@@ -121,15 +101,14 @@ prescan_members(std::span<const std::uint8_t> compressed_view) noexcept {
         if (cursor + 4 > compressed_view.size())
             break;
 
-        // Cheap pre-filter: 0x1f 0x8b 0x08 <flags ≤ 0x1f>.
+        // Check the gzip magic, compression method, and reserved flag bits.
         if (compressed_view[cursor + 0] != 0x1F || compressed_view[cursor + 1] != 0x8B ||
             compressed_view[cursor + 2] != 0x08 || compressed_view[cursor + 3] > 0x1F) {
             ++cursor;
             continue;
         }
 
-        // Step 1: parse the header itself (magic + flags + optional
-        // NUL-terminated fields).
+        // Parse optional header fields before locating the first DEFLATE block.
         bit_reader probe{std::span<const std::uint8_t>{compressed_view.data() + cursor,
                                                        compressed_view.size() - cursor}};
         auto header_or =
@@ -142,13 +121,8 @@ prescan_members(std::span<const std::uint8_t> compressed_view) noexcept {
         }
         const std::size_t header_end_bit_global = cursor * 8u + header_or->end_bit_offset;
 
-        // Step 2: validate the first deflate block at header_end_bit
-        // is dynamic-Huffman with Kraft-complete literal + distance
-        // trees. This is what distinguishes a real gzip member start
-        // from a 4-byte pattern that happens to live inside compressed
-        // data. Without this check, every random `1f 8b 08 <flag>`
-        // hit becomes a fake "member" whose chunk-0 decodes garbage in
-        // direct mode (EXCEEDED_WINDOW_RANGE downstream).
+        // Validate the first block's code lengths to reject accidental gzip magic
+        // inside compressed data. This remains a candidate check until decoding.
         bit_reader block_probe{compressed_view};
         block_probe.seek_to_bit(header_end_bit_global);
         if (!validate_dynamic_huffman_only(block_probe)) {
@@ -161,8 +135,7 @@ prescan_members(std::span<const std::uint8_t> compressed_view) noexcept {
         info.header_end_bit = header_end_bit_global;
         members.push_back(info);
 
-        // Skip past the header. The deflate stream starts here.
-        // we'll rediscover the next member when we hit its magic.
+        // Continue searching after this header for the next member.
         cursor = info.header_end_bit / 8u;
         if ((info.header_end_bit % 8u) != 0u)
             ++cursor;
@@ -174,27 +147,23 @@ prescan_members(std::span<const std::uint8_t> compressed_view) noexcept {
     return members;
 }
 
-// =====================================================================
-// Chunk planning
-// =====================================================================
+// Choose chunk boundaries.
 
-/// Encoded interval and member position assigned to one chunk worker.
+/// Compressed bit range and member position assigned to a worker.
 struct chunk_decode_plan {
     std::uint32_t member_index = 0;
-    /// Bit offset of a valid deflate-block start. Worker seeks here.
+    /// Candidate block start that passed the header checks.
     std::size_t start_bit = 0;
-    /// Worker stops decoding once a block starts at-or-after this bit
-    /// without decoding a block owned by the next plan.
+    /// Target stopping boundary. A worker can continue through fixed-Huffman
+    /// blocks and the member's final block.
     std::size_t stop_at_bit = 0;
-    /// True for the very first chunk of the member (decoder runs in
-    /// direct mode with an empty window).
+    /// True for the first chunk, which starts with empty decoding history.
     bool is_first_in_member = false;
-    /// True for the chunk that contains the BFINAL=1 block of the
-    /// member. Drain resets `_drain_window_size` after it.
+    /// True for the last planned chunk of this member.
     bool is_last_in_member = false;
 };
 
-/// Validate a dynamic-Huffman block at the reader's current bit position.
+/// Check a dynamic-Huffman header and code lengths, advancing the reader.
 [[nodiscard]] inline bool validate_dynamic_huffman_only(bit_reader& reader) noexcept {
     if (reader.bits_buffered() < 3)
         reader.refill();
@@ -221,10 +190,8 @@ struct chunk_decode_plan {
     for (std::size_t i = 0; i < precode_count; ++i) {
         if (reader.bits_buffered() < precode_bit_count)
             reader.refill();
-        // Fully-qualify `precode_alphabet` — the unqualified name
-        // shadows on `bioseq::io::compression::detail::precode_alphabet`
-        // (from huffman.cppm), which is a size_t count, not the
-        // alphabet array (which lives in the parent namespace).
+        // Select the precode ordering array in the parent namespace. The detail
+        // namespace also has a precode_alphabet name for an alphabet size.
         precode_cl[::bioseq::io::compression::precode_alphabet[i]] =
             static_cast<std::uint8_t>(reader.read<precode_bit_count>());
     }
@@ -253,14 +220,10 @@ struct chunk_decode_plan {
     return true;
 }
 
-/// Build a per-member chunk plan. For each member, the first chunk
-/// starts at the header-end bit. Subsequent chunks find a valid
-/// dynamic-Huffman block via `seek_dynamic_huffman_candidate`. The
-/// `stop_at_bit` of chunk K is the `start_bit` of chunk K+1 (or, for
-/// the last chunk of a member, the next member's start or end of file).
-///
-/// Every noninitial `start_bit` passes full literal and distance Kraft
-/// validation. Precode-only candidates are insufficient as chunk boundaries.
+/// Split each member near the requested compressed-byte intervals. The first
+/// chunk starts after its header. Later chunks start at candidates whose
+/// literal and distance code lengths pass validation. Each planned range ends
+/// at the next start, the next member header, or the end of input.
 [[nodiscard]] inline std::expected<std::vector<chunk_decode_plan>, std::string>
 plan_chunks(std::span<const std::uint8_t> compressed_view,
             const std::vector<gzip_member_descriptor>& members,
@@ -272,7 +235,7 @@ plan_chunks(std::span<const std::uint8_t> compressed_view,
 
     const std::size_t total_bits = compressed_view.size() * 8u;
 
-    // Skip false-positive headers until a complete dynamic-Huffman block validates.
+    // Skip rejected candidates until a header passes the code-length checks.
     auto find_validated_block = [&compressed_view](std::size_t start_bit,
                                                    std::size_t until_bit) noexcept -> std::size_t {
         std::size_t cursor = start_bit;
@@ -295,7 +258,7 @@ plan_chunks(std::span<const std::uint8_t> compressed_view,
         return block_finder_sentinel;
     };
 
-    // Bound candidate validation to the same pool used for decoding.
+    // Choose a planning concurrency limit when setting up an inactive pool.
     const unsigned hw_threads = bioseq::parallelism::default_concurrency_limit();
     const std::size_t plan_workers = std::min<std::size_t>(hw_threads > 2 ? hw_threads - 2 : 1, 8);
 
@@ -379,13 +342,10 @@ plan_chunks(std::span<const std::uint8_t> compressed_view,
     return plans;
 }
 
-// =====================================================================
-// Marker resolver
-// =====================================================================
+// Resolve references to earlier output.
 
-/// Resolve `count` marker or literal lanes from
-/// `src` into uint8 bytes at `dst`, using `prev_window` for marker
-/// lookups.
+/// Convert literal bytes and references to earlier output into bytes.
+/// References beyond prev_window_size read as zero from the padded history.
 inline void resolve_lane_range(const std::uint16_t* src,
                                std::uint8_t* dst,
                                std::size_t count,
@@ -409,11 +369,9 @@ inline void resolve_lane_range(const std::uint16_t* src,
     }
 }
 
-/// Resolve the chunk's trailing 32 KiB. This operation is sequential
-/// across chunks (each chunk's trailing window depends on the
-/// previous chunk's). Saves the prior `drain_window` snapshot into
-/// the chunk so workers can resolve the remainder against the same
-/// previous window in parallel.
+/// Resolve the chunk's last 32 KiB so the next chunk can use that history.
+/// Save the preceding history for a worker to resolve the remaining prefix.
+/// Call this in chunk order with empty byte_storage.
 [[nodiscard]] inline bool resolve_trailing_window_markers(decoded_chunk& chunk,
                                                           const std::uint8_t* drain_window,
                                                           std::size_t drain_window_size) noexcept {
@@ -448,8 +406,8 @@ inline void resolve_lane_range(const std::uint16_t* src,
     return true;
 }
 
-/// Resolve the chunk prefix not covered by the trailing window. Chunks are
-/// independent after the ordered drain has saved `prior_window_snapshot`.
+/// Resolve the remaining references using the saved history.
+/// Different chunks can finish this step independently.
 inline void resolve_remaining_markers(decoded_chunk& chunk) noexcept {
     if (!chunk.uses_marker_storage) {
         return;
@@ -475,11 +433,9 @@ inline void resolve_remaining_markers(decoded_chunk& chunk) noexcept {
     chunk.uses_marker_storage = false;
 }
 
-// =====================================================================
-// Direct-mode buffer copy helpers
-// =====================================================================
+// Copy decoder output into chunk storage.
 
-/// Copy resolved spans into contiguous byte storage.
+/// Append resolved bytes. Return the byte count, or max_size_t on allocation failure.
 [[nodiscard]] inline std::size_t copy_direct_view(chunk_byte_buffer& byte_storage,
                                                   const decoded_data_view& view) noexcept {
     const std::size_t total = view.data_size();
@@ -499,7 +455,7 @@ inline void resolve_remaining_markers(decoded_chunk& chunk) noexcept {
     return copied;
 }
 
-/// Copy marker spans into contiguous marker storage.
+/// Append marker values. Return their count, or max_size_t on allocation failure.
 [[nodiscard]] inline std::size_t copy_marker_view(chunk_marker_buffer& marker_storage,
                                                   const decoded_data_view& view) noexcept {
     const std::size_t total = view.data_with_markers_size();
@@ -519,9 +475,8 @@ inline void resolve_remaining_markers(decoded_chunk& chunk) noexcept {
     return copied;
 }
 
-/// Drive `deflate_block_decoder` over `reader` until `target_bytes` of decompressed
-/// output have been emitted (or end-of-stream). Used by the
-/// single-thread producer fallback.
+/// Decode toward the requested output size for the single-worker producer.
+/// Stop at the member's final block or a decoder status that needs handling.
 [[nodiscard]] inline std::pair<std::size_t, decode_status>
 decode_until(deflate_block_decoder& decoder,
              bit_reader& reader,
@@ -589,13 +544,11 @@ decode_until(deflate_block_decoder& decoder,
     return {produced, final_status};
 }
 
-// =====================================================================
-// Worker chunk decode (parallel-pool path)
-// =====================================================================
+// Decode one planned chunk on a pool worker.
 
-/// Decode a single chunk per a `chunk_decode_plan`. Invoked from each worker
-/// task. The worker owns a heap-allocated decoder and a
-/// fresh `bit_reader` over `compressed_view`.
+/// Decode a planned range using the worker's reusable decoder. The first
+/// chunk has empty history. Later chunks keep references to earlier output
+/// until the ordered pass can supply those bytes.
 [[nodiscard]] inline decode_status
 worker_decode_chunk(deflate_block_decoder& decoder,
                     std::span<const std::uint8_t> compressed_view,
@@ -614,30 +567,17 @@ worker_decode_chunk(deflate_block_decoder& decoder,
     bit_reader reader{compressed_view};
     reader.seek_to_bit(plan.start_bit);
     if (plan.is_first_in_member) {
-        // Direct mode: empty prior window. This start was verified by
-        // the gzip header parse during prescan — no false-positive
-        // retry needed.
+        // A member starts with empty history, so its first chunk can produce bytes directly.
         decoder.reset();
         decoder.set_initial_window(std::span<const std::uint8_t>{});
     } else {
-        // Marker mode: fresh decoder, prior window unknown. The
-        // `plan.start_bit` was returned by candidate scanning. Retry
-        // within this plan if full header decoding rejects it.
-        //
-        // We deliberately avoid `deflate_block_decoder::reset()` between attempts —
-        // its 128 KiB marker-buffer memcpy dominates wall clock at
-        // false-positive rates. `read_header` is idempotent on state
-        // (it overwrites compression_type, is_last_block, and Huffman
-        // tables unconditionally), so a single reset() upfront is
-        // enough: the marker buffer is set up once and read_header
-        // re-runs cheap-and-clean for each attempt.
+        // Start with unknown history represented by markers. If a candidate header
+        // fails to decode, try another candidate in this range. Reset once so retries
+        // can reuse the marker buffer while read_header replaces the header state.
         decoder.reset();
         decode_status header_err = decode_status::ok;
         std::size_t retry_search_start = plan.start_bit;
-        // Unbounded retry — terminates only when either a valid block
-        // is found OR the blockfinder runs out of candidates within
-        // [retry_search_start, plan.stop_at_bit). The chunk's range
-        // is bounded so termination is guaranteed.
+        // Retry until a header is accepted or this range has no candidates left.
         while (true) {
             reader.seek_to_bit(retry_search_start);
             header_err = decoder.read_header(reader);
@@ -648,9 +588,7 @@ worker_decode_chunk(deflate_block_decoder& decoder,
             const std::size_t next_candidate =
                 seek_dynamic_huffman_candidate(probe, plan.stop_at_bit);
             if (next_candidate == block_finder_sentinel) {
-                // No candidate left in the chunk's window — the chunk
-                // is effectively empty. Return success with zero bytes.
-                // the next chunk's worker will pick up the slack.
+                // Return an empty chunk when no candidate remains in this planned range.
                 out_chunk.encoded_end_bit_offset = plan.stop_at_bit;
                 return decode_status::ok;
             }
@@ -661,24 +599,14 @@ worker_decode_chunk(deflate_block_decoder& decoder,
 
     while (true) {
         if (decoder.is_end_of_block()) {
-            // Capture the bit position BEFORE reading the next block's
-            // header. This is the position where the new block starts,
-            // i.e. what the next chunk's blockfinder candidate aligns
-            // with.
+            // Save the block start before read_header advances into its header.
             const auto next_block_bit = reader.bit_position();
             const auto err = decoder.read_header(reader);
             if (err != decode_status::ok) {
                 return err;
             }
-            // Stop before decoding the just-read block when (a) the
-            // new block sits at or past `stop_at_bit`, (b) it isn't the
-            // member's last block, and (c) it's not a fixed block.
-            // Fixed blocks are excluded because the blockfinder doesn't
-            // find them as candidates — if we stopped on a fixed block,
-            // the next chunk's start_bit (= next dynamic) wouldn't
-            // match our stop position and the gap would be lost. So
-            // workers naturally chew through any intervening fixed
-            // blocks until the next dynamic boundary.
+            // Keep decoding intervening fixed-Huffman blocks because the planner only
+            // chooses dynamic-Huffman starts. The final block is also decoded before stopping.
             if (next_block_bit >= plan.stop_at_bit && !decoder.is_last_block() &&
                 decoder.compression_type() != block_compression::fixed_huffman) {
                 break;
@@ -695,21 +623,9 @@ worker_decode_chunk(deflate_block_decoder& decoder,
                 }
                 out_chunk.decompressed_size_bytes += copied;
             } else if (out_chunk.uses_marker_storage) {
-                // Mid-chunk auto-demotion (deflate.cppm calls
-                // `set_initial_window({})` once
-                // `_distance_to_last_marker_byte` exceeds the live
-                // buffer). The DECODED bytes coming out of the
-                // decoder are now resolved (no markers in them), but
-                // the markers we ALREADY emitted to `marker_storage`
-                // are still unresolved — they reference the as-yet-
-                // unknown prior chunk. We must keep them for the drain
-                // to resolve. Solution: append the direct bytes to
-                // `marker_storage` as fake-markers (uint16 with high
-                // byte = 0). Drain's resolver leaves these alone (they
-                // map to themselves) and only resolves the true
-                // markers. The suffix uses twice its byte count in memory.
-                // since it's bounded by chunk size and only triggers
-                // on chunks with mixed marker+direct output.
+                // The decoder now returns bytes, but earlier output still contains unresolved
+                // references. Append the bytes as 16-bit literal values so the ordered pass
+                // can resolve the whole chunk without losing those earlier references.
                 const std::size_t total = view.data_size();
                 auto extend_or = out_chunk.marker_storage.extend(total);
                 if (!extend_or) {
@@ -724,9 +640,7 @@ worker_decode_chunk(deflate_block_decoder& decoder,
                 }
                 out_chunk.decompressed_size_bytes += total;
             } else {
-                // Pure direct mode (decoder ran in direct mode from
-                // the start, or all-literal chunk that never emitted
-                // any marker). Append to byte_storage.
+                // This output has no unresolved references and can use byte storage.
                 const std::size_t copied = copy_direct_view(out_chunk.byte_storage, view);
                 if (copied == std::numeric_limits<std::size_t>::max()) {
                     return decode_status::generic_error;
@@ -739,15 +653,12 @@ worker_decode_chunk(deflate_block_decoder& decoder,
             return status;
         }
         if (decoder.is_end_of_block() && decoder.is_last_block()) {
-            // BFINAL=1 ends the member. The worker stops and the gzip
-            // footer is consumed by the next-member's header parse
-            // (already done at pre-scan time).
+            // BFINAL ends this member. The parallel path stops before the gzip footer.
             out_chunk.is_member_final = true;
             break;
         }
-        // Defence against unbounded output: a false-positive header
-        // can build malformed Huffman tables and decode for far longer
-        // than expected. Bound the damage to `maximum_chunk_decompressed_bytes`.
+        // Stop oversized chunks between decode steps. A false block candidate can
+        // otherwise keep producing output far beyond the intended chunk size.
         if (out_chunk.decompressed_size_bytes >= maximum_chunk_decompressed_bytes) [[unlikely]] {
             return decode_status::generic_error;
         }
@@ -770,14 +681,14 @@ worker_decode_chunk(deflate_block_decoder& decoder,
 
 } // namespace detail
 
-// =====================================================================
-// chunk_fetcher
-// =====================================================================
+// Ordered chunk delivery.
 
-/// Plans, decodes, and exposes gzip chunks in encoded order.
+/// Decode gzip chunks and lend them to the consumer in input order.
+/// The compressed bytes must remain valid until the fetcher is destroyed.
 class chunk_fetcher {
   public:
-    /// Construct over caller-owned compressed bytes.
+    /// Borrow compressed input and allocate reusable chunk slots. The output-size
+    /// target applies to the single-worker path. Parallel planning uses its default.
     chunk_fetcher(std::span<const std::uint8_t> compressed_view,
                   std::size_t chunk_decompressed_target_bytes,
                   std::size_t worker_count,
@@ -801,19 +712,19 @@ class chunk_fetcher {
         shutdown();
     }
 
-    /// Fetchers exclusively own their task group and chunk arena.
+    /// Copying would share ownership of active tasks and chunk slots.
     chunk_fetcher(const chunk_fetcher&) = delete;
 
-    /// Fetchers cannot copy active producer state into another instance.
+    /// Copy assignment is disabled because task and chunk ownership is exclusive.
     chunk_fetcher& operator=(const chunk_fetcher&) = delete;
 
-    /// Fetchers cannot transfer active producer state between instances.
+    /// Moving is disabled because background tasks keep this object's address.
     chunk_fetcher(chunk_fetcher&&) = delete;
 
-    /// Fetchers cannot replace their task group through move assignment.
+    /// Move assignment is disabled while tasks can refer to this object.
     chunk_fetcher& operator=(chunk_fetcher&&) = delete;
 
-    /// Start the background producer once.
+    /// Start the producer if it has not already been started.
     void start_producer() noexcept {
         if (_producer_started)
             return;
@@ -829,14 +740,14 @@ class chunk_fetcher {
         }});
     }
 
-    /// Borrow the next ordered chunk and report whether it carries an error.
+    /// Wait for the next chunk and borrow it until release_chunk is called.
+    /// A null pointer means production ended. The Boolean reports an error in
+    /// the returned chunk or, when null, in the producer.
     [[nodiscard]] std::pair<const decoded_chunk*, bool> get_next_chunk() noexcept {
         start_producer();
         std::unique_lock<std::mutex> guard(_state_mutex);
-        // Tagged wait: the consumer reads chunks in chunk-index order
-        // regardless of which slot they live in. Workers and the drain
-        // mark slots ready as soon as their chunk's resolution finishes,
-        // possibly out of order. The consumer waits for its specific tag.
+        // Wait for the expected chunk tag. A slot may hold a later chunk after reuse,
+        // and workers can finish in a different order from the compressed input.
         const std::size_t slot = _consumer_next_index % chunk_arena_capacity;
         _state_cv.wait(guard, [this, slot]() noexcept {
             return (_slot_lifecycles[slot] == detail::slot_lifecycle::ready_for_consumer &&
@@ -882,10 +793,11 @@ class chunk_fetcher {
         return _last_error_message;
     }
 
-    /// Compatibility hook. Chunks are released explicitly by pointer.
+    /// Do nothing. The consumer releases chunks by pointer through release_chunk.
     void release_until(std::size_t /*encoded_bit_offset*/) noexcept {}
 
-    /// Stop the producer and join its task group. Idempotent.
+    /// Request shutdown and wait for the producer task group to finish.
+    /// Repeated calls after shutdown do nothing.
     void shutdown() noexcept {
         if (!_producer_started)
             return;
@@ -899,16 +811,14 @@ class chunk_fetcher {
     }
 
   private:
-    // -----------------------------------------------------------------
-    // Producer (single-worker path)
-    // -----------------------------------------------------------------
+    // Single-worker producer.
 
-    /// Single-worker per-member loop. Each chunk moves directly from worker
-    /// ownership to consumer readiness because no ordered marker drain is needed.
+    /// Decode members in order with one decoder. Publish each completed chunk
+    /// directly because the decoder already knows the preceding output.
     void producer_loop_single_thread() noexcept {
         bit_reader reader{_compressed_view};
         std::size_t fill_cursor = 0;         // round-robin slot index
-        std::size_t chunk_index_counter = 0; // Strict consumer order.
+        std::size_t chunk_index_counter = 0; // Index used to preserve consumer order.
 
         while (true) {
             auto header_or = parse_gzip_header(reader, _compressed_view);
@@ -1007,11 +917,9 @@ class chunk_fetcher {
         signal_done();
     }
 
-    // -----------------------------------------------------------------
-    // Producer (parallel-pool path)
-    // -----------------------------------------------------------------
+    // Parallel producer.
 
-    /// Plan independent chunks, decode them concurrently, and drain in order.
+    /// Plan chunks, decode them on workers, and pass history forward in input order.
     void producer_loop_parallel() noexcept {
         auto members_or = detail::prescan_members(_compressed_view);
         if (!members_or) {
@@ -1050,7 +958,7 @@ class chunk_fetcher {
                 [this, &plans, total_chunks]() noexcept { worker_loop(plans, total_chunks); }});
         }
 
-        // Drain in chunk-index order, resolve markers, publish to consumer.
+        // Resolve each chunk's history in input order before allowing delivery.
         std::array<std::uint8_t, chunk_trailing_window_bytes> drain_window{};
         std::size_t drain_window_size = 0;
         std::uint32_t current_member_index = 0;
@@ -1061,8 +969,7 @@ class chunk_fetcher {
              ++k) {
             const std::size_t slot = k % chunk_arena_capacity;
 
-            // Wait for slot[k % K] to be filled by the worker that owns
-            // chunk_index == k.
+            // Wait for the worker to fill the slot with the expected chunk tag.
             {
                 std::unique_lock<std::mutex> guard(_state_mutex);
                 _state_cv.wait(guard, [this, slot, k]() noexcept {
@@ -1077,13 +984,13 @@ class chunk_fetcher {
             decoded_chunk& chunk = *_chunk_arena[slot];
             const auto& plan = plans[k];
 
-            // Member-boundary reset.
+            // Each gzip member starts with empty history.
             if (plan.member_index != current_member_index) {
                 drain_window_size = 0;
                 current_member_index = plan.member_index;
             }
 
-            // Worker reported an error?
+            // Publish a worker error and stop decoding.
             if (chunk.state == chunk_state::decode_error) {
                 set_error(std::string{chunk.error_message.view()});
                 publish_to_consumer(slot);
@@ -1091,9 +998,8 @@ class chunk_fetcher {
                 break;
             }
 
-            // Resolve the trailing 32 KiB in encoded order so the window
-            // propagates forward correctly. The remaining prefix is resolved
-            // by the worker after this slot is marked ready.
+            // Resolve the tail first so the next chunk can use it as history. The worker
+            // can finish this chunk's prefix after receiving the saved preceding history.
             if (chunk.uses_marker_storage) {
                 if (!detail::resolve_trailing_window_markers(
                         chunk, drain_window.data(), drain_window_size)) {
@@ -1106,7 +1012,7 @@ class chunk_fetcher {
                 }
             }
 
-            // Update drain_window from the chunk's trailing window.
+            // Keep the last 32 KiB across chunks, including earlier bytes when this chunk is short.
             const std::size_t chunk_tail = chunk.trailing_window_size;
             if (chunk_tail >= chunk_trailing_window_bytes) {
                 std::memcpy(
@@ -1138,8 +1044,7 @@ class chunk_fetcher {
                 _slot_lifecycles[slot] = detail::slot_lifecycle::trailing_window_resolved;
                 _state_cv.notify_all();
             } else {
-                // Direct-mode chunk — already fully resolved by the
-                // worker. Publish it directly.
+                // All bytes are resolved, so the consumer can read this chunk.
                 publish_to_consumer(slot);
             }
         }
@@ -1155,11 +1060,11 @@ class chunk_fetcher {
         signal_done();
     }
 
-    /// One worker task. Claims chunks atomically, decodes them into
-    /// their tagged arena slots, and signals the ordered drain.
+    /// Claim chunk indices, decode into reusable slots, and notify the ordered pass.
+    /// Finish any remaining marker resolution after that pass supplies the history.
     void worker_loop(const std::vector<detail::chunk_decode_plan>& plans,
                      std::size_t total_chunks) noexcept {
-        // Keep the decoder's 128 KiB window out of the worker stack.
+        // Allocate the decoder on the heap to keep its large history buffer off the stack.
         auto decoder = std::make_unique<deflate_block_decoder>();
 
         while (true) {
@@ -1172,8 +1077,7 @@ class chunk_fetcher {
 
             const std::size_t slot = chunk_index % chunk_arena_capacity;
 
-            // Wait for slot to be FREE (consumer released previous
-            // chunk).
+            // Wait until the consumer releases the slot's previous chunk.
             {
                 std::unique_lock<std::mutex> guard(_state_mutex);
                 _state_cv.wait(guard, [this, slot]() noexcept {
@@ -1205,10 +1109,9 @@ class chunk_fetcher {
                 _state_cv.notify_all();
             }
 
-            // If markers remain, wait until the drain has propagated and
-            // snapshotted the dependency window. A ready slot wins over a
-            // simultaneous shutdown notification: otherwise the final chunk's
-            // prefix would remain unresolved and be silently omitted.
+            // Wait for the preceding history before resolving the prefix. If the history
+            // is ready when shutdown arrives, finish and publish the chunk so its last
+            // bytes are still delivered.
             if (needs_remaining_marker_resolution) {
                 bool trailing_window_ready = false;
                 {
@@ -1231,13 +1134,10 @@ class chunk_fetcher {
         }
     }
 
-    // -----------------------------------------------------------------
-    // Shared producer helpers
-    // -----------------------------------------------------------------
+    // Shared producer helpers.
 
-    /// Publish a slot to the consumer. Slot's chunk is fully resolved.
-    /// The consumer reads tagged slots in chunk-index order even when workers
-    /// publish them out of order.
+    /// Mark a resolved chunk or an error ready for the consumer. Chunk tags let
+    /// the consumer keep input order even when publication happens out of order.
     void publish_to_consumer(std::size_t slot) noexcept {
         std::lock_guard<std::mutex> guard(_state_mutex);
         _slot_lifecycles[slot] = detail::slot_lifecycle::ready_for_consumer;
@@ -1251,7 +1151,7 @@ class chunk_fetcher {
         _state_cv.notify_all();
     }
 
-    /// Retain the first terminal error and discard later diagnostics.
+    /// Keep the first terminal error and ignore later diagnostics.
     void set_error(std::string message) noexcept {
         std::lock_guard<std::mutex> guard(_state_mutex);
         if (_last_error_message.empty()) {
@@ -1259,8 +1159,7 @@ class chunk_fetcher {
         }
     }
 
-    // -----------------------------------------------------------------
-    // Members
+    // Fetcher state.
     std::span<const std::uint8_t> _compressed_view;
     std::size_t _chunk_target_bytes;
     std::size_t _worker_count;
@@ -1271,16 +1170,16 @@ class chunk_fetcher {
     mutable std::mutex _state_mutex;
     std::condition_variable _state_cv;
 
-    /// Per-slot lifecycle. Source of truth for slot ownership.
+    /// Current owner or processing stage of each chunk slot.
     std::vector<detail::slot_lifecycle> _slot_lifecycles;
-    /// chunk_index currently in slot[i] (max_size_t = unset). Set by
-    /// workers, cleared on consumer release.
+    /// Chunk index in each slot, or max_size_t when unused. Producers set the
+    /// tag, and consumer release clears it.
     std::vector<std::size_t> _slot_chunk_index;
 
-    // Consumer's next-to-read chunk_index. Strictly monotonic.
+    // Index of the next chunk the consumer expects.
     std::size_t _consumer_next_index = 0;
 
-    // Parallel-path coordination.
+    // Next chunk index to claim in the parallel producer.
     std::atomic<std::size_t> _next_worker_chunk_index{0};
 
     std::atomic<bool> _shutdown{false};

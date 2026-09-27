@@ -1,9 +1,6 @@
 /**
  * @file aligned_byte_buffer.cppm
- * @brief Fallible uninitialized storage with explicit alignment.
- *
- * Over-aligned storage uses `posix_memalign`. Other storage uses an
- * overwrite allocation. Growth preserves the live prefix.
+ * @brief Growable aligned storage whose new elements are left uninitialized.
  */
 module;
 
@@ -24,9 +21,8 @@ import bioseq.common.logging;
 
 export namespace bioseq::io::compression {
 
-/// Uninitialised-on-extend buffer with explicit element alignment. Backed
-/// by `posix_memalign` + custom deleter when `p_alignment` exceeds the
-/// default `new` alignment, otherwise by `std::make_unique_for_overwrite`.
+/// Growable storage for trivially copyable elements. New elements are
+/// uninitialized. Alignments above max_align_t use posix_memalign and free.
 template <typename p_value_type, std::size_t p_alignment = alignof(p_value_type)>
 struct aligned_buffer {
     static_assert(std::is_trivially_copyable_v<p_value_type>,
@@ -90,28 +86,28 @@ struct aligned_buffer {
         return out;
     }
 
-    /// Discard the live prefix without releasing the allocation.
+    /// Mark the buffer empty while keeping its allocation.
     void clear() noexcept {
         size = 0;
     }
 
-    /// Return whether the live prefix contains no elements.
+    /// Return true when the buffer contains no elements.
     [[nodiscard]] bool empty() const noexcept {
         return size == 0;
     }
-    /// Return the writable live prefix.
+    /// Return a writable view of the stored elements.
     [[nodiscard]] std::span<p_value_type> view() noexcept {
         return {data.get(), size};
     }
-    /// Return the readable live prefix.
+    /// Return a read-only view of the stored elements.
     [[nodiscard]] std::span<const p_value_type> view() const noexcept {
         return {data.get(), size};
     }
 };
 
-/// 64-byte-aligned uint16 buffer for the chunk arena (SIMD loads).
+/// 16-bit chunk markers aligned for SIMD loads.
 using chunk_marker_buffer = aligned_buffer<std::uint16_t, 64>;
-/// 64-byte-aligned uint8 buffer for the chunk arena.
+/// Chunk bytes aligned to 64 bytes.
 using chunk_byte_buffer = aligned_buffer<std::uint8_t, 64>;
 
 } // namespace bioseq::io::compression

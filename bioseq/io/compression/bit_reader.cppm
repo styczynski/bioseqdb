@@ -1,9 +1,9 @@
 /**
  * @file bit_reader.cppm
- * @brief Forward-only LSB-first reader for DEFLATE streams.
+ * @brief Read DEFLATE bits from a borrowed byte span, least significant bit first.
  *
- * A 64-bit local buffer supports fixed-width and runtime-width reads without
- * accessing bytes beyond the borrowed input span.
+ * A local 64-bit buffer holds upcoming bits. Callers must ensure enough input
+ * remains before consuming bits.
  */
 module;
 
@@ -17,17 +17,13 @@ export module bioseq.io.compression.bit_reader;
 
 export namespace bioseq::io::compression {
 
-/// Forward-only LSB-first reader over borrowed compressed bytes.
+/// Read compressed bits from borrowed bytes. Reads advance the cursor, and
+/// seek_to_bit can reposition it within the input.
 class bit_reader {
   public:
     static constexpr std::size_t buffer_refill_size = 128 * 1024;
-    /// Max bits we can guarantee the buffer holds after a `refill()`
-    /// call. Must be `<= 64 - 8` because `refill` shifts the loaded
-    /// byte by `_bits_buffered`. With `<= 57`, the case
-    /// `_bits_buffered == 57` would load a new byte at shift 57,
-    /// pushing bit 7 of that byte to position 64 (OUT of uint64_t),
-    /// silently losing it. Keeping at most `64 - 8 = 56` ensures the
-    /// loaded byte fully fits.
+    /// Largest supported fixed-width peek. Leaving room for a whole byte keeps
+    /// refill from shifting any loaded bits beyond the 64-bit buffer.
     static constexpr std::size_t maximum_peek_bits = sizeof(std::uint64_t) * 8 - 8;
 
     /// Construct an exhausted reader with no borrowed input.
@@ -40,17 +36,17 @@ class bit_reader {
     /// Copy the borrowed view and the current bit cursor.
     bit_reader(const bit_reader&) = default;
 
-    /// Transfer the borrowed view and the current bit cursor.
+    /// Copy the borrowed input and cursor state from another reader.
     bit_reader(bit_reader&&) = default;
 
     /// Replace this reader with a copied view and cursor.
     bit_reader& operator=(const bit_reader&) = default;
 
-    /// Replace this reader with a transferred view and cursor.
+    /// Replace the borrowed input and cursor state from another reader.
     bit_reader& operator=(bit_reader&&) = default;
 
-    /// Peek p_bit_count bits from the current position WITHOUT advancing. p_bit_count is a
-    /// compile-time constant in [1, maximum_peek_bits].
+    /// Inspect the next p_bit_count bits without advancing. The count must be
+    /// in [1, maximum_peek_bits], and enough input must remain.
     template <std::size_t p_bit_count> [[nodiscard]] std::uint64_t peek() noexcept {
         static_assert(
             p_bit_count >= 1 && p_bit_count <= maximum_peek_bits,
@@ -60,7 +56,8 @@ class bit_reader {
         return _bit_buffer & ((std::uint64_t{1} << p_bit_count) - 1);
     }
 
-    /// Peek + advance. Same p_bit_count constraints as `peek<p_bit_count>()`.
+    /// Read and consume p_bit_count bits. The count must be in
+    /// [1, maximum_peek_bits], and enough input must remain.
     template <std::size_t p_bit_count> [[nodiscard]] std::uint64_t read() noexcept {
         static_assert(
             p_bit_count >= 1 && p_bit_count <= maximum_peek_bits,
@@ -73,7 +70,8 @@ class bit_reader {
         return result;
     }
 
-    /// Peek a runtime-sized bit window without advancing the cursor.
+    /// Inspect the next bit_count bits without advancing. The caller must ensure
+    /// the requested bits fit in the buffer after refill.
     [[nodiscard]] std::uint64_t peek_bits(std::size_t bit_count) noexcept {
         if (_bits_buffered < bit_count) [[unlikely]]
             refill();
@@ -82,7 +80,8 @@ class bit_reader {
         return _bit_buffer & ((std::uint64_t{1} << bit_count) - 1);
     }
 
-    /// Read and consume a runtime-sized bit window.
+    /// Read and consume bit_count bits. The caller must ensure the requested
+    /// bits fit in the buffer after refill.
     [[nodiscard]] std::uint64_t read_bits(std::size_t bit_count) noexcept {
         if (_bits_buffered < bit_count) [[unlikely]]
             refill();
@@ -98,9 +97,7 @@ class bit_reader {
         return result;
     }
 
-    /// Advance the bit cursor by `n_bits` without consuming. Caller MUST
-    /// have peeked the bits via `peek_bits(n_bits)` first so the buffer
-    /// is guaranteed to hold them.
+    /// Discard n_bits already held in the buffer. Refill first when needed.
     void skip(std::size_t n_bits) noexcept {
         if (n_bits >= 64) {
             _bit_buffer = 0;
@@ -110,8 +107,7 @@ class bit_reader {
         _bits_buffered -= n_bits;
     }
 
-    /// Bit-position-from-start. Useful for blockfinder candidate
-    /// reporting and chunk boundary tracking.
+    /// Return the current bit offset from the start of the input.
     [[nodiscard]] std::size_t bit_position() const noexcept {
         return _byte_cursor * 8 - _bits_buffered;
     }
@@ -121,8 +117,8 @@ class bit_reader {
         return _bits_buffered;
     }
 
-    /// Reset the bit-cursor and buffer to a specific bit-offset. Used
-    /// by the chunk decoder to seek to a candidate block start.
+    /// Reposition the reader at a valid bit offset in the borrowed input.
+    /// Chunk decoders use this to try a candidate block start.
     void seek_to_bit(std::size_t bit_offset) noexcept {
         _byte_cursor = bit_offset / 8;
         _bit_buffer = 0;
@@ -135,9 +131,8 @@ class bit_reader {
         }
     }
 
-    /// Drop bits until the cursor sits at a byte boundary. Required
-    /// before reading the LEN/NLEN fields of a stored block per
-    /// RFC 1951 §3.2.4.
+    /// Discard bits up to the next byte boundary, as required before the
+    /// LEN and NLEN fields of a stored DEFLATE block.
     void align_to_byte_boundary() noexcept {
         const std::size_t excess = _bits_buffered % 8;
         if (excess > 0) {
@@ -146,8 +141,7 @@ class bit_reader {
         }
     }
 
-    /// Fill the bit buffer. After this call the buffer holds at least
-    /// `min(8 * remaining_bytes, 57)` bits.
+    /// Load whole bytes until the buffer holds at least 57 bits or input runs out.
     void refill() noexcept {
         while (_bits_buffered <= maximum_peek_bits && _byte_cursor < _data.size()) {
             const std::uint64_t byte = static_cast<std::uint64_t>(_data[_byte_cursor]);
@@ -157,9 +151,8 @@ class bit_reader {
         }
     }
 
-    /// Read 8 aligned bytes when the cursor sits at a byte boundary.
-    /// Used by the gzip footer parser to consume CRC32 + ISIZE in one
-    /// shot. Asserts byte alignment.
+    /// Read up to eight bytes as a little-endian value at a byte boundary.
+    /// Missing bytes at the end of input leave the high bits zero.
     [[nodiscard]] std::uint64_t read_aligned_le_u64() noexcept {
         DEBUG_ASSERT(_bits_buffered % 8 == 0, "read_aligned_le_u64 requires byte alignment");
         // Drain any buffered bytes first.
