@@ -1,13 +1,9 @@
 /**
  * @file index.cppm
- * @brief Primary interface for the partitioned columnar metadata module.
+ * @brief Export columnar metadata operations and transaction state.
  *
- * This umbrella re-exports the partitions making up the module: the
- * metadata core, the columnar/row-mask write-state machinery, the
- * write-state lifecycle dispatchers and the read-state cache.
- *
- * The partitions share one ownership boundary, avoiding dependency cycles
- * between catalog access and transaction-state lifecycle code.
+ * The module groups catalog access with pending writes and cached readers,
+ * allowing its partitions to share types without circular module imports.
  */
 export module bioseq.postgres.storage.metadata;
 

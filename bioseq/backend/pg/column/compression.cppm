@@ -1,12 +1,10 @@
 /**
  * @file compression.cppm
- * @brief Compression dispatch for columnar payload buffers.
+ * @brief Compress and decompress column buffers with PGLZ, LZ4 or Zstandard.
  *
- * Compression / decompression dispatch over the configured compression
- * algorithms (none, pglz, optional lz4, optional zstd). The pglz path
- * also serialises a small header (raw size + varlena) at the start of
- * the compressed buffer so the decompressor can size the output without
- * a separate sidecar.
+ * LZ4 and Zstandard are available when included in the build. PGLZ buffers
+ * begin with a header containing the encoded length and original byte count.
+ * Decompression checks the result against the size stored in column metadata.
  */
 module;
 
@@ -38,14 +36,14 @@ import bioseq.postgres.configuration.core;
 import bioseq.postgres.support;
 
 /**
- * @brief Prefixes PGLZ bytes with encoded and raw buffer sizes.
+ * @brief Header containing a PGLZ buffer's encoded and original sizes.
  *
- * The standard varlena field remains first so PostgreSQL macros can validate the encoded
- * length. `raw_size` lets decompression allocate without external metadata.
+ * Keep the PostgreSQL varlena header first. Its macros read the encoded length,
+ * and raw_size is checked against column metadata before decompression.
  */
 struct compressed_column_header
 {
-	int32_t vl_len_;              /* varlena header (do not touch directly!) */
+	int32_t vl_len_;              /* PostgreSQL varlena header. Access through its macros. */
 	int32_t raw_size;
 };
 
@@ -61,8 +59,8 @@ static_assert(
 	== pglz_maximum_output_overhead);
 
 /**
- * @brief Reports a PostgreSQL size-limit error for compression allocation.
- * @param[in] operation Diagnostic verb describing the failed operation.
+ * @brief Report that a column buffer exceeds PostgreSQL's allocation limit.
+ * @param[in] operation Operation named in the error message.
  * @param[in] byte_count Requested size in bytes.
  */
 [[noreturn]] static void
@@ -82,8 +80,8 @@ raise_compression_size_error(const char* operation, uint64_t byte_count)
 }
 
 /**
- * @brief Reports malformed compressed input through PostgreSQL's error boundary.
- * @param[in] detail Diagnostic detail moved into the error report.
+ * @brief Report a corrupt compressed column buffer as a PostgreSQL error.
+ * @param[in] detail Explanation included in the error report.
  */
 [[noreturn]] static void
 raise_corrupt_compressed_buffer(std::string detail)
@@ -97,9 +95,9 @@ raise_corrupt_compressed_buffer(std::string detail)
 }
 
 /**
- * @brief Validates source and destination `StringInfo` storage before compression.
- * @param[in] input_buffer Readable input with a nonnegative length.
- * @param[in] output_buffer Writable initialized destination buffer.
+ * @brief Reject invalid input or output buffers before compression.
+ * @param[in] input_buffer Source buffer with data and a nonnegative length.
+ * @param[in] output_buffer Initialized destination with allocated storage.
  */
 static void
 validate_compression_buffers(StringInfo input_buffer, StringInfo output_buffer)
@@ -125,10 +123,10 @@ validate_compression_buffers(StringInfo input_buffer, StringInfo output_buffer)
 }
 
 /**
- * @brief Narrows a byte count to PostgreSQL's allocatable `StringInfo` range.
- * @param[in] byte_count Requested byte count.
- * @param[in] operation Diagnostic verb used when the request is too large.
- * @return Valid signed capacity.
+ * @brief Check that a byte count fits in a PostgreSQL StringInfo allocation.
+ * @param[in] byte_count Requested size in bytes.
+ * @param[in] operation Operation named in a size-limit error.
+ * @return The size as an int, after checking both allocation and integer limits.
  */
 [[nodiscard]] static int
 validate_string_info_size(uint64_t byte_count, const char* operation)
@@ -144,10 +142,9 @@ validate_string_info_size(uint64_t byte_count, const char* operation)
 }
 
 /**
- * @brief Parses the SQL spelling of a supported compression algorithm.
- *
- * @param[in] value Null-terminated PostgreSQL name buffer.
- * @return Parsed algorithm, or `invalid` for an unsupported spelling.
+ * @brief Read a compression algorithm from its SQL name.
+ * @param[in] value Non-null, null-terminated name.
+ * @return The algorithm, or invalid if this build does not support the name.
  */
 export [[nodiscard]] bioseq::compression_algorithm
 parse_compression_algorithm(const char* value) noexcept
@@ -177,10 +174,9 @@ parse_compression_algorithm(const char* value) noexcept
 }
 
 /**
- * @brief Returns the SQL spelling of a supported compression algorithm.
- *
- * @param[in] value Algorithm selector.
- * @return Static spelling, or null for a sentinel value.
+ * @brief Return a compression algorithm's SQL name.
+ * @param[in] value Algorithm to name.
+ * @return A static string, or nullptr if this build does not support the value.
  */
 export [[nodiscard]] const char*
 compression_algorithm_name(bioseq::compression_algorithm value) noexcept
@@ -243,13 +239,13 @@ set_compressed_column_raw_size(char* compressed_buffer, int32_t raw_size) noexce
 
 
 /**
- * @brief Compresses a serialized column buffer when the selected codec succeeds.
- * @param[in] input_buffer Source bytes borrowed for the call.
- * @param[in,out] output_buffer Reusable destination scratch buffer, valid on success.
- * @param[in] compression_algorithm Configured compression algorithm.
- * @param[in] compression_level Algorithm-specific compression level.
- * @return `true` when compressed bytes were produced.
- * @note Invalid buffers and unallocatable sizes report PostgreSQL errors.
+ * @brief Try to compress a serialized column buffer with the selected algorithm.
+ * @param[in] input_buffer Source bytes, borrowed for this call.
+ * @param[in,out] output_buffer Scratch buffer containing the result on success.
+ * @param[in] compression_algorithm Compression algorithm to use.
+ * @param[in] compression_level Zstandard compression level. Ignored by other algorithms.
+ * @return true if compression succeeded. On false, the caller keeps the source bytes.
+ * @note Invalid buffers and sizes beyond PostgreSQL's limit raise errors.
  */
 export bool
 compress_column_buffer(StringInfo input_buffer,
@@ -412,12 +408,12 @@ compress_column_buffer(StringInfo input_buffer,
 
 
 /**
- * @brief Decompresses serialized column bytes and validates the exact output size.
- * @param[in] buffer Encoded bytes, or the uncompressed buffer for `none`.
- * @param[in] compression_algorithm Codec used to produce the buffer.
- * @param[in] decompressed_size Expected output size in bytes.
- * @return The borrowed input for `none`, otherwise a current-context allocated buffer.
- * @note Malformed input and size mismatches report PostgreSQL data-corruption errors.
+ * @brief Decompress a column buffer and check its expected size.
+ * @param[in] buffer Compressed bytes, or the original buffer for none.
+ * @param[in] compression_algorithm Algorithm used to write the buffer.
+ * @param[in] decompressed_size Expected number of bytes. Ignored for none.
+ * @return The input for none, otherwise a buffer in the current PostgreSQL memory context.
+ * @note Corrupt compressed data and size mismatches raise PostgreSQL errors.
  */
 export StringInfo
 decompress_column_buffer(StringInfo buffer,

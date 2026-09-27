@@ -1,22 +1,10 @@
 /**
  * @file core.cppm
- * @brief Transactional catalog operations for columnar relation metadata.
+ * @brief Shared catalog operations for columnar storage metadata.
  *
- * Manages metadata for columnar relations in separate, shared metadata
- * tables in the "bioseq" catalog schema.
- *
- *   * holds basic stripe information including data size and row counts
- *   * holds basic chunk and chunk group information like data offsets and
- *     min/max values (used for Chunk Group Filtering)
- *   * useful for fast VACUUM operations (e.g. reporting with VACUUM VERBOSE)
- *   * useful for stats/costing
- *   * maps logical row numbers to stripe IDs
- *
- * Each metadata table is opened by oid through the per-call helpers in
- * the "bioseq.foo_relid" family further down. Lookups go through index
- * scans (systable_beginscan_ordered) so they're transactional and
- * MVCC-safe.
- *
+ * Tables in bioseq_internal store stripe ranges, chunk locations and row
+ * counts. Readers use the same metadata for chunk filtering and row lookup
+ * that VACUUM and the planner use for storage statistics.
  */
 module;
 #include <algorithm>
@@ -68,31 +56,31 @@ inline constexpr std::uint64_t row_mask_chunk_row_capacity = 10'000;
 static_assert(metadata_entity_handles::row_mask_seq.schema_binding() ==
               bioseq::postgres::support::sql_schema_binding::fixed);
 
-/// @brief Reads the persistent storage identifier for a physical relation.
-/// @param[in] relfilelocator Physical relation locator whose metadata page is inspected.
-/// @return Stable storage identifier recorded in the relation fork.
+/// @brief Read a physical relation's storage id from its metapage.
+/// @param[in] relfilelocator Locator of a relation with initialized columnar storage.
+/// @return Persistent storage id.
 export uint64_t lookup_storage_id(RelFileLocator relfilelocator);
-/// @brief Finds the stripe beginning at the greatest row number not above the query.
-/// @param[in] relation Open Bioseq relation used to resolve its storage identity.
-/// @param[in] row_number Logical row number to locate.
-/// @param[in] snapshot Snapshot governing metadata visibility.
-/// @return Metadata allocated in the current PostgreSQL memory context, or `nullptr`.
+/// @brief Find the stripe with the latest start at or before a row number.
+/// @param[in] relation Open columnar relation.
+/// @param[in] row_number Logical row number to look up.
+/// @param[in] snapshot Snapshot used to read metadata.
+/// @return Metadata in the current memory context, or nullptr. Check the stripe
+/// end separately to determine whether the requested row is in it.
 export stripe_metadata*
 find_stripe_by_first_row_number(Relation relation, uint64_t row_number, Snapshot snapshot);
 /// @brief Computes the inclusive highest logical row number stored by a stripe.
 /// @param[in] stripe Stripe metadata with a nonzero row count.
 /// @return Inclusive final row number.
 export uint64_t stripe_highest_row_number(stripe_metadata* stripe);
-/** @brief Resolves an access-method support function for a data type.
- *
- * Falls back from the datum type to the operator class input type before
- * constructing the function manager record.
+/** @brief Find a data type's support function in its default operator class.
+ * Try the operator class's input type if the data type has no matching function.
+ * Return nullptr when the operator class, family or function is missing.
  */
 export FmgrInfo*
 find_index_support_function(Oid type_id, Oid access_method_id, int16_t procedure_id) {
     FmgrInfo* function_info = nullptr;
 
-    /* get default operator class from pg_opclass for datum type */
+    /* Find the type's default operator class for this access method. */
     Oid operator_class_id = GetDefaultOpClass(type_id, access_method_id);
     if (operator_class_id == InvalidOid) {
         return nullptr;
@@ -105,7 +93,7 @@ find_index_support_function(Oid type_id, Oid access_method_id, int16_t procedure
 
     Oid operator_id = get_opfamily_proc(operator_family_id, type_id, type_id, procedure_id);
 
-    /* No operator for type_id, search for operator class type*/
+    /* Try the operator class's input type when the data type has no match. */
     if (operator_id == InvalidOid) {
         Oid opcintype = get_opclass_input_type(operator_class_id);
         operator_id = get_opfamily_proc(operator_family_id, opcintype, opcintype, procedure_id);
@@ -114,16 +102,16 @@ find_index_support_function(Oid type_id, Oid access_method_id, int16_t procedure
     if (operator_id != InvalidOid) {
         function_info = bioseq::postgres::support::allocate_zeroed_object<FmgrInfo>();
 
-        /* fill in the FmgrInfo struct using the operator_id */
+        /* Prepare the function for PostgreSQL calls. */
         fmgr_info(operator_id, function_info);
     }
 
     return function_info;
 }
 
-/// @brief Directional relation between a row number and a stripe boundary.
+/// @brief Which side of a row number to search for a stripe start.
 enum class row_number_lookup_mode {
-    /// Selects the stripe starting at or before the requested row.
+    /// Find the latest stripe start at or before the requested row.
     less_or_equal,
 
     /// Selects the first stripe starting after the requested row.
@@ -136,16 +124,16 @@ void insert_empty_stripe_metadata_row(uint64_t storage_id,
                                       uint32_t column_count,
                                       uint32_t chunk_group_row_count,
                                       uint64_t first_row_number);
-/// @brief Finds the greatest occupied byte address and stripe identifier for storage.
+/// @brief Find the last occupied logical byte and highest stripe id with a dirty snapshot.
 void find_highest_used_address_and_id(uint64_t storage_id,
                                       uint64_t* highest_used_address,
                                       uint64_t* highest_used_id);
-/// @brief Applies a codec update and returns the resulting stripe metadata.
+/// @brief Update non-indexed stripe fields in place and return the updated metadata.
 stripe_metadata*
 update_stripe_metadata_row(uint64_t storage_id, uint64_t stripe_id, stripe_codec::update& update);
-/// @brief Reads all visible stripes for storage in the requested index order.
+/// @brief Read visible stripes in ascending or descending first-row order.
 List* read_data_file_stripes(uint64_t storage_id, Snapshot snapshot, ScanDirection scan_direction);
-/// @brief Decodes a stripe catalog tuple into current-context metadata.
+/// @brief Decode a stripe heap tuple, including its transaction state.
 export stripe_metadata* build_stripe_metadata(Relation bioseq_column_stripes, HeapTuple heap_tuple);
 /// @brief Reads row and deletion counts for every chunk group in one stripe.
 void read_chunk_group_row_counts(uint64_t storage_id,
@@ -154,38 +142,38 @@ void read_chunk_group_row_counts(uint64_t storage_id,
                                  uint32_t** chunk_group_row_counts,
                                  uint32_t** chunk_group_deleted_rows,
                                  Snapshot snapshot);
-/// @brief Resolves the storage-identifier sequence OID.
+/// @brief Find the bioseq_internal.storageid_seq OID.
 Oid column_storage_id_sequence_oid(void);
-/// @brief Resolves the stripe catalog relation OID.
+/// @brief Find the bioseq_internal.stripe OID.
 export Oid column_stripe_relation_oid(void);
-/// @brief Resolves the stripe primary-key index OID.
+/// @brief Find the stripe catalog's primary-key index OID.
 export Oid column_stripe_primary_key_index_oid(void);
-/// @brief Resolves the stripe first-row index OID.
+/// @brief Find the index used to look up stripes by their first row.
 Oid stripe_first_row_number_index_oid(void);
-/// @brief Resolves the column-options catalog relation OID.
+/// @brief Find the bioseq_internal.options OID.
 Oid column_options_relation_oid(void);
-/// @brief Resolves the column-options primary-key index OID.
+/// @brief Find the options catalog's primary-key index OID.
 Oid column_options_index_oid(void);
-/// @brief Resolves the chunk catalog relation OID.
+/// @brief Find the bioseq_internal.chunk OID.
 Oid column_chunk_relation_oid(void);
-/// @brief Resolves the chunk-group catalog relation OID.
+/// @brief Find the bioseq_internal.chunk_group OID.
 Oid column_chunk_group_relation_oid(void);
-// Row-mask write state consumes these catalog identities across partitions.
-/// @brief Resolves the row-mask catalog relation OID.
+// Row-mask writers in other partitions use these catalog OIDs.
+/// @brief Find the bioseq_internal.row_mask OID.
 export Oid column_row_mask_relation_oid(void);
-/// @brief Resolves the row-mask identifier sequence OID.
+/// @brief Find the bioseq_internal.row_mask_seq OID.
 Oid column_row_mask_sequence_oid(void);
-/// @brief Resolves the chunk primary-key index OID.
+/// @brief Find the chunk catalog's primary-key index OID.
 Oid column_chunk_index_oid(void);
-/// @brief Resolves the chunk-group primary-key index OID.
+/// @brief Find the chunk-group catalog's primary-key index OID.
 Oid column_chunk_group_index_oid(void);
-/// @brief Resolves the row-mask primary-key index OID.
+/// @brief Find the row-mask catalog's primary-key index OID.
 export Oid column_row_mask_index_oid(void);
-/// @brief Resolves the row-mask stripe index OID.
+/// @brief Find the index used to look up row masks by stripe.
 Oid column_row_mask_stripe_index_oid(void);
-/// @brief Resolves the internal metadata schema OID.
+/// @brief Find the bioseq_internal schema OID.
 Oid column_namespace_oid(void);
-/// @brief Finds the greatest logical row number present in storage.
+/// @brief Find the highest logical row number in visible stripe metadata.
 uint64_t find_highest_used_row_number(uint64_t storage_id);
 /// @brief Deletes catalog rows belonging to one storage identifier.
 void delete_storage_metadata_rows(Oid metadata_table_id,
@@ -199,21 +187,21 @@ void delete_stripe_metadata_rows(Oid metadata_table_id,
                                  Oid storage_id_index_id,
                                  uint64_t storage_id,
                                  uint64_t stripe_id);
-/// @brief Writes relation options with optional replacement of an existing row.
+/// @brief Insert table options, replacing an existing row when requested.
 bool write_column_options(Oid regclass, column_options* options, bool overwrite);
-/// @brief Finds a stripe relative to a logical row-number boundary.
+/// @brief Find the nearest stripe start on the requested side of a row number.
 stripe_metadata* find_stripe_metadata_by_row_number(Relation relation,
                                                     uint64_t row_number,
                                                     Snapshot snapshot,
                                                     row_number_lookup_mode lookup_mode);
-/// @brief Validates stripe count and address invariants before use.
+/// @brief Check that stripe counts and storage ranges agree with its write state.
 void validate_stripe_metadata(stripe_metadata* stripe);
 
 /**
- * @brief Runs cleanup while preserving the first exception for later propagation.
- * @tparam p_operation Nullary cleanup callable.
- * @param[in,out] failure First captured exception, if any.
- * @param[in] operation Cleanup operation to attempt.
+ * @brief Attempt cleanup and keep the first exception for the caller to rethrow.
+ * @tparam p_operation Cleanup callable taking no arguments.
+ * @param[in,out] failure Previously captured exception, if any.
+ * @param[in] operation Cleanup to attempt even when an earlier step failed.
  */
 template <typename p_operation>
 void record_cleanup_failure(std::exception_ptr& failure, p_operation&& operation) {
