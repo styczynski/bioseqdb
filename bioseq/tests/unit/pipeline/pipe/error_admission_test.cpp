@@ -1,6 +1,6 @@
 /**
  * @file error_admission_test.cpp
- * @brief Exercises pipeline admission and ownership errors.
+ * @brief Check memory accounting and cleanup when pipeline results change owners.
  */
 #include <catch2/matchers/catch_matchers.hpp>
 
@@ -194,10 +194,9 @@ TEST_CASE("fixed Vulkan host ownership is target-only and starts at 256 Mi bp",
         fixed_vulkan_target_host_adoption_route_selected;
     constexpr std::uint64_t minimum = pipe_entry_detail::
         k_vulkan_fixed_host_adoption_target_minimum_bp;
-    // Route selection is intentionally independent of emitted-vector size.
-    // An ambiguity-heavy dna5 target can be >=256 MiB yet emit only this
-    // representative small nonzero payload, which must retain its exact permit
-    // if RSS reconciliation is inconclusive.
+    // The size threshold uses target length. A long dna5 target with many N bases
+    // can produce very few minimizers. Keep their memory reserved if process
+    // memory measurements cannot account for the allocation.
     constexpr std::uint64_t sparse_dna5_emitted_bytes =
         2u * sizeof(minimap_sketch_data);
     minimap2_parameters params{};
@@ -790,9 +789,8 @@ TEST_CASE("real sparse dna5 Vulkan target adopts either exact authority and buil
     REQUIRE(adopted.has_valid_ownership_authorization());
     REQUIRE(adopted.minimizers.data() == original_data);
     REQUIRE(device_lifetime.expired());
-    // Moving an optional leaves its source engagement unspecified.  If the
-    // retained-permit case leaves an engaged source, its memory permit must be
-    // moved-from and therefore own neither a controller nor any bytes.
+    // If the source optional still contains a permit after the move, that
+    // permit must have given up its reservation.
     if (result->host_permit.has_value()) {
         REQUIRE_FALSE(static_cast<bool>(*result->host_permit));
         REQUIRE(result->host_permit->bytes() == 0u);
@@ -829,11 +827,9 @@ TEST_CASE("real sparse dna5 Vulkan target adopts either exact authority and buil
     }
 
     admitted.release_storage_before_permit();
-    // This first real sketch may compile and retain Vulkan pipelines.  Their
-    // process-lifetime metadata has its own explicit memory permit and is not
-    // part of the adopted host vector or admitted index. Verify that the only
-    // reservation surviving this transaction is precisely that cache growth;
-    // an unreturned host/device/index permit would make the equality fail.
+    // Compiling Vulkan pipelines can leave cache metadata reserved for the
+    // process lifetime. After freeing the index, only that cache growth should
+    // remain in the memory budget.
     const std::uint64_t pipeline_cache_metadata_after =
         runtime.pipeline_cache_metadata_reserved_bytes();
     REQUIRE(pipeline_cache_metadata_after
@@ -848,7 +844,7 @@ TEST_CASE("real sparse dna5 Vulkan target adopts either exact authority and buil
 TEST_CASE("raw sketch batches grow geometrically and nested query scopes release only their tail",
           "[component:bioseq][layer:unit][feature:pipeline]")
 {
-    constexpr std::size_t initial_capacity = 140'000; // > 1 MiB as uint64_t.
+    constexpr std::size_t initial_capacity = 140'000; // Exceeds 1 MiB with 64-bit records.
     constexpr std::size_t batch_size = 4'096;
     constexpr std::size_t batch_count = 64;
     constexpr std::size_t emitted_count = batch_size * batch_count;
@@ -869,9 +865,8 @@ TEST_CASE("raw sketch batches grow geometrically and nested query scopes release
             initial_capacity * sizeof(raw_sketch_append_fixture);
         REQUIRE(ctx.chain_heap_fallback_bytes() == outer_bytes);
 
-        // Repeat the faithful under-estimated raw-batch append shape. Before
-        // geometric growth this performed one exact allocation and full-prefix
-        // copy for every batch after `initial_capacity` was crossed.
+        // Start with too little capacity, then append several batches. Check that
+        // capacity doubles when the initial allocation fills.
         for (std::size_t round = 0; round < 3; ++round) {
             {
                 auto query_scope = ctx.push<context::arena::chain>();
@@ -911,8 +906,8 @@ TEST_CASE("raw sketch batches grow geometrically and nested query scopes release
                     sketches.data() + sketches.size());
             }
 
-            // Inner heap blocks are gone, the outer allocation and its bytes
-            // remain live, and ordinary result ownership survives the unwind.
+            // Releasing the query scope frees its heap blocks. The outer allocation
+            // and the copied results must remain usable.
             REQUIRE(ctx.chain_heap_fallback_bytes() == outer_bytes);
             REQUIRE(outer_slab.data()[0].value == 0xfeedfacecafebeefULL);
             REQUIRE(survivor.size() == emitted_count);

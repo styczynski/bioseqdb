@@ -1,6 +1,6 @@
 /**
  * @file scalar_highway_test.cpp
- * @brief Exercises scalar and Highway pipeline routes.
+ * @brief Check scalar and Highway pipeline results, memory ownership, and recorded work.
  */
 #include <catch2/matchers/catch_matchers.hpp>
 
@@ -178,13 +178,13 @@ TEST_CASE("prefilter_stage composes reverse, unequal, aggregate, and stable rout
     static_assert(reverse_source.size() == 40u);
     query_text.replace(16u, reverse_source.size(), reverse_source);
     std::string target_text = query_text;
-    // Region 1 owns two individually accepted, equal-length gaps. Their
-    // lower bounds aggregate to two and reject only at the region boundary.
+    // Each gap in region 1 passes on its own. Together their lower bounds
+    // exceed the region's edit limit, so the region must be rejected.
     target_text[72] = 'C';
     target_text[104] = 'C';
-    // Region 3 is reverse-strand.  Its query-coordinate window [168, 208)
-    // mirrors to the non-palindromic forward source [16, 56), so this checks
-    // coordinate mirroring and reversal as well as base complementation.
+    // Region 3 uses the reverse strand. Query coordinates [168, 208) map to
+    // forward bases [16, 56). Their unequal ends make this check both reversal
+    // and complementation.
     const auto complement_ascii = [](char base) {
         switch (base) {
             case 'A': return 'T';
@@ -646,9 +646,8 @@ TEST_CASE("exact SIMD pipe admits whole non-u32 ranges into resident u32 vector_
     REQUIRE(whole_stats.generic_u64_kernel_calls == 0u);
     REQUIRE(whole_stats.kmer_15_window_10_byte_8_uint32_hash_kernel_calls == 0u);
 
-    // Range dispatch is also used by indexed query preparation. Resident
-    // vector_stream is therefore an explicit paired/no-index opt-in, never a
-    // decision inferred from the query's storage shape alone.
+    // Indexed queries also use range dispatch. The caller must explicitly
+    // request resident vector_stream for a sequence pair without an index.
     collector_type paired_resident_collector;
     const auto paired_resident_stats =
         minimizer_dispatch_range<minimizer_type>(
@@ -671,9 +670,8 @@ TEST_CASE("exact SIMD pipe admits whole non-u32 ranges into resident u32 vector_
         /*require_nonempty_vector_work=*/true,
         exact_simd_range_route::require_resident_vector_stream));
 
-    // Resident vector_stream is an exact-u32 topology. A different resident
-    // width is therefore admitted into an owned u32 region before the same
-    // The fixed-target route executes; source width is never relabelled in place.
+    // Resident vector_stream needs 32-bit packed words. Reserve memory and
+    // copy a sequence stored in wider words into that layout before running it.
     non_u32_range_type non_u32_resident(data);
     auto lazy_non_u32 = bioseq::storage::make_resident_lazy_sequence(non_u32_resident);
     const auto non_u32_view =
@@ -723,8 +721,8 @@ TEST_CASE("exact SIMD pipe admits whole non-u32 ranges into resident u32 vector_
             == resident_records[index].raw_value());
     }
 
-    // This is the fail-closed resident-stats boundary: resident stats cannot
-    // be relabelled as the continuation/B8 scheme used by persisted indexes.
+    // Reject resident vector_stream statistics when the caller requires the
+    // continuation algorithm used with persisted indexes.
     REQUIRE_FALSE(minimizer_range_stats_matches_backend(
         minimizer_sketch_backend::exact_simd,
         paired_resident_stats,

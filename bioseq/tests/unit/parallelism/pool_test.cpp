@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Verifies pool scheduling, tracked tasks, and memory-admission lifetimes.
+ * @brief Check worker scheduling and memory reservations as contexts and results change owners.
  */
 
 #include <catch2/catch_test_macros.hpp>
@@ -40,7 +40,7 @@ struct context_allocation_geometry {
     std::uint64_t retained_bytes;
 };
 
-/// Independently read the native heap extent, not the allocator's logical request.
+/// Read the system allocator's allocation size, or zero when unsupported.
 [[nodiscard]] std::size_t native_context_allocation_bytes(void* allocation) noexcept {
 #if defined(__APPLE__)
     return ::malloc_size(allocation);
@@ -51,7 +51,7 @@ struct context_allocation_geometry {
 #endif
 }
 
-/// Inspect one source-planned allocation without involving context admission.
+/// Allocate and measure one heap block to check its planned memory allowance.
 [[nodiscard]] context_allocation_geometry context_test_allocation_geometry(
     std::size_t bytes,
     std::size_t alignment = alignof(std::max_align_t),
@@ -70,7 +70,7 @@ struct context_allocation_geometry {
     return {plan.allocation_requirement_bytes, retained_bytes};
 }
 
-/// Test-only hook observer; ownership remains in the concrete context allocator.
+/// Observe allocation hooks in tests. The context allocator still owns the storage.
 struct context_storage_transaction_probe {
     std::uint64_t available_bytes = (std::numeric_limits<std::uint64_t>::max)();
     std::uint64_t reserved_bytes = 0u;
@@ -120,25 +120,25 @@ struct context_storage_transaction_probe {
     }
 };
 
-/// Return the next deterministic process-footprint observation.
+/// Return the next test memory reading, repeating the last value after the sequence ends.
 [[nodiscard]] std::uint64_t deterministic_footprint_observation() noexcept {
     const std::size_t index =
         materialization_observation_index.fetch_add(1u, std::memory_order_relaxed);
     return materialization_observations[std::min(index, materialization_observations.size() - 1u)];
 }
 
-/// Reset the deterministic footprint sequence for one materialization test.
+/// Set the before/after memory readings and restart the test observer.
 void set_materialization_observations(std::uint64_t before, std::uint64_t after) noexcept {
     materialization_observations = {before, after, after, after};
     materialization_observation_index.store(0u, std::memory_order_relaxed);
 }
 
-/// Force unreflected ownership for context-allocation lifetime tests.
+/// Report zero process memory so the test keeps explicit allocation reservations.
 [[nodiscard]] std::uint64_t zero_context_footprint_observation() noexcept {
     return 0u;
 }
 
-/// Retain the largest admitted byte count observed around one replacement.
+/// Record the peak reserved bytes during replacement, then report zero process memory.
 [[nodiscard]] std::uint64_t recording_zero_footprint_observation() noexcept {
     if (replacement_peak_admission != nullptr) {
         const std::uint64_t reserved = replacement_peak_admission->reserved_bytes();
@@ -151,14 +151,14 @@ void set_materialization_observations(std::uint64_t before, std::uint64_t after)
     return 0u;
 }
 
-/// Reflect one fixed-size initial arena block between each probe pair.
+/// Simulate one new arena block appearing in process memory between each pair of reads.
 [[nodiscard]] std::uint64_t reflecting_context_footprint_observation() noexcept {
     const std::uint64_t call =
         context_reflection_probe_calls.fetch_add(1u, std::memory_order_relaxed);
     return 1'000'000u + ((call + 1u) / 2u) * context_reflected_block_bytes;
 }
 
-/// Return valid compact geometry with five equal, predictable initial blocks.
+/// Configure five small arenas with equal initial block sizes for allocation tests.
 [[nodiscard]] context::context::arena_configuration context_test_configuration() noexcept {
     return {
         .scratch_block = k_context_test_block_bytes,
@@ -171,7 +171,7 @@ void set_materialization_observations(std::uint64_t before, std::uint64_t after)
     };
 }
 
-/// Scheduler state modeled by the tracked-pool unit fixture.
+/// Task states used by the test scheduler.
 enum class fake_tracked_state : std::uint8_t {
     unused = 0u,
     enrolled,
@@ -179,7 +179,7 @@ enum class fake_tracked_state : std::uint8_t {
     finished,
 };
 
-/// Generation-checked state for one fake scheduler slot.
+/// One test scheduler slot, with a generation number to reject stale handles.
 struct fake_tracked_slot_state {
     std::uint64_t generation = 0u;
     fake_tracked_state state = fake_tracked_state::unused;
@@ -187,7 +187,7 @@ struct fake_tracked_slot_state {
     bool failed = false;
 };
 
-/// Complete fake scheduler owner used by observer callbacks.
+/// Two task slots and counters used by the scheduler observer tests.
 struct fake_tracked_owner {
     std::array<fake_tracked_slot_state, 2> slots{};
     std::uint32_t live = 0u;
@@ -199,7 +199,7 @@ struct fake_tracked_owner {
     std::atomic<std::uint32_t> peak_active_workers{0u};
 };
 
-/// Enroll a tracked task in the first unused fake scheduler slot.
+/// Register a task in the first free test slot and return its handle.
 [[nodiscard]] bool fake_tracked_enroll(void* argument,
                                        bioseq::parallelism::tracked_job_resources resources,
                                        bioseq::parallelism::tracked_job_handle* handle) noexcept {
@@ -227,7 +227,7 @@ struct fake_tracked_owner {
     return false;
 }
 
-/// Resolve a fake scheduler handle after validating its generation.
+/// Find a test slot if the handle's index and generation are valid.
 [[nodiscard]] fake_tracked_slot_state*
 fake_tracked_slot(fake_tracked_owner* owner,
                   bioseq::parallelism::tracked_job_handle handle) noexcept {
@@ -238,7 +238,7 @@ fake_tracked_slot(fake_tracked_owner* owner,
     return slot.generation == handle.generation ? std::addressof(slot) : nullptr;
 }
 
-/// Apply the enrolled-to-scheduled fixture transition.
+/// Mark an enrolled test task as scheduled. Reject any other current state.
 [[nodiscard]] bool
 fake_tracked_mark_scheduled(void* argument,
                             bioseq::parallelism::tracked_job_handle handle) noexcept {
@@ -250,7 +250,7 @@ fake_tracked_mark_scheduled(void* argument,
     return true;
 }
 
-/// Apply the scheduled-to-finished fixture transition.
+/// Mark a scheduled test task as finished. Reject any other current state.
 [[nodiscard]] bool
 fake_tracked_mark_finished(void* argument,
                            bioseq::parallelism::tracked_job_handle handle) noexcept {
@@ -262,7 +262,8 @@ fake_tracked_mark_finished(void* argument,
     return true;
 }
 
-/// Drain callbacks and recycle one fake scheduler slot.
+/// Cancel unfinished work, join the task, release its backing resources, and free the slot.
+/// Increment the generation so old handles cannot name the next task.
 [[nodiscard]] bool fake_tracked_drain(void* argument,
                                       bioseq::parallelism::tracked_job_handle handle,
                                       bioseq::parallelism::tracked_job_outcome* outcome) noexcept {
@@ -296,7 +297,7 @@ fake_tracked_mark_finished(void* argument,
     return true;
 }
 
-/// Mark the addressed fake slot as failed.
+/// Record a task failure when its test handle is still valid.
 void fake_tracked_handoff_error(void* argument,
                                 bioseq::parallelism::tracked_job_handle handle,
                                 std::uint32_t,
@@ -308,7 +309,7 @@ void fake_tracked_handoff_error(void* argument,
     }
 }
 
-/// Record entry into a fake scheduler worker scope.
+/// Count a worker entry and update the highest number of active workers.
 void fake_tracked_worker_enter(void* argument,
                                bioseq::parallelism::tracked_job_handle,
                                bioseq::parallelism::tracked_worker_scope_storage*) noexcept {
@@ -323,7 +324,7 @@ void fake_tracked_worker_enter(void* argument,
     }
 }
 
-/// Record exit from a fake scheduler worker scope.
+/// Decrement the active-worker count when a worker leaves.
 void fake_tracked_worker_leave(void* argument,
                                bioseq::parallelism::tracked_job_handle,
                                bioseq::parallelism::tracked_worker_scope_storage*) noexcept {
@@ -346,13 +347,13 @@ make_fake_tracked_observer(fake_tracked_owner* owner) noexcept {
     };
 }
 
-/// Task fixture that waits for an explicit release signal.
+/// Release flag and completion counter for a task that waits in the worker pool.
 struct delayed_tracked_task {
     std::atomic<bool>* release = nullptr;
     std::atomic<std::uint32_t>* executions = nullptr;
 };
 
-/// Execute one delayed task fixture through its opaque task reference.
+/// Wait for the release flag, then count one completed test task.
 void run_delayed_tracked_task(void* argument) {
     auto* task = static_cast<delayed_tracked_task*>(argument);
     bool released = task->release->load(std::memory_order_acquire);
@@ -897,8 +898,8 @@ TEST_CASE("route worker factory tracks and drains admitted shards on success or 
         route_worker_context_factory factory{2u, admission,
             context_test_configuration(), zero_context_footprint_observation};
         const auto slots_bytes = admission.reserved_bytes();
-        // Neither worker can obtain even its first backing block. Enrollment
-        // still precedes execution and both failed submissions must be drained.
+        // Deny the first arena block for both workers. They still need registered
+        // task slots, and failure must drain both slots before returning.
         admission.set_index_memory_cap_bytes(slots_bytes + k_context_test_block_bytes - 1u);
         std::atomic<unsigned> body_entries{0u};
         REQUIRE_THROWS_AS(pool.parallel_for_with_context_tracked(0u, 16u, 1u,
@@ -949,7 +950,8 @@ TEST_CASE("context hook admits later backing blocks but not covered suballocatio
                     == initial_context_bytes + next_scratch_block_bytes);
         }
 
-        // Scope rewind caches the backing block; it does not release admission.
+        // Rewinding the scope keeps its arena blocks for reuse, so their memory
+        // reservations must stay live.
         REQUIRE(attempt.retention.retained_bytes()
                 == initial_context_bytes + next_scratch_block_bytes);
         REQUIRE(admission.reserved_bytes()
@@ -1152,9 +1154,8 @@ TEST_CASE("admitted alignment vector replaces capacity at the exact adjacent pea
         CHECK(values[1] == 29u);
         CHECK(admission.reserved_bytes() == stable_reserved);
 
-        // A prior legitimate reserve may leave physical capacity above a later
-        // logical plan. The bound still rejects a request before the capacity
-        // early-return path can hide it.
+        // Check the new logical limit even when an earlier allocation already has
+        // enough capacity for the request.
         values.set_logical_bounds(values.size(), values.size());
         REQUIRE(values.capacity() > values.size());
         REQUIRE_THROWS_AS(values.reserve(values.size() + 1u), std::length_error);
@@ -1291,8 +1292,8 @@ TEST_CASE("outer match results retain exact replacement ownership across map tra
             mapped_results.at(4) = std::move(results);
             REQUIRE(mapped_results.at(4).size() == 1u);
             CHECK(mapped_results.at(4)[0].dp_score == 71);
-            // Moving the vector transfers its existing lease; only the
-            // independently allocated real tree node adds physical bytes.
+            // Moving the vector carries its existing reservation. Only the map's new
+            // tree node adds another allocation.
             CHECK(admission.reserved_bytes() == admitted_outer_bytes + node_bytes);
         }
         CHECK(admission.reserved_bytes() == context_baseline);
@@ -1348,8 +1349,9 @@ TEST_CASE("outer match result denial preserves source and reflected probes keep 
         results.set_logical_bounds(1u, 1u);
         results.reserve(1u);
         REQUIRE(results.capacity() == 1u);
-        // A move-only result replacement cannot touch unconstructed spare
-        // elements, so even an equal footprint delta cannot release its lease.
+        // Unused capacity has no constructed result objects. A matching increase
+        // in process memory cannot confirm that these pages were touched, so keep
+        // their reservation.
         CHECK(reflected_admission.reserved_bytes() ==
               context_baseline + sizeof(match_result));
     }
@@ -1396,8 +1398,8 @@ TEST_CASE("batched result collections replace and unwind their outer storage exa
         REQUIRE(collections[0].results.size() == 1u);
         CHECK(collections[0].results[0].dp_score == 97);
 
-        // A narrower later logical plan rejects a request even when the prior
-        // legitimate physical capacity is already equal to that request.
+        // Enforce the smaller logical limit even though the existing allocation
+        // could hold the requested elements.
         collections.set_logical_bounds(1u, 1u);
         REQUIRE(collections.capacity() >= 2u);
         REQUIRE_THROWS_AS(collections.reserve(2u), std::length_error);
@@ -1435,8 +1437,8 @@ TEST_CASE("batched result collections replace and unwind their outer storage exa
         storage_type collections{reflected_admission, deterministic_footprint_observation};
         collections.set_logical_bounds(1u, 1u);
         collections.reserve(1u);
-        // The move-only collection cannot touch unconstructed spare storage,
-        // so an equal process-footprint delta does not discharge its lease.
+        // The unused collection storage has no constructed objects. Keep its
+        // reservation even when the reported process-memory increase matches it.
         CHECK(reflected_admission.reserved_bytes() == one_collection_bytes);
     }
     REQUIRE(reflected_admission.reserved_bytes() == 0u);
@@ -1611,7 +1613,7 @@ TEST_CASE("admitted vector capacity is destroyed before its reservation is relea
           "[component:bioseq][layer:unit][feature:scheduler]") {
     auto& admission = bioseq::parallelism::memory_admission_controller::instance();
     const std::uint64_t previous_cap = admission.index_memory_cap_bytes();
-    /// Restores the process-wide admission cap after the fixture unwinds.
+    /// Restore the process-wide memory limit when the test scope ends.
     struct restore_cap_guard {
         bioseq::parallelism::memory_admission_controller& admission;
         std::uint64_t previous = 0;
@@ -1622,7 +1624,7 @@ TEST_CASE("admitted vector capacity is destroyed before its reservation is relea
     const std::uint64_t baseline = admission.reserved_bytes();
     admission.set_index_memory_cap_bytes(std::max<std::uint64_t>(previous_cap, baseline + 4096u));
 
-    /// Records whether vector elements are destroyed while their permit is live.
+    /// Record whether each element is destroyed before its memory reservation is released.
     struct destruction_observer {
         bioseq::parallelism::memory_admission_controller* admission = nullptr;
         std::uint64_t expected_reserved = 0;
@@ -1658,14 +1660,14 @@ TEST_CASE("admitted vector capacity is destroyed before its reservation is relea
     REQUIRE(explicit_destroyed);
     REQUIRE(explicit_reservation_live);
 
-    // Mirrors MemoryRun's production member order: reverse destruction must
-    // destroy the vector before the permit's destructor releases its bytes.
+    // C++ destroys members in reverse declaration order. Declare the permit
+    // first so the vector is destroyed while its reservation is still live.
     bool member_destroyed = false;
     bool member_reservation_live = false;
     {
         auto permit = admission.try_reserve(512u);
         REQUIRE(permit.has_value());
-        /// Mirrors the permit-before-vector declaration order of admitted owners.
+        /// Own a vector whose storage is destroyed before its memory permit.
         struct ordered_admitted_vector {
             bioseq::parallelism::memory_permit permit;
             std::vector<destruction_observer> values;
@@ -1724,10 +1726,10 @@ TEST_CASE("admitted vector capacity is destroyed before its reservation is relea
     REQUIRE(second_buffer_reservation_live);
     REQUIRE(admission.reserved_bytes() == baseline);
 
-    // Model the compaction hand-off used by the sorted-run store: old and next
-    // capacities are simultaneously admitted, old capacity is destroyed, then
-    // next transfers both allocation and permit without a reservation gap.
-    /// Couples vector capacity with the admission permit that accounts for it.
+    // Model sorted-run compaction with both old and new buffers reserved during
+    // replacement. Free the old buffer before releasing its reservation, then
+    // move the new buffer together with its permit.
+    /// Keep a vector and the permit covering its allocated capacity together.
     struct owned_u64_vector {
         bioseq::parallelism::memory_permit permit;
         std::vector<std::uint64_t> values;
@@ -1751,8 +1753,8 @@ TEST_CASE("admitted vector capacity is destroyed before its reservation is relea
     bioseq::parallelism::release_admitted_vector_capacity_before_permit(old_runs.values,
                                                                         old_runs.permit);
     REQUIRE(admission.reserved_bytes() == baseline + next_capacity_bytes);
-    // Production compaction/store transfer swaps the allocation before moving
-    // its permit, so the source is capacity-free at hand-off.
+    // Transfer the allocation first, then its permit. The source must have
+    // no capacity or memory reservation afterward.
     old_runs.values.swap(next_runs.values);
     old_runs.permit = std::move(next_runs.permit);
     REQUIRE(next_runs.values.capacity() == 0u);
