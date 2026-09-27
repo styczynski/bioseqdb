@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Admits verified transformed mmsearch join paths.
+ * @brief Builds per-row alignment paths for mmsearch over transformed sequence expressions.
  */
 module;
 #include <bioseq/pg_compat.h>
@@ -55,20 +55,18 @@ using namespace bioseq::postgres::support;
 
 export {
     /**
-     * @brief Builds per-row BatchJoin owners for an admissible transformed mmsearch restriction.
+     * @brief Adds per-row mmsearch paths for transformed target and query expressions.
      *
-     * Successful admission replaces the join relation's competing paths with planner-context
-     * CustomPaths that preserve the reconstructed child metadata and helper carriers.
-     * @param root Planner state used for path reconstruction, costing, and pathtarget edits.
-     * @param joinrel Inner join relation whose pathlist may be replaced on success.
-     * @param extra Join-path extras holding residual restrictions evaluated alongside the owned mmsearch clause.
-     * @param restriction RestrictInfo for the transformed mmsearch predicate transferred into the owner CustomPath.
-     * @param mmsearch Planner FuncExpr whose first and second arguments are the target and query sequence operands.
-     * @param executable_mmsearch Executable mmsearch FuncExpr used for aligner overrides and operand costing.
-     * @param requirement Index read policy, admission declines when persisted-compatible reads are required.
-     * @param oids Bioseq type OIDs used for typmod, helper, and alphabet validation.
-     * @return True when at least one owner path was added to the join relation.
-     * @throws PostgreSQL ERROR when reconstruction leaks the transferred RestrictInfo.
+     * Rebuild the join and align each joined pair, keeping existing helper outputs.
+     * Required persisted-index reads are unsupported. On success, keep existing
+     * custom paths for this mmsearch condition and replace the other paths with
+     * the new candidates.
+     *
+     * @param mmsearch Planner expression identifying the operands.
+     * @param executable_mmsearch Expression used for option overrides and costing.
+     * @return True if paths were added.
+     * @throws PostgreSQL ERROR if operand alphabets differ or the rebuilt child
+     * still contains the mmsearch condition.
      */
     [[nodiscard]] bool
     per_row_add_transformed_mmsearch_paths(PlannerInfo* root,
@@ -179,14 +177,11 @@ export {
         required_vars = list_concat(required_vars, list_copy(owner_setrefs_carrier_vars));
         required_vars = list_concat(required_vars, pull_var_clause(query_expression, pull_flags));
         required_vars = list_concat(required_vars, list_copy(owner_support.passthrough_vars));
-        /* A transformed result slot does not retain the source scan's physical
-         * slot identity.  For a direct relation, carry both components explicitly:
-         * ctid is unique only within the relation named by tableoid.  A parent
-         * inheritance RTE can place different physical relations below one Append;
-         * retaining its existing host-only owner avoids forging one parent identity
-         * or widening every append child.  A leaf child RTE has inh=false and is
-         * therefore authenticated independently.  These remain private child
-         * requirements and never widen the public owner target. */
+        /* Carry ctid and tableoid together for a direct target relation so
+         * buffered rows keep their physical source identity. An inheritance parent
+         * can read several relations through Append, so keep its existing
+         * execution without a physical source ID. These extra columns stay
+         * private to the child plan. */
         if (!target_rte->inh) {
             per_row_append_unique_expression(
                 required_vars,
@@ -311,11 +306,9 @@ export {
                     helper_provenance_invalid = true;
                     break;
                 }
-                /* root->processed_tlist is query-global.  No descendant match means
-                 * either that this exact helper belongs to the owner being constructed,
-                 * or that its owner will be constructed at a higher join frontier.  In
-                 * both cases it is not inherited here.  A helper with one exact
-                 * descendant remains inherited, while multiplicity still fails above. */
+                /* processed_tlist includes helpers from the whole query. Inherit a
+                 * helper only when a descendant already supplies it. Other helpers
+                 * may belong to this new owner or to a join built later. */
                 if (ownership.matches + base_ownership.matches == 0u)
                     continue;
                 CustomPath* inherited_owner =
@@ -356,9 +349,9 @@ export {
                                                                       reconstruction_rejects);
             if (reconstructed == nullptr)
                 continue;
-            /* Re-run the exact pointer audit on the finished reconstructed path,
-             * before copyObject can turn a leaked RestrictInfo into a merely-equal
-             * private copy and before any Plan node exists. */
+            /* Check for the original RestrictInfo before copying the path. Its
+             * presence would mean the child still executes the mmsearch clause
+             * being assigned to the new owner. */
             if (per_row_descendant_owns_restriction(reconstructed, restriction)) {
                 ereport(ERROR,
                         (errcode(ERRCODE_DATA_CORRUPTED),
@@ -488,10 +481,9 @@ export {
             owner->path.startup_cost = startup;
             owner->path.total_cost = total;
             owner->path.pathkeys = recipe_path->path.pathkeys;
-            /* Keep core from folding a later SELECT/RETURNING projection into this
-             * CustomScan after PlanCustomPath has registered descriptor identities.
-             * A normal Result above the owner can bind whole helpers through the
-             * owner-support target without ever executing their SQL stubs. */
+            /* Keep later SELECT or RETURNING projections in a Result above this
+             * scan. Once PlanCustomPath registers helper outputs, folding another
+             * projection into this node could leave SQL helper stubs executable. */
             owner->flags = 0;
             owner->custom_paths = list_make1(recipe_path);
             owner->custom_restrictinfo = list_make1(restriction);

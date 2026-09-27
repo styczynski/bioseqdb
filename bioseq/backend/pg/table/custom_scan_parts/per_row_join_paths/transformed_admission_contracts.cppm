@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Declares transformed mmsearch path admission without importing its implementation.
+ * @brief Declares path construction for mmsearch over joined-row sequence expressions.
  */
 module;
 #include <bioseq/pg_compat.h>
@@ -10,7 +10,7 @@ export module bioseq.postgres.table:custom_scan_per_row_join_paths_transformed_a
 import bioseq.indexing.type;
 import :custom_scan_oid_expression_support_oid_catalog_contracts;
 
-/** @brief Build verified per-row BatchJoin owners for a transformed mmsearch restriction. */
+/** @brief Adds per-row alignment paths for a transformed mmsearch predicate. */
 export [[nodiscard]] bool per_row_add_transformed_mmsearch_paths(
     PlannerInfo* root,
     RelOptInfo* joinrel,

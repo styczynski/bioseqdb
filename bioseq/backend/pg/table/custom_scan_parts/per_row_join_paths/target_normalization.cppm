@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Normalizes authoritative targets and private path spines.
+ * @brief Adjusts private child-path outputs to the helper results available at each node.
  */
 module;
 #include <bioseq/pg_compat.h>
@@ -36,9 +36,14 @@ using namespace bioseq::postgres::support;
 
 export {
     /**
-     * @brief Builds a child target containing available helpers and required carrier Vars.
-     * @param changed Set when the returned target differs from the source target.
-     * @param invalid Set when helper or carrier metadata cannot be preserved.
+     * @brief Builds child output expressions using available helpers and required source columns.
+     *
+     * Remove expressions supplied by the new parent match owner. Preserve sort/group
+     * references on the remaining expressions and add missing columns from this
+     * path's relations.
+     *
+     * @param changed Set when expressions are removed or added.
+     * @param invalid Set when helper ownership or column metadata cannot be preserved.
      */
     [[nodiscard]] PathTarget* per_row_normalized_path_target(PlannerInfo* root,
                                                              Path* path,
@@ -70,10 +75,9 @@ export {
                 per_row_expression_uses_available_helpers(expression, available, saw_helper);
             const Index sortgroupref = source_sortgrouprefs[source_index++];
             if (!supported) {
-                /* Pathkeys were audited against the actually available helpers
-                 * before target normalization.  A current-owner helper may therefore
-                 * be removed from this private child even when its public TLE carries
-                 * a sortgroupref; the exact outer owner target retains that ref. */
+                /* Sorting has already been checked against available helpers. A
+                 * helper supplied by the new parent can leave this private child
+                 * target while its public output keeps the sort/group reference. */
                 bool saw_candidate_helper = false;
                 const bool covered_by_current_owner = per_row_expression_uses_available_helpers(
                     expression, candidate_helpers, saw_candidate_helper);
@@ -156,7 +160,7 @@ export {
         return true;
     }
 
-    /** @brief Compares target expressions and their authoritative sort-group references. */
+    /** @brief Compares target expressions and the sort/group references recovered for each occurrence. */
     [[nodiscard]] bool
     per_row_authoritative_targets_match(PlannerInfo* root, PathTarget* left, PathTarget* right) {
         if (root == nullptr || left == nullptr || right == nullptr ||
@@ -171,8 +175,13 @@ export {
     }
 
     /**
-     * @brief Normalizes every node in a private path spine to its available helper carriers.
-     * @return True when all metadata and wrapper contracts remain valid after normalization.
+     * @brief Adjusts a private path tree to the helper results each node can obtain.
+     *
+     * Check filters, sorting, and other metadata before changing outputs. Preserve
+     * matching output layouts through wrappers and append children, and leave
+     * shared ordinary scan leaves unchanged.
+     *
+     * @return True when the whole tree passes these checks.
      */
     [[nodiscard]] bool per_row_normalize_private_path_spine(PlannerInfo* root,
                                                             Path* path,
@@ -297,8 +306,8 @@ export {
         } else if (IsA(path, UniquePath)) {
             auto* unique = reinterpret_cast<UniquePath*>(path);
 #if PG_VERSION_NUM >= 190000
-            // PG19 represents uniqueness by a prefix of the sorted pathkeys,
-            // not uniq_exprs. Preserve the no-helper rule for those keys.
+            // PG19 uses a prefix of pathkeys for uniqueness. Check that those
+            // sorting expressions contain no match helpers.
             if (unique->numkeys < 0 || unique->numkeys > list_length(path->pathkeys))
                 return false;
             List* const unique_keys = list_copy_head(path->pathkeys, unique->numkeys);
@@ -345,9 +354,9 @@ export {
             return per_row_append_targets_are_ordinally_compatible(path->pathtarget, children);
         }
 
-        /* Ordinary base scan paths are immutable leaves in the existing COW
-         * cloner.  They may be shared only when normalization is a no-op; direct
-         * BioseqScan leaves were handled above and are private CustomPaths. */
+        /* Ordinary scan leaves may be shared with other plans, so their
+         * output expressions must already fit. BioseqScan leaves are private
+         * copies and were handled above. */
         if (path->parent != nullptr && (path->parent->reloptkind == RELOPT_BASEREL ||
                                         path->parent->reloptkind == RELOPT_OTHER_MEMBER_REL)) {
             return !target_changed;
@@ -355,7 +364,7 @@ export {
         return false;
     }
 
-    /** @brief Returns methods for the unsupported-wrapper integration probe path. */
+    /** @brief Returns a test-only custom-path method table that the wrapper checks must reject. */
     [[nodiscard]] CustomPathMethods const&
     match_helper_wrapper_probe_unknown_path_methods() noexcept {
         static const CustomPathMethods methods{
@@ -366,7 +375,7 @@ export {
         return methods;
     }
 
-    /** @brief Initializes common Path fields for a wrapper integration probe. */
+    /** @brief Initializes a serial, one-row path for the wrapper tests. */
     void match_helper_wrapper_probe_init_path(Path* path,
                                               NodeTag plan_tag,
                                               RelOptInfo* parent,
@@ -385,7 +394,7 @@ export {
         path->pathkeys = NIL;
     }
 
-    /** @brief Allocates a minimal planner relation for wrapper integration probes. */
+    /** @brief Creates a minimal planner relation with an empty target for the wrapper tests. */
     [[nodiscard]] RelOptInfo*
     match_helper_wrapper_probe_rel(RelOptKind kind, Index relid, Relids relids) {
         auto* rel = makeNode(RelOptInfo);
