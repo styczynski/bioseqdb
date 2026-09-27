@@ -16,22 +16,17 @@ module bioseq.codegen.website:markdown_directives;
 import bioseq.codegen.website.model;
 import bioseq.codegen.support;
 
-// Bioseq Markdown extensions over MD4C's typed events: admonition
-// classification, entity-reference parsing (both `[[sql:...]]` wikilinks and
-// `entity:` links), and the runnable-SQL fence grammar. Source-neutral helpers
-// shared by the markdown driver and the tutorial planner.
+// Parses Bioseq Markdown additions shared by the parser and tutorial planner.
+// These include admonition kinds, C++ and SQL reference links, and runnable
+// SQL code-block options.
 namespace bioseq::codegen::website {
 
-/// @brief Maps an admonition marker keyword to its rendered severity class.
+/// @brief Converts an admonition keyword to its CSS class.
 ///
-/// Accepts the keyword in either spelling the two producers use: the marker as
-/// authored (`> [!WARNING]`) and the already-normalized lowercase tag MD4C
-/// reports in MD_BLOCK_ADMONITION_DETAIL::type ("warning"). Matching only one
-/// case silently classifies the other as unknown, which renders every severity
-/// as the "note" fallback, so the comparison is deliberately case-insensitive.
-/// @param keyword Marker keyword in any case.
-/// @return The severity class, or empty for a keyword outside the five known
-///         severities.
+/// Matching ignores case because authored markers use names such as WARNING
+/// while MD4C supplies lowercase names.
+/// @param keyword One marker keyword, without the surrounding [! and ].
+/// @return note, tip, important, warning, or caution. Unknown names return empty.
 [[nodiscard]] std::string admonition_class(std::string_view keyword) {
     std::string normalized(keyword);
     for (char& character : normalized) {
@@ -46,14 +41,13 @@ namespace bioseq::codegen::website {
     return {};
 }
 
-/// @brief Parses an entity-reference target into a typed query.
+/// @brief Parses a C++, SQL, or ID reference link.
 ///
-/// Accepts an optional `entity:` prefix (link form) and a bare domain prefix
-/// (`sql:`/`cpp:`/`id:`) as produced by `[[sql:...]]` wikilinks. A trailing
-/// `|label` is stripped and returned as the query label.
-/// @param spelling Raw target such as `sql:bioseq.seq|the sequence type`.
-/// @param span Source span for diagnostics.
-/// @return The typed query, or nullopt when the target is an ordinary link.
+/// Accepts sql:, cpp:, or id:, optionally preceded by entity:.
+/// Text after | becomes the link label.
+/// @param spelling Target such as `sql:bioseq.seq|the sequence type`.
+/// @param span Source location for errors.
+/// @return The reference query, or nullopt for an ordinary or empty link.
 [[nodiscard]] std::optional<unresolved_entity_query> parse_entity_query(
     std::string_view spelling,
     source_span span) {
@@ -72,7 +66,7 @@ namespace bioseq::codegen::website {
         query.domain = entity_query_domain::canonical_id;
         spelling.remove_prefix(3);
     } else {
-        return std::nullopt;  // ordinary link/wikilink, not an entity reference
+        return std::nullopt;  // ordinary link target
     }
     const std::size_t bar = spelling.find('|');
     if (bar != std::string_view::npos) {
@@ -86,7 +80,7 @@ namespace bioseq::codegen::website {
     return query;
 }
 
-/// @brief Parsed attributes of a runnable SQL fence info string.
+/// @brief Execution options parsed from a runnable SQL code-block header.
 struct runnable_fence_attributes {
     std::string local_id;
     std::chrono::milliseconds timeout{15'000};
@@ -97,7 +91,7 @@ struct runnable_fence_attributes {
 namespace {
 
 [[nodiscard]] std::chrono::milliseconds parse_timeout(std::string_view value) {
-    // Unsigned decimal integer followed by ms or s; 100ms-60s.
+    // Accept an unsigned integer with ms or s, from 100ms through 60s.
     std::size_t digits = 0;
     while (digits < value.size() && value[digits] >= '0' && value[digits] <= '9') {
         ++digits;
@@ -141,18 +135,17 @@ namespace {
     return true;
 }
 
-// One token of a fenced info string: the head language/kind word, a `key=value`
-// attribute, or a bare boolean flag.
+// One word, key=value option, or flag from a code-block header.
 struct info_token {
     std::string key;                   // head word, attribute key, or flag name
     std::optional<std::string> value;  // present only for key=value
     bool head = false;                 // true for the first (language/kind) token
 };
 
-// Tokenizes a fenced info string honoring double-quoted values with \\ \" \t \n
-// escapes; bare values end at ASCII whitespace. A quote may only open a
-// value (immediately after `=`); a stray or unterminated quote is fatal, so a
-// signature containing commas/spaces can be carried verbatim as one value.
+// Splits a code-block header into words and options. Double-quoted values
+// keep spaces and commas and accept backslash, quote, tab, and newline
+// escapes. Unquoted values end at a space or tab. Quoted values must close
+// and use supported escapes.
 [[nodiscard]] std::vector<info_token> tokenize_info(std::string_view info) {
     std::vector<info_token> tokens;
     std::size_t index = 0;
@@ -227,14 +220,14 @@ struct info_token {
 
 }  // namespace
 
-/// @brief Closed classification of a fenced code block.
+/// @brief Whether a fence displays code, contains an annotation, or runs SQL.
 enum class fence_kind { ordinary, annotation, runnable };
 
-/// @brief Parsed, validated attributes of any fenced block's info string.
+/// @brief Parsed options for a code block or annotation directive.
 struct fence_descriptor {
     fence_kind kind{fence_kind::ordinary};
     std::string language;               // head word (ordinary/runnable)
-    std::string id;                     // optional id (ordinary/runnable)
+    std::string id;                     // required for runnable blocks, optional for ordinary blocks
     bool annotated{false};
     std::vector<std::string> entities;  // repeatable entity="<canonical-id>"
     std::chrono::milliseconds timeout{15'000};
@@ -246,14 +239,12 @@ struct fence_descriptor {
     std::optional<std::size_t> occurrence;
 };
 
-/// @brief Parses any fenced info string against the closed attribute table.
+/// @brief Parses and checks a code-block header.
 ///
-/// Duplicate scalar attributes and unknown attributes/flags are fatal; `entity=` is
-/// the one repeatable attribute; quoted values may carry commas/spaces (an overload
-/// id or a C++ signature) verbatim. `runnable` is legal only on `sql`; `sqlstate`
-/// only with `expect=error`. The head word selects the branch: `annotation` is the
-/// directive, any other word is a display language (runnable when a `runnable` flag
-/// is present).
+/// The first word is a display language or annotation. Only entity= may
+/// repeat. Unknown options and duplicate flags cause errors. Runnable blocks
+/// must use SQL and have an ID. expect=error requires sqlstate, and sqlstate
+/// is rejected for successful examples. Quoted values can include spaces.
 [[nodiscard]] fence_descriptor parse_fence_info(std::string_view info) {
     const std::vector<info_token> tokens = tokenize_info(info);
     if (tokens.empty() || tokens.front().value || tokens.front().key.empty()) {
@@ -388,9 +379,9 @@ struct fence_descriptor {
     return descriptor;
 }
 
-/// @brief Parses a runnable-SQL fence info string, or nullopt when not runnable.
-/// @param info Full fence info such as `sql runnable id=x timeout=10s`.
-/// @return Validated attributes, or nullopt for a non-runnable code fence.
+/// @brief Reads execution options from a runnable SQL code-block header.
+/// @param info Header such as `sql runnable id=x timeout=10s`.
+/// @return Checked options, or nullopt if the block is not runnable.
 [[nodiscard]] std::optional<runnable_fence_attributes> parse_runnable_sql_fence(
     std::string_view info) {
     const fence_descriptor descriptor = parse_fence_info(info);
@@ -404,19 +395,20 @@ struct fence_descriptor {
         .expected_sqlstate = descriptor.expected_sqlstate};
 }
 
-/// @brief The setup/visible/teardown text of a runnable example.
+/// @brief Hidden setup, visible SQL, and hidden teardown for one example.
 struct sql_example_sections {
     std::string setup;
     std::string visible;
     std::string teardown;
 };
 
-/// @brief Splits fenced SQL into sections on the exact marker lines.
+/// @brief Splits runnable SQL at its setup, visible, and teardown markers.
 ///
-/// Each of `-- bioseq:setup`, `-- bioseq:visible`, `-- bioseq:teardown` must
-/// occur exactly once, alone on a line, in order. Markers are removed and each
-/// section is trimmed of surrounding blank lines.
-/// @param code Raw fenced SQL body.
+/// Each marker must appear once on its own line, in that order. Trailing
+/// spaces are allowed. Removes marker lines and trims surrounding whitespace
+/// from each section.
+/// @param code Fenced SQL containing -- bioseq:setup, -- bioseq:visible,
+/// and -- bioseq:teardown.
 /// @return The three SQL sections.
 [[nodiscard]] sql_example_sections parse_sql_example_sections(std::string_view code) {
     constexpr auto markers = std::to_array<std::string_view>({

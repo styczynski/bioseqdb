@@ -12,15 +12,15 @@ import bioseq.libpq.client;
 import bioseq.codegen.website.model;
 import bioseq.codegen.support;
 
-// PostgreSQL catalog access stays behind source-neutral website model types. Raw
-// catalog object identifiers never cross this module boundary.
+// Reads PostgreSQL catalog rows into the website model.
+// Catalog lookups stay here so rendering does not need a database connection.
 export namespace bioseq::codegen::website {
 
-/// @brief Builds the stable website identity for a PostgreSQL catalog entity.
+/// @brief Builds an ID of the form sql:kind:schema.name.
 /// @param schema Owning schema name.
 /// @param name Object name.
-/// @param object_kind One of type/function/schema.
-/// @return A normalized `sql:` identity.
+/// @param object_kind Object kind, such as type, function, or schema.
+/// @return The ID with the supplied names unchanged.
 [[nodiscard]] std::string make_sql_entity_id(
     std::string_view schema,
     std::string_view name,
@@ -50,8 +50,8 @@ export namespace bioseq::codegen::website {
         connection.escape_literal(extension_name);
     for (const std::string& schema : included_schemas) {
         const std::string schema_literal = connection.escape_literal(schema);
-        // Extension membership, rather than schema/name coincidence, defines the
-        // public surface. PostgreSQL-generated array types are excluded.
+        // Check extension membership so unrelated objects in the same schema
+        // stay out of the reference. Exclude PostgreSQL-generated array types.
         const std::string query =
             "select t.typname, obj_description(t.oid, 'pg_type') "
             "from pg_type t join pg_namespace n on n.oid = t.typnamespace "
@@ -82,12 +82,12 @@ export namespace bioseq::codegen::website {
     return entities;
 }
 
-/// @brief Loads extension-owned function entities from the live PostgreSQL catalog.
+/// @brief Loads functions owned by the requested extension.
 /// @param connection_info Unix-socket connection parameters for the private cluster.
-/// @param extension_name Exact owning extension name from the validated manifest.
-/// @param included_schemas Schemas whose extension functions may be returned.
-/// @return SQL function entities with normalized identity arguments, ordered first
-/// by requested schema and then by catalog identity.
+/// @param extension_name Owning extension name from the validated manifest.
+/// @param included_schemas Schemas to read, in output order.
+/// @return Function entities with argument types in their identities, ordered
+/// by schema order, function name, and OID.
 /// @throws bioseq::libpq::command_error When the catalog command fails.
 [[nodiscard]] std::vector<reference_entity> load_extension_function_entities(
     const std::string& connection_info,
@@ -97,19 +97,16 @@ export namespace bioseq::codegen::website {
     bioseq::libpq::client_connection connection(connection_info);
     const std::string extension_literal =
         connection.escape_literal(extension_name);
-    // format_type() qualifies every type that is not on the search path, so pinning
-    // the path to pg_catalog gives schema-qualified identity types for extension
-    // types (bioseq.seq, public.bioseq_aligner_options) while built-ins stay bare
-    // (text). The generated manifest uses this parameter-name-free normalized
-    // spelling for its install-resolved identities. pg_get_function_identity_arguments
-    // keeps parameter names, so we rebuild the signature structurally instead.
+    // Set search_path to pg_catalog so format_type() includes the schema for
+    // extension types, such as bioseq.seq. Built-in names, such as text, stay
+    // unqualified. Read argument types directly because
+    // pg_get_function_identity_arguments() also includes parameter names,
+    // which the manifest identities omit.
     (void)connection.execute("set search_path = pg_catalog");
     for (const std::string& schema : included_schemas) {
         const std::string schema_literal = connection.escape_literal(schema);
-        // Only exact pg_depend members of the requested extension (deptype 'e')
-        // are candidates.
-        // Their identity argument types are normalized and joined
-        // without parameter names, defaults, or insignificant whitespace.
+        // Select exact extension members through pg_depend. Build the argument
+        // list from types, without parameter names or defaults, to match the manifest.
         const std::string query =
             "select p.proname, "
             "coalesce((select string_agg(format_type(t, null), ',' order by ord) "

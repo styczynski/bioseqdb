@@ -13,8 +13,8 @@ import :tests.contract;
 
 export namespace bioseq::codegen::website {
 
-/// @brief Runs the website parser/renderer/integration self-tests.
-/// @return Zero on success, one after a diagnostic failure.
+/// @brief Runs the website contract checks.
+/// @return Zero on success, or one after reporting a failure.
 inline int self_test() {
     try {
         run_website_contract_self_tests();
