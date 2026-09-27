@@ -1,6 +1,6 @@
 /**
  * @file index_parts/configuration.cppm
- * @brief Defines tuple-buffer configuration, captured operand, and borrowed-owner lifetimes.
+ * @brief Configure the scan buffer and save its sequence operands.
  */
 module;
 
@@ -25,14 +25,9 @@ extern "C" {
 #include <utility>
 #include <vector>
 
-// The chunked-scanner dispatch path is always compiled as a permanent part of
-// the fragmented pipeline tree.
-// The `bioseq.testing.chunked_scanner.enabled` GUC routes row sequences through a
-// synthetic chunked scanner end-to-end. The
-// `bioseq.testing.in_memory_scanner.enabled` GUC forces the materialise-then-
-// in_memory baseline. Without either GUC the production path promotes locator
-// values through the statement-owned source provider and runs from its
-// canonical lazy facade.
+// Locator-backed scans read through the statement source provider.
+// The chunked_scanner and in_memory_scanner test settings select synthetic
+// fragments or complete in-memory sequences for comparison.
 module bioseq.postgres.scheduler.dispatch_buffer:configuration;
 
 import bioseq.postgres.scheduler.dispatch_buffer;
@@ -52,8 +47,7 @@ import bioseq.postgres.storage.scanner.source_provider_contract;
 
 namespace bioseq::scheduler {
 
-/** @brief Implements the require evaluated mmsearch index policy contract declared by the stable
- * buffer facade. */
+/** @brief Require index reads to be disabled for an evaluated target expression. */
 void tuple_dispatch_buffer::require_evaluated_mmsearch_index_policy_() const {
     if (!evaluated_mmsearch_index_policy_valid(index_read_requirement,
                                                read_sequence_index_active)) {
@@ -65,8 +59,7 @@ void tuple_dispatch_buffer::require_evaluated_mmsearch_index_policy_() const {
     }
 }
 
-/** @brief Implements the require registered mvcc snapshot contract declared by the stable buffer
- * facade. */
+/** @brief Require a registered MVCC snapshot before reading stored sequences. */
 void tuple_dispatch_buffer::require_registered_mvcc_snapshot_(Snapshot snapshot) {
     if (snapshot == nullptr || !IsMVCCSnapshot(snapshot) || snapshot->regd_count == 0) {
         ereport(ERROR,
@@ -75,7 +68,7 @@ void tuple_dispatch_buffer::require_registered_mvcc_snapshot_(Snapshot snapshot)
     }
 }
 
-/** @brief Implements the retain expanded recipe contract declared by the stable buffer facade. */
+/** @brief Keep an expanded slice in batch memory without reading its sequence. */
 [[nodiscard]] Datum tuple_dispatch_buffer::retain_expanded_recipe_(Datum input) {
     if (batch_payload_ctx == nullptr) {
         ereport(ERROR,
@@ -85,10 +78,9 @@ void tuple_dispatch_buffer::require_registered_mvcc_snapshot_(Snapshot snapshot)
     return bioseq::postgres::support::invoke_pg_as_cpp([this, input] {
         MemoryContext previous = MemoryContextSwitchTo(batch_payload_ctx);
         try {
-            /* Force a copy even when the producer handed us its RW
-             * wrapper: that wrapper commonly belongs to the current
-             * per-tuple context.  The retained edge graph is small and
-             * source-backed; no sequence payload is copied here. */
+            /* Copy the wrapper into batch memory even if the input is writable.
+             * The producer may reset its per-tuple context before alignment.
+             * The copy keeps source references without reading sequence bytes. */
             const Datum read_only = MakeExpandedObjectReadOnly(input, false, -1);
             acquired_sequence acquired = acquire_writable_pg_sequence(read_only);
             const Datum retained = pg_sequence_ro_datum(acquired.value);
@@ -101,8 +93,7 @@ void tuple_dispatch_buffer::require_registered_mvcc_snapshot_(Snapshot snapshot)
     });
 }
 
-/** @brief Implements the require recipe descriptor contract declared by the stable buffer facade.
- */
+/** @brief Check that an expanded operand still has the planned alphabet and storage width. */
 void tuple_dispatch_buffer::require_recipe_descriptor_(const pg_sequence_descriptor& descriptor,
                                                        const std::uint8_t alphabet_code,
                                                        const std::uint8_t storage_unit_byte_width,
@@ -124,7 +115,10 @@ void tuple_dispatch_buffer::require_recipe_descriptor_(const pg_sequence_descrip
     }
 }
 
-/** @brief Implements the capture target datum contract declared by the stable buffer facade. */
+/**
+ * @brief Keep a target sequence valid until this batch finishes.
+ * Copy inline bytes, decode locators, or save an expanded slice wrapper.
+ */
 void tuple_dispatch_buffer::capture_target_datum_(buffered_scan_entry& entry, Datum datum) {
     if (VARATT_IS_EXTERNAL_EXPANDED(DatumGetPointer(datum))) {
         const pg_sequence_descriptor descriptor = classify_and_describe_sequence(datum);
@@ -159,7 +153,11 @@ void tuple_dispatch_buffer::capture_target_datum_(buffered_scan_entry& entry, Da
     source.free_if_copy();
 }
 
-/** @brief Implements the capture query datum contract declared by the stable buffer facade. */
+/**
+ * @brief Save this row's query for alignment.
+ * Check its planned type and convert flat query bytes to the target storage
+ * width when needed. Locators and expanded slices remain deferred.
+ */
 void tuple_dispatch_buffer::capture_query_datum_(buffered_scan_entry& entry, Datum datum) {
     if (VARATT_IS_EXTERNAL_EXPANDED(DatumGetPointer(datum))) {
         const pg_sequence_descriptor descriptor = classify_and_describe_sequence(datum);
@@ -216,8 +214,11 @@ void tuple_dispatch_buffer::capture_query_datum_(buffered_scan_entry& entry, Dat
     source.free_if_copy();
 }
 
-/** @brief Implements the retain expanded sequence output attributes contract declared by the stable
- * buffer facade. */
+/**
+ * @brief Save expanded sequence columns before copying the output tuple.
+ * Reuse operand wrappers where possible so later projection can read slices
+ * without flattening them during tuple serialization.
+ */
 void tuple_dispatch_buffer::retain_expanded_sequence_output_attributes_(buffered_scan_entry& entry,
                                                                         TupleTableSlot* slot) {
     if (slot == nullptr || slot->tts_tupleDescriptor == nullptr || mmsearch_state.seq_attno <= 0 ||
@@ -275,14 +276,13 @@ void tuple_dispatch_buffer::retain_expanded_sequence_output_attributes_(buffered
     }
 }
 
-/** @brief Implements the tuple dispatch buffer contract declared by the stable buffer facade. */
+/** @brief Reserve input and output storage from the estimated row count. */
 tuple_dispatch_buffer::tuple_dispatch_buffer(const size_t estimated_tuple_count) {
     buffered_entries.reserve(estimated_tuple_count * 2);
     output_cursors.reserve(estimated_tuple_count * 2);
 }
 
-/** @brief Implements the bind persisted gpu operation stats sink contract declared by the stable
- * buffer facade. */
+/** @brief Attach the statement's GPU counters, rejecting a change of owner. */
 void tuple_dispatch_buffer::bind_persisted_gpu_operation_stats_sink(
     bioseq::pipeline_stats::persisted_gpu_operation_accumulator& sink) {
     if (persisted_gpu_operation_stats_sink != nullptr &&
@@ -294,7 +294,7 @@ void tuple_dispatch_buffer::bind_persisted_gpu_operation_stats_sink(
     persisted_gpu_operation_stats_sink = &sink;
 }
 
-/** Bind the immutable statement owner used by all downstream intervals. */
+/** @brief Attach the statement's processing timer, rejecting a change of owner. */
 void tuple_dispatch_buffer::bind_downstream_active_wall_tracker(
     bioseq::simd::downstream_active_wall_tracker& tracker) {
     if (downstream_active_wall_tracker != nullptr &&
@@ -306,7 +306,10 @@ void tuple_dispatch_buffer::bind_downstream_active_wall_tracker(
     downstream_active_wall_tracker = &tracker;
 }
 
-/** @brief Implements the bind slice async owner contract declared by the stable buffer facade. */
+/**
+ * @brief Attach the slice owner that tracks asynchronous work and payload memory.
+ * The owner must still accept jobs and remain the same until dispatch is drained.
+ */
 void tuple_dispatch_buffer::bind_slice_async_owner(slice_async_owner_guard* owner) {
     if (owner == nullptr || !make_slice_async_pool_observer_noexcept(owner)) {
         ereport(ERROR,
@@ -331,8 +334,7 @@ void tuple_dispatch_buffer::bind_slice_async_owner(slice_async_owner_guard* owne
                                                         materialization_reason::mmsearch_query);
 }
 
-/** @brief Implements the bind sequence source provider contract declared by the stable buffer
- * facade. */
+/** @brief Borrow the live sequence provider used by this scan. */
 void tuple_dispatch_buffer::bind_sequence_source_provider(
     bioseq::storage::pg_sequence_source_provider* provider) {
     if (provider == nullptr || !provider->open || provider->lease.registry == nullptr) {
@@ -348,14 +350,12 @@ void tuple_dispatch_buffer::bind_sequence_source_provider(
     source_provider = provider;
 }
 
-/** @brief Implements the clear sequence source provider binding contract declared by the stable
- * buffer facade. */
+/** @brief Forget the borrowed sequence provider without closing it. */
 void tuple_dispatch_buffer::clear_sequence_source_provider_binding() noexcept {
     source_provider = nullptr;
 }
 
-/** @brief Implements the release per row slice async owner after drain contract declared by the
- * stable buffer facade. */
+/** @brief Release the per-row slice owner after input, output, and reads are drained. */
 void tuple_dispatch_buffer::release_per_row_slice_async_owner_after_drain() {
     if (join_mode || !buffered_entries.empty() || !match_map.empty() || !output_cursors.empty() ||
         output_position != -1 || active_wave_read_session != nullptr ||
@@ -369,8 +369,7 @@ void tuple_dispatch_buffer::release_per_row_slice_async_owner_after_drain() {
     mmsearch_query_payload_observer = {};
 }
 
-/** @brief Implements the release join slice async owner after drain contract declared by the stable
- * buffer facade. */
+/** @brief Release the batch join's slice owner after all targets and query batches finish. */
 void tuple_dispatch_buffer::release_join_slice_async_owner_after_drain() {
     if (!join_mode || join_target_active || join_target_prepared || !join_queries.empty() ||
         !join_match_map.empty() || !join_output_cursors.empty() ||
@@ -384,7 +383,11 @@ void tuple_dispatch_buffer::release_join_slice_async_owner_after_drain() {
     mmsearch_query_payload_observer = {};
 }
 
-/** @brief Implements the configure params contract declared by the stable buffer facade. */
+/**
+ * @brief Save the statement plan and the executor state needed for storage reads.
+ * Validate the relation and registered snapshot, select the index-read policy,
+ * and allocate the batch memory context under the executor's query context.
+ */
 void tuple_dispatch_buffer::configure_params(
     ::bioseq::simd::pipe::statement_execution_plan_owner plan,
     bioseq::indexing::index_read_requirement read_requirement,
@@ -410,8 +413,8 @@ void tuple_dispatch_buffer::configure_params(
                 (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
                  errmsg("bioseq dispatch executor relation identity is invalid")));
     }
-    // A non-alignment provider scan has no biological request. Any alignment
-    // consumer checks this owner before dispatch; configuration never copies it.
+    // A scan that only provides sequences has no alignment plan. Alignment
+    // callers require one before dispatch.
     execution_plan = std::move(plan);
     index_read_requirement = read_requirement;
     const bool generic_raw_optional_scalar =
@@ -441,11 +444,8 @@ void tuple_dispatch_buffer::configure_params(
                  errmsg("bioseq dispatch borrowed executor context is invalid")));
     }
     last_stats = ::bioseq::pipeline_stats::pipeline_execution_stats{};
-    /*
-     * The payload arena is parented on CurrentMemoryContext
-     * at BeginCustomScan time (the executor per-query context), so the
-     * bulk-fetched bioseq::pg_types::seq* survive the full scan, not just one tuple.
-     */
+    /* Allocate under the executor's query context so fetched payloads survive
+     * per-tuple resets until clear_slots() releases the completed batch. */
     if (batch_payload_ctx == nullptr) {
         batch_payload_ctx = AllocSetContextCreate(
             executor_query_mctx, "tuple_dispatch_buffer payload arena", ALLOCSET_DEFAULT_SIZES);
@@ -455,8 +455,7 @@ void tuple_dispatch_buffer::configure_params(
     }
 }
 
-/** @brief Implements the replace executor snapshot contract declared by the stable buffer facade.
- */
+/** @brief Use the worker's restored snapshot for subsequent storage reads. */
 void tuple_dispatch_buffer::replace_executor_snapshot(Snapshot executor_snapshot) {
     require_registered_mvcc_snapshot_(executor_snapshot);
     Relation executor_relation =
@@ -471,7 +470,7 @@ void tuple_dispatch_buffer::replace_executor_snapshot(Snapshot executor_snapshot
     scan_snapshot = executor_snapshot;
 }
 
-/** @brief Implements the configure mmsearch contract declared by the stable buffer facade. */
+/** @brief Configure mmsearch to reuse one owned query across target rows. */
 void tuple_dispatch_buffer::configure_mmsearch(AttrNumber seq_attno,
                                                std::string column_name,
                                                std::vector<char> query_varlena_bytes,
@@ -508,7 +507,9 @@ void tuple_dispatch_buffer::configure_mmsearch(AttrNumber seq_attno,
         query_bp_size);
 }
 
-/** @brief Implements the configure mmsearch per row contract declared by the stable buffer facade.
+/**
+ * @brief Configure mmsearch to read its query from each row.
+ * Operands must share an alphabet. Their storage widths may differ.
  */
 void tuple_dispatch_buffer::configure_mmsearch_per_row(AttrNumber seq_attno,
                                                        std::string column_name,
@@ -551,8 +552,7 @@ void tuple_dispatch_buffer::configure_mmsearch_per_row(AttrNumber seq_attno,
         static_cast<unsigned>(query_storage_unit_byte_width));
 }
 
-/** @brief Implements the configure mmsearch per row evaluated contract declared by the stable
- * buffer facade. */
+/** @brief Configure mmsearch to accept evaluated target and query expressions per row. */
 void tuple_dispatch_buffer::configure_mmsearch_per_row_evaluated(
     const AttrNumber seq_attno,
     std::string column_name,
@@ -582,7 +582,10 @@ void tuple_dispatch_buffer::configure_mmsearch_per_row_evaluated(
     mmsearch_state.active = true;
 }
 
-/** @brief Implements the configure mmsearch join contract declared by the stable buffer facade. */
+/**
+ * @brief Configure the target relation and child-slot columns for a batch join.
+ * Check the column numbers and operand alphabets, then clear prior join state.
+ */
 void tuple_dispatch_buffer::configure_mmsearch_join(
     const Oid target_relation_oid,
     const AttrNumber target_storage_seq_attno,
@@ -629,19 +632,22 @@ void tuple_dispatch_buffer::configure_mmsearch_join(
     reset_join_runtime_for_rescan();
 }
 
-/** @brief Implements the per row mode contract declared by the stable buffer facade. */
+/** @return Whether the active mmsearch gets its query from each row. */
 [[nodiscard]] bool tuple_dispatch_buffer::per_row_mode() const noexcept {
     return dispatch_uses_per_row_query(mmsearch_state.active,
                                        mmsearch_state.per_row_query_attno,
                                        mmsearch_state.per_row_evaluated);
 }
 
-/** @brief Implements the per row query attno contract declared by the stable buffer facade. */
+/** @return The query column number, or InvalidAttrNumber for other query forms. */
 [[nodiscard]] AttrNumber tuple_dispatch_buffer::per_row_query_attno() const {
     return mmsearch_state.per_row_query_attno;
 }
 
-/** @brief Implements the query source attno contract declared by the stable buffer facade. */
+/**
+ * @return The per-row query column, or the target source column for evaluated
+ * queries. Return InvalidAttrNumber when per-row mode is inactive.
+ */
 [[nodiscard]] AttrNumber tuple_dispatch_buffer::query_source_attno() const noexcept {
     if (!per_row_mode()) {
         return InvalidAttrNumber;
@@ -651,28 +657,27 @@ void tuple_dispatch_buffer::configure_mmsearch_join(
                : mmsearch_state.seq_attno;
 }
 
-/** @brief Implements the coalesce active contract declared by the stable buffer facade. */
+/** @return Whether a converted constant query is installed. */
 [[nodiscard]] bool tuple_dispatch_buffer::coalesce_active() const {
     return mmsearch_state.coalesce_active;
 }
 
-/** @brief Implements the per row self alignment contract declared by the stable buffer facade. */
+/** @return Whether the per-row query names the same source column as the target. */
 [[nodiscard]] bool tuple_dispatch_buffer::per_row_self_alignment() const {
     return mmsearch_state.per_row_self_alignment;
 }
 
-/** @brief Implements the mmsearch alphabet code contract declared by the stable buffer facade. */
+/** @return The target alphabet used for alignment. */
 [[nodiscard]] uint8_t tuple_dispatch_buffer::mmsearch_alphabet_code() const {
     return mmsearch_state.alphabet_code;
 }
 
-/** @brief Implements the mmsearch storage unit byte width contract declared by the stable buffer
- * facade. */
+/** @return The target storage-unit width in bytes. */
 [[nodiscard]] uint8_t tuple_dispatch_buffer::mmsearch_storage_unit_byte_width() const {
     return mmsearch_state.storage_unit_byte_width;
 }
 
-/** @brief Implements the clear mmsearch context contract declared by the stable buffer facade. */
+/** @brief Reset the primary query, keeping extra constant filters unless requested. */
 void tuple_dispatch_buffer::clear_mmsearch_context(bool clear_extras) {
     mmsearch_state = mmsearch_context{};
     if (clear_extras) {
@@ -680,7 +685,7 @@ void tuple_dispatch_buffer::clear_mmsearch_context(bool clear_extras) {
     }
 }
 
-/** @brief Implements the add extra const query contract declared by the stable buffer facade. */
+/** @brief Take ownership of an extra constant query used to filter target rows. */
 void tuple_dispatch_buffer::add_extra_const_query(std::vector<char> query_varlena_bytes) {
     const bioseq::pg_types::seq* hdr =
         reinterpret_cast<const bioseq::pg_types::seq*>(query_varlena_bytes.data());
@@ -692,7 +697,7 @@ void tuple_dispatch_buffer::add_extra_const_query(std::vector<char> query_varlen
     extra_query_varlenas.push_back(std::move(query_varlena_bytes));
 }
 
-/** @brief Implements the extra query count contract declared by the stable buffer facade. */
+/** @return The number of constant filters in addition to the primary query. */
 [[nodiscard]] size_t tuple_dispatch_buffer::extra_query_count() const {
     return extra_query_varlenas.size();
 }
