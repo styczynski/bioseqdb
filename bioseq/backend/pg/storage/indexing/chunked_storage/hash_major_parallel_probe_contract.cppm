@@ -1,6 +1,6 @@
 /**
  * @file hash_major_parallel_probe_contract.cppm
- * @brief Defines lightweight hash-major audit and diagnostic probe receipts.
+ * @brief Results from checks of minimizer indexes grouped by hash.
  */
 module;
 
@@ -13,10 +13,7 @@ import bioseq.indexing.hash_major_minimizer_index;
 export namespace bioseq::storage::indexing {
 using bioseq::indexing::hash_major_minimizer_stream_kind;
 
-/// One hash-major read session owns the exact current-generation heap/primary-index
-/// descriptors and borrows one already-registered executor MVCC snapshot.
-/// Metadata discovery, source authorization, and every logical stream callback
-/// therefore observe one relation incarnation and one snapshot.
+/// Row count, byte count and checksum for one index stream read from the catalog.
 struct hash_major_minimizer_catalog_stream_receipt {
     hash_major_minimizer_stream_kind kind = hash_major_minimizer_stream_kind::directory;
     std::uint64_t exact_catalog_rows = 0;
@@ -24,8 +21,8 @@ struct hash_major_minimizer_catalog_stream_receipt {
     std::uint64_t exact_catalog_stream_crc64 = 0;
 };
 
-/// Test-only authorization returned by the hash-major parallel heap-scan experiment.
-/// The production reader does not consult this object or switch to this path.
+/// Row counts, checksums and timings for diagnostic scans.
+/// Query readers do not use these results.
 struct hash_major_minimizer_parallel_scan_stats {
     std::uint32_t requested_workers = 0;
     std::uint32_t launched_workers = 0;

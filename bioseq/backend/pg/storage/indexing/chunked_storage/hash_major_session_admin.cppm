@@ -1,6 +1,6 @@
 /**
  * @file hash_major_session_admin.cppm
- * @brief Defines hash-major session opening, inspection, probing, and generation cleanup.
+ * @brief Inspect stored hash-major indexes and run diagnostic scans.
  */
 module;
 #include <bioseq/pg_compat.h>
@@ -68,17 +68,17 @@ import bioseq.postgres.storage.manager; // seq_caches, sequence_locator, format 
 import bioseq.storage.layout;           // sequence_locator
 import bioseq.storage.size;             // sequence_size_t
 import bioseq.indexing.type; // sequence_index_layout, index_sub_key_t, k_max_index_chunk_size_bytes, sentinels
-import bioseq.indexing.storage;           // the concepts
-import bioseq.indexing.minimizer_hashmap; // encoded header/bucket validation
-import bioseq.indexing.minimizer_fragment_image; // explicit fixed-endian minimizer fragment image image ABI
+import bioseq.indexing.storage;           // Storage adapter requirements.
+import bioseq.indexing.minimizer_hashmap; // Minimizer index header and bucket format.
+import bioseq.indexing.minimizer_fragment_image; // Minimizer fragment format with a fixed byte order.
 import bioseq.indexing.compact_hash32_direct_index;
 import bioseq.indexing.minimizer_fragment_compact_hash32_adapter;
 import bioseq.postgres.table.io; // begin_column_read/read_next_column_row/end_column_read/column_read_state
-import bioseq.postgres.storage.scanner;        // PostgreSQL-backed lazy sequence access
+import bioseq.postgres.storage.scanner;        // Read sequence fragments through PostgreSQL.
 import bioseq.storage.lazy_sequence;           // lazy_sequence
 import bioseq.postgres.types.compact_sequence; // bioseq::pg_types::seq, dispatch_instance
 import bioseq.sequences;                       // compact_sequence_range
-import bioseq.sequences.simd;                  // canonical bounded base decoding
+import bioseq.sequences.simd;                  // Decode sequence bases with SIMD.
 import bioseq.parallelism.memory_admission;
 import bioseq.parallelism.mode;
 import bioseq.parallelism.concepts;
@@ -96,9 +96,9 @@ import bioseq.postgres.storage.indexing.chunked_storage;
 import bioseq.postgres.storage.indexing.hash_major_parallel_probe;
 export import bioseq.postgres.storage.indexing.hash_major_session_reader;
 export namespace bioseq::storage::indexing {
-/// Read-only restart/audit receipt for the complete fixed hash-major metadata
-/// surface. parallel_scan_stream descriptors carry the directory/control/posting counts,
-/// byte lengths and CRCs. The manifest carries the generation CRC.
+/// Metadata and stream checksums from a completed hash-major index audit.
+/// Keep both decoded values and their stored bytes, together with the source
+/// identity and the row counts, byte lengths and CRCs checked for each stream.
 struct ready_hash_major_minimizer_metadata_identity {
     hash_major_minimizer_head head{};
     hash_major_minimizer_manifest manifest{};
@@ -170,10 +170,9 @@ inspect_ready_hash_major_minimizer_metadata_pg(
         identity, query_key, registered_snapshot, std::move(authorization));
 }
 
-/// Test-only transport probe. It authenticates the same READY head, manifest
-/// and source binding as the production reader, then scans only the three
-/// current-generation hash-major stream subkeys through either one serial heap
-/// scan or one core ParallelContext/shared ParallelTableScanDesc.
+/// Measure a serial or parallel scan of the active hash-major index.
+/// Check its head, manifest and source first. The probe checks rows from the
+/// directory, control and position streams using the same snapshot.
 [[nodiscard]] inline hash_major_minimizer_parallel_scan_stats
 probe_ready_hash_major_minimizer_parallel_scan_pg(
     const minimizer_generation_administration_identity& identity,
@@ -234,9 +233,8 @@ inline void hash_major_minimizer_parallel_scan_probe_worker_main_pg(dsm_segment*
                  errmsg("bioseq hash-major parallel scan worker state is invalid")));
     }
 
-    // ParallelWorkerMain joined the leader's lock group before loading this
-    // symbol, so NoLock reuses the leader-held AccessShareLock and cannot
-    // release it independently.
+    // ParallelWorkerMain has joined the leader's lock group. Use NoLock
+    // here so opening and closing the table leaves the leader's lock in place.
     Relation relation = table_open(header->relation_oid, NoLock);
     parallel_scan_pg_leaf(relation, parallel_scan, header, seen_words);
     table_close(relation, NoLock);

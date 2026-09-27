@@ -1,6 +1,6 @@
 /**
  * @file hash_major_session.cppm
- * @brief Preserves the public hash-major read-session partition.
+ * @brief Export readers and administrative checks for minimizer indexes grouped by hash.
  */
 export module bioseq.postgres.storage.indexing.hash_major_session;
 
