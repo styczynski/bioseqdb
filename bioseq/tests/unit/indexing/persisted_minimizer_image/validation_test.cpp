@@ -1,6 +1,6 @@
 /**
  * @file validation_test.cpp
- * @brief Tests persisted minimizer image authentication and corruption rejection.
+ * @brief Checks stored index metadata and rejects damaged images.
  */
 
 #include <sys/mman.h>
@@ -61,7 +61,7 @@ TEST_CASE(
 
     fixture.image[static_cast<std::size_t>(fixture.header.payload.offset)]
         ^= std::byte{1};
-    // Normal open deliberately does not scan the payload aggregate.
+    // Opening with deferred checks skips the full payload checksum.
     REQUIRE(idx::validate_minimizer_fragment_image(
         fixture.image, normal_options));
     const auto scrubbed = idx::validate_minimizer_fragment_image(
@@ -120,10 +120,8 @@ TEST_CASE(
         REQUIRE(result.error()
             == idx::minimizer_fragment_image_error::nonzero_section_padding);
     }
-    // A valid grouped-SoA directory is a whole number of fixed 128-byte entries,
-    // so its end is necessarily 8-byte aligned. Consequently the
-    // directory-to-manifest gap is empty. The two reachable non-empty gaps
-    // are exercised above.
+    // Each directory entry is 128 bytes, so the directory ends on an
+    // eight-byte boundary. No padding is needed before the manifest.
     STATIC_REQUIRE(
         idx::grouped_soa_bucket_directory_entry::encoded_bytes
             % idx::k_minimizer_fragment_image_section_alignment
@@ -149,9 +147,8 @@ TEST_CASE(
                 idx::k_minimizer_fragment_image_header_bytes));
         REQUIRE(decoded);
         auto identity = expected_identity(fixture.header);
-        // Keep the outer receipt consistent so this section isolates the nested
-        // direct-header receipt pin from the outer fragment-image header CRC
-        // check.
+        // Update the expected outer checksum so validation reaches the changed
+        // nested-header checksum field.
         identity.header_crc64 = decoded->header_crc64;
         const idx::minimizer_fragment_image_validation_options options{
             .expected_identity = identity,
@@ -425,7 +422,7 @@ TEST_CASE(
             fixture.header.directory.offset);
         const std::size_t manifest_offset = static_cast<std::size_t>(
             fixture.header.manifest.offset);
-        // Partition id 1 is invalid for the first/only directory entry.
+        // The first directory entry must have partition ID zero.
         reference_store_le(
             std::span<std::byte>{fixture.image},
             directory_offset,
@@ -438,8 +435,8 @@ TEST_CASE(
             reference_crc64_ecma182(directory);
         reference_store_le(
             std::span<std::byte>{fixture.image}, 152u, directory_crc);
-        // Keep the manifest's duplicate directory receipt consistent so the
-        // structural directory decoder is the rejecting authority.
+        // Update both copies of the directory checksum so validation reaches
+        // the invalid partition ID.
         reference_store_le(
             std::span<std::byte>{fixture.image},
             manifest_offset + 80u,

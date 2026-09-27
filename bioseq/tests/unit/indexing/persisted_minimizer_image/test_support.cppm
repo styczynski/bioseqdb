@@ -1,6 +1,6 @@
 /**
  * @file test_support.cppm
- * @brief Provides byte-oracle and image fixtures for persisted minimizer tests.
+ * @brief Builds stored index fixtures and computes reference bytes and checksums.
  */
 module;
 
@@ -34,8 +34,7 @@ constexpr void reference_store_le(
     }
 }
 
-/// Independent bit-at-a-time CRC-64/ECMA-182 oracle. It deliberately does not
-/// call the production lookup-table implementation used by the codec.
+/// Compute CRC-64/ECMA-182 one bit at a time for comparison with the codec.
 [[nodiscard]] constexpr std::uint64_t reference_crc64_ecma182(
         std::span<const std::byte> bytes) noexcept {
     constexpr std::uint64_t polynomial = 0x42F0E1EBA9EA3693ULL;
@@ -65,7 +64,7 @@ constexpr void reference_store_le(
     return reference_crc64_ecma182(header);
 }
 
-/// Rewrite the checksum after mutating a header fixture.
+/// Update the header checksum after changing fixture bytes.
 void reference_reseal_header(std::span<std::byte> image) {
     auto header = idx::encoded_minimizer_fragment_image_header{};
     std::copy_n(image.begin(), header.size(), header.begin());
@@ -75,7 +74,7 @@ void reference_reseal_header(std::span<std::byte> image) {
         reference_header_crc(header));
 }
 
-/// Construct the byte-pinned minimizer-fragment header fixture.
+/// Build a header with fixed values for byte-layout tests.
 [[nodiscard]] idx::minimizer_fragment_image_header golden_header() {
     return idx::minimizer_fragment_image_header{
         .magic = idx::k_minimizer_fragment_image_magic,
@@ -114,13 +113,12 @@ void reference_reseal_header(std::span<std::byte> image) {
             .bytes = 7u,
             .crc64 = 0x9796959493929190ULL,
         },
-        // Deliberately nonzero: the encoder must ignore this convenience
-        // value and checksum the wire field as zero.
+        // The encoder must replace this value with a newly computed checksum.
         .header_crc64 = std::numeric_limits<std::uint64_t>::max(),
     };
 }
 
-/// Extend the header fixture with a compact-hash32 direct section.
+/// Add a compact hash index section to the fixed header fixture.
 [[nodiscard]] idx::minimizer_fragment_image_header direct_golden_header() {
     auto header = golden_header();
     const auto layout = idx::plan_minimizer_fragment_image_layout(
@@ -146,7 +144,7 @@ void reference_reseal_header(std::span<std::byte> image) {
     return header;
 }
 
-/// Encode the byte-pinned header through the independent reference writer.
+/// Write the expected header bytes with the reference encoder.
 [[nodiscard]] idx::encoded_minimizer_fragment_image_header golden_header_bytes() {
     const auto header = golden_header();
     idx::encoded_minimizer_fragment_image_header expected{};
@@ -187,7 +185,7 @@ void reference_reseal_header(std::span<std::byte> image) {
     return expected;
 }
 
-/// Derive the exact identity expected by the image validator.
+/// Copy the header fields that image validation must match.
 [[nodiscard]] idx::expected_minimizer_fragment_image_identity expected_identity(
         const idx::minimizer_fragment_image_header& header) noexcept {
     return idx::expected_minimizer_fragment_image_identity{
@@ -216,7 +214,7 @@ void reference_reseal_header(std::span<std::byte> image) {
     };
 }
 
-/// Own all sections and the assembled bytes of one image fixture.
+/// The section bytes and complete image used by a test.
 struct image_fixture {
     idx::minimizer_fragment_image_header header{};
     std::vector<std::byte> payload{};
@@ -226,7 +224,8 @@ struct image_fixture {
     std::vector<std::byte> image{};
 };
 
-/// Build a valid grouped-SoA image with an optional opaque direct section.
+/// Build an image for outer-format validation, optionally including
+/// placeholder bytes for a nested direct index.
 [[nodiscard]] image_fixture make_image_fixture(
         bool include_compact_hash32_direct = false) {
     constexpr std::uint64_t target_length = 100u;
@@ -330,8 +329,8 @@ struct image_fixture {
         .control_count = 1u,
         .position_count = 1u,
         .payload_bytes = fixture.payload.size(),
-        // The manifest authenticates the little-endian sequence of
-        // address-bound row CRCs, not the concatenated raw payload bytes.
+        // The manifest checksum describes row checksums. Give it a different
+        // value from the raw payload checksum used by the image header.
         .payload_checksum = raw_payload_crc ^ std::uint64_t{1u},
         .directory_bytes = fixture.directory.size(),
         .directory_checksum = idx::crc64_ecma182(fixture.directory),
@@ -373,10 +372,8 @@ struct image_fixture {
 
     std::optional<idx::minimizer_fragment_compact_hash32_section_spec> direct_spec;
     if (include_compact_hash32_direct) {
-        // The fragment-image codec treats this section as opaque. The first
-        // 256 bytes
-        // stand in for the nested direct header and the remainder for nested
-        // payload; only the direct codec interprets either one.
+        // Use placeholder bytes for a 256-byte direct index header and its
+        // payload. These tests check the outer image format.
         constexpr std::size_t opaque_direct_header_bytes = 256u;
         fixture.compact_hash32_direct.resize(
             opaque_direct_header_bytes + 37u, std::byte{0});
@@ -462,7 +459,7 @@ struct image_fixture {
     return fixture;
 }
 
-/// Construct validation options pinned to a fixture header.
+/// Match validation to the fixture header, with payload checks deferred by default.
 [[nodiscard]] idx::minimizer_fragment_image_validation_options validation_options(
         const image_fixture& fixture,
         idx::minimizer_fragment_payload_crc_policy payload_crc_policy =
@@ -473,7 +470,7 @@ struct image_fixture {
     };
 }
 
-/// Decode an invalid header and return its exact error.
+/// Return the header decoding error, terminating if decoding succeeds.
 [[nodiscard]] idx::minimizer_fragment_image_error decoded_error(
         std::span<const std::byte> encoded) {
     const auto result = idx::decode_minimizer_fragment_image_header(encoded);
@@ -483,7 +480,7 @@ struct image_fixture {
     return result.error();
 }
 
-/// Release one anonymous mapping at scope exit.
+/// Release an anonymous memory mapping when this object leaves scope.
 struct anonymous_mapping_guard {
     void* address = MAP_FAILED;
     std::size_t bytes = 0u;

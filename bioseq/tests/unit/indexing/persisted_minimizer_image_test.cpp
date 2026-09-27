@@ -1,6 +1,6 @@
 /**
  * @file persisted_minimizer_image_test.cpp
- * @brief Tests persisted minimizer image headers, extensions, and fixed codecs.
+ * @brief Checks stored index headers, optional sections, and encoded bytes.
  */
 
 #include <sys/mman.h>
@@ -32,8 +32,7 @@ TEST_CASE(
     const auto expected = golden_header_bytes();
     REQUIRE(*encoded == expected);
 
-    // Frozen magic bytes read as ASCII in file order, independent of the
-    // machine's native integer representation.
+    // The file must begin with these ASCII bytes on every machine.
     constexpr std::array<std::byte, 8> magic_bytes{
         static_cast<std::byte>('B'), static_cast<std::byte>('S'),
         static_cast<std::byte>('M'), static_cast<std::byte>('P'),
@@ -138,8 +137,8 @@ TEST_CASE(
         opaque_payload_mutation.header.compact_hash32_direct.offset + 256u;
     opaque_payload_mutation.image[
         static_cast<std::size_t>(nested_payload_offset)] ^= std::byte{1};
-    // The fragment image authenticates the nested-header receipt and extent, not the opaque
-    // direct payload.  Nested section CRCs remain the direct codec's job.
+    // The outer image compares the saved nested-header checksum and section bounds.
+    // The direct index reader checks the nested bytes.
     REQUIRE(idx::validate_minimizer_fragment_image(
         opaque_payload_mutation.image,
         validation_options(opaque_payload_mutation)));
