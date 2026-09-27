@@ -1,4 +1,7 @@
-/** @file Async mmsearch index-policy worker recovery scenarios. */
+/**
+ * @file mmsearch_async_index_policy_test.cpp
+ * @brief Tests recovery after errors while queuing and building async indexes.
+ */
 
 #include <cctype>
 #include <libpq-fe.h>
@@ -42,9 +45,8 @@ TEST_CASE(
     exec_sql(ctx, "SET bioseq.index.recompute_async_persistence.enabled = on;");
     exec_sql(ctx,
         "SET bioseq.aligner.minimizer.algorithm = 'two_stack_nthash';");
-    // The transient minimizer-sequence sketch backend is selected independently
-    // of the downstream chaining/base-alignment tuple. Keep that mixed tuple
-    // explicit: staging must reach the injected PostgreSQL leaf without aborting.
+    // Keep this combination of minimizer, chaining, and alignment settings
+    // explicit. It must reach the injected staging error.
     exec_sql(ctx,
         "SET bioseq.aligner.chaining.algorithm = 'scalar_minimap2';");
     exec_sql(ctx,
@@ -75,9 +77,8 @@ TEST_CASE(
         "SELECT pk FROM {} WHERE mmsearch(seq0, {}, "
         "aligner_options(index_read_requirement => 1));",
         k_async_minimizer_sequence_worker_leaves, hoe_probe_literal());
-    // Staging runs in this client backend. Each injected PG leaf must unwind
-    // the attached/pinned DSM state, abort only that statement, and leave the
-    // next fresh transaction able to stage the same identity again.
+    // Fail at each step of staging the job in the client backend. Cleanup
+    // must leave the connection usable so the next statement can try again.
     constexpr std::array<std::string_view, 4> stage_failure_points{
         "stage_register_xact_callback", "stage_dsm_create",
         "stage_dsm_pin", "stage_dsm_detach"};
@@ -164,13 +165,12 @@ TEST_CASE(
             REQUIRE(count_at(after, 8) == count_at(before, 8) + 1);
             REQUIRE(count_at(after, 9) == count_at(before, 9));
         }
-        // The client backend is unchanged, and the next iteration also checks
-        // worker-process recovery for another worker leaf.
+        // The client must remain usable after each worker failure.
         REQUIRE(query_scalar_int(ctx, "SELECT 1;") == 1);
     }
 
-    // Explicitly disarm, then require the same worker to accept and complete
-    // a clean minimizers_per_sequence build after ten failed jobs.
+    // Disable fault injection and require a successful index build after
+    // the ten failed jobs.
     exec_sql(ctx,
         "SELECT bioseq_internal.disarm_async_minimizer_sequence_worker_failure();");
     const long long generation_before = query_scalar_int(
