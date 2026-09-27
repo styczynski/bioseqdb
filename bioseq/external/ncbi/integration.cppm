@@ -1,6 +1,6 @@
 /**
  * @file external/ncbi/integration.cppm
- * @brief NCBI generated-client identity and integration fragments.
+ * @brief Client name and live request checks for generated NCBI code.
  */
 module;
 
@@ -10,7 +10,7 @@ export module bioseq.external.ncbi:integration;
 
 export namespace bioseq::external::ncbi::descriptor {
 
-/** @brief Generated-client name and integration request contracts. */
+/** @brief Names the client and defines version and accession-lookup checks. */
 inline constexpr std::string_view integration_contracts =
     R"bioseq_openapi(x-bioseq-client-name: NCBI
 x-bioseq-integration:

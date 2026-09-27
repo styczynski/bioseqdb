@@ -1,6 +1,6 @@
 /**
  * @file external/ncbi/genome_name_paths.cppm
- * @brief NCBI genome name catalog endpoint fragments.
+ * @brief NCBI genome reports by WGS accession or assembly name.
  */
 module;
 

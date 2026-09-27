@@ -1,6 +1,6 @@
 /**
  * @file external/ncbi/genome_sequence_paths.cppm
- * @brief NCBI genome sequence and link catalog endpoint fragments.
+ * @brief NCBI assembly lookup and sequence-report requests.
  */
 module;
 
@@ -10,7 +10,7 @@ export module bioseq.external.ncbi:genome_sequence_paths;
 
 export namespace bioseq::external::ncbi::descriptor {
 
-/** @brief Assembly, sequence, link, and CheckM catalog paths. */
+/** @brief Assembly and sequence reports, external links, and CheckM histograms. */
 inline constexpr std::string_view genome_sequence_catalog_paths =
     R"bioseq_openapi(  /genome/dataset_report:
     post:

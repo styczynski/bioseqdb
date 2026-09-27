@@ -1,6 +1,6 @@
 /**
  * @file external/ncbi/genome_paths.cppm
- * @brief NCBI genome download, check, annotation, and revision endpoint fragments.
+ * @brief NCBI genome downloads, annotation reports, and assembly checks.
  */
 module;
 
@@ -10,7 +10,7 @@ export module bioseq.external.ncbi:genome_paths;
 
 export namespace bioseq::external::ncbi::descriptor {
 
-/** @brief Genome package download path entries. */
+/** @brief Requests for genome data packages as ZIP downloads. */
 inline constexpr std::string_view genome_download_paths =
     R"bioseq_openapi(  /genome/accession/{accessions}/download:
     get:
@@ -155,7 +155,7 @@ inline constexpr std::string_view genome_download_paths =
           default: ncbi_dataset.zip
 )bioseq_openapi";
 
-/** @brief Genome annotation download path entries. */
+/** @brief Requests for genome annotation data packages. */
 inline constexpr std::string_view genome_annotation_download_path =
     R"bioseq_openapi(  /genome/accession/{accession}/annotation_report/download:
     get:
@@ -321,7 +321,7 @@ inline constexpr std::string_view genome_annotation_download_path =
           default: ncbi_dataset.zip
 )bioseq_openapi";
 
-/** @brief Genome package availability check path entries. */
+/** @brief Requests that check whether assembly accessions are valid. */
 inline constexpr std::string_view genome_check_paths =
     R"bioseq_openapi(  /genome/accession/{accessions}/check:
     get:
@@ -399,7 +399,7 @@ inline constexpr std::string_view genome_check_paths =
                   - SEQUENCE_REPORT
 )bioseq_openapi";
 
-/** @brief Genome annotation report path entries. */
+/** @brief Annotation reports, report summaries, and package previews. */
 inline constexpr std::string_view genome_annotation_paths =
     R"bioseq_openapi(  /genome/accession/{accession}/annotation_report:
     get:
@@ -790,7 +790,7 @@ inline constexpr std::string_view genome_annotation_paths =
                   accession: "GCF_000001635.27"
 )bioseq_openapi";
 
-/** @brief Genome revision-history path entries. */
+/** @brief Requests for the revision history of an assembly. */
 inline constexpr std::string_view genome_revision_path =
     R"bioseq_openapi(  /genome/accession/{accession}/revision_history:
     get:
