@@ -279,6 +279,7 @@ In BioseqDB there are two types of filter conditions:
   \texttt{bioseq.edit(t.seq) < 10} I run pipeline with prefilter enabled. This is different to the case above, because it still requires batching tuples and running pipeline, but it allows for faster termination.
   If the distance estimation yields false, then the rest of stages are skipped (there's no seeding, chaining, backtracking etc.) so we avoid even the cost of fetching the minimizers from the saved index.
   This results in great speedups, but at this time is yet an experimental feature using code from libraries that weren't developed by me.
+\label{lst:prefilter-condition}
 \end{itemize}
 
 \noindent\begin{minipage}{\linewidth}

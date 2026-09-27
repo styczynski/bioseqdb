@@ -57,15 +57,8 @@ that effectively we just stop earlier if the distance from the diagonal gets to 
 \label{sec:final-alignment-block}
 
 Block Aligner moves a \(B\times B\) square through the scoring matrix,
-and internally compute strips of width \(s=8\) visible on the figure~\ref{fig:block-adaptive-reconstruction} below. 
-
-
-Border scores guide its direction;
-stalled progress triggers a return to a checkpoint and a larger block
-(Figure~\ref{fig:block-adaptive-reconstruction}). The following formulation
-adapts the paper's Algorithm~1 to BioseqDB's sequence-to-sequence port;
-the upstream README also describes these heuristics~\cite{block_aligner_paper,block_aligner_readme}.
-A finite block limit can exclude a better path outside the computed cells.
+and internally compute strips of width \(S=8\) visible on the figure~\ref{fig:block-adaptive-reconstruction} below.
+When the algorithm fails to improve best score for number of steps, then it decides to grow the block as seen on image below~\ref{fig:block-adaptive-reconstruction}
 
 \begin{figure}[H]
 \centering
@@ -78,11 +71,11 @@ A finite block limit can exclude a better path outside the computed cells.
     \fill[blue!15] (4,0) rectangle (5,4);
     \draw[gray!70,dashed,thick] (0,0) rectangle (4,4);
     \draw[blue!70!black,very thick] (1,0) rectangle (5,4);
-    \draw[->,thick] (1,4.8) -- (2,4.8) node[midway,below] {$s$};
-    \node at (3,7) {$(i,j)\mapsto(i,j+s)$};
+    \draw[->,thick] (1,4.8) -- (2,4.8) node[midway,below] {$S$};
+    \node at (3,7) {$(i,j)\mapsto(i,j+S)$};
   \end{scope}
   \begin{scope}[xshift=5cm]
-    \node at (3,-1) {(b) grow at checkpoint};
+    \node at (3,-1) {(b) grow when best score doesn't improve};
     \foreach \k in {0,...,6} {
       \draw[gray!25,very thin] (0,\k) -- (6,\k) (\k,0) -- (\k,6);
     }
@@ -95,7 +88,7 @@ A finite block limit can exclude a better path outside the computed cells.
     \node at (3,7) {$B_0\mapsto 2B_0$};
   \end{scope}
   \begin{scope}[xshift=10cm]
-    \node at (3,-1) {(c) keep bottom-right quarter};
+    \node at (3,-1) {(c) then shrink to keep bottom-right quarter};
     \foreach \k in {0,...,6} {
       \draw[gray!25,very thin] (0,\k) -- (6,\k) (\k,0) -- (\k,6);
     }
@@ -106,114 +99,83 @@ A finite block limit can exclude a better path outside the computed cells.
     \node at (3,7) {$B\mapsto B/2$};
   \end{scope}
 \end{tikzpicture}
-\caption{Block updates in DP coordinates (rows increase downwards).
-Dashed outlines precede the update; blue outlines follow it. Shading marks
-new cells in (a,b) and retained cells in (c). Growth computes the lower
+\caption{Illustration of 3 steps that Block Aligner repeatedly performs. Growth computes the lower
 rectangle \(\Omega_1\) before the right rectangle \(\Omega_2\).}
 \label{fig:block-adaptive-reconstruction}
 \end{figure}
 
-Let \(m=|Q|\), \(n=|T|\), with DP coordinates starting at \((0,0)\).
-For substitution scores \(\sigma\) and gap cost \(q+e\ell\), \(D,C,R\)
-denote the score and horizontal/vertical gap tables. Their boundary values are
-\[
- D_{0,0}=0,\qquad D_{i,0}=R_{i,0}=-q-ei,\qquad
- D_{0,j}=C_{0,j}=-q-ej\quad(i,j>0).
-\]
-All other unavailable scores, including cells outside
-\([0,m]\times[0,n]\), are \(-\infty\).
-\(\Call{Rect}{r,c,h,w}\) evaluates the affine recurrence on
-\([r,r+h)\times[c,c+w)\), updates the borders and trace \(\tau\), and
-returns the maximum score and its coordinates; an empty rectangle returns
-\((-\infty,\bot)\). The shared state \(\mathcal S=(\mathcal F,\tau)\)
-contains the four border vectors
-\(\mathcal F=(D_{\rm right},C_{\rm right},D_{\rm bottom},R_{\rm bottom})\).
-Checkpoint assignment copies these vectors and saves the trace-stack position;
-restoration discards the later trace. Scores below are absolute, omitting
-SIMD score offsets.
+The pseudocode below is directly taken from Block Aligner paper~\cite{block_aligner_paper}. For more details please consult the projects README~\cite{block_aligner_readme}.
+I use here original paper notation, where \(q\) is the query and \(p\) the
+target sequence aligner to.
+\(G^c_{open},G^c_{close},G^r_{open},G_{ext}\) are the gap penalties.
+Function \(\mathrm{COMPUTE\_RECT}((r,c),(w,h))\) is used to compute all the scores in the given rectangle given as parameters, using SIMD version of regular DP scoring formulation.
 
-For the current block \([i,i+B)\times[j,j+B)\), define
-\begin{equation}
-\begin{aligned}
- r_s&=\max_{0\leq k<s}D_{i+k,j+B-1},&
- b_s&=\max_{0\leq k<s}D_{i+B-1,j+k},\\
- h_s&=\max_{B-s/4\leq k<B}
-       \{D_{i+k,j+B-1},D_{i+B-1,j+k}\}.&&
-\end{aligned}
-\label{eq:block-border-decisions}
-\end{equation}
-Thus direction uses border prefixes of length \(s\), while shrinking tests
-suffixes of length \(s/4=2\). Brackets \([P]\) denote the indicator of \(P\).
+The important thing in the paper is: \([r,r+h)\times[c,c+w)\); \(Y=\lfloor B/S\rfloor-1\) which defines threshold, when block assumes the score cannot improve and decides to grow.
+Note that here $S$ was used by paper's authors as the width of the strip, not the actual score computed. 
 
+% Keep the introduction compact before the full-page reproduction.
+\vfill\clearpage
 \begin{algorithm}[H]
-\caption{Adaptive Block Aligner: explicit block and boundary updates}
+\caption{Pseudocode for the Block Aligner algorithm.}
 \label{alg:adaptive-block-alignment}
 \footnotesize
+% Restore the published end statements locally; other thesis listings use noend.
+\algrenewtext{EndIf}{\algorithmicend\ \algorithmicif}
+\algrenewtext{EndWhile}{\algorithmicend\ \algorithmicwhile}
+\algrenewtext{EndProcedure}{\algorithmicend\ \algorithmicprocedure}
+% Wording (including the paper's typos) and numbered blank lines are intentional.
 \begin{algorithmic}[1]
-  \Require $Q,T,\sigma,q,e,B_{\min},B_{\max},X$; $\chi\in\{0,1\}$
-    \Comment{$\chi=1$: X-drop; $\chi=0$: global}
-  \Require $B_{\min},B_{\max}\in\{2^k:k\geq3\}$, $B_{\min}\leq B_{\max}$
-    \Comment{bounds adjusted to the SIMD lane count}
-  \Statex \textbf{Constants:} $(m,n,s)=(|Q|,|T|,8)$
-  \Statex \textbf{Global:} $\mathcal S=(\mathcal F,\tau)$
-    \Comment{per-call state shared with \(\mathrm{Rect}\)}
-  \Statex \textbf{Local:} $i,j,B,B_0,u,z\in\mathbb N_0$;
-    $d\in\{\mathsf R,\mathsf D,\mathsf G\}$; checkpoint $\mathcal K$
-  \Statex \textbf{Local:} $M,M_1,M_2,S^\star\in\mathbb Z\cup\{-\infty\}$;
-    $p,p_1,p_2,p^\star\in\mathbb N_0^2\cup\{\bot\}$; $v\in\{0,1\}$
-  \State $(i,j,B,B_0,u,z)\gets(0,0,B_{\min},0,0,0)$
-    \Comment{$u$: stalled steps; $z$: X-drop steps}
-  \State $(S^\star,p^\star,d)\gets(0,(0,0),\mathsf G)$; $\tau\gets\varnothing$
-  \State $\mathcal F\gets\Call{InitBorders}{\sigma,q,e}$; $\mathcal K\gets(i,j,\mathcal S)$
-    \Comment{boundary values above}
-  \While{true}
-    \If{$d=\mathsf R$}
-      \State $(M,p)\gets\Call{Rect}{i,j+B-s,B,s}$ \Comment{new right strip}
-    \ElsIf{$d=\mathsf D$}
-      \State $(M,p)\gets\Call{Rect}{i+B-s,j,s,B}$ \Comment{new bottom strip}
-    \Else
-      \State $(M_1,p_1)\gets\Call{Rect}{i+B_0,j,B-B_0,B_0}$ \Comment{$\Omega_1$: grow down}
-      \State $(M_2,p_2)\gets\Call{Rect}{i,j+B_0,B,B-B_0}$ \Comment{$\Omega_2$: grow right}
-      \State $(M,p)\gets (M_1>M_2)\ ?\ (M_1,p_1):(M_2,p_2)$
-      \State $\mathcal K\gets(i,j,\mathcal S)$ \Comment{checkpoint at the enlarged size}
-    \EndIf
-    \State $u\gets u+1$; $v\gets[M>S^\star]$
-    \If{$v=1$}
-      \State $(S^\star,p^\star,u)\gets(M,p,0)$; $\mathcal K\gets(i,j,\mathcal S)$
-    \EndIf
-    \State $z\gets(z+1)[M<S^\star-X]$
-    \If{$(\chi=1\land z=2)\lor(i+B>m\land j+B>n)$}
-      \State \textbf{break} \Comment{X-drop or both sequence ends}
-    \EndIf
-    \If{$j+B>n$}
-      \State $(i,d)\gets(i+s,\mathsf D)$; \textbf{continue} \Comment{right edge reached}
-    \EndIf
-    \If{$i+B>m$}
-      \State $(j,d)\gets(j+s,\mathsf R)$; \textbf{continue} \Comment{bottom edge reached}
-    \EndIf
-    \If{$2B\leq B_{\max}\land\bigl(u\geq B/s\lor(d=\mathsf G\land v=0)\bigr)$}
-      \State $(B_0,B,d,u)\gets(B,2B,\mathsf G,0)$
-      \State $(i,j,\mathcal S)\gets\mathcal K$; \textbf{continue} \Comment{restore before growing}
-    \EndIf
-    \If{$B>B_{\min}\land v=1\land h_s\geq M$}
-      \State $B\gets B/2$; $(i,j)\gets(i+B,j+B)$
-      \State $\mathcal F\gets\mathcal F[B:2B)$; $\mathcal K\gets(i,j,\mathcal S)$
-        \Comment{suffix of each border vector}
-    \EndIf
-    \State $d\gets(r_s\geq b_s)\ ?\ \mathsf R:\mathsf D$
-      \Comment{evaluate on the current borders}
-    \State $(i,j)\gets(i+s[d=\mathsf D],j+s[d=\mathsf R])$
-  \EndWhile
-  \State \Return $(\chi=1)\ ?\ (S^\star,p^\star,\tau):(D_{m,n},(m,n),\tau)$
+  \Procedure{ALIGN}{$q,p,X,B_{min},B_{max},G^c_{open},G^c_{close},G^r_{open},G_{ext}$}
+    \State $S\gets8$, $\mathit{max\_score}\gets0$, $\mathit{dir}\gets\textsc{GROW}$,
+      $B\gets B_{min}$, $B_{prev}\gets0$, $i\gets0$, $j\gets0$
+    \State Initialize $D$, $D'$, $C$, $R$, and the trace array
+    \While{true}
+      \Comment{\parbox[t]{.69\linewidth}{\raggedright One step of ligner. Note that $i$, $j$, $B$, and $\mathit{dir}$ have already been updated.}}
+      \If{$\mathit{dir}=\textsc{RIGHT}$}
+        \Comment{Block position $(i,j-S)\mapsto(i,j)$}
+        \State $\mathit{curr\_score}\gets\Call{COMPUTE\_RECT}{(i,j+B-S),(S,B)}$
+      \ElsIf{$\mathit{dir}=\textsc{DOWN}$}
+        \Comment{Block position $(i-S,j)\mapsto(i,j)$}
+        \State $\mathit{curr\_score}\gets\Call{COMPUTE\_RECT}{(i+B-S,j),(B,S)}$
+      \ElsIf{$\mathit{dir}=\textsc{GROW}$}
+        \State $\mathit{curr\_score}\gets\Call{COMPUTE\_RECT}{(i+B_{prev},j),(B_{prev},B-B_{prev})}$
+          \Comment{Grow down}
+        \State $\mathit{curr\_score}\gets\Call{COMPUTE\_RECT}{(i,j+B_{prev}),(B-B_{prev},B)}$
+          \Comment{Grow right}
+      \EndIf
+      \State \strut
+      \If{$\mathit{curr\_score}>\mathit{max\_score}$}
+        \State Update $\mathit{max\_score}$ with $\mathit{curr\_score}$ and its store its position
+        \State Save $i$, $j$, and the block right and bottom border scores as checkpoint
+      \EndIf
+      \State \strut
+      \State \textbf{if} $\mathit{curr\_score}<\mathit{max\_score}-X$ for 2 consecutive steps, \textbf{then break}
+        \Comment{X-drop}
+      \State \textbf{if} $i+B>|q|$ \textbf{and} $j+B>|p|$, \textbf{then break}
+        \Comment{Reached end of DP matrix}
+      \State \textbf{if} $i+B>|q|$ \textbf{or} $j+B>|p|$, \textbf{then} shift $i$, $j$ by $S$ to avoid out of bounds \textbf{and continue}
+      \State \strut
+      \If{$B<B_{max}$ and $Y$ steps pass without improving $\mathit{max\_score}$}
+        \Comment{Block grow criteria}
+        \State $B_{prev}=B$, $B\gets2B$, $\mathit{dir}\gets\textsc{GROW}$
+        \State Restore $i$, $j$, and block border scores from previous checkpoint
+        \State \textbf{continue}
+      \EndIf
+      \State \strut
+      \If{$B>B_{min}$ and $\mathit{max\_score}$ is in the bottom-right corner region of block}
+        \Comment{Block shrink criteria}
+        \State $B\gets B/2$, $i\gets i+B$, $j\gets j+B$
+        \State Save $i$, $j$, and the block right and bottom border scores as checkpoint
+      \EndIf
+      \State \strut
+      \State $\mathit{dir}\gets\textsc{RIGHT}$ or \textsc{DOWN} based on comparing right and bottom border cells
+      \State Increment $i$, $j$ by $S$ based on $\mathit{dir}$
+    \EndWhile
+    \State \Return the trace array, and \textbf{if} X-drop, \textbf{then} $\mathit{max\_score}$, \textbf{else} $D[|q|][|p|]$
+  \EndProcedure
 \end{algorithmic}
 \end{algorithm}
 
-\noindent\label{sec:final-alignment-fused-work}
-Traceback from the returned endpoint produces the CIGAR when requested.
-One alignment call includes scoring, trace storage, traceback and CIGAR
-construction. BioseqDB can skip Block DP when a score bound proves that an
-equal-length fill's straight diagonal is uniquely optimal. The timer in
-Section~\ref{sec:bench-a-b} includes this shortcut too.
 
 % Other existing illustrations retained as source material.
 % \begin{figure}[htbp]

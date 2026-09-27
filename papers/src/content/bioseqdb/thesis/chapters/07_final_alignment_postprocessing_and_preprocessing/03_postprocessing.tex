@@ -1,28 +1,73 @@
-\section{What is returned after alignment?}
+\section{Postprocessing}
 \label{sec:alignment-postprocessing}
 
-BioseqDB assembles the alignment coordinates, strand, score and CIGAR, then
-repeats primary and secondary selection
-(Section~\ref{sec:chaining-primary-secondary}). The following quantities
-answer different questions:
+After the alignment is done, BioseqDB computes CIGAR string, extracts all values returned by the final aligner (like exact coordinates, score etc.), and also calculates
+some additional values (if they are requested by the user in query):
 \begin{itemize}
-  \item \textbf{Score and edit count.} The score uses the selected aligner's
-    match and gap penalties. The edit count is the number of substitutions,
-    inserted symbols and deleted symbols on its chosen path. A generic
-    CIGAR \texttt{M} operation can include both matches and mismatches, so
-    counting edits also requires comparing the corresponding symbols.
-  \item \textbf{Divergence.} Matching minimizers give an estimate of the
-    fraction of differing bases. This estimate is available before final
-    alignment and does not replace the edit count from the CIGAR.
-  \item \textbf{Mapping quality (MAPQ).} This estimates confidence in the
-    mapping location. Competing chains and repetitive seeds reduce it.
-    BioseqDB follows minimap2's estimate and bounds it to 0--60.
-    Secondary mappings receive zero. A high alignment score alone does not
-    imply high MAPQ when several locations match equally well.
+  \item \textbf{Divergence} Matching minimizers give an estimate of the fraction of differing bases
+  \item \textbf{Mapping quality (MAPQ)} This estimates confidence in the
+    mapping locations
 \end{itemize}
 
-\noindent\label{sec:divergence-prefix-counts}
-To estimate divergence, BioseqDB forms cumulative counts of query minimizers
-by position. Subtracting two counts gives the number in an interval without
-sorting the emitted minimizers. This avoids the extra sorting discussed in
-Section~\ref{sec:minimizer-divergence-history}.
+Minimap defines diverges exactly as mentioned before in Section~\ref{sec:minimizer-divergence-history}:
+\begin{equation}
+  \widehat{\epsilon}=\frac{1}{k}\ln\frac{n}{m},
+  \qquad
+  \widehat{d}=1-\exp(-\widehat{\epsilon})
+            =1-\left(\frac{m}{n}\right)^{1/k}.
+  \label{eq:postprocessing-divergence}
+\end{equation}
+where $n$ is the number of minimizers that are part of chains and $m$ is the number of all query minimizers between first match and last match
+BioseqDB similarily to what minimap2 does, returns
+\(\widehat{d}\), which is approximation of \(\widehat{\epsilon}\) assuming low sequence divergence.
+To obtain \(n\) in BioseqDB I uise cumulative counts of minimizers by position, so subtracting two counts gives the number in an interval without
+sorting the emitted minimizers (this avoids cirtical problem I found earlier, which made this step thousands of time slower - Section~\ref{sec:minimizer-divergence-history}).
+
+
+BioseqDB computes MAPQ with the following heuristic, which again, is the same as used in minimap2~\autocite{minimap2_mapq_implementation}.
+For a primary region, let \(s,s_0\) be its current and original chaining
+scores, \(s_2\) the strongest secondary chaining score, \(c\) its seed count,
+and \(a\) the match reward. Let \(d_1,d_2\) be the region's and its strongest
+alternative's maximum DP scores (\(d_2=0\) if unavailable), and
+\(I=L_{\mathrm{match}}/L_{\mathrm{block}}\) its alignment identity
+(zero when \(L_{\mathrm{block}}=0\)). With primary regions \(\mathcal P\),
+repetitive query span \(R\), and minimum chaining score \(s_{\min}\), define
+\begin{equation}
+  \begin{aligned}
+    u&=\frac{\sum_{r\in\mathcal P}s_r}
+             {\sum_{r\in\mathcal P}s_r+R},
+    &x&=\frac{\max(s_2,s_{\min})}{s_0},\\
+    p&=\min\!\left\{u\min\!\left(1,\frac{s}{100}\right),
+                       \min\!\left(1,\frac{c}{10}\right)\right\}.
+  \end{aligned}
+  \label{eq:mapq-penalties}
+\end{equation}
+When both DP scores are positive, the score is capped by a second heuristic:
+\begin{equation}
+  q_{\mathrm{DP}}=\min\!\left\{
+    40Ip\left[1-\left(\frac{d_2x}{d_1}\right)^2\right]
+      \ln\frac{d_1}{a},\;
+    6.02I^2\frac{d_1-d_2}{a}+0.499
+  \right\}.
+  \label{eq:mapq-dp}
+\end{equation}
+The available alignment information selects the branch:
+\begin{equation}
+  q=\begin{cases}
+    q_{\mathrm{DP}}, &\text{alignment available and }d_1,d_2>0,\\
+    40Ip(1-x)\ln(d_1/a), &\text{alignment available, otherwise},\\
+    40p(1-x)\ln s, &\text{no base-level alignment}.
+  \end{cases}
+  \label{eq:mapq-branches}
+\end{equation}
+Let \(n_{\mathrm{sub}}\) be the implementation's count of competitive
+secondary mappings and \(T(z)\) truncate towards zero. The reported integer is
+\begin{equation}
+  \mathrm{MAPQ}_0=\min\!\left\{60,\max\!\left\{0,
+    T(q)-T\!\left(4.343\ln(n_{\mathrm{sub}}+1)+0.499\right)
+  \right\}\right\}.
+  \label{eq:mapq-final}
+\end{equation}
+A primary region with a base-level alignment and \(d_1>d_2\) receives
+\(\max(1,\mathrm{MAPQ}_0)\); other primary regions receive
+\(\mathrm{MAPQ}_0\), and secondary regions receive zero.

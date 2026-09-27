@@ -3,13 +3,43 @@
 \label{sec:prefilter-role}
 \label{sec:prefilter-sneakysnake}
 
-A prefilter rejects candidates with too many edits before base-level alignment.
-BioseqDB uses SneakySnake~\cite{sneakysnake_paper,sneakysnake_readme}, which
-models pairwise character comparisons as a \emph{chip maze} and searches
-for a signal net through it.
+We discussed the postprocessing step, but there's also corresponding preprocessing step in the pipeline. I didn't separate it into its own chapter, because
+the feature is exerimental and uses external dependency.
 
-For equal-length sequences \(Q,R\in\Sigma^m\) and edit limit \(E\), use the
-paper's row order and columns \(1\leq j\leq m\):
+A prefilter is specialized algorithm to reject sequence quickly before doing any alignment work.
+In BioseqDB I decided to use SneakySnake algorithm directly. Good prefilter should offer the following properties:
+\begin{itemize}
+  \item It should quickly evaluate query and sequence parts and compute estimate of edit distance.
+  \item The estimated edit distance should be lower than actual edit distance to prevent situation in which prefilter rejects valid candidates.
+\end{itemize}
+
+In BioseqDB I used SneakySnake~\cite{sneakysnake_paper,sneakysnake_readme}, where the core idea is to translate approximate string matching problem into a chip maze problem
+(formally SNR - Single Net Routing). I won't describe the algorithm in detail here, as I only use SneakySnake as a dependency and it wasn't evalauted in the final benchmarks.
+
+The prefilter can be evaluated if users provides special predicate~\ref{lst:prefilter-condition}. In that case BioseqDB for case where the sequence is filtered-out
+won't fetch the minimizers or recompute them meaning the rest of the pipeline will be entirely skipped (to be precise the order of the filter evaluation is as follows:
+non-sequence user filters, then prefilter):
+\begin{minipage}{\linewidth}
+\begin{lstlisting}[style=bioseq-walk-sql]
+SELECT pk, bioseq.edit(seq0) AS edits
+FROM tutorial_mmsearch
+WHERE public.mmsearch(seq0, $1::bioseq.seq('dna4', 64))
+  AND bioseq.edit(seq0) < 5
+ORDER BY pk;
+\end{lstlisting}
+\end{minipage}
+
+The SNR problem is constructed as follows: For input query/target \(Q,R\in\Sigma^m\) and given maximum edit distance $E$, SneakySnake constructs a
+ matrix $Z \in \{0,1\}^{(2E+1)\times m}$
+The idea is that the matrix covers one sequence (columns), while the rows cover only $2E+1$ relative positions in the second sequence.
+We then compare each position in the query and in target and if they match we put 0, otherwise we put 1 in the $Z$ matrix.
+Now $Z$ matrix represents "obstacles" for 1s and empty spaces for 0s. The SNR problem needs to find a path from left to right (possibly going up and down and to the left, but never to the right),
+where path is better if it contains less obstacles.
+
+The benefit here is that traverse of the matrix is $O((2E+1)*m)$, which for low $E$ can be very fast. You must note however that I directly plugged SneakySnake into 
+BioseqDB lazy-sequence adapters without proper benchmarking, which means that I don't know how matching quality/performance is affected by calling this prefilter.
+
+Let's define $Z$ matrix formally. First index $i$ is up to $2E+1$ and second index $j$ is position in $R$: \(1\leq j\leq m\):
 \[
  \delta_i=\begin{cases}
   -i,&1\leq i\leq E,\\
@@ -22,11 +52,8 @@ paper's row order and columns \(1\leq j\leq m\):
   1,&\text{otherwise}.
  \end{cases}
 \]
-Each row is a horizontal track with zeros for matches and obstacles for
-mismatches or out-of-range comparisons. From each checkpoint the net follows
-the longest zero run across all rows, crosses the next obstacle if present,
-and repeats. Row changes are free, so the obstacle count is a lower bound
-on edit distance. Reject only if it exceeds \(E\).
+Here, $\delta_i$ just formally defines relative lookups i.e if we look to the left of position in $R$ up to $E$ positions or to the right up to $E$ positions.
+In paper authors want to look at the left side first, for example $(-1, -2, -3, 0, +1, +2, +3)$, so $\delta_i$ looks more complicated than just $i-E$.
 
 \begin{figure}[H]
 \centering
@@ -120,21 +147,16 @@ on edit distance. Reject only if it exceeds \(E\).
   \draw[teal!65!black,densely dashed] (11.55,5.88) -- (11.55,6.18);
   \node[anchor=west,font=\scriptsize] at (11.7,6.03) {checkpoint};
 \end{tikzpicture}
-\caption{Reconstruction of Fig.~2(a,b) in
+\caption{Example similar to original figure from paper: Fig.~2(a,b) in
 \citeauthor{sneakysnake_paper} (\citeyear{sneakysnake_paper}) for
 \(R=\mathtt{GGTGCAGAGCTC}\), \(Q=\mathtt{GGTGAGAGTTGT}\), and \(E=3\).
 (a) Comparing \(R_6\) with \(Q_3,\ldots,Q_9\) constructs column~6
-(blue in (b)); the first three results follow the paper's reversed order.
-(b) The net crosses three circled obstacles, so the pair passes the filter.
-Only runs up to the first obstacle after each checkpoint need evaluation.}
+(blue in (b)). The first three results follow this $\delta_i$ reversed order..
+(b) The net (best path) crosses three circled obstacles, so the pair passes the filter.
+The SneakySnake algorithm uses special notion of "checkpoints" so we don't perform path updates until obstacle is met after last checkpoint.}
 \label{fig:prefilter-chip-maze}
 \end{figure}
 
-BioseqDB applies this test to mandatory intervals between anchors;
-optional outer extensions are left to the aligner. For unequal lengths,
-the implementation uses only \(\bigl||Q|-|T|\bigr|\).
-Survivors are aligned and checked against the original edit predicate:
-passing the filter alone does not establish that it holds.
 
 % Existing filter illustrations retained as source material.
 % \begin{figure}[H]

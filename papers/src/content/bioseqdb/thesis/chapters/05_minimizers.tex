@@ -1421,9 +1421,7 @@ intersection~\cite{minimap2_paper}:
 \[
 \hat{\epsilon} = \frac{1}{k} \log \frac{n}{m}
 \]
-where $n$ is the number of query minimizers in the chain's reference
-span and $m$ is the number of those that are actually seeded
-(i.e.\ that appear as anchors in the chain).  Computing $n$ requires
+where $n$ is the number of minimizers that are part of chains and $m$ is the number of all query minimizers between first match and last match.  Computing $n$ requires
 \emph{knowing which positions are query minimizers}, which is a set
 membership test against the query's minimizer-position set.
 
