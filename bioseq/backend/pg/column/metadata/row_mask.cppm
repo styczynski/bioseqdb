@@ -1,6 +1,6 @@
 /**
  * @file row_mask.cppm
- * @brief Row-mask catalog operations exposed by the metadata module.
+ * @brief Store row-deletion masks and read chunk metadata for columnar scans.
  */
 module;
 #include <algorithm>
@@ -33,12 +33,12 @@ import :tuple_ops;
 import :core;
 
 /**
- * @brief Creates zeroed row-mask catalog ranges for a newly written stripe.
- * @param[in] storage_id Stable storage identifier.
- * @param[in] stripe_id Stripe identifier within the storage object.
+ * @brief Create empty deletion masks for a newly written stripe.
+ * @param[in] storage_id Persistent storage identifier.
+ * @param[in] stripe_id Stripe identifier within this storage.
  * @param[in] stripe_start_row_number First logical row number in the stripe.
- * @param[in] chunk_group_row_counts Borrowed PostgreSQL integer list of group sizes.
- * @return `true` when every range was inserted, or `false` after an insertion error.
+ * @param[in] chunk_group_row_counts PostgreSQL integer list of chunk-group sizes.
+ * @return true if every mask was inserted, or false after an insertion error.
  */
 export bool save_empty_row_mask(uint64_t storage_id,
                                 uint64_t stripe_id,
@@ -68,7 +68,7 @@ export bool save_empty_row_mask(uint64_t storage_id,
         for (uint16_t n = 0; n < row_mask_iterations; n++) {
             uint16_t mask_size;
 
-            /* Last iteration */
+            /* The final mask may cover fewer rows. */
             if (n == (row_mask_iterations - 1)) {
                 uint16_t last_iteration_row_size = row_count % row_mask_chunk_row_capacity
                                                        ? row_count % row_mask_chunk_row_capacity
@@ -102,7 +102,7 @@ export bool save_empty_row_mask(uint64_t storage_id,
             const row_mask_codec::encoded_tuple_data tuple_data =
                 encoded.tuple_data(RelationGetDescr(row_mask_relation));
 
-            /* A conflicting UNIQUE row means another writer owns this range. */
+            /* Stop creating masks if an insert fails, including a duplicate range. */
             PG_TRY();
             {
                 bioseq::storage::metadata::tuple_ops::insert_catalog_tuple(
@@ -132,14 +132,14 @@ export bool save_empty_row_mask(uint64_t storage_id,
 }
 
 /**
- * @brief Loads chunk offsets, statistics, and row counts used to skip stripe data.
+ * @brief Read chunk locations and statistics used to skip unneeded stripe data.
  * @param[in] relfilelocator Physical relation locator.
- * @param[in] stripe Stripe identifier within the relation storage.
- * @param[in] tuple_descriptor Borrowed logical column layout.
- * @param[in] chunk_count Expected number of chunk groups in the stripe.
- * @param[in] snapshot Snapshot governing catalog visibility.
- * @return Current-context skip list owning its nested arrays and decoded by-reference Datums.
- * @note Nullable minimum or maximum catalog values disable min-max filtering for that chunk.
+ * @param[in] stripe Stripe identifier.
+ * @param[in] tuple_descriptor Table column definitions.
+ * @param[in] chunk_count Number of chunk groups in the stripe.
+ * @param[in] snapshot Snapshot used to read the catalog.
+ * @return Skip metadata and its arrays in the current PostgreSQL memory context.
+ * @note A missing minimum or maximum disables min/max filtering for that chunk.
  */
 export stripe_skip_list* read_stripe_skip_list(RelFileLocator relfilelocator,
                                                uint64_t stripe,
@@ -249,14 +249,14 @@ export stripe_skip_list* read_stripe_skip_list(RelFileLocator relfilelocator,
 }
 
 /**
- * @brief Reassembles deletion bits covering one contiguous stripe row range.
+ * @brief Read deletion bits for a complete chunk group.
  * @param[in] relfilelocator Physical relation locator.
- * @param[in] snapshot Registered snapshot governing catalog visibility.
- * @param[in] cxt Memory context that owns the returned `bytea`.
- * @param[in] stripe_first_row_number First logical row number requested.
- * @param[in] row_count Number of rows represented by the returned mask.
- * @return Zero-filled mask with each available catalog fragment copied into place.
- * @note Null masks and invalid catalog ranges raise a row-codec error.
+ * @param[in] snapshot Caller's registered snapshot.
+ * @param[in] cxt Memory context for the returned mask.
+ * @param[in] stripe_first_row_number First logical row in the chunk group.
+ * @param[in] row_count Number of rows in the chunk group.
+ * @return A zeroed chunk mask filled with the available catalog fragments.
+ * @note Null masks and invalid catalog row ranges raise a row-codec error.
  */
 export bytea* read_chunk_row_mask(RelFileLocator relfilelocator,
                                   Snapshot snapshot,
@@ -346,9 +346,9 @@ export bytea* read_chunk_row_mask(RelFileLocator relfilelocator,
 }
 
 /**
- * @brief Persists cached deletion count and mask bytes for one row-mask entry.
- * @param[in] row_mask_entry Borrowed decoded entry whose identifier selects the catalog row.
- * @note Missing rows are ignored and the command counter still advances.
+ * @brief Save a cached mask and deleted-row count in the catalog.
+ * @param[in] row_mask_entry Entry whose id identifies the row to update.
+ * @note Missing rows are ignored.
  */
 export void
 flush_row_mask_cache(bioseq::storage::metadata::catalog_rows::row_mask* row_mask_entry) {
