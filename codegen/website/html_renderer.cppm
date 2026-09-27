@@ -13,24 +13,22 @@ module bioseq.codegen.website:html_renderer;
 import bioseq.codegen.website.model;
 import bioseq.codegen.support;
 
-// Trusted content_node -> sanitized HTML stage (§14). This is one of the four
-// closed render stages permitted to produce trusted_html fragments: it walks the
-// owned document tree and emits HTML5 with every text/attribute value escaped and
-// every href scheme-validated here, so no raw Markdown/Doxygen text ever reaches
-// a template ValuesMap. The output is bound to templates through a *_html field.
+// Converts content_node trees to HTML for template *_html fields.
+// Escapes text and attribute values and checks link targets before writing
+// markup, so Markdown and Doxygen text cannot supply arbitrary HTML tags.
 namespace bioseq::codegen::website {
 
 namespace {
 
-// Escapes text for an HTML element body (§14 plain_text projection).
+// Escapes text placed inside an HTML element.
 void append_escaped_text(std::string& out, std::string_view text) {
     for (const char character : text) {
         switch (character) {
         case '&': out += "&amp;"; break;
         case '<': out += "&lt;"; break;
         case '>': out += "&gt;"; break;
-        // JSON/SQL examples may contain adjacent braces. Preserve their visible
-        // text while distinguishing it from unresolved template syntax.
+        // Encode braces so JSON or SQL examples cannot be mistaken for
+        // unresolved template expressions in the generated page.
         case '{': out += "&#123;"; break;
         case '}': out += "&#125;"; break;
         default: out.push_back(character); break;
@@ -62,9 +60,8 @@ void append_escaped_attribute(std::string& out, std::string_view text) {
     return lowered;
 }
 
-// A fenced language token normalized to its Prism grammar class and a visible
-// label (§10.5). Aliases collapse to one grammar; an unrecognized token carries an
-// empty class so the block renders as plain, unhighlighted text.
+// Prism grammar and display label for a code-block language.
+// Known aliases share a grammar. Unknown languages use plain text.
 struct code_language_view {
     std::string_view prism_class;
     std::string_view label;
@@ -83,10 +80,8 @@ struct code_language_view {
     return {"", "Text"};
 }
 
-// A stable, page-unique DOM id for one code block, derived from its exact source
-// text plus its ordinal on the page: the Copy button targets it and it must never
-// collide (the html5lib validator rejects duplicate ids, §20.7). Identical blocks
-// on one page differ by ordinal.
+// Builds the code-block ID used by the Copy button. Include its position
+// on the page so repeated blocks have different IDs.
 [[nodiscard]] std::string code_block_id(std::string_view text, std::size_t ordinal) {
     std::uint64_t hash = 1469598103934665603ULL;
     for (const char character : text) {
@@ -103,8 +98,8 @@ struct code_language_view {
     return id;
 }
 
-// Parses a small non-negative decimal from a node attribute (annotation range /
-// number). Stops at the first non-digit; absent/garbage yields 0.
+// Reads leading decimal digits from an annotation attribute.
+// Returns zero if the string does not start with a digit.
 [[nodiscard]] std::size_t parse_index(std::string_view text) {
     std::size_t value = 0;
     for (const char character : text) {
@@ -116,9 +111,8 @@ struct code_language_view {
     return value;
 }
 
-// Accepts only inert href schemes: relative/fragment/absolute-path links and the
-// http(s)/mailto schemes. Anything else (javascript:, data:, vbscript:, unknown
-// scheme) collapses to a harmless fragment so a hostile link cannot execute.
+// Accepts relative links, fragments, paths, and HTTP(S) or mailto URLs.
+// Ordinary links and images use # for rejected targets.
 [[nodiscard]] bool is_safe_href(std::string_view href) {
     if (href.empty()) {
         return false;
@@ -181,11 +175,9 @@ struct html_content_writer {
         return found == node.attributes.end() ? fallback : std::string_view(found->second);
     }
 
-    // Doxygen may place block elements such as itemized/ordered lists directly
-    // inside a <para>. HTML <p> accepts phrasing content only and is implicitly
-    // closed by a block element, so wrapping the whole model paragraph would emit
-    // an unmatched trailing </p>. Keep the closed set of phrasing node kinds here;
-    // every other model node is rendered as a sibling block.
+    // Doxygen paragraphs can contain lists and other blocks. Close the HTML
+    // paragraph before rendering those children, since placing them inside p
+    // would make the browser close it early and leave an unmatched closing tag.
     [[nodiscard]] static bool paragraph_child_is_block(content_node_kind kind) {
         switch (kind) {
         case content_node_kind::text:
@@ -241,8 +233,7 @@ struct html_content_writer {
         }
         case content_node_kind::text: append_escaped_text(out, node.text); break;
         case content_node_kind::heading: {
-            // The page template owns the single <h1>; body headings start at h2 so
-            // the document keeps one top-level heading (§15.4 accessibility).
+            // The page template supplies h1. Keep body headings at h2 or below.
             int level = 2;
             const auto found = node.attributes.find("level");
             if (found != node.attributes.end()) {
@@ -255,8 +246,7 @@ struct html_content_writer {
                 level = 6;
             }
             const std::string tag = "h" + std::to_string(level);
-            // An on-this-page anchor (a generated [a-z0-9-] slug) becomes an id so
-            // the table of contents can link to the heading (§15.1).
+            // Use the generated anchor as the heading ID for table-of-contents links.
             const auto anchor = node.attributes.find("anchor");
             if (anchor != node.attributes.end() && !anchor->second.empty()) {
                 out.push_back('<');
@@ -306,18 +296,14 @@ struct html_content_writer {
             out += "</code>";
             break;
         case content_node_kind::code_block: {
-            // Every fenced block carries a visible language label, a keyboard-focusable
-            // Copy button bound by id to the exact source (no inline handler; main.js
-            // wires the click and the polite live region), and a Prism grammar class so
-            // the vendored highlighter can decorate it client-side (§10.5).
+            // Choose the code language and block ID. Ordinary blocks get a language
+            // label and Copy button, with a Prism class for supported languages.
             const code_language_view language =
                 classify_code_language(attribute_or(node, "language", ""));
             const std::string id = code_block_id(node.text, code_ordinal++);
-            // §10.6: an annotation directive was folded into a code_annotation child
-            // carrying a source range + number. Collect the ranges to underline the
-            // matched spans and the cards to render below. An annotated block skips the
-            // Prism class so the server-rendered <mark> spans survive (Prism rewrites
-            // <code> innerHTML).
+            // Annotation children identify text ranges and numbered explanation
+            // cards. Render their marks here and omit Prism highlighting, which
+            // would replace the code element contents and remove those marks.
             struct anno_span { std::size_t start; std::size_t len; std::size_t number; };
             std::vector<anno_span> spans;
             std::vector<const content_node*> cards;
@@ -327,10 +313,8 @@ struct html_content_writer {
                         parse_index(attribute_or(child, "start", "0"));
                     const std::size_t len =
                         parse_index(attribute_or(child, "len", "0"));
-                    // Invalid ranges must not influence the focus window or produce
-                    // a card with no corresponding underline. process_annotations
-                    // already guarantees valid ranges; this remains a safe boundary
-                    // for a deserialized/tampered model.
+                    // Ignore invalid annotation ranges before choosing the displayed text
+                    // or adding cards. This also checks models loaded from saved JSON.
                     if (len > 0 && start <= node.text.size()
                         && len <= node.text.size() - start) {
                         spans.push_back({start, len,
@@ -345,12 +329,10 @@ struct html_content_writer {
             const bool annotated = !spans.empty();
 
             if (annotated) {
-                // The supplied documentation design treats an annotated type as an
-                // anatomy component, not a terminal. Focus the smallest single-line
-                // call expression that encloses every source range. For example, the
-                // declaration `CREATE TABLE ... bioseq.seq('dna4', 64)` becomes the
-                // centered `bioseq.seq('dna4', 64)` expression while its two authored
-                // annotation ranges and prose remain fully data-driven.
+                // Show the smallest call expression that contains all annotations,
+                // or keep the surrounding lines if none is found. For example, a
+                // CREATE TABLE column can focus on bioseq.seq('dna4', 64) while
+                // keeping its numbered marks and cards.
                 std::size_t marked_start = spans.front().start;
                 std::size_t marked_end = spans.front().start + spans.front().len;
                 for (const anno_span& span : spans) {
@@ -510,8 +492,8 @@ struct html_content_writer {
                 append_escaped_attribute(out, language.prism_class);
                 out.push_back('"');
             }
-            // §12.6: generator-resolved non-overlapping source ranges the client
-            // decorator wraps in entity links after Prism completes.
+            // The browser adds entity links to these source ranges after Prism
+            // finishes syntax highlighting.
             const std::string_view entity_ranges = attribute_or(node, "entity_ranges", "");
             if (!entity_ranges.empty()) {
                 out += " data-entity-ranges=\"";
@@ -526,7 +508,7 @@ struct html_content_writer {
                 std::size_t cursor = 0;
                 for (const anno_span& span : spans) {
                     if (span.start < cursor || span.start + span.len > text.size()) {
-                        continue;  // defensive: never emit an overlapping/out-of-range mark
+                        continue;  // skip overlapping or out-of-range marks
                     }
                     append_escaped_text(out, text.substr(cursor, span.start - cursor));
                     out += "<mark class=\"anno\" data-anno=\"";
@@ -575,10 +557,8 @@ struct html_content_writer {
             break;
         }
         case content_node_kind::entity_link: {
-            // A resolved reference (the link resolver set entity_id + a base-aware
-            // route in target, §12.1/§12.4) renders as a live cross-link carrying the
-            // tooltip data attributes; an unresolved one renders as inert code (the
-            // build fails before this in normal operation, §10.4).
+            // Resolved references become links with tooltip data. If the entity ID
+            // or a usable route is missing, show the label as plain code.
             const std::string_view entity_id = attribute_or(node, "entity_id", "");
             const std::string_view label = attribute_or(node, "entity_label", "");
             if (!entity_id.empty() && !node.target.empty() && is_safe_href(node.target)) {
@@ -619,11 +599,9 @@ struct html_content_writer {
         }
         case content_node_kind::block_quote: wrap("blockquote", node); break;
         case content_node_kind::admonition: {
-            // Markdown stores one of the five authored severities in `class`;
-            // Doxygen stores semantic kinds (`return`, `param:*`, `warning`, ...)
-            // in `kind`. Preserve the useful label while collapsing the latter to
-            // the supplied callout colour vocabulary (never emit punctuation such
-            // as ':' into a CSS class token).
+            // Markdown uses class for its callout kind. Doxygen uses kind for
+            // warnings, parameters, and return descriptions. Choose a readable label
+            // and one of the supported CSS styles for either form.
             std::string raw_kind(attribute_or(node, "class", ""));
             if (raw_kind.empty()) {
                 raw_kind = std::string(attribute_or(node, "kind", "note"));
@@ -685,9 +663,8 @@ struct html_content_writer {
             }
             out.push_back('>');
             if (table_class == "result-table" && !node.children.empty()) {
-                // PostgreSQL result nodes always store the column header first.
-                // Preserve that semantic split in the DOM, matching the supplied
-                // terminal-result table and improving screen-reader navigation.
+                // Put the first result row in thead because it contains column names.
+                // Keep data rows in tbody so screen readers can distinguish them.
                 out += "<thead>";
                 render_node(node.children.front());
                 out += "</thead><tbody>";
@@ -703,8 +680,7 @@ struct html_content_writer {
         }
         case content_node_kind::table_row: wrap("tr", node); break;
         case content_node_kind::table_cell: {
-            // A cell with a scope attribute is a header cell (§15.4 accessible data
-            // tables); otherwise it is a plain data cell.
+            // A nonempty scope attribute marks a header cell. Other cells use td.
             const std::string_view scope = attribute_or(node, "scope", "");
             if (scope.empty()) {
                 wrap("td", node);
@@ -728,9 +704,9 @@ struct html_content_writer {
 
 }  // namespace
 
-/// @brief Renders an owned document node forest to sanitized trusted HTML (§14).
-/// @param nodes Document children (a tutorial/Doxygen body).
-/// @return HTML5 with every text/attribute escaped and every href validated.
+/// @brief Renders document nodes as HTML for a template content field.
+/// @param nodes Tutorial or Doxygen body nodes.
+/// @return HTML with text and attributes escaped and link targets checked.
 [[nodiscard]] std::string render_content_html(const std::vector<content_node>& nodes) {
     html_content_writer writer;
     writer.render_children(nodes);
