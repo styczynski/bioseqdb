@@ -517,7 +517,7 @@ Each SIMD lane will load fragments of input data:
       neighbouring region.};
     
   \node[anchor=west,font=\bfseries] at (0,7.08)
-    {(b) Lane 0 loses its minimum; the shared branch scans all lanes};
+    {(b) Lane 0 loses its minimum, so the shared branch scans all lanes};
   \foreach \r/\lab in {0/lane 0,1/lane 1,2/lane 2,3/lane 3}
     \node[anchor=east] at (1.35,5.35-.48*\r) {\lab};
   \foreach \r/\c/\v in {
@@ -634,8 +634,7 @@ The suffix values are recalculated in a fixed $w$-step loop each $w$ steps. This
   \node[anchor=west,blue!70!black] at (11.40,-.15)
     {$j=7$: $\min(Q_7,P_{10})=\min(8,3)=3$};
 \end{tikzpicture}
-\caption{Sliding minima from blockwise prefixes and suffixes. Blocks have the
-same width as the minimizer window. The two shaded crossing windows each use
+\caption{Sliding minima from blockwise prefixes and suffixes. The two shaded crossing windows each use
 one suffix value from the starting block and one prefix value from the ending
 block.}
 \label{fig:two-stack-minimum}
@@ -694,11 +693,8 @@ block.}
   \draw[->,thick] (absolute) -- (collect);
   \draw[->,thick] (7.55,3.55) to[out=-90,in=90] (lanes.north);
 \end{tikzpicture}
-\caption{Vectorized minimizer extraction over logical chunks. Each chunk owns
-a disjoint range and reads enough context to complete its boundary windows.
-Lane-wise rolling hashes and minima produce local positions. Adding each chunk
-origin and deduplicating full identities yields a global sketch. The symbolic
-chunk size is an execution parameter rather than part of minimizer semantics.}
+\caption{Vectorized minimizer extraction: Each chunk owns
+a disjoint range and reads enough context to complete its windows.}
 \label{fig:vector-minimizer-pipeline}
 \end{figure}
 

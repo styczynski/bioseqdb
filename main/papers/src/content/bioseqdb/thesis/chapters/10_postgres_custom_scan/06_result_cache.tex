@@ -49,7 +49,7 @@ The cache has expiration TTL time after which the results cannot be reused anymo
   \node[scan input,minimum width=3.6cm] (build) at (3.7,2.25)
     {compute and store rows};
   \node[scan output,minimum width=1.8cm] (seal) at (6.9,2.25)
-    {seal and check};
+    {compute hash};
   \node[scan output,minimum width=1.6cm] (complete) at (9.2,2.25)
     {complete};
   \draw[scan arrow] (claim) -- (build);
