@@ -1,6 +1,6 @@
 /**
  * @file batch.cppm
- * @brief Resident and batched Vulkan minimizer sketch routes.
+ * @brief Sketches packed sequences in Vulkan batches and downloads query results.
  */
 module;
 
@@ -49,14 +49,14 @@ import :index_materialization;
 
 namespace bioseq::gpu::vulkan::authorized_readback_detail {
 
-/** @brief Checked allocation and logical-extent plan for one typed readback. */
+/** Checked record count and byte sizes for a host download buffer. */
 struct typed_destination_plan {
     std::size_t host_count = 0u;
     std::uint64_t exact_bytes = 0u;
     std::uint64_t preallocation_bytes = 0u;
 };
 
-/** @brief Multiply a record count and stride, rejecting an unrepresentable byte extent. */
+/** Returns record storage bytes, throwing vulkan_runtime_error on multiplication overflow. */
 [[nodiscard]] inline std::uint64_t checked_record_bytes(
     std::uint64_t count,
     std::uint64_t record_bytes) {
@@ -68,8 +68,11 @@ struct typed_destination_plan {
 }
 
 /**
- * @brief Validate the typed, wire, authorization, and backing extents before allocation.
- * @tparam p_minimizer_type Registry-selected physical minimizer record.
+ * @brief Checks that a host record buffer can receive the permitted device output.
+ *
+ * The C++ record size must match the device format. The requested bytes must
+ * match the readback permission and fit both the device buffer and host limits.
+ * @throws vulkan_runtime_error If any count, size, or capacity check fails.
  */
 template <class p_minimizer_type>
 [[nodiscard]] typed_destination_plan make_typed_destination_plan(
@@ -105,7 +108,7 @@ template <class p_minimizer_type>
     };
 }
 
-/** @brief Expose bytes only after every destination element has been constructed. */
+/** Returns writable record bytes after checking the vector size against the download plan. */
 template <class p_minimizer_type>
 [[nodiscard]] std::span<std::byte> exact_typed_destination_span(
     std::vector<p_minimizer_type>& destination,
@@ -121,10 +124,14 @@ template <class p_minimizer_type>
 }
 
 /**
- * @brief Admit, allocate, reconcile, construct, and synchronously fill one typed destination.
- * @tparam p_minimizer_type Registry-selected physical minimizer record.
- * @tparam p_footprint_probe Compile-time-selected existing footprint probe.
- * @tparam p_transfer Direct synchronous transfer callable accepting the exact byte span.
+ * @brief Allocates a host record buffer and fills it through a synchronous callback.
+ *
+ * Requires an empty vector without reserved capacity or a memory permit. Reserves
+ * the planned bytes, accounts for actual vector capacity, and touches that capacity
+ * before measuring process memory. The callback receives only the requested records.
+ * @tparam p_footprint_probe Probe used to measure process memory.
+ * @param transfer Fills the byte span without changing vector size or capacity.
+ * @throws vulkan_runtime_error If reservation, allocation checks, or callback checks fail.
  */
 template <
     class p_minimizer_type,
@@ -194,9 +201,9 @@ void materialize_typed_destination(
 namespace bioseq::gpu::vulkan::batch_admission_detail {
 
 /**
- * @brief Bound query-authority vector capacity using the shared admission policy.
- * @param query_count Number of uploads whose query records are retained.
- * @return Saturating byte bound for authority records and tile-count ownership.
+ * @brief Estimates memory for query records and their tile counts.
+ * @param query_count Number of input queries.
+ * @return Estimated vector bytes including growth allowance, clamped on overflow.
  */
 [[nodiscard]] constexpr std::uint64_t query_authority_headroom_bytes(
     std::uint64_t query_count) noexcept {
@@ -212,16 +219,16 @@ namespace bioseq::gpu::vulkan::batch_admission_detail {
 export namespace bioseq::gpu::vulkan {
 
 /**
- * @brief Sketches one resident packed sequence into host and device storage.
- * @tparam p_minimizer_type Packed minimizer record.
- * @tparam p_sequence Contiguous packed sequence type.
+ * @brief Sketches a contiguous packed sequence and returns host and device records.
+ *
+ * Checks alphabet and k-mer/window sizes before preparing the upload.
  * @param seq Source sequence.
- * @param window_size Window length in k-mers.
- * @param kmer_size K-mer length in biological symbols.
- * @param decline_out Optional pre-dispatch rejection record.
- * @param host_ownership_route Host allocation ownership contract.
- * @return Sketch result, or no value when the shape or resources are rejected.
- * @throws vulkan_runtime_error If runtime execution fails.
+ * @param window_size K-mers per window.
+ * @param kmer_size Symbols per k-mer.
+ * @param decline_out Optional rejection details.
+ * @param host_ownership_route How the caller will keep the host result alive.
+ * @return Sketch result, or no value when the input or resources are unsuitable.
+ * @throws vulkan_runtime_error If execution or result checks fail.
  */
 template <class p_minimizer_type, class p_sequence>
 [[nodiscard]] std::optional<vulkan_sketch_result<p_minimizer_type>>
@@ -282,11 +289,7 @@ collect_minimizers_vulkan_result_resident_impl(
     }
 }
 
-/**
- * @brief Prevents direct use of the generic sequence-batch entry point.
- * @tparam p_minimizer_type Packed minimizer record.
- * @tparam p_sequence Sequence element type.
- */
+/** Direct sequence batches are disabled. Prepare upload descriptors before batching. */
 template <class p_minimizer_type, class p_sequence>
 [[nodiscard]] std::optional<vulkan_batch_sketch_result<p_minimizer_type>>
 collect_minimizers_vulkan_batch_result(
@@ -295,12 +298,10 @@ collect_minimizers_vulkan_batch_result(
     std::size_t kmer_size) = delete;
 
 /**
- * @brief Owns one exact admitted prefix before any Vulkan batch dispatch.
- * @tparam p_minimizer_type Registry-selected physical minimizer record.
+ * @brief Holds input sizes and the memory reserved for an accepted batch prefix.
  *
- * Upload descriptors and their referenced storage remain caller-owned and must
- * outlive plan consumption. The move-only permit is charged exactly once by
- * preflight and transferred to result retention by execution.
+ * The caller owns the upload descriptors and sequence bytes until execution
+ * finishes. Execution moves the memory reservation into the result owner.
  */
 template <class p_minimizer_type>
 struct vulkan_upload_batch_admission_plan {
@@ -339,7 +340,7 @@ struct vulkan_upload_batch_admission_plan {
         return accepted_uploads;
     }
 
-    /** @brief Bind the exact accepted descriptors immediately before execution. */
+    /** Binds accepted descriptors if their count matches. The caller must supply the checked inputs. */
     [[nodiscard]] bool bind_accepted_uploads(
         std::span<const sequence_upload_view> accepted) noexcept {
         if (accepted.size() != accepted_uploads) {
@@ -351,13 +352,13 @@ struct vulkan_upload_batch_admission_plan {
 };
 
 /**
- * @brief Create an empty appendable batch admission transaction.
- * @tparam p_minimizer_type Registry-selected physical record.
- * @param rank_lut Shared alphabet rank mapping.
- * @param window_size Window length in k-mers.
- * @param kmer_size K-mer length in biological symbols.
- * @param materialization Requested host materialization mode.
- * @return Empty plan, or no value when shape or hardware is unavailable.
+ * @brief Starts an empty batch plan for a supported device and k-mer/window size.
+ * @param rank_lut Shared alphabet decoding table.
+ * @param window_size K-mers per window.
+ * @param kmer_size Symbols per k-mer.
+ * @param materialization Whether to return host records as well as device records.
+ * @return Empty plan, or no value for unsupported sizes or unavailable hardware.
+ * @throws vulkan_runtime_error If materialization is invalid.
  */
 template <class p_minimizer_type = ::bioseq::minimizers::minimap_sketch_data>
 [[nodiscard]] std::optional<vulkan_upload_batch_admission_plan<p_minimizer_type>>
@@ -390,16 +391,13 @@ make_minimap_sketch_data_vulkan_upload_batch_admission_plan(
 }
 
 /**
- * @brief Transactionally append one prepared upload to an admitted prefix.
+ * @brief Checks the next input and reserves memory for adding it to the batch.
  *
- * Candidate aggregates are local until every shape check and permit growth
- * succeeds. Rejection leaves descriptor count, geometry, and permit unchanged
- * and never submits GPU work.
- *
- * @tparam p_minimizer_type Registry-selected physical record.
- * @param plan Appendable admission transaction.
- * @param upload Next ordered non-owning upload descriptor.
- * @return `true` only when the descriptor belongs to the admitted prefix.
+ * All inputs must share packing and alphabet settings. A rejection leaves the
+ * plan and its reservation unchanged. No GPU work is submitted here.
+ * @param plan Batch plan whose descriptors have not yet been bound.
+ * @param upload Next borrowed input descriptor.
+ * @return True when the input has been added to the accepted count.
  */
 template <class p_minimizer_type>
 [[nodiscard]] bool try_append_minimap_sketch_data_vulkan_upload(
@@ -589,16 +587,17 @@ template <class p_minimizer_type>
 }
 
 /**
- * @brief Admit the largest valid ordered prefix without submitting GPU work.
- * @tparam p_minimizer_type Registry-selected physical record, fixed before allocation.
- * @param candidate_uploads Ordered candidate upload views.
- * @param rank_lut Shared alphabet rank mapping.
- * @param window_size Window length in k-mers.
- * @param kmer_size K-mer length in biological symbols.
- * @param materialization Requested host materialization mode.
- * @return Exact admitted prefix, or no value when even the first dispatchable
- * candidate cannot be admitted or the leading shape is invalid.
- * @throws vulkan_runtime_error If the materialization mode is invalid.
+ * @brief Reserves memory for consecutive inputs until one cannot be accepted.
+ *
+ * Stops at the first invalid input or failed reservation. A nonempty batch must
+ * contain at least one dispatchable tile. Empty input returns an empty plan.
+ * @param candidate_uploads Inputs in order.
+ * @param rank_lut Shared alphabet decoding table.
+ * @param window_size K-mers per window.
+ * @param kmer_size Symbols per k-mer.
+ * @param materialization Whether host records are needed.
+ * @return Accepted prefix, or no value when no dispatchable prefix fits.
+ * @throws vulkan_runtime_error If materialization is invalid.
  */
 template <class p_minimizer_type = ::bioseq::minimizers::minimap_sketch_data>
 [[nodiscard]] std::optional<vulkan_upload_batch_admission_plan<p_minimizer_type>>
@@ -652,11 +651,13 @@ admit_minimap_sketch_data_vulkan_upload_batch_prefix(
 }
 
 /**
- * @brief Execute one already-admitted prepared-upload batch exactly once.
- * @tparam p_minimizer_type Registry-selected physical record.
- * @param plan Move-only plan returned by prefix admission.
- * @return Batch result, or no value if later physical reconciliation fails.
- * @throws vulkan_runtime_error If execution or ownership checks fail.
+ * @brief Executes a prepared batch using its memory reservation.
+ *
+ * Consumes the plan reservation and keeps it with the returned buffers. Actual
+ * allocation sizes are checked before dispatch and again before results are returned.
+ * @param plan Plan with the accepted input descriptors bound.
+ * @return Batch result, or no value for output overflow or failed memory checks.
+ * @throws vulkan_runtime_error If execution or result-consistency checks fail.
  */
 template <class p_minimizer_type = ::bioseq::minimizers::minimap_sketch_data>
 [[nodiscard]] std::optional<vulkan_batch_sketch_result<p_minimizer_type>>
@@ -721,9 +722,8 @@ execute_admitted_minimap_sketch_data_vulkan_upload_batch(
             ? 2u
             : 0u);
 
-    // Declaration order is a correctness invariant: the shared permit holder
-    // precedes result/scaffold/raw ownership, so reverse destruction always
-    // releases vectors and Vulkan Buffers before admission on every exit.
+    // Keep the reservation owner alive until every result and temporary buffer
+    // has been freed, including when an error leaves this function early.
     auto memory_retention =
         std::make_shared<vulkan_batch_sketch_memory_retention>();
     memory_retention->permit = std::move(plan.permit);
@@ -740,8 +740,8 @@ execute_admitted_minimap_sketch_data_vulkan_upload_batch(
     tiles.reserve(static_cast<std::size_t>(total_tile_count));
     tile_ranges.resize(uploads.size());
 
-    // Pass 2 fills the exact preflight shapes without capacity growth under
-    // normal allocators.  Actual capacities are reconciled before dispatch.
+    // Fill buffers using the sizes computed during planning. Check their actual
+    // capacities against the memory reservation before submitting work.
     for (std::size_t query_index = 0; query_index < uploads.size(); ++query_index) {
         const sequence_upload_view& upload = uploads[query_index];
         const std::size_t aligned_begin = static_cast<std::size_t>(
@@ -879,8 +879,8 @@ execute_admitted_minimap_sketch_data_vulkan_upload_batch(
         .padding_letters = padding_letters,
     };
 
-    // Declared after every other owner: any later failure destroys this raw
-    // buffer/vector aggregate first, then scaffolds/result, then the permit.
+    // Destroy the raw runtime buffers before temporary host buffers and the
+    // shared reservation if a later check fails.
     runtime_sketch_batch_result raw =
         runtime.run_sketch_tile_batch_roundtrip(
             std::span<const std::byte>{
@@ -1055,15 +1055,14 @@ execute_admitted_minimap_sketch_data_vulkan_upload_batch(
 }
 
 /**
- * @brief Sketches a complete prepared-upload batch with exact pre-dispatch admission.
- * @tparam p_minimizer_type Registry-selected physical record, fixed before allocation.
- * @param uploads Ordered query upload views.
- * @param rank_lut Shared alphabet rank mapping.
- * @param window_size Window length in k-mers.
- * @param kmer_size K-mer length in biological symbols.
- * @param materialization Requested host materialization mode.
- * @return Batch result, or no value unless the complete batch is valid and admitted.
- * @throws vulkan_runtime_error If runtime execution or ownership checks fail.
+ * @brief Sketches a batch only when all prepared inputs can be accepted together.
+ * @param uploads Query inputs in order.
+ * @param rank_lut Shared alphabet decoding table.
+ * @param window_size K-mers per window.
+ * @param kmer_size Symbols per k-mer.
+ * @param materialization Whether host records are needed.
+ * @return Batch result, or no value when planning or execution rejects the batch.
+ * @throws vulkan_runtime_error If execution or result-consistency checks fail.
  */
 template <class p_minimizer_type = ::bioseq::minimizers::minimap_sketch_data>
 [[nodiscard]] std::optional<vulkan_batch_sketch_result<p_minimizer_type>>
@@ -1088,12 +1087,12 @@ collect_minimap_sketch_data_vulkan_upload_batch_result(
 }
 
 /**
- * @brief Materialize the selected device-only query sketch exactly once.
+ * @brief Downloads an existing device-only query sketch into its host result buffer.
  *
- * The caller retains the complete batch in its real shared owner and publishes
- * immutable subranges only after this function succeeds. The runtime verifies
- * its private authorization without consuming it; the later seed-only call is
- * the sole consumer. No query kernel is invoked by this host materialization.
+ * Allows one successful download per result. The runtime checks its readback
+ * permission and leaves it valid for the later seeding call. No sketch is rerun.
+ * Keep the full batch alive, and expose its host subranges only after this succeeds.
+ * @throws vulkan_runtime_error If ownership, record ranges, or download checks fail.
  */
 template <class p_minimizer_type>
 void materialize_authorized_query_minimizers(
@@ -1137,10 +1136,8 @@ void materialize_authorized_query_minimizers(
         throw vulkan_runtime_error{"authorized typed query records do not cover the device output"};
     }
 
-    // Fresh standard-allocator reserve has a finite bound: the pinned libc++
-    // reserve -> split_buffer -> allocator::allocate_at_least chain requests
-    // exactly host_count records. Retain the existing conservative headroom and
-    // verify/reconcile actual capacity; never use geometric append growth here.
+    // Reserve space once and check the allocated capacity. If process-memory
+    // accounting still requires a reservation, keep it with the downloaded buffer.
     bioseq::parallelism::memory_permit pending_permit{};
     std::vector<p_minimizer_type> pending;
     authorized_readback_detail::materialize_typed_destination(
@@ -1150,8 +1147,8 @@ void materialize_authorized_query_minimizers(
         [&issuing_runtime,
          &result,
          host_count_u64](std::span<std::byte> destination) {
-            // The host materialization lock is no longer held: the runtime's
-            // download allocation enters its own serialized physical transaction.
+            // The process-memory measurement has finished. The runtime can now take
+            // its own allocation lock for the download.
             issuing_runtime.readback_authorized_query_minimizers(
                 result.query_authority,
                 result.device->words,
@@ -1166,14 +1163,14 @@ void materialize_authorized_query_minimizers(
     if (!result.query_authority.is_valid()) {
         throw vulkan_runtime_error{"authorized typed query readback consumed its authority"};
     }
-    // Storage moves while its pending permit remains live; publication is last.
+    // Move the buffer and its reservation before marking the download complete.
     result.host_minimizers.swap(pending);
     result.host_readback_permit = std::move(pending_permit);
     result.host_readback_completed = true;
 }
 
 #if defined(BIOSEQ_TEST_INDEXES)
-/** @brief Test-build audit of the shared authorized typed-destination transaction. */
+/** Results of the host download-buffer checks used by test builds. */
 struct authorized_typed_readback_test_audit {
     bool checked_multiplication_overflow_rejected = false;
     bool maximum_u32_count_accepted = false;
@@ -1189,8 +1186,10 @@ struct authorized_typed_readback_test_audit {
 };
 
 /**
- * @brief Exercise the production typed-destination planner and materializer without Vulkan.
- * @return One flag for every checked boundary and ordering observation.
+ * @brief Tests download-buffer planning and allocation without a Vulkan device.
+ *
+ * Checks overflow, memory rejection, exact destination sizes, and cleanup.
+ * @return Flags reporting which checks passed.
  */
 [[nodiscard]] inline authorized_typed_readback_test_audit
 self_test_authorized_typed_readback_contract() {
@@ -1234,8 +1233,8 @@ self_test_authorized_typed_readback_contract() {
         authorized_readback_detail::checked_record_bytes(
             above_maximum_count, record_bytes);
     try {
-        // The generic host planner retains its original u64 count domain.
-        // Selected GPU routes enforce their wire-specific u32 limits earlier.
+        // Host planning accepts 64-bit record counts when they fit host limits.
+        // GPU callers apply their 32-bit interface limits before this step.
         const auto wider = authorized_readback_detail::make_typed_destination_plan<minimizer_type>(
             above_maximum_count,
             record_bytes,

@@ -1,13 +1,11 @@
 /**
  * @file vulkan_minimizers.cppm
- * @brief Vulkan minimizer backend for resident and lazy compact sequences.
+ * @brief Vulkan minimizer sketching and target-index construction.
  *
- * @details Re-exports contract, upload, memory, sketch dispatch,
- * index materialization, batch, index-route, segmented, and entry-point
- * partitions. Owns minimizer wire traits, direct packed-sequence upload
- * views, alphabet rank tables, memory admission, host materialization, and
- * reusable device output. Unsupported sequence, alphabet, and coordinate shapes
- * are reported explicitly and never routed through a silent CPU fallback.
+ * Exports input preparation, GPU dispatch, and result owners for resident and
+ * lazy sequences. Supports batched queries and overlapping target segments.
+ * Unsupported input or unavailable resources produce a rejection or exception.
+ * These entry points do not switch to CPU sketching.
  */
 module;
 
@@ -49,21 +47,21 @@ import bioseq.storage.lazy_sequence;
 import bioseq.storage.size;
 import bioseq.instrumentation;
 
-/** Minimizer wire traits, decline identities, and alphabet contracts. */
+/** Device record layouts, rejection details, and alphabet checks. */
 export import :contract;
-/** Packed upload views, canonical windows, and segment geometry. */
+/** Packed upload buffers and overlapping sequence intervals. */
 export import :upload;
-/** Host and device minimizer ownership and admission accounting. */
+/** Host and device result owners with their memory reservations. */
 export import :memory;
-/** Single-window Vulkan sketch dispatch and materialization. */
+/** GPU sketching and result download for one input window. */
 export import :sketch_dispatch;
-/** Device target-index materialization from prepared uploads. */
+/** GPU target-index construction from prepared input. */
 export import :index_materialization;
-/** Resident and batched Vulkan minimizer sketch routes. */
+/** Single-sequence and batched query sketching. */
 export import :batch;
-/** Resident whole-target and segment index routes. */
+/** GPU target indexes for a whole sequence or a packed interval. */
 export import :index_routes;
-/** Strict segmented Vulkan minimizer collectors. */
+/** Collectors for overlapping GPU sequence segments. */
 export import :segmented;
-/** Lazy-sequence Vulkan minimizer facade entry points. */
+/** Lazy-sequence sketching and index-building entry points. */
 export import :entry_points;

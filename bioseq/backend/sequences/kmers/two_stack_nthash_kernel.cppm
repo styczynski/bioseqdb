@@ -1,6 +1,6 @@
 /**
  * @file two_stack_nthash_kernel.cppm
- * @brief Stable generated-source facade for exact two-stack minimizer cases.
+ * @brief Generated entry points for the exact two-stack minimizer kernels.
  */
 module;
 
@@ -21,9 +21,9 @@ namespace [[bioseq::simd]] target {
 namespace hn = hwy::HWY_NAMESPACE;
 
 /**
- * One fixed-target, one-shot resident two_stack_nthash call. The exact target-local
- * continuation is created, consumed and finalized inside the checked driver.
- * no target-dependent state crosses the neutral ABI.
+ * Runs a two-stack minimizer request on this Highway target. Checks the
+ * window, k-mer length, and output position range before selecting a typed
+ * output record and driver. The driver keeps all SIMD state inside the call.
  */
 template<sequence_alphabet p_alphabet, class p_storage_unit>
 [[nodiscard]] inline minimizer_kernel_result two_stack_nthash_fixed_case(
@@ -66,9 +66,8 @@ template<sequence_alphabet p_alphabet, class p_storage_unit>
         return reject_output_layout();
     }
 
-    // Typed record projection is part of the existing minimizer semantics.
-    // The selected driver verifies both invocation masks against its record;
-    // index/query compatibility remains the generated planner's responsibility.
+    // The selected driver checks that both requested masks match the output
+    // record. The caller must choose compatible layouts for the index and query.
     bool is_internally_consistent = false;
     switch (invocation.output_layout) {
         case minimizer_output_layout::sequence_log2_15_kmer_15_uint64:
@@ -86,9 +85,8 @@ template<sequence_alphabet p_alphabet, class p_storage_unit>
                 minimizer_representation<33u, 15u>, p_alphabet, p_storage_unit>(
                     invocation, result);
             break;
-        // Reuse existing wider-hash physical records with the unchanged
-        // runtime-generic driver. Their names describe storage geometry;
-        // they do not restrict the biological K/W to a campaign pair.
+        // These record types reserve wider hash fields. The driver still uses the
+        // requested k-mer and window sizes.
         case minimizer_output_layout::sequence_log2_20_kmer_20_uint64:
             is_internally_consistent = coarse_two_stack_detail::run_selected_output_layout<
                 minimizer_representation<20u, 20u>, p_alphabet, p_storage_unit>(
@@ -126,7 +124,7 @@ template<sequence_alphabet p_alphabet, class p_storage_unit>
     return result;
 }
 
-/** Source-topology-owned exact two-stack case for registered nucleotides. */
+/** Checks packed input dimensions before running a nucleotide minimizer case. */
 template<sequence_alphabet p_alphabet, class p_storage_unit>
 requires (
     seqan3::nucleotide_alphabet<p_alphabet>
