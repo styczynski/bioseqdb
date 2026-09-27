@@ -1,6 +1,6 @@
 /**
  * @file hash_sorted_ingest.cppm
- * @brief Source-direct hash-sorted GPU minimizer-index ingestion.
+ * @brief Build sorted minimizer lookup buffers directly from stored or generated minimizers.
  */
 module;
 
@@ -47,7 +47,7 @@ import bioseq.storage.size;
 
 export namespace bioseq::indexing {
 
-/// Allocate a nonzero process-local identity for one source-direct build operation.
+/// Assign a nonzero process-local ID to a minimizer build operation.
 [[nodiscard]] inline std::uint64_t
 next_gpu_source_direct_operation_identity() noexcept {
     static std::atomic<std::uint64_t> next_identity{1u};
@@ -59,8 +59,8 @@ next_gpu_source_direct_operation_identity() noexcept {
     return identity;
 }
 
-/// Bind a presorted minimizer source to its operation, tuple, representation, and device.
-/// @tparam p_minimizer Packed minimizer type that supplies hash and position bit widths.
+/// Describe a minimizer build by its operation, record layout, counts, and GPU.
+/// @tparam p_minimizer Packed minimizer type that supplies hash and position widths.
 template <class p_minimizer>
 [[nodiscard]] inline gpu_index_cache_identity
 make_gpu_source_direct_sorted_dense_identity(
@@ -95,14 +95,10 @@ make_gpu_source_direct_sorted_dense_identity(
     };
 }
 
-/// Return whether a target sketch tuple is compatible with the source-direct
-/// sorted-dense device ABI and one generated Vulkan runtime profile. Target
-/// materialization and published identity validation share this predicate so an
-/// unregistered physical tuple fails closed before target generation; this gate
-/// does not authorize an alternate host or scalar route. The transient key owns
-/// alphabet cardinality rather than a persisted alphabet code, and owns no
-/// packed-source width, so those axes remain authenticated by the upstream
-/// generated layout selection rather than being invented here.
+/// Check that a generated Vulkan profile supports this K/W pair and record layout.
+/// The caller must select the alphabet and packed sequence format before this
+/// check. Here alphabet_size is only checked for a valid range because the
+/// cache identity does not carry the alphabet code or packed sequence width.
 [[nodiscard]] inline constexpr bool gpu_source_direct_tuple_supported(
     std::uint32_t alphabet_size,
     std::int64_t kmer_size,
@@ -150,9 +146,8 @@ make_gpu_source_direct_sorted_dense_identity(
                 bioseq::simd::minimizer_algorithm::vulkan_minimap_integer) {
             continue;
         }
-        // Several registered records share the same 128-bit geometry. Resolve
-        // the runtime-selected identity before checking its representation;
-        // the first geometry match need not belong to this K/W profile.
+        // Records with the same size can belong to different K/W profiles.
+        // Compare the record selected for this profile.
         const auto* physical_record =
             bioseq::minimizers::find_minimizer_physical_record(selected->record_id);
         if (physical_record != nullptr && representation_matches(*physical_record)) {
@@ -162,9 +157,8 @@ make_gpu_source_direct_sorted_dense_identity(
     return false;
 }
 
-/// Typed form used before the target sketch is materialized.  The layout is
-/// inspected at compile time without adding a new dispatch/template axis.
-/// @tparam p_minimizer Packed minimizer type whose layout defines the tuple widths.
+/// Check profile support using the packed minimizer type's size and bit widths.
+/// @tparam p_minimizer Packed minimizer type that defines the record layout.
 template <class p_minimizer>
 [[nodiscard]] inline constexpr bool gpu_source_direct_tuple_supported(
     std::uint32_t alphabet_size,
@@ -182,7 +176,7 @@ template <class p_minimizer>
         layout::k_position_bits);
 }
 
-/// Validate the complete operation, source shape, minimizer ABI, and device identity.
+/// Check operation and device IDs, source counts, record layout, and disabled hash filtering.
 [[nodiscard]] inline bool gpu_source_direct_identity_well_formed(
     const gpu_index_cache_identity& identity) noexcept
 {
@@ -218,19 +212,19 @@ template <class p_minimizer>
         && !identity.gate_canonical_words;
 }
 
-/// Vulkan usage required by source-direct resident control and position buffers.
+/// Vulkan usage flags for shader access and copies of control and position buffers.
 inline constexpr VkBufferUsageFlags k_gpu_source_direct_buffer_usage =
     VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
     | VK_BUFFER_USAGE_TRANSFER_SRC_BIT
     | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
 
-/// Counts of minimizers and distinct hash groups in a presorted source.
+/// Counts of minimizers and distinct hash groups in an index source.
 struct gpu_source_direct_sorted_shape {
     std::uint64_t minimizer_count = 0u;
     std::uint64_t distinct_count = 0u;
 };
 
-/// Logical, device-allocation, and conservative admission sizes for materialization.
+/// Buffer sizes and driver allocation requirements used to reserve memory before building.
 struct gpu_source_direct_preflight {
     gpu_source_direct_sorted_shape shape{};
     std::uint64_t control_bytes = 0u;
@@ -246,7 +240,7 @@ struct gpu_source_direct_preflight {
     bool canonical_empty = false;
 };
 
-/// Failures from source-direct preflight or final resident materialization.
+/// Errors while checking sizes, reserving memory, or filling the final GPU buffers.
 enum class gpu_source_direct_materialization_error : std::uint8_t {
     invalid_shape,
     representation_ineligible,
@@ -257,14 +251,14 @@ enum class gpu_source_direct_materialization_error : std::uint8_t {
     invariant_failed,
 };
 
-/// Materialization error with optional memory-admission diagnostics.
+/// A build error, with memory-budget details when admission fails.
 struct gpu_source_direct_materialization_failure {
     gpu_source_direct_materialization_error error =
         gpu_source_direct_materialization_error::invalid_shape;
     bioseq::parallelism::memory_admission_failure admission{};
 };
 
-/// Planned, allocated, checksummed, and ownership-accounted resident statistics.
+/// Build counts, checksums, allocation sizes, and the memory budget held for the result.
 struct gpu_source_direct_materialization_stats {
     gpu_source_direct_sorted_shape shape{};
     std::uint64_t logical_slot_bytes = 0u;
@@ -291,13 +285,13 @@ struct gpu_source_direct_materialization_stats {
         gpu_resident_accounting_authority::none;
 };
 
-/// Newly materialized resident together with its verified allocation statistics.
+/// The completed GPU index and the checks recorded while building it.
 struct gpu_source_direct_materialization_result {
     std::shared_ptr<gpu_resident_minimizer_index> resident;
     gpu_source_direct_materialization_stats stats{};
 };
 
-/// Required adjustment between a held memory permit and actual device allocation.
+/// How a memory permit must change to match the actual allocation.
 enum class gpu_permit_reconciliation_action : std::uint8_t {
     invalid,
     shrink,
@@ -305,7 +299,7 @@ enum class gpu_permit_reconciliation_action : std::uint8_t {
     grow,
 };
 
-/// Compare held and actual byte counts to select exact permit reconciliation.
+/// Compare reserved and allocated bytes to decide whether the permit must change.
 [[nodiscard]] constexpr gpu_permit_reconciliation_action
 plan_gpu_exact_permit_reconciliation(
     std::uint64_t held_bytes,
@@ -323,7 +317,7 @@ plan_gpu_exact_permit_reconciliation(
     return gpu_permit_reconciliation_action::unchanged;
 }
 
-/// Verify that either footprint reflection or an exact retained permit accounts for a resident.
+/// Check that the measured process footprint or a held permit covers all resident memory.
 [[nodiscard]] inline bool gpu_exact_resident_authority_valid(
     gpu_resident_accounting_authority authority,
     const bioseq::parallelism::memory_materialization_result& materialization,
@@ -356,10 +350,10 @@ plan_gpu_exact_permit_reconciliation(
     return reflected != retained;
 }
 
-/// Plan source-direct logical bytes and allocator allowances from exact device requirements.
+/// Calculate buffer sizes and allocation padding before reserving memory.
 ///
-/// Empty input is accepted only with zero allocation requirements. Nonempty shapes must fit the
-/// 32-bit shader ABI and both Vulkan storage-buffer ranges.
+/// Empty input requires zero allocation bytes. Nonempty input must fit the
+/// shader's 32-bit counts and each buffer must fit its Vulkan binding limit.
 [[nodiscard]] inline std::expected<gpu_source_direct_preflight,
     gpu_source_direct_materialization_error>
 plan_gpu_source_direct_sorted_dense_with_requirements(
@@ -453,7 +447,7 @@ plan_gpu_source_direct_sorted_dense_with_requirements(
     };
 }
 
-/// Test a completed preflight against currently allocatable admitted bytes.
+/// Check whether the planned allocation fits the supplied memory budget.
 [[nodiscard]] inline constexpr bool gpu_source_direct_preflight_fits(
     const gpu_source_direct_preflight& preflight,
     std::uint64_t allocatable_bytes) noexcept
@@ -464,7 +458,7 @@ plan_gpu_source_direct_sorted_dense_with_requirements(
             && preflight.conservative_request_bytes <= allocatable_bytes;
 }
 
-/// Query Vulkan allocation requirements and produce a conservative source-direct preflight.
+/// Ask Vulkan for the allocation sizes needed by the planned control and position buffers.
 [[nodiscard]] inline std::expected<gpu_source_direct_preflight,
     gpu_source_direct_materialization_error>
 plan_gpu_source_direct_sorted_dense(
@@ -509,8 +503,8 @@ plan_gpu_source_direct_sorted_dense(
         position_requirement);
 }
 
-/// Count hash groups while checking that a borrowed minimizer source is hash-sorted.
-/// @tparam p_minimizer Packed minimizer type exposing `kmer()`.
+/// Count distinct hashes and reject minimizers whose hashes are out of order.
+/// @tparam p_minimizer Packed minimizer type exposing kmer().
 template <class p_minimizer>
 [[nodiscard]] inline std::expected<gpu_source_direct_sorted_shape,
     gpu_source_direct_materialization_error>
@@ -546,10 +540,9 @@ inspect_presorted_minimizer_source(
         .distinct_count = distinct_count,
     };
 }
-/// Construct the hash-sorted dense representation directly in the final
-/// mapped Vulkan allocation.  The in-place radix sort uses no full-size
-/// staging allocation.  Position offsets remain valid because only controls
-/// move. The authoritative position array is copied byte-for-byte.
+/// Copy a CPU index into mapped buffers and sort its controls by hash.
+/// Positions keep their original order. Sorting only the controls preserves
+/// their offsets into the copied position array and needs no second full array.
 [[nodiscard]] inline gpu_index_direct_fill_stats
 direct_fill_gpu_minimizer_index_sorted_dense(
         const minimizer_hashmap_fragment_index& idx,
@@ -610,17 +603,18 @@ direct_fill_gpu_minimizer_index_sorted_dense(
     return splitmix64(checksum ^ splitmix64(word));
 }
 
-/// Domain seed shared by source and mapped traversal checksums.
+/// Initial value shared by source and mapped-data checksums.
 inline constexpr std::uint64_t k_gpu_source_direct_checksum_seed =
     0x534f555243454450ULL;
 
-/// Stream a presorted source into final dense controls and positions, then verify it in place.
+/// Copy a hash-sorted source into final controls and position intervals.
 ///
-/// Each control stores one hash and a contiguous 32-bit position interval. Encoded positions are
-/// copied unchanged, and the second traversal must reproduce the source checksum.
+/// Each control names one hash and its contiguous positions. The function then
+/// rereads the mapped buffers, checks their bounds, and compares their checksum
+/// with the checksum collected while copying. Position encodings stay unchanged.
 ///
-/// @tparam p_minimizer Packed minimizer type exposing `kmer()` and `pos_strand_encoded()`.
-/// @throws gpu_index_direct_fill_invariant On shape, order, coordinate, or checksum mismatch.
+/// @tparam p_minimizer Packed type exposing kmer() and pos_strand_encoded().
+/// @throws gpu_index_direct_fill_invariant If counts, order, positions, or checksums disagree.
 template <class p_minimizer>
 [[nodiscard]] inline gpu_source_direct_materialization_stats
 direct_fill_gpu_minimizer_index_from_presorted_source(
@@ -736,12 +730,13 @@ direct_fill_gpu_minimizer_index_from_presorted_source(
     };
 }
 
-/// Materialize a presorted source directly into its final admitted mapped Vulkan buffers.
+/// Build final mapped GPU buffers from a hash-sorted minimizer span.
 ///
-/// The key, preflight, source shape, device UUID, and packed minimizer ABI must agree exactly.
-/// The returned resident owns the buffers and either an exact permit or footprint authority.
+/// The source, cache key, device, and memory plan must agree. The result owns
+/// both buffers. It keeps their permit unless the measured process footprint
+/// already accounts for the allocation when the buffers are built.
 ///
-/// @tparam p_minimizer Standard-layout eight-byte packed minimizer with the fixed device ABI.
+/// @tparam p_minimizer Eight-byte minimizer with 30 hash bits and 33 position bits.
 template <class p_minimizer>
 [[nodiscard]] inline std::expected<
     gpu_source_direct_materialization_result,
@@ -886,8 +881,8 @@ materialize_sorted_dense_from_presorted_minimizers(
                  &resident_permit, &stats,
                  &allocation_requirement_mismatch, &non_host_visible]()
                     -> bioseq::parallelism::memory_materialization_snapshot {
-                    // Prefix lookup repeatedly reads this resident on the CPU.
-                    // Keep its Vulkan-visible payload in cached host memory.
+                    // CPU prefix searches also read these buffers. Use cached host memory
+                    // that remains accessible to Vulkan.
                 resident->slots = runtime_ptr->create_host_buffer(
                         plan.slot_buffer_bytes,
                         k_gpu_source_direct_buffer_usage);
@@ -1057,7 +1052,7 @@ materialize_sorted_dense_from_presorted_minimizers(
     };
 }
 
-/// Build a source-direct cache key without constructing a placeholder CPU index.
+/// Build a cache key from the source counts and layout without building a CPU index.
 template <class p_minimizer>
 [[nodiscard]] inline gpu_minimizer_index_cache_key
 make_gpu_mapped_fragment_sorted_dense_key(
@@ -1091,7 +1086,7 @@ make_gpu_mapped_fragment_sorted_dense_key(
     };
 }
 
-/// Build the same CPU-free sorted-dense key for a runtime target sketch.
+/// Build the same cache key for minimizers produced by the Vulkan runtime.
 template <class p_minimizer>
 [[nodiscard]] inline gpu_minimizer_index_cache_key
 make_gpu_runtime_built_sorted_dense_key(
@@ -1221,12 +1216,12 @@ fill_event(void* raw, const canonical_minimizer_event& event) noexcept {
 } // namespace segmented_spill_gpu_detail
 
 /**
- * Materialize one statement-complete query-union spill into the final MPF resident.
+ * Build one GPU lookup table from the spill selected by all queries in a statement.
  *
- * The qualified spill remains segmented and file-backed. Its first bounded merge
- * counts every selected hash; its second bounded merge scatters those same events
- * directly into globally hash-major final intervals. No whole-target pair vector,
- * GPU radix workspace, or per-segment seed job is created.
+ * Replay the spill twice. The first pass counts occurrences for each selected
+ * hash so every hash can receive a contiguous position interval. The second
+ * pass writes those intervals directly in the final mapped buffers. The spill
+ * stays on disk, and the result is checked for counts and position order.
  */
 template <class p_minimizer, class p_hash, class p_replay_producer>
 [[nodiscard]] inline std::expected<
@@ -1384,8 +1379,8 @@ materialize_sorted_dense_from_segmented_spill_replay(
                  &stats,
                  &allocation_requirement_mismatch,
                  &non_host_visible]() -> bioseq::parallelism::memory_materialization_snapshot {
-                    // Prefix lookup repeatedly reads this resident on the CPU.
-                    // Keep its Vulkan-visible payload in cached host memory.
+                    // CPU prefix searches also read these buffers. Use cached host memory
+                    // that remains accessible to Vulkan.
                 resident->slots = runtime_ptr->create_host_buffer(
                         preflight.control_bytes, k_gpu_source_direct_buffer_usage);
                     resident->positions = runtime_ptr->create_host_buffer(
@@ -1800,11 +1795,11 @@ template <class p_hash>
 }
 
 /**
- * Exact query-selected view over one authenticated immutable mapped reader.
+ * View of the stored index restricted to hashes requested by this statement.
  *
- * Controls are the globally accumulated counts from the preceding complete
- * control traversal. Postings still come from a complete authenticated source
- * traversal; the adapter only declines hashes outside the statement union.
+ * Controls come from counts already accumulated across all fragments. Position
+ * reads still scan the complete source, forwarding only the selected hashes.
+ * The source and the caller-owned hash and count arrays must outlive this view.
  */
 template <class p_hash>
 struct query_union_reader_view {
@@ -1913,10 +1908,11 @@ struct query_union_reader_view {
 } // namespace mapped_fragment_gpu_detail
 
 /**
- * Count the complete statement query union against an authenticated persisted source.
+ * Count stored occurrences of the hashes requested by all queries in a statement.
  *
- * The caller owns both sorted unique hashes and zeroed counters. This performs one
- * complete control traversal and never decodes or regenerates target minimizers.
+ * The caller supplies sorted unique hashes and zeroed counters. One scan of the
+ * stored controls fills the counts without reading their position lists or
+ * generating minimizers from the sequence.
  */
 template <class p_hash>
 [[nodiscard]] inline std::expected<
@@ -1996,12 +1992,12 @@ inspect_mapped_fragment_query_union(
 }
 
 /**
- * Materialize an authenticated mapped MPF source directly into final dense Vulkan buffers.
+ * Build GPU lookup buffers from a validated stored minimizer reader.
  *
- * The first complete source traversal writes one slot per fragment-local control into the
- * final control allocation. Controls are sorted and compacted in place. The second complete
- * traversal writes postings directly into their final hash-major intervals. No CPU hashmap,
- * target-wide posting vector, or query-dependent target owner is constructed.
+ * Read the controls first, then sort and merge repeated hashes in the final
+ * control buffer. Their counts define contiguous position intervals. A second
+ * pass fills those intervals directly from stored postings and checks that
+ * their contents agree with the source.
  */
 template <class p_minimizer, class p_reader>
 [[nodiscard]] inline std::expected<
@@ -2100,8 +2096,8 @@ materialize_sorted_dense_from_mapped_fragment_reader(
                  &stats,
                  &allocation_requirement_mismatch,
                  &non_host_visible]() -> bioseq::parallelism::memory_materialization_snapshot {
-                    // Prefix lookup repeatedly reads this resident on the CPU.
-                    // Keep its Vulkan-visible payload in cached host memory.
+                    // CPU prefix searches also read these buffers. Use cached host memory
+                    // that remains accessible to Vulkan.
                 resident->slots = runtime_ptr->create_host_buffer(
                         preflight.control_bytes, k_gpu_source_direct_buffer_usage);
                     resident->positions = runtime_ptr->create_host_buffer(
@@ -2357,7 +2353,7 @@ materialize_sorted_dense_from_mapped_fragment_reader(
     };
 }
 
-/** Materialize only the authenticated persisted postings selected by the query union. */
+/** Build GPU lookup buffers for the stored hashes selected by this statement. */
 template <class p_minimizer, class p_hash>
 [[nodiscard]] inline std::expected<
     gpu_source_direct_materialization_result,
@@ -2462,9 +2458,9 @@ gpu_built_index_adoption_error_name(
     return "unknown";
 }
 
-/// Zero-allocation ownership handoff for a runtime-built index. The original
-/// count/main admission lineage either retains an exact-R permit or carries a
-/// strict footprint-backed release commit. Adoption never reserves again.
+/// Transfer a runtime-built index into a resident owner for reuse.
+/// Reuse its device buffers and memory permit. If the permit was released,
+/// require a record showing that the process footprint covers the allocation.
 [[nodiscard]] inline std::expected<
     std::shared_ptr<gpu_resident_minimizer_index>, gpu_built_index_adoption_error>
 adopt_gpu_built_index(
@@ -2635,9 +2631,9 @@ adopt_gpu_built_index(
     resident->ownership.adoption_successes = 1u;
     resident->key = key;
     resident->target_len = built.target_len;
-    resident->slot_mask = built.slot_mask;          // 0 for the sorted-bucket form
+    resident->slot_mask = built.slot_mask;          // Sorted controls do not use a hash-table mask.
     resident->position_count = built.position_count;
-    resident->bucket_count = built.occupied_slots;  // dense bucket count for binary search
+    resident->bucket_count = built.occupied_slots;  // Number of sorted controls searched by hash.
     resident->unique_key_count = built.occupied_slots;
     resident->slot_capacity = built.occupied_slots != 0u
         ? built.occupied_slots
@@ -2652,13 +2648,12 @@ adopt_gpu_built_index(
 }
 
 /**
- * Authenticate one adopted no-index sorted-dense resident for the existing
- * mapped-prefix consumer without rebuilding a host target index.
+ * Prepare an adopted GPU-built index for CPU searches of its mapped buffers.
  *
- * The adopted build receipt already proves one exact GPU count/emit source
- * operation. This pass reads the final coherent control/position buffers once,
- * validates their complete interval geometry, and records the existing
- * source/mapped checksum authority consumed by non-fused MPF prefix counting.
+ * Check the build record, then read each final control and position once to
+ * verify sorted hashes, contiguous intervals, and target bounds. Save the
+ * resulting checksum for the prefix-search consumer. The existing buffers
+ * remain the index used by both CPU and GPU code.
  */
 [[nodiscard]] inline bool authenticate_gpu_built_sorted_dense_prefix(
     const bioseq::gpu::vulkan::runtime& runtime,
