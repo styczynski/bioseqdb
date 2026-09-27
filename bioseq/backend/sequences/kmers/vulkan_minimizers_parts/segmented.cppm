@@ -1,6 +1,6 @@
 /**
  * @file segmented.cppm
- * @brief Strict segmented Vulkan minimizer collectors.
+ * @brief Collects Vulkan minimizers from overlapping sequence segments.
  */
 module;
 
@@ -52,17 +52,14 @@ import :index_routes;
 export namespace bioseq::gpu::vulkan {
 
 /**
- * @brief Collects a resident Vulkan sketch through an existing collector surface.
- * @tparam p_minimizer_type Packed minimizer record.
- * @tparam p_collector_type Collector accepting individual records.
- * @tparam p_sequence Contiguous packed sequence type.
- * @param collector Destination collector.
- * @param seq Source sequence.
- * @param window_size Window length in k-mers.
- * @param kmer_size K-mer length in biological symbols.
- * @param decline_out Optional rejection record.
- * @return Completed dispatch token, or no value when dispatch is rejected.
- * @throws vulkan_runtime_error If runtime execution or token validation fails.
+ * @brief Sketches a resident sequence and sends its minimizers to a collector.
+ * @param collector Receives each downloaded record.
+ * @param seq Contiguous packed input.
+ * @param window_size K-mers per window.
+ * @param kmer_size Symbols per k-mer.
+ * @param decline_out Optional rejection details.
+ * @return Completion token, or no value if sketching is rejected.
+ * @throws vulkan_runtime_error If execution or completion checks fail.
  */
 template <class p_minimizer_type, class p_collector_type, class p_sequence>
 [[nodiscard]] std::optional<vulkan_sketch_dispatch_token>
@@ -87,12 +84,15 @@ collect_minimizers_vulkan_resident_impl(
 }
 
 /**
- * @brief Decodes parallel device key and position arrays into sorted pairs.
- * @param key_bytes Downloaded 64-bit minimizer hashes.
+ * @brief Combines downloaded hash and encoded-position arrays into pairs.
+ *
+ * Preserves their existing order. The caller supplies arrays already sorted by
+ * hash and position.
+ * @param key_bytes Downloaded 64-bit hashes.
  * @param value_bytes Downloaded 64-bit encoded positions.
- * @param pair_count Number of complete pairs.
- * @return Pairs in runtime-provided hash and position order.
- * @throws vulkan_runtime_error If the count or byte spans are invalid.
+ * @param pair_count Number of pairs.
+ * @return Hash-position pairs.
+ * @throws vulkan_runtime_error If the count exceeds host limits or an array is too short.
  */
 [[nodiscard]] inline std::vector<std::pair<std::uint64_t, std::uint64_t>>
 decode_sorted_pair_bytes(
@@ -125,19 +125,22 @@ decode_sorted_pair_bytes(
 }
 
 /**
- * @brief Collects sorted minimizer pairs for one stitched packed segment.
- * @tparam p_sequence Contiguous packed sequence type.
- * @param seq Source sequence.
- * @param lo_unit Inclusive upload unit index.
- * @param hi_unit Exclusive upload unit index.
- * @param emit_base_bp Global biological offset of the upload window.
- * @param core_lo_bp Inclusive global core boundary.
- * @param core_hi_bp Exclusive global core boundary.
- * @param window_size Window length in k-mers.
- * @param kmer_size K-mer length in biological symbols.
- * @param execution_stats_out Optional segment execution counters.
- * @return Sorted global position and hash pairs owned with their permit.
- * @throws vulkan_runtime_error For every selected-Vulkan rejection.
+ * @brief Sketches a packed interval and returns sorted hash-position pairs for its core.
+ *
+ * Splits large inputs into overlapping GPU windows and retries smaller windows
+ * when capacity or memory limits allow. Duplicate pairs from overlaps are removed.
+ * @param seq Contiguous packed input.
+ * @param lo_unit First upload unit, inclusive.
+ * @param hi_unit Last upload unit, exclusive.
+ * @param emit_base_bp Global symbol offset of the uploaded interval.
+ * @param core_lo_bp First global output position, inclusive.
+ * @param core_hi_bp Last global output position, exclusive.
+ * @param window_size K-mers per window.
+ * @param kmer_size Symbols per k-mer.
+ * @param execution_stats_out Optional completed-dispatch and split counts.
+ * @return Pairs of hash and (global position << 1 | strand), sorted in that order,
+ * with their memory reservation. A nonempty interval too short for a window returns empty.
+ * @throws vulkan_runtime_error If input checks or Vulkan execution fail.
  */
 // BIOSEQ_PRIVATE_PACKED_ACCESS_BEGIN collect_sorted_minimizer_pairs_vulkan_segment_resident_impl_or_throw
 template <bioseq::minimizers::generated_minimizer_physical_record p_minimizer_type =
@@ -186,8 +189,8 @@ collect_sorted_minimizer_pairs_vulkan_segment_resident_impl_or_throw(
                 throw_vulkan_strict_decline(
                     "Vulkan segment minimizer pair path", path_decline);
             }
-            // Direct resident callers must not bypass the facade's physical
-            // capacity selection. The two-word wire reserves one span byte.
+            // Check hash capacity for direct resident calls too. The 128-bit record
+            // reserves one byte for the span, leaving at most 56 hash bits.
             constexpr std::size_t record_hash_bits =
                 minimizer_type::layout_type::k_hash_bits;
             constexpr std::size_t wire_hash_bits = sizeof(minimizer_type) == 16u
@@ -345,10 +348,9 @@ collect_sorted_minimizer_pairs_vulkan_segment_resident_impl_or_throw(
                     maximum_allocation_requirements
                         .pessimistic_output_allocation_bytes,
                     maximum_host_bytes);
-            // The borrowed slice covers the larger of the mutually exclusive
-            // dispatch and exact-host materialization. It must use the same physical
-            // arena/output requirements as `sketch_uploaded_window_result`,
-            // including a reusable arena's high-water allocation.
+            // Dispatch and host download happen in separate phases. Reserve enough
+            // for the larger phase, using the same physical buffer sizes as the dispatch
+            // helper, including memory already held by a reusable GPU arena.
             const std::uint64_t dispatch_budget = std::max(
                 maximum_dispatch_bytes,
                 maximum_host_materialization_bytes);
@@ -390,7 +392,7 @@ collect_sorted_minimizer_pairs_vulkan_segment_resident_impl_or_throw(
                 throw_vulkan_strict_decline(
                     "Vulkan segment minimizer pair path", path_decline);
             }
-            /** @brief Owns admitted work vectors for one segment-pair call. */
+            /** Keeps temporary vectors and their memory reservation together. */
             struct segment_pair_owner {
                 bioseq::parallelism::memory_permit permit;
                 std::vector<gpu_sketch_segment_window> windows;
@@ -589,9 +591,8 @@ collect_sorted_minimizer_pairs_vulkan_segment_resident_impl_or_throw(
                 result->host_permit.reset();
                 result->device.reset();
             }
-            // std::pair's default ordering sorts by (kmer, encoded_pos), exactly
-            // the order the minimizer-sequence and minimizer-fragment builders
-            // expect from a "sorted pair run".
+            // Sort by hash, then encoded position, as expected by the minimizer index
+            // builders. Remove repeated pairs produced by overlapping uploads.
             std::sort(owner.filtered.begin(), owner.filtered.end());
             owner.filtered.erase(
                 std::unique(owner.filtered.begin(), owner.filtered.end()),
@@ -627,18 +628,21 @@ collect_sorted_minimizer_pairs_vulkan_segment_resident_impl_or_throw(
 // BIOSEQ_PRIVATE_PACKED_ACCESS_END collect_sorted_minimizer_pairs_vulkan_segment_resident_impl_or_throw
 
 /**
- * @brief Collects minimizers for one resident segment through a collector.
- * @tparam p_minimizer_type Packed minimizer record.
- * @tparam p_collector_type Collector accepting individual records.
- * @tparam p_sequence Contiguous packed sequence type.
- * @param collector Destination collector.
- * @param seq Source sequence.
- * @param lo_unit Inclusive upload unit index.
- * @param hi_unit Exclusive upload unit index.
- * @param window_size Window length in k-mers.
- * @param kmer_size K-mer length in biological symbols.
- * @param query_gate Optional canonical query filter.
- * @throws vulkan_runtime_error For every selected-Vulkan rejection.
+ * @brief Sends a packed interval's GPU minimizers to a collector.
+ *
+ * Uses overlapping uploads and emits each window's core with positions relative
+ * to the requested interval. Without a query gate, capacity failures can retry
+ * smaller windows. A query gate requires a single upload.
+ * @param collector Receives minimizer records.
+ * @param seq Contiguous packed input.
+ * @param lo_unit First packed unit, inclusive.
+ * @param hi_unit Last packed unit, exclusive.
+ * @param window_size K-mers per window.
+ * @param kmer_size Symbols per k-mer.
+ * @param query_gate Optional bitmap filtering hashes.
+ *
+ * Nonempty intervals shorter than window_size + kmer_size emit nothing.
+ * @throws vulkan_runtime_error If input checks or Vulkan execution fail.
  */
 // BIOSEQ_PRIVATE_PACKED_ACCESS_BEGIN collect_minimizers_vulkan_segment_resident_impl_or_throw
 template <class p_minimizer_type, class p_collector_type, class p_sequence>

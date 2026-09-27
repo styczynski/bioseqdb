@@ -1,6 +1,6 @@
 /**
  * @file upload.cppm
- * @brief Packed upload views, canonical windows, and segment geometry.
+ * @brief Packed input buffers and overlapping sequence segments for Vulkan uploads.
  */
 module;
 
@@ -46,7 +46,7 @@ import :contract;
 export namespace bioseq::gpu::vulkan {
 
 #ifdef BIOSEQ_TEST_INDEXES
-/** @brief Captures admitted-window ownership counters exposed to unit tests. */
+/** Counts temporary upload buffers and records the latest tracked allocation for tests. */
 struct vulkan_admitted_window_test_snapshot {
   std::uint64_t admitted_materializations = 0u;
   std::uint64_t live_admitted_windows = 0u;
@@ -67,7 +67,7 @@ inline std::atomic<std::uint64_t> off_backend_materializations{0u};
 inline std::thread::id backend_thread{};
 } // namespace admitted_window_test_detail
 
-/** @brief Resets and enables admitted-window ownership tracking on this thread. */
+/** Resets allocation counters and records this thread as the backend thread for tests. */
 inline void arm_vulkan_admitted_window_test_seam() noexcept {
   using namespace admitted_window_test_detail;
   enabled.store(0u, std::memory_order_release);
@@ -81,12 +81,12 @@ inline void arm_vulkan_admitted_window_test_seam() noexcept {
   enabled.store(1u, std::memory_order_release);
 }
 
-/** @brief Disables admitted-window ownership tracking. */
+/** Disables upload-buffer allocation tracking. */
 inline void reset_vulkan_admitted_window_test_seam() noexcept {
   admitted_window_test_detail::enabled.store(0u, std::memory_order_release);
 }
 
-/** @brief Returns an atomic snapshot of admitted-window test counters. */
+/** Reads the allocation test counters. Concurrent updates can appear between field reads. */
 [[nodiscard]] inline vulkan_admitted_window_test_snapshot
 vulkan_admitted_window_test_snapshot() noexcept {
   using namespace admitted_window_test_detail;
@@ -107,10 +107,12 @@ vulkan_admitted_window_test_snapshot() noexcept {
 }
 
 /**
- * @brief Records one admitted materialization while test tracking is enabled.
- * @param permit_bytes Bytes owned by the admission permit.
- * @param buffer_address Address of the admitted storage.
- * @return `true` when a matching end event must be recorded.
+ * @brief Records a temporary upload buffer when allocation tracking is enabled.
+ *
+ * Updates the live-buffer count and records this buffer as the latest allocation.
+ * @param permit_bytes Bytes reserved for the buffer.
+ * @param buffer_address Address of the buffer.
+ * @return True when destruction must record a matching end event.
  */
 [[nodiscard]] inline bool note_vulkan_admitted_window_begin(
     std::uint64_t permit_bytes, std::uintptr_t buffer_address) noexcept {
@@ -132,7 +134,7 @@ vulkan_admitted_window_test_snapshot() noexcept {
 }
 
 /**
- * @brief Records destruction of a tracked admitted materialization.
+ * @brief Records destruction of a tracked upload buffer.
  * @param tracked Whether the matching begin event was recorded.
  */
 inline void note_vulkan_admitted_window_end(bool tracked) noexcept {
@@ -148,7 +150,7 @@ inline void note_vulkan_admitted_window_end(bool tracked) noexcept {
 
 namespace admitted_sequence_detail {
 
-/** @brief Describes borrowed packed storage for a compact range adapter. */
+/** Describes borrowed packed words for a compact sequence range. */
 struct borrowed_packed_header {
   const void *data = nullptr;
   bioseq::storage::sequence_size_t bp_size = 0;
@@ -157,8 +159,8 @@ struct borrowed_packed_header {
 };
 
 /**
- * @brief Brands a borrowed descriptor with canonical 32-bit packed storage.
- * @tparam p_alphabet Logical sequence alphabet.
+ * @brief Supplies sequence traits for borrowed 32-bit packed words.
+ * @tparam p_alphabet Sequence alphabet.
  */
 template <sequence_alphabet p_alphabet> struct borrowed_u32_instance {
   using alphabet_type = p_alphabet;
@@ -173,11 +175,13 @@ template <sequence_alphabet p_alphabet> struct borrowed_u32_instance {
 };
 
 /**
- * @brief Visits a descriptor backed by a real 32-bit object array.
- * @tparam p_alphabet Logical sequence alphabet.
- * @tparam p_function Callback receiving the compact range.
- * @param descriptor Resident descriptor with canonical 32-bit storage.
- * @param fn Callback invoked synchronously.
+ * @brief Calls fn with a compact range over actual 32-bit source words.
+ *
+ * The temporary header and range are valid only during the callback. The caller
+ * must keep the underlying descriptor storage alive.
+ * @tparam p_alphabet Sequence alphabet.
+ * @param descriptor Resident descriptor backed by 32-bit objects.
+ * @param fn Synchronous callback.
  * @return Callback result.
  */
 template <sequence_alphabet p_alphabet, class p_function>
@@ -198,8 +202,8 @@ decltype(auto) with_typed_u32_range(
 }
 
 /**
- * @brief Steps through byte-addressed packed storage in logical unit strides.
- * @tparam p_unit_bytes Number of object-representation bytes per logical unit.
+ * @brief Moves through packed bytes by whole storage units.
+ * @tparam p_unit_bytes Bytes per packed unit.
  */
 template <std::size_t p_unit_bytes>
 struct byte_packed_unit_iterator {
@@ -228,12 +232,11 @@ struct byte_packed_unit_iterator {
 };
 
 /**
- * @brief Exposes upload geometry for layout-compatible byte storage.
+ * @brief Describes packed bytes for upload without reading them as 32-bit objects.
  *
- * The range has no dereference operation, so a differently typed backing
- * allocation cannot be read as 32-bit objects on the host.
- *
- * @tparam p_alphabet Logical sequence alphabet.
+ * This range has no dereference operator. It allows compatible storage with a
+ * different C++ element type to be uploaded through byte addresses.
+ * @tparam p_alphabet Sequence alphabet.
  */
 template <sequence_alphabet p_alphabet>
 class byte_upload_range {
@@ -249,7 +252,7 @@ private:
   descriptor_type descriptor_{};
 
 public:
-  /** @brief Binds a resident descriptor with canonical 32-bit byte geometry. */
+  /** Borrows a descriptor whose bytes use the 32-bit upload layout. */
   explicit byte_upload_range(const descriptor_type &descriptor) noexcept
       : descriptor_(descriptor) {
     DEBUG_ASSERT(
@@ -265,7 +268,7 @@ public:
   [[nodiscard]] std::size_t byte_size() const noexcept {
     return descriptor_.unit_count * sizeof(std::uint32_t);
   }
-  /** @brief Returns the biological symbol count. */
+  /** Returns the number of sequence symbols. */
   [[nodiscard]] std::size_t bp_size() const noexcept {
     return static_cast<std::size_t>(descriptor_.logical_length);
   }
@@ -282,7 +285,7 @@ public:
     return cbegin() + size();
   }
   // BIOSEQ_PRIVATE_PACKED_ACCESS_BEGIN byte_upload_range_address_adapter
-  /** @brief Returns the object-representation address at an upload iterator. */
+  /** Returns the byte address of an upload iterator. */
   [[nodiscard]] const std::byte *read_cptr(const iterator &it) const noexcept {
     return it.address;
   }
@@ -290,8 +293,8 @@ public:
 };
 
 /**
- * @brief Owns or borrows one canonical 32-bit upload window.
- * @tparam p_alphabet Logical sequence alphabet.
+ * @brief Holds one owned or borrowed input window in the 32-bit upload layout.
+ * @tparam p_alphabet Sequence alphabet.
  */
 template <sequence_alphabet p_alphabet> struct canonical_u32_window {
   using owner_type = bioseq::storage::admitted_packed_sequence<p_alphabet>;
@@ -306,7 +309,7 @@ template <sequence_alphabet p_alphabet> struct canonical_u32_window {
   bool test_admitted_window_tracked = false;
 #endif
 
-  /** @brief Takes ownership of an admitted 32-bit materialization. */
+  /** Takes ownership of packed input and its memory reservation. */
   explicit canonical_u32_window(owner_type &&admitted)
       : owner(std::in_place, std::move(admitted)),
         descriptor(owner->descriptor())
@@ -318,7 +321,7 @@ template <sequence_alphabet p_alphabet> struct canonical_u32_window {
   {
   }
 
-  /** @brief Borrows stable resident storage with its validated borrow kind. */
+  /** Borrows resident input using the borrow kind checked by the access plan. */
   explicit canonical_u32_window(
       const descriptor_type &borrowed,
       bioseq::storage::sequence_resident_borrow_kind kind) noexcept
@@ -339,7 +342,7 @@ template <sequence_alphabet p_alphabet> struct canonical_u32_window {
 #endif
   {
   }
-  /** @brief Ends test tracking before releasing admitted storage. */
+  /** Records the end of allocation tracking before owned storage is released. */
   ~canonical_u32_window() {
 #ifdef BIOSEQ_TEST_INDEXES
     note_vulkan_admitted_window_end(test_admitted_window_tracked);
@@ -351,17 +354,14 @@ template <sequence_alphabet p_alphabet> struct canonical_u32_window {
 };
 
 /**
- * @brief Retains canonical upload windows through synchronous batch execution.
+ * @brief Keeps input windows alive while a synchronous Vulkan batch uses them.
  *
- * Container construction, mutation, movement, and destruction are expressed
- * by out-of-line operations attached to the module partition that defines
- * canonical_u32_window. Full-BMI consumers therefore do not spell std::vector
- * bookkeeping for the imported move-only window at their call sites. Upload
- * descriptors remain non-owning; this batch must outlive every synchronous
- * operation that consumes them.
+ * Owned buffers remain in this batch. Callers must keep borrowed source buffers
+ * alive as well. The upload descriptors borrow these buffers.
  *
- * @tparam p_alphabet Logical sequence alphabet selected by the existing typed
- * dispatch profile.
+ * Vector operations are defined in the module that owns canonical_u32_window
+ * to avoid allocation lookup problems in Clang module consumers.
+ * @tparam p_alphabet Sequence alphabet.
  */
 template <sequence_alphabet p_alphabet> class canonical_u32_window_batch {
 public:
@@ -385,15 +385,15 @@ public:
     return *this;
   }
 
-  /** @brief Transfers one accepted window into batch-owned lifetime storage. */
+  /** Moves an input window into the batch. */
   [[gnu::noinline]] void push_back(window_type &&window) {
     windows_.push_back(std::move(window));
   }
 
-  /** @brief Releases every retained window after descriptor consumption. */
+  /** Releases all saved input windows. */
   [[gnu::noinline]] void clear() noexcept { windows_.clear(); }
 
-  /** @brief Returns the number of retained accepted windows. */
+  /** Returns the number of input windows. */
   [[nodiscard, gnu::noinline]] std::size_t size() const noexcept {
     return windows_.size();
   }
@@ -403,11 +403,12 @@ private:
 };
 
 /**
- * @brief Visits canonical input through a type-correct upload surface.
- * @tparam p_alphabet Logical sequence alphabet.
- * @tparam p_function Callback receiving a typed or byte-addressed range.
- * @param window Owned or borrowed canonical upload window.
- * @param fn Callback invoked synchronously.
+ * @brief Calls fn with an upload range suited to the window backing storage.
+ *
+ * Uses byte addresses for storage reinterpreted at a different unit width. Native
+ * 32-bit storage uses a typed compact range. Both ranges live only for the call.
+ * @param window Owned or borrowed input window.
+ * @param fn Synchronous callback.
  * @return Callback result.
  */
 template <sequence_alphabet p_alphabet, class p_function>
@@ -430,13 +431,17 @@ decltype(auto) with_canonical_u32_upload_source(
 }
 
 /**
- * @brief Borrows or materializes one canonical 32-bit upload window.
- * @tparam p_alphabet Logical sequence alphabet.
- * @param sequence Lazy sequence source.
- * @param from Inclusive biological start position.
- * @param to Exclusive biological end position.
- * @param decline_out Optional rejection record.
- * @return Prepared window, or no value when admission or geometry fails.
+ * @brief Prepares a sequence interval for upload as 32-bit packed units.
+ *
+ * Borrows compatible resident bytes. Otherwise, reserves memory and packs a
+ * copy of the interval.
+ * @param sequence Source sequence.
+ * @param from First symbol, inclusive.
+ * @param to Last symbol, exclusive.
+ * @param decline_out Optional rejection details.
+ * @return Input window, or no value for an invalid interval or failed reservation.
+ *
+ * Errors while materializing the packed copy can throw.
  */
 template <sequence_alphabet p_alphabet>
 [[nodiscard]] std::optional<canonical_u32_window<p_alphabet>>
@@ -460,13 +465,9 @@ prepare_canonical_u32_window(
   if (access.route
           == bioseq::storage::sequence_access_route::borrow_resident
       && access.resident.has_value()) {
-    // All facade Vulkan entry points below use the range only to derive byte
-    // addresses and upload its object representation; they never load a
-    // requested-width storage unit on the CPU.  They also complete upload,
-    // submission, fence drain, and result delivery before returning.  A
-    // validated stable native descriptor or cross-width byte descriptor can
-    // therefore be borrowed for that synchronous interval without an
-    // admitted O(n) repack/copy.
+    // Upload uses byte addresses, so a compatible resident layout can be
+    // borrowed without repacking the sequence. The caller keeps it alive
+    // until the synchronous upload finishes.
     return std::optional<canonical_u32_window<p_alphabet>>{
         std::in_place, *access.resident, access.resident_borrow_kind};
   }
@@ -488,13 +489,12 @@ prepare_canonical_u32_window(
 }
 
 /**
- * @brief Validates the alphabet, k-mer, and window shape for facade dispatch.
- * @tparam p_alphabet Logical sequence alphabet.
- * @param sequence Lazy sequence source.
- * @param window_size Window length in k-mers.
- * @param kmer_size K-mer length in biological symbols.
- * @param decline_out Optional rejection record.
- * @return `true` when the shape is supported.
+ * @brief Checks the alphabet, k-mer length, and minimizer window before dispatch.
+ * @param sequence Source sequence, also used for rejection details.
+ * @param window_size Number of k-mers per window.
+ * @param kmer_size Number of symbols per k-mer.
+ * @param decline_out Optional rejection details.
+ * @return True when the input shape is supported.
  */
 template <sequence_alphabet p_alphabet>
 [[nodiscard]] bool validate_facade_sketch_shape(
@@ -532,8 +532,9 @@ template <sequence_alphabet p_alphabet>
 } // namespace admitted_sequence_detail
 
 /**
- * @brief Requires the contiguous packed surface used by one Vulkan upload.
- * @tparam p_sequence Candidate packed sequence type.
+ * @brief Requires the sequence methods needed to describe packed input for upload.
+ *
+ * The caller must supply contiguous storage for the described interval.
  */
 // BIOSEQ_PRIVATE_PACKED_ACCESS_BEGIN vulkan_sketchable_sequence
 template <class p_sequence>
@@ -549,7 +550,7 @@ concept vulkan_sketchable_sequence = requires (const p_sequence& seq) {
 };
 // BIOSEQ_PRIVATE_PACKED_ACCESS_END vulkan_sketchable_sequence
 
-/** @brief Describes packed sequence bytes and shader decoding geometry. */
+/** Borrowed packed bytes with the sizes and alphabet settings needed to decode them. */
 struct sequence_upload_view {
     const void* bytes = nullptr;
     std::uint64_t byte_size = 0;
@@ -565,12 +566,11 @@ struct sequence_upload_view {
 };
 
 /**
- * @brief Owns a contiguous batch of non-owning sequence upload descriptors.
+ * @brief Owns upload descriptors while their sequence bytes remain with the caller.
  *
- * Keeping the vector operations in their defining module preserves the exact
- * dynamically-sized upload batch while avoiding cross-module allocation lookup
- * in Clang full-BMI consumers. The referenced sequence storage remains owned by
- * the caller and must outlive the batch, exactly as for one sequence_upload_view.
+ * Keep the referenced buffers alive until upload finishes. Vector operations are
+ * defined in this module to avoid allocation lookup problems in Clang module
+ * consumers.
  */
 class sequence_upload_batch {
     std::vector<sequence_upload_view> views_;
@@ -583,7 +583,7 @@ public:
     sequence_upload_batch(sequence_upload_batch&&) noexcept = default;
     sequence_upload_batch& operator=(sequence_upload_batch&&) noexcept = default;
 
-    /** @brief Reserves descriptors for one scheduler batch. */
+    /** Reserves space for a batch of upload descriptors. */
     void reserve(const std::size_t capacity) {
         views_.reserve(capacity);
     }
@@ -603,7 +603,7 @@ public:
         return views_.size();
     }
 
-    /** @brief Borrows the complete contiguous upload descriptor batch. */
+    /** Returns a span over all upload descriptors. */
     [[nodiscard]] std::span<const sequence_upload_view> view() const noexcept {
         return {views_.data(), views_.size()};
     }
@@ -621,11 +621,14 @@ public:
 }
 
 /**
- * @brief Validates one untyped upload against the typed shader contract.
- * @param upload Non-owning packed upload descriptor.
- * @param rank_lut Shared rank mapping.
- * @param kmer_size Runtime k-mer length in biological symbols.
- * @return `true` when packing, rolling width, and LUT semantics agree.
+ * @brief Checks whether packed input and its rank table match the shader settings.
+ *
+ * Checks byte counts, symbol counts, padding, and the supported k-mer width.
+ * For lookup-table alphabets, every forward and complement code must be valid.
+ * @param upload Borrowed packed input.
+ * @param rank_lut Rank-to-base mappings used by the shader.
+ * @param kmer_size Symbols per k-mer.
+ * @return True when the descriptor and decoding settings agree.
  */
 [[nodiscard]] constexpr bool vulkan_upload_contract_supported(
     const sequence_upload_view& upload,
@@ -694,7 +697,7 @@ public:
     return true;
 }
 
-/** @brief Describes a packed unit interval and its exact biological length. */
+/** Packed unit interval with its symbol count and final-unit padding. */
 struct segment_upload_descriptor {
     std::size_t lo_unit = 0;
     std::size_t hi_unit = 0;
@@ -702,7 +705,7 @@ struct segment_upload_descriptor {
     std::uint32_t tail_padding = 0;
 };
 
-/** @brief Describes one collected upload window and its emitted core interval. */
+/** Upload interval with overlap around the core whose minimizers are emitted. */
 struct gpu_sketch_segment_window {
     std::size_t sub_lo_unit = 0;
     std::size_t sub_hi_unit = 0;
@@ -713,11 +716,13 @@ struct gpu_sketch_segment_window {
 };
 
 /**
- * @brief Computes biological context retained around a segmented core.
- * @tparam p_traits Packed sequence traits.
- * @param window_size Window length in k-mers.
- * @param kmer_size K-mer length in biological symbols.
- * @return Required context in biological symbols.
+ * @brief Returns the sequence overlap needed around a segment core.
+ *
+ * Includes enough bases for a k-mer and its minimizer window, plus a small
+ * boundary allowance.
+ * @param window_size K-mers per window.
+ * @param kmer_size Symbols per k-mer.
+ * @return Context length in sequence symbols.
  */
 template <class p_traits>
 [[nodiscard]] constexpr std::uint64_t sketch_segment_context_bp(
@@ -731,11 +736,10 @@ template <class p_traits>
 
 // BIOSEQ_PRIVATE_PACKED_ACCESS_BEGIN sketch_segment_context_units
 /**
- * @brief Converts required segment context to packed storage units.
- * @tparam p_traits Packed sequence traits.
- * @param window_size Window length in k-mers.
- * @param kmer_size K-mer length in biological symbols.
- * @return At least one packed storage unit.
+ * @brief Rounds the segment overlap up to whole packed units.
+ * @param window_size K-mers per window.
+ * @param kmer_size Symbols per k-mer.
+ * @return At least one storage unit.
  */
 template <class p_traits>
 [[nodiscard]] constexpr std::size_t sketch_segment_context_units(
@@ -754,12 +758,13 @@ template <class p_traits>
 
 // BIOSEQ_PRIVATE_PACKED_ACCESS_BEGIN compute_segment_descriptor
 /**
- * @brief Clamps a packed unit interval and computes its biological geometry.
- * @tparam p_sequence Packed sequence type.
+ * @brief Clamps a unit interval to the sequence and counts its symbols.
+ *
+ * Applies final-unit padding only when the interval reaches the sequence end.
  * @param seq Source sequence.
- * @param lo_unit Inclusive packed unit index.
- * @param hi_unit Exclusive packed unit index.
- * @return Validated upload descriptor.
+ * @param lo_unit First packed unit, inclusive.
+ * @param hi_unit Last packed unit, exclusive.
+ * @return Clamped interval and upload sizes.
  */
 template <class p_sequence>
 [[nodiscard]] segment_upload_descriptor compute_segment_descriptor(
@@ -792,14 +797,16 @@ template <class p_sequence>
 
 // BIOSEQ_PRIVATE_PACKED_ACCESS_BEGIN make_sketch_segment_window
 /**
- * @brief Expands a core unit interval with bounded minimizer context.
- * @tparam p_sequence Packed sequence type.
+ * @brief Adds overlap around a segment core within the source interval.
+ *
+ * Records the core separately so callers can discard results from the overlap.
+ * The output position offset is measured from the source sequence start.
  * @param seq Source sequence.
- * @param descriptor Bounds of the complete source interval.
- * @param core_lo_unit Inclusive core unit index.
- * @param core_hi_unit Exclusive core unit index.
- * @param context_units Context retained on each available side.
- * @return Upload and emission geometry for the segment.
+ * @param descriptor Bounds of the requested source interval.
+ * @param core_lo_unit First core unit, inclusive.
+ * @param core_hi_unit Last core unit, exclusive.
+ * @param context_units Overlap to keep on each side.
+ * @return Upload bounds and result offsets.
  */
 template <class p_sequence>
 [[nodiscard]] gpu_sketch_segment_window make_sketch_segment_window(
@@ -835,15 +842,14 @@ template <class p_sequence>
 // BIOSEQ_PRIVATE_PACKED_ACCESS_END make_sketch_segment_window
 
 /**
- * @brief Bisects a segment core while restoring context on both halves.
- * @tparam p_sequence Packed sequence type.
+ * @brief Splits a segment core in half and adds overlap to both halves.
  * @param seq Source sequence.
- * @param descriptor Bounds of the complete source interval.
+ * @param descriptor Bounds of the requested source interval.
  * @param window Segment to split.
- * @param context_units Context retained around each new core.
- * @param left Receives the lower core half.
- * @param right Receives the upper core half.
- * @return `false` when the core cannot be divided further.
+ * @param context_units Overlap around each new core.
+ * @param left Receives the first half.
+ * @param right Receives the second half.
+ * @return False when the core cannot form two nonempty halves.
  */
 template <class p_sequence>
 [[nodiscard]] bool split_sketch_segment_window(
@@ -880,13 +886,15 @@ template <class p_sequence>
 
 // BIOSEQ_PRIVATE_PACKED_ACCESS_BEGIN admitted_sketch_collection_limit_bp
 /**
- * @brief Selects a collection limit that fits current memory admission.
- * @tparam p_minimizer_type Packed output record.
- * @tparam p_traits Packed sequence traits.
- * @param window_size Window length in k-mers.
- * @param kmer_size K-mer length in biological symbols.
- * @param use Requested GPU sketch output purpose.
- * @return Biological-symbol limit for one dispatch.
+ * @brief Chooses a segment size using the currently available memory budget.
+ *
+ * Starts at the maximum size and halves it until the estimated buffers leave
+ * room for other work. The minimum size is returned even if its reservation
+ * may fail later.
+ * @param window_size K-mers per window.
+ * @param kmer_size Symbols per k-mer.
+ * @param use Requested kind of sketch output.
+ * @return Suggested symbol limit for one dispatch.
  */
 template <class p_minimizer_type, class p_traits>
 [[nodiscard]] std::uint64_t admitted_sketch_collection_limit_bp(
@@ -896,8 +904,7 @@ template <class p_minimizer_type, class p_traits>
 {
     using storage_unit = typename p_traits::storage_unit;
     constexpr std::uint64_t collected_floor_bp = 1'000'000u;
-    // Bound one dispatch while retaining room for large target segments under
-    // ordinary memory admission.
+    // Limit the size of one dispatch while allowing large target segments.
     constexpr std::uint64_t collected_ceil_bp = 96'000'000u;
     const std::uint64_t available =
         bioseq::parallelism::memory_admission_controller::instance()
@@ -942,16 +949,17 @@ template <class p_minimizer_type, class p_traits>
 
 // BIOSEQ_PRIVATE_PACKED_ACCESS_BEGIN sketch_segment_windows
 /**
- * @brief Tiles a source descriptor into context-preserving GPU windows.
- * @tparam p_minimizer_type Packed output record.
- * @tparam p_sequence Packed sequence type.
+ * @brief Divides a sequence interval into GPU segments with overlap.
+ *
+ * Cores cover the source interval once. Adjacent uploads overlap so minimizer
+ * windows at the core boundaries have the required neighboring bases.
  * @param seq Source sequence.
- * @param descriptor Bounds of the complete source interval.
- * @param window_size Window length in k-mers.
- * @param kmer_size K-mer length in biological symbols.
- * @param use Requested GPU sketch output purpose.
- * @param collected_limit_override Optional fixed biological-symbol limit.
- * @return Ordered upload windows covering every core unit once.
+ * @param descriptor Bounds of the requested interval.
+ * @param window_size K-mers per window.
+ * @param kmer_size Symbols per k-mer.
+ * @param use Requested kind of sketch output.
+ * @param collected_limit_override Suggested symbol limit, or zero to use the memory budget.
+ * @return Segments in sequence order.
  */
 template <class p_minimizer_type, class p_sequence>
 [[nodiscard]] std::vector<gpu_sketch_segment_window> sketch_segment_windows(
@@ -1015,12 +1023,12 @@ template <class p_minimizer_type, class p_sequence>
 
 // BIOSEQ_PRIVATE_PACKED_ACCESS_BEGIN make_upload_view_from_window
 /**
- * @brief Creates shader upload geometry for one packed window.
- * @tparam p_sequence Packed sequence type.
- * @tparam p_addressed_element Native storage or byte address element type.
- * @param base Address of the window's first packed unit.
- * @param descriptor Exact unit and biological interval.
- * @return Non-owning upload view.
+ * @brief Describes a packed window for shader upload.
+ * @param base Address of the first packed unit in the window.
+ * @param descriptor Unit bounds, symbol count, and padding.
+ * @return A borrowed byte range with shader decoding settings.
+ *
+ * The caller keeps the source bytes alive until upload finishes.
  */
 template <class p_sequence, class p_addressed_element>
 [[nodiscard]] inline sequence_upload_view make_upload_view_from_window(
@@ -1057,10 +1065,9 @@ template <class p_sequence, class p_addressed_element>
 
 // BIOSEQ_PRIVATE_PACKED_ACCESS_BEGIN make_sequence_upload_view
 /**
- * @brief Creates a non-owning upload view for a contiguous packed sequence.
- * @tparam p_sequence Sequence satisfying `vulkan_sketchable_sequence`.
- * @param seq Source sequence.
- * @return Upload bytes and shader decoding geometry.
+ * @brief Describes a contiguous packed sequence for upload without copying it.
+ * @param seq Source sequence, kept alive by the caller until upload finishes.
+ * @return Packed bytes and shader decoding settings.
  */
 template <vulkan_sketchable_sequence p_sequence>
 [[nodiscard]] inline sequence_upload_view make_sequence_upload_view(const p_sequence& seq) {
@@ -1077,14 +1084,12 @@ template <vulkan_sketchable_sequence p_sequence>
 }
 
 /**
- * @brief Creates an upload view for an admitted packed sequence owner.
+ * @brief Describes an owned packed sequence for upload without copying it.
  *
- * The owner must outlive upload completion because the view does not copy or
- * acquire the backing storage.
- *
- * @tparam p_alphabet Logical sequence alphabet.
- * @param owner Admitted packed sequence owner.
- * @return Validated upload bytes and shader decoding geometry.
+ * The owner must outlive upload completion. This function checks the packed
+ * layout and counts before returning a view of the existing bytes.
+ * @param owner Packed sequence and its memory reservation.
+ * @return Packed bytes and shader decoding settings.
  * @throws vulkan_runtime_error If the resident descriptor is inconsistent.
  */
 template <sequence_alphabet p_alphabet>
