@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Defines compile-heavy logging specializations in the logging named module.
+ * @brief Defines two debug-log specializations for file output.
  */
 module;
 
