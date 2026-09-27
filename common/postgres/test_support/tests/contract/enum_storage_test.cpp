@@ -1,4 +1,4 @@
-/** @file Catch contracts for PostgreSQL enum storage registration. */
+/** @file Tests that enum settings keep one storage cell and can retry failed registration. */
 #include <catch2/catch_test_macros.hpp>
 
 #include <cstddef>
