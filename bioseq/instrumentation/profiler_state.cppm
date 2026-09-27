@@ -1,10 +1,9 @@
 /**
  * @file instrumentation/profiler_state.cppm
- * @brief Typed per-thread storage and scoped installation.
+ * @brief Profiler storage and installation for the current thread.
  *
- * The state remains separate from pipeline context objects so enabling
- * instrumentation does not alter their layout. A scoped installer restores the
- * previous pointer, which keeps nested dispatch safe.
+ * An installed_profiler_scope saves the previous pointer and restores it on exit.
+ * This lets nested work temporarily use another profiler.
  */
 module;
 
@@ -18,7 +17,7 @@ import bioseq.instrumentation.aggregation;
 
 export namespace bioseq::instrumentation {
 
-/** @brief Allocation arena currently attributed to the calling thread. */
+/** @brief Memory category used for allocation accounting. */
 enum class arena_kind : std::uint8_t {
     none = 0,
     scratch = 1,
@@ -64,7 +63,7 @@ struct profiler_state {
     }
 };
 
-/** @brief Active profiler pointer for one instantiated configuration. */
+/** @brief Active profiler for this thread and configuration. */
 template<profiling_configuration p_configuration_type>
 inline thread_local profiler_state<p_configuration_type>* active_thread_profiler = nullptr;
 
@@ -73,7 +72,7 @@ template<profiling_configuration p_configuration_type>
 struct [[nodiscard]] installed_profiler_scope {
     profiler_state<p_configuration_type>* previous_profiler = nullptr;
 
-    /** @brief Install a profiler and retain the prior thread-local pointer. */
+    /** @brief Install a profiler and save the previous thread-local pointer. */
     [[gnu::always_inline]]
     explicit installed_profiler_scope(profiler_state<p_configuration_type>& profiler) noexcept {
         previous_profiler = active_thread_profiler<p_configuration_type>;

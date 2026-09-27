@@ -1,9 +1,9 @@
 /**
  * @file instrumentation/pmu/macos.cppm
- * @brief Apple Silicon kperf backend.
+ * @brief Read macOS hardware counters through kperf.
  *
- * Dynamically resolved kperf and kperfdata symbols provide four thread-local
- * counters. Initialization failure leaves the portable API unavailable.
+ * Load kperf and kperfdata at runtime, find matching events, and configure
+ * thread counter reads. Failed setup leaves this backend unavailable.
  */
 module;
 
@@ -52,9 +52,9 @@ struct kpep_event {
     std::uint8_t  is_fixed;
 };
 
-/// Opaque event-database handle owned by kperfdata.
+/// Event-database handle managed by kperfdata.
 struct kpep_db {};
-/// Opaque event-configuration handle owned by kperfdata.
+/// Event-configuration handle managed by kperfdata.
 struct kpep_config {};
 
 // Function pointer typedefs for the symbols we resolve at runtime.
@@ -78,8 +78,8 @@ using fn_kpep_config_kpc_count   = int (*)(kpep_config*, std::size_t*);
 using fn_kpep_config_kpc_map     = int (*)(kpep_config*, std::size_t*, std::size_t);
 using fn_kpep_config_kpc         = int (*)(kpep_config*, kpc_configuration_word*, std::size_t);
 
-/// Process-wide kperf state. Initialized once on first use. Each thread can
-/// independently read counters because kpc_get_thread_counters is per-thread.
+/// Framework functions and event settings shared by the process.
+/// Initialization runs once, while counter reads request the calling thread's values.
 struct process_state {
     std::atomic<bool> is_initialized{false};
     std::atomic<bool> has_failed{false};
@@ -109,27 +109,25 @@ struct process_state {
 
     std::uint32_t classes        = 0;
     std::uint32_t counter_count  = 0;
-    std::size_t   counter_map[4] = {0, 0, 0, 0};   // event-index -> counter slot
+    std::size_t   counter_map[4] = {0, 0, 0, 0};   // Event index to hardware-counter slot.
 };
 
-/// Returns the process-wide state without exposing it outside this module.
-/// @return The state instance retained until process shutdown.
+/// Return this module's shared process state.
+/// @return State kept until process shutdown.
 inline process_state& get_process_state() noexcept {
     static process_state state;
     return state;
 }
 
-/// Returns the guard serializing process-wide PMU initialization.
-/// @return The guard retained until process shutdown.
+/// Return the flag used to run process setup once.
+/// @return Process-lifetime initialization flag.
 inline std::once_flag& initialization_once() noexcept {
     static std::once_flag flag;
     return flag;
 }
 
-/// Try to dlopen() kperf.framework / kperfdata.framework and resolve the
-/// minimum symbol set needed for our 4-event group. Returns true iff
-/// every required symbol resolved.
-/// @return `true` when both frameworks and every required symbol are available.
+/// Load kperf and kperfdata and find the required functions.
+/// @return True when both frameworks and all required symbols are available.
 [[nodiscard]] inline bool resolve_symbols(process_state& state) noexcept {
     constexpr const char* kperf_framework_path =
         "/System/Library/PrivateFrameworks/kperf.framework/kperf";
@@ -142,7 +140,7 @@ inline std::once_flag& initialization_once() noexcept {
         return false;
     }
 
-    // Resolve one borrowed symbol address from a loaded framework.
+    // Look up a function in the loaded framework.
     auto resolve = [](void* handle, const char* name) noexcept -> void* {
         return ::dlsym(handle, name);
     };
@@ -187,10 +185,8 @@ inline std::once_flag& initialization_once() noexcept {
            state.kpep_config_kpc         != nullptr;
 }
 
-/// The 4-event canon. The first matching alias (by lookup against the
-/// current host's PMC database) wins. On Apple Silicon the
-/// FIXED_CYCLES / FIXED_INSTRUCTIONS pair lives on dedicated fixed
-/// counters and the two branch counters consume two configurable slots.
+/// Alternative event names tried in order for each reported counter.
+/// The branch-event list includes an instruction-count fallback.
 struct event_alias {
     const char* names[8];
 };
@@ -214,9 +210,8 @@ inline constexpr event_alias profile_events[4] = {
         nullptr } },
 };
 
-/// Walk the alias list and return the first event the loaded PMC
-/// database knows about, or nullptr if none match.
-/// @return A borrowed event descriptor, or `nullptr` when no alias is known.
+/// Find the first alias known to the loaded event database.
+/// @return Borrowed event descriptor, or nullptr if none match.
 [[nodiscard]] inline kpep_event* find_event(
     process_state& state, kpep_db* db, const event_alias& alias) noexcept
 {
@@ -230,14 +225,9 @@ inline constexpr event_alias profile_events[4] = {
     return nullptr;
 }
 
-/// Process-wide one-shot init. Returns true on success, false on any
-/// failure (permissions, missing symbols, unknown CPU, ...). The caller
-/// can call this once and remember the result. Subsequent calls are
-/// no-ops. Failure modes are reported via stderr (cheap and visible
-/// when running the bench from a TTY) so the operator can tell
-/// `requires sudo` apart from `unknown CPU` apart from `framework
-/// missing` apart from `event not found on this PMU`.
-/// @return `true` when the four-event group is configured and counting.
+/// Configure process-wide counters after the caller has serialized setup.
+/// Report several setup failures to stderr, including missing frameworks and events.
+/// @return True when event configuration and counting setup succeed.
 [[nodiscard]] inline bool initialize_process_unlocked() noexcept {
     auto& state = get_process_state();
 
@@ -248,8 +238,7 @@ inline constexpr event_alias profile_events[4] = {
         return false;
     }
 
-    // Permission check — needs root. Without root, kpc_force_all_ctrs_get
-    // returns EPERM and there is nothing more we can do.
+    // Check whether this process can access the hardware counters.
     int forced = 0;
     if (state.kpc_force_all_ctrs_get(&forced) != 0) {
         std::fprintf(stderr,
@@ -284,9 +273,7 @@ inline constexpr event_alias profile_events[4] = {
         return false;
     }
 
-    // Look up our 4 canonical events. If any one is unavailable on this
-    // CPU, abort entire init — the report would be missing a column
-    // that downstream code expects.
+    // Find all four requested events before enabling any counter group.
     static constexpr const char* event_names[4] = {
         "cycles", "instructions", "branches", "branch-misses"
     };
@@ -338,9 +325,8 @@ inline constexpr event_alias profile_events[4] = {
         return false;
     }
 
-    // The kpep config is no longer needed after we've copied the
-    // register configuration out — kpc_set_config takes ownership of
-    // the kernel-side state.
+    // The register settings have been copied out, so the temporary event
+    // configuration and database can now be freed.
     state.kpep_config_free(configuration);
     state.kpep_db_free(db);
 
@@ -386,12 +372,9 @@ inline constexpr event_alias profile_events[4] = {
 
 }  // namespace detail
 
-/// Process-wide init. Idempotent: subsequent calls are no-ops once the
-/// first one succeeds (or have failed). The bool return is the cached
-/// success/failure of the *first* invocation. The init is std::call_once
-/// guarded so concurrent threads can race here without corrupting the
-/// kperf state.
-/// @return The cached result of the first initialization attempt.
+/// Run process setup once, even when several threads call concurrently.
+/// Cache the first success or failure.
+/// @return Result of the first setup attempt.
 [[nodiscard]] inline bool initialize_process() noexcept {
     auto& state = detail::get_process_state();
     if (state.is_initialized.load(std::memory_order_acquire)) return true;
@@ -408,9 +391,9 @@ inline constexpr event_alias profile_events[4] = {
     return state.is_initialized.load(std::memory_order_acquire);
 }
 
-/// Per-thread init. Enables thread-local PMU counting on the calling
-/// thread. Idempotent. Thread-local cached after first call.
-/// @return `true` when counters are enabled for the calling thread.
+/// Set up thread counting once after process setup succeeds.
+/// Cache the result for this thread. shutdown_thread does not clear that cache.
+/// @return Cached thread setup result.
 [[nodiscard]] inline bool initialize_thread() noexcept {
     if (!initialize_process()) return false;
     auto& state = detail::get_process_state();
@@ -428,23 +411,19 @@ inline constexpr event_alias profile_events[4] = {
     return true;
 }
 
-/// Disables counting for the calling thread without releasing process-wide state.
+/// Request that thread counting stop while keeping process-wide setup.
 inline void shutdown_thread() noexcept {
     auto& state = detail::get_process_state();
     if (!state.is_initialized.load(std::memory_order_acquire)) return;
-    // Best-effort disable of per-thread counting. On macOS this is
-    // process-wide for the calling thread. We do not unwind the
-    // process-wide state because other threads might still be using it.
+    // Keep framework and event state because other threads may still use it.
     if (state.kpc_set_thread_counting != nullptr) {
         state.kpc_set_thread_counting(0);
     }
 }
 
-/// Read the current 4-event counter values for this thread. Returns
-/// zeros if the per-thread group is not initialized. The kernel hands
-/// back monotonically-increasing counter values. The caller is expected
-/// to subtract a baseline taken at scope-begin to obtain the delta.
-/// @return The cumulative thread-local counters, or zeros when unavailable.
+/// Read the counters selected by the saved event-to-slot mapping.
+/// Subtract an earlier sample to measure work over an interval.
+/// @return Counts, or zeros if process setup has not succeeded or the read fails.
 [[nodiscard]] inline counter_sample read_counters() noexcept {
     auto& state = detail::get_process_state();
     if (!state.is_initialized.load(std::memory_order_acquire)) return counter_sample{};
@@ -462,8 +441,8 @@ inline void shutdown_thread() noexcept {
     };
 }
 
-/// Reports whether process-wide counter initialization succeeded.
-/// @return `true` when the calling thread may attempt a counter read.
+/// Report whether process-wide counter setup succeeded.
+/// @return Recorded process setup state, regardless of thread setup.
 [[nodiscard]] inline bool are_thread_counters_available() noexcept {
     auto& state = detail::get_process_state();
     return state.is_initialized.load(std::memory_order_acquire);

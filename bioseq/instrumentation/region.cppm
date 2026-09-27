@@ -1,11 +1,9 @@
 /**
  * @file instrumentation/region.cppm
- * @brief Scoped region timing and hardware-counter measurement.
+ * @brief Measure elapsed time and hardware counters over a scope.
  *
- * The explicitly templated overload follows the caller's dispatch
- * configuration. The non-templated overload targets the independently
- * installed benchmark profiler state. Both paths return immediately when no
- * matching state is installed.
+ * The template uses the caller's configuration. The overload without a template
+ * argument uses benchmark profiler state. Both need an installed thread profiler.
  */
 module;
 
@@ -23,14 +21,14 @@ import bioseq.instrumentation.pmu;
 
 export namespace bioseq::instrumentation {
 
-/// Stack-local state captured at region begin. It occupies about 16 bytes and is never allocated.
+/// Region identity and start time kept inside a scope measurement.
 struct region_measurement {
     const region_descriptor* descriptor = nullptr;
     std::uint64_t start_time_ns = 0;
     bool is_skipped = true;
 };
 
-/** @brief Scoped region measurement for one compile-time configuration. */
+/** @brief Measure one region until this scope is destroyed. */
 template<profiling_configuration p_configuration_type>
 struct [[nodiscard]] region_scope {
     region_measurement measurement{};
@@ -55,7 +53,7 @@ struct [[nodiscard]] region_scope {
         }
     }
 
-    /** @brief Record elapsed time and available PMU deltas. */
+    /** @brief Add elapsed time and available hardware-counter changes to the region. */
     [[gnu::always_inline]] inline ~region_scope() noexcept {
         if constexpr (p_configuration_type::enable_profiling) {
             if (measurement.is_skipped) return;
@@ -95,7 +93,7 @@ inline region_scope<p_configuration_type> region(const region_descriptor* descri
     return region_scope<p_configuration_type>(descriptor);
 }
 
-/** @brief Measure a region against the benchmark-owned profiler state. */
+/** @brief Measure a region using the installed benchmark profiler. */
 [[nodiscard, gnu::always_inline]]
 inline region_scope<benchmark_profiling_configuration>
 region(const region_descriptor* descriptor) noexcept {

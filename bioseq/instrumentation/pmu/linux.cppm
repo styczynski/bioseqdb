@@ -1,9 +1,9 @@
 /**
  * @file instrumentation/pmu/linux.cppm
- * @brief Linux perf_event_open backend.
+ * @brief Read Linux hardware counters with perf_event_open.
  *
- * A thread-local perf group returns four coherent raw counters in one read.
- * Failed setup is cached and reported as an unavailable zero sample.
+ * Each thread owns a group of four counters read together. Failed setup is
+ * remembered so later measurements return zeros without retrying setup.
  */
 module;
 
@@ -23,10 +23,9 @@ export module bioseq.instrumentation.pmu.linux_backend;
 export namespace bioseq::instrumentation::pmu::linux_backend {
 
 /**
- * @brief Hold one Linux backend sample in the public counter order.
+ * @brief Linux counter sample with the same fields as the public PMU sample.
  *
- * This backend-local type deliberately mirrors `pmu::counter_sample` without
- * coupling the platform module to the public dispatch module.
+ * Keeping this type local avoids importing the module that selects a backend.
  */
 struct counter_sample {
     std::uint64_t cycles = 0;
@@ -41,10 +40,10 @@ static_assert(sizeof(counter_sample) == 32);
 namespace detail {
 
 /**
- * @brief Own the calling thread's four perf-event file descriptors.
+ * @brief File descriptors and setup status for one thread's counter group.
  *
- * `cycles_fd` is the group leader. The initialization flags cache successful
- * and failed setup independently so a denied host does not retry on a hot path.
+ * The cycle counter leads the group. Remember failed setup so each measurement
+ * does not repeat a denied system call.
  */
 struct per_thread_file_descriptors {
     int cycles_fd = -1;
@@ -56,13 +55,11 @@ struct per_thread_file_descriptors {
 };
 
 /**
- * @brief Match the exact byte layout returned by a grouped perf `read()`.
+ * @brief Layout of a grouped perf read without event IDs.
  *
- * The leader requests GROUP plus TOTAL_TIME_ENABLED and TOTAL_TIME_RUNNING,
- * but not PERF_FORMAT_ID. The kernel therefore writes the event count, the two
- * timing fields, then cycles, instructions, branches, and branch misses in the
- * event-open order. The timing fields remain present even though raw values are
- * intentionally reported without multiplex scaling.
+ * The header contains an event count and two timing fields. Counter values
+ * follow in the order they were opened. Keep the timing fields in this layout
+ * even though this backend returns raw counts without adjusting for event multiplexing.
  */
 struct group_read_without_ids {
     std::uint64_t event_count;
@@ -76,14 +73,13 @@ struct group_read_without_ids {
 static_assert(sizeof(group_read_without_ids) == 7 * sizeof(std::uint64_t));
 
 /**
- * @brief Invoke `perf_event_open` through its Linux syscall boundary.
- *
- * @param[in] attributes Fully initialized kernel event attributes.
- * @param[in] process_id Thread/process selector passed to the kernel.
- * @param[in] cpu CPU selector passed to the kernel.
- * @param[in] group_file_descriptor Group leader fd, or `-1` to create one.
- * @param[in] flags Kernel syscall flags.
- * @return The kernel's file descriptor or negative error result.
+ * @brief Call the Linux perf_event_open system call.
+ * @param[in] attributes Kernel event settings.
+ * @param[in] process_id Thread or process selector.
+ * @param[in] cpu CPU selector.
+ * @param[in] group_file_descriptor Group leader descriptor, or -1 for a new group.
+ * @param[in] flags System-call flags.
+ * @return Open descriptor, or a negative value on failure.
  */
 [[nodiscard]] inline long perf_event_open_syscall(perf_event_attr* attributes,
                                                   pid_t process_id,
@@ -111,9 +107,7 @@ static_assert(sizeof(group_read_without_ids) == 7 * sizeof(std::uint64_t));
     attributes.disabled = group_file_descriptor == -1 ? 1 : 0;
     attributes.exclude_kernel = 1;
     attributes.exclude_hv = 1;
-    // Only the leader needs the read format. Sibling events inherit
-    // the group's read interpretation when read() is issued on the
-    // leader. We set it on the leader only.
+    // Read all event values through the group leader, which carries the read format.
     if (group_file_descriptor == -1) {
         attributes.read_format =
             PERF_FORMAT_GROUP | PERF_FORMAT_TOTAL_TIME_ENABLED | PERF_FORMAT_TOTAL_TIME_RUNNING;
@@ -125,9 +119,8 @@ static_assert(sizeof(group_read_without_ids) == 7 * sizeof(std::uint64_t));
 inline thread_local per_thread_file_descriptors thread_file_descriptors{};
 
 /**
- * @brief Close every descriptor in leader-to-sibling order.
- *
- * @param[in,out] file_descriptors Calling-thread descriptor state to clear.
+ * @brief Close all counter descriptors and mark them unused.
+ * @param[in,out] file_descriptors Thread counter handles to clear.
  */
 inline void close_group(per_thread_file_descriptors& file_descriptors) noexcept {
     if (file_descriptors.cycles_fd >= 0) {
@@ -149,14 +142,13 @@ inline void close_group(per_thread_file_descriptors& file_descriptors) noexcept 
 }
 
 /**
- * @brief Open and enable all four events as one calling-thread group.
+ * @brief Open and start the thread's four counters as one group.
  *
- * Event creation remains cycles, instructions, branches, then branch misses.
- * Reset and enable are issued on the leader only after every sibling opens.
- * Partial failure closes all descriptors in the same stable order.
+ * Open cycles first so it becomes the leader. If a later open, reset, or enable
+ * fails, close the descriptors already opened.
  *
- * @param[in,out] file_descriptors Calling-thread descriptor state to populate.
- * @return `true` only after the complete group is reset and enabled.
+ * @param[in,out] file_descriptors Thread handles to populate.
+ * @return True after the complete group has been reset and enabled.
  */
 [[nodiscard]] inline bool open_group(per_thread_file_descriptors& file_descriptors) noexcept {
     file_descriptors.cycles_fd = open_counter(PERF_COUNT_HW_CPU_CYCLES, -1);
@@ -185,7 +177,7 @@ inline void close_group(per_thread_file_descriptors& file_descriptors) noexcept 
         return false;
     }
 
-    // Reset and enable the entire group via one ioctl on the leader.
+    // Reset, then enable the full group through its leader.
     if (::ioctl(file_descriptors.cycles_fd, PERF_EVENT_IOC_RESET, PERF_IOC_FLAG_GROUP) != 0) {
         close_group(file_descriptors);
         return false;
@@ -200,23 +192,20 @@ inline void close_group(per_thread_file_descriptors& file_descriptors) noexcept 
 } // namespace detail
 
 /**
- * @brief Confirm process-level initialization for the per-thread Linux backend.
- *
- * Linux needs no process-wide setup because each thread owns its perf group.
- *
- * @return Always `true` on Linux.
+ * @brief Complete the process setup step without opening counters.
+ * @return Always true. Each thread opens its own group.
  */
 [[nodiscard]] inline bool initialize_process() noexcept {
     return true;
 }
 
 /**
- * @brief Lazily initialize the calling thread's four-event perf group.
+ * @brief Initialize this thread's counter group on first use.
  *
- * Successful and failed outcomes are cached thread-locally, so subsequent
- * calls do not issue more syscalls until a successful group is shut down.
+ * Remember success or failure. A successfully opened group can be initialized
+ * again after shutdown. A failed setup remains disabled for the thread.
  *
- * @return `true` when the complete group is available.
+ * @return True when this thread's group is initialized.
  */
 [[nodiscard]] inline bool initialize_thread() noexcept {
     auto& file_descriptors = detail::thread_file_descriptors;
@@ -246,12 +235,12 @@ inline void shutdown_thread() noexcept {
 }
 
 /**
- * @brief Read the calling thread's four counters with one grouped syscall.
+ * @brief Read the thread's four counters through the group leader.
  *
- * Raw values are returned without multiplex scaling, preserving the counter
- * contract. A short read or unexpected event count yields zeros.
+ * Return raw counts, without adjusting for multiplexed event scheduling.
+ * A missing group, short read, or unexpected event count returns zeros.
  *
- * @return Counters in cycles, instructions, branches, branch-misses order.
+ * @return Cycles, instructions, branches, and branch misses.
  */
 [[nodiscard]] inline counter_sample read_counters() noexcept {
     auto& file_descriptors = detail::thread_file_descriptors;
@@ -284,17 +273,17 @@ inline void shutdown_thread() noexcept {
 
 #else // !defined(__linux__)
 
-/** @brief Report that process-level Linux PMU setup is unavailable. */
+/** @brief Return false when this is not a Linux build. */
 [[nodiscard]] inline bool initialize_process() noexcept {
     return false;
 }
 
-/** @brief Report that calling-thread Linux PMU setup is unavailable. */
+/** @brief Return false because Linux thread counters are unavailable here. */
 [[nodiscard]] inline bool initialize_thread() noexcept {
     return false;
 }
 
-/** @brief Perform the no-op shutdown for a non-Linux translation. */
+/** @brief Do nothing in a non-Linux build. */
 inline void shutdown_thread() noexcept {}
 
 /** @brief Return an all-zero sample when the Linux backend is unavailable. */
