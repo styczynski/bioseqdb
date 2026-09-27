@@ -1,6 +1,6 @@
 /**
  * @file bioseq_caching/core/column_format.cppm
- * @brief Policy-hashed little-endian columnar row-group writer and reader.
+ * @brief Writes and validates cached rows stored in column groups.
  */
 module;
 
@@ -132,7 +132,7 @@ struct row_group_limits {
     std::uint64_t value_bytes = k_default_row_group_value_bytes;
 };
 
-/** Exact final size after all row-group bytes have been serialized. */
+/** Calculates the final store size from the end of its row groups, including the index and checksum footer. */
 [[nodiscard]] inline constexpr std::expected<std::uint64_t, format_error>
 projected_column_store_bytes(std::uint64_t end_of_groups, std::uint64_t row_group_count) noexcept {
     if (row_group_count > k_maximum_column_store_row_groups) {
@@ -165,7 +165,7 @@ projected_column_store_bytes(std::uint64_t end_of_groups, std::uint64_t row_grou
     return *total;
 }
 
-/** Encode validity bits with one for non-NULL and deterministic zero tail bits. */
+/** Packs null flags into bits, with one for a present value and zero in unused tail bits. */
 [[nodiscard]] inline std::vector<std::byte> encode_validity(std::span<const bool> valid) {
     std::vector<std::byte> bytes((valid.size() + 7u) / 8u, std::byte{0});
     for (std::size_t index = 0; index < valid.size(); ++index) {
@@ -176,7 +176,7 @@ projected_column_store_bytes(std::uint64_t end_of_groups, std::uint64_t row_grou
     return bytes;
 }
 
-/** Support the standard packed-bool container used by boundary fixtures. */
+/** Packs null flags from std::vector<bool> using the same bitmap format. */
 [[nodiscard]] inline std::vector<std::byte> encode_validity(const std::vector<bool>& valid) {
     std::vector<std::byte> bytes((valid.size() + 7u) / 8u, std::byte{0});
     for (std::size_t index = 0; index < valid.size(); ++index) {
@@ -187,7 +187,7 @@ projected_column_store_bytes(std::uint64_t end_of_groups, std::uint64_t row_grou
     return bytes;
 }
 
-/** Decode exactly the requested number of validity bits. */
+/** Decodes the requested null flags, rejecting the wrong bitmap size or nonzero unused bits. */
 [[nodiscard]] inline std::expected<std::vector<bool>, format_error>
 decode_validity(std::span<const std::byte> bytes, std::size_t row_count) {
     if (bytes.size() != (row_count + 7u) / 8u) {
@@ -208,7 +208,7 @@ decode_validity(std::span<const std::byte> bytes, std::size_t row_count) {
     return valid;
 }
 
-/** Verify that bits beyond the row count cannot destabilize checksums. */
+/** Checks bitmap size and requires unused tail bits to be zero for repeatable checksums. */
 [[nodiscard]] inline bool unused_tail_bits_are_zero(std::span<const std::byte> bytes,
                                                     std::size_t row_count) noexcept {
     if (bytes.size() != (row_count + 7u) / 8u || bytes.empty()) {
@@ -222,7 +222,7 @@ decode_validity(std::span<const std::byte> bytes, std::size_t row_count) {
     return (std::to_integer<unsigned int>(bytes.back()) & mask) == 0;
 }
 
-/** Reject dictionary candidates that do not strictly reduce encoded bytes. */
+/** Checks whether a dictionary and its indexes use fewer bytes than the plain values. */
 [[nodiscard]] constexpr bool dictionary_is_beneficial(std::uint64_t plain_bytes,
                                                       std::uint64_t dictionary_bytes,
                                                       std::uint64_t index_bytes) noexcept {
@@ -230,7 +230,7 @@ decode_validity(std::span<const std::byte> bytes, std::size_t row_count) {
     return encoded.has_value() && *encoded < plain_bytes;
 }
 
-/** Validate a DSA/file reference before deriving a backing-store pointer. */
+/** Checks a shared-memory or file block reference before the caller accesses its bytes. */
 [[nodiscard]] constexpr bool validate_block_reference(const block_reference& reference,
                                                       std::uint64_t backing_size) noexcept {
     const bool known_tier =
@@ -273,7 +273,7 @@ struct group_index_entry {
     std::uint32_t crc32c = 0;
 };
 
-/** Overwrite a fixed-width integer already reserved in a byte vector. */
+/** Writes a little-endian integer into space already reserved in a byte vector. */
 template <class p_integer_type>
 void write_little_endian_at(std::vector<std::byte>& destination,
                             std::size_t offset,
@@ -284,7 +284,7 @@ void write_little_endian_at(std::vector<std::byte>& destination,
     std::copy(encoded.begin(), encoded.end(), destination.begin() + offset);
 }
 
-/** Append zero padding to reach a checked power-of-two alignment. */
+/** Pads with zero bytes until the absolute offset meets the requested alignment. */
 [[nodiscard]] inline std::expected<void, format_error> align_vector(std::vector<std::byte>& bytes,
                                                                     std::uint64_t alignment,
                                                                     std::uint64_t base_offset = 0) {
@@ -304,7 +304,7 @@ void write_little_endian_at(std::vector<std::byte>& destination,
     return {};
 }
 
-/** Return the dense or aligned-stride width for a fixed encoding. */
+/** Returns the space between fixed-size values, including alignment padding for values stored by reference. */
 [[nodiscard]] inline std::expected<std::uint64_t, format_error>
 fixed_value_stride(const column_descriptor& descriptor) noexcept {
     if (descriptor.type_length <= 0) {
@@ -321,7 +321,7 @@ fixed_value_stride(const column_descriptor& descriptor) noexcept {
     return *stride;
 }
 
-/** Build the exact canonical descriptor block used for the schema digest. */
+/** Validates and serializes the column schema in the fixed format used for schema hashes. */
 [[nodiscard]] inline std::expected<std::vector<std::byte>, format_error>
 serialize_schema(std::span<const column_schema> schema) {
     if (schema.size() > k_maximum_provider_boundary_columns ||
@@ -395,7 +395,7 @@ serialize_schema(std::span<const column_schema> schema) {
     return bytes;
 }
 
-/** Copy selected byte ranges into one canonical chunk-checksum input. */
+/** Joins a column chunk's null bitmap, offsets and values for checksum calculation. */
 [[nodiscard]] inline std::expected<std::vector<std::byte>, format_error>
 chunk_checksum_bytes(std::span<const std::byte> group, const column_chunk& chunk) {
     std::vector<std::byte> bytes;
@@ -417,13 +417,13 @@ chunk_checksum_bytes(std::span<const std::byte> group, const column_chunk& chunk
 
 } // namespace detail
 
-/** Return the canonical schema bytes used by writer and validator. */
+/** Returns the serialized schema bytes shared by the writer and validator. */
 [[nodiscard]] inline std::expected<std::vector<std::byte>, format_error>
 schema_canonical_bytes(std::span<const column_schema> schema) {
     return detail::serialize_schema(schema);
 }
 
-/** Compute a provider-independent schema digest through the injected policy. */
+/** Hashes the serialized column schema using the supplied checksum policy. */
 template <column_checksum_policy p_policy_type>
 [[nodiscard]] std::expected<cache_digest_256, format_error>
 schema_digest(std::span<const column_schema> schema, p_policy_type& policy) {
@@ -456,8 +456,9 @@ template <column_checksum_policy p_policy_type, column_store_block_sink p_sink_t
 class streaming_column_store_builder;
 
 /**
- * Logical block order plus cleanup ownership after a streaming finalization.
- * A caller marks the blocks published only after its manifest owns every token.
+ * Owns the temporary blocks returned by a streaming writer, in logical
+ * file order. They are discarded on destruction unless the caller
+ * marks them published after a storage manifest takes ownership.
  */
 template <column_store_block_sink p_sink_type> class streamed_column_store_blocks {
   public:
@@ -500,12 +501,12 @@ template <column_store_block_sink p_sink_type> class streamed_column_store_block
         return row_group_count_;
     }
 
-    /** Transfer cleanup responsibility to an atomically published manifest. */
+    /** Stops automatic cleanup after a published manifest takes ownership of the blocks. */
     void mark_published() noexcept {
         sink_ = nullptr;
     }
 
-    /** Discard every still-temporary token exactly once in logical order. */
+    /** Discards unpublished block tokens in logical order and clears the token list. */
     void discard() noexcept {
         if (sink_ != nullptr) {
             for (const token_type& token : tokens_) {
@@ -544,14 +545,14 @@ template <column_store_block_sink p_sink_type> class streamed_column_store_block
     std::uint32_t row_group_count_ = 0;
 };
 
-/** Zone order used when physical blocks are assembled into one manifest. */
+/** Orders physical blocks as header and schema, row groups, then index and footer. */
 enum class column_store_physical_zone : std::uint8_t {
     prefix = 0,
     row_groups = 1,
     suffix = 2,
 };
 
-/** A sink-local handle for one logical block. */
+/** Identifies one logical block within its sink. */
 struct column_store_logical_block_token {
     std::uint32_t slot = (std::numeric_limits<std::uint32_t>::max)();
 
@@ -575,9 +576,10 @@ concept column_store_physical_sink = requires(p_sink_type& sink,
 };
 
 /**
- * Coalesce logical blocks into bounded physical blocks without changing
- * their manifest order.  Row groups are written first, while the later-created
- * prefix and suffix tokens are returned in prefix/group/suffix order.
+ * Combines logical blocks into physical blocks with a size limit. Row
+ * groups arrive first, before the header is known. The returned tokens
+ * put the header and schema first so the manifest reconstructs the
+ * normal file order.
  */
 template <column_store_physical_sink p_physical_sink_type> class coalescing_column_store_sink {
   public:
@@ -698,7 +700,7 @@ template <column_store_physical_sink p_physical_sink_type> class coalescing_colu
         return token_type{.slot = slot};
     }
 
-    /** Release logical ownership; the final release frees physical tokens. */
+    /** Releases a logical block. Releasing the last unpublished block also frees the physical blocks. */
     void discard(const token_type& token) noexcept {
         if (token.slot >= records_.size()) {
             return;
@@ -714,7 +716,7 @@ template <column_store_physical_sink p_physical_sink_type> class coalescing_colu
         }
     }
 
-    /** Copy the bounded physical capabilities in exact manifest byte order. */
+    /** Returns physical block tokens in the order needed to reconstruct the file. */
     [[nodiscard]] std::expected<std::vector<physical_token_type>, format_error>
     manifest_tokens(std::span<const token_type> logical_order) const {
         if (state_ != state::complete || !valid_logical_order(logical_order) ||
@@ -740,7 +742,7 @@ template <column_store_physical_sink p_physical_sink_type> class coalescing_colu
         return tokens;
     }
 
-    /** Stop cleanup only after the copied capabilities were atomically owned. */
+    /** Stops physical-block cleanup after the manifest takes ownership of the copied tokens. */
     void mark_published() noexcept {
         state_ = state::published;
         physical_records_.clear();
@@ -939,7 +941,7 @@ template <column_store_physical_sink p_physical_sink_type> class coalescing_colu
     std::size_t discarded_record_count_ = 0;
 };
 
-/** Incremental row API; sealed output is one self-validating byte blob. */
+/** Collects rows in memory and writes one column store with checksums when sealed. */
 class column_store_builder {
   public:
     column_store_builder(column_store_identity identity,
@@ -954,7 +956,7 @@ class column_store_builder {
         }
     }
 
-    /** Copy one raw encoded row; no caller memory survives this call. */
+    /** Copies an encoded row into the builder, allowing the caller to reuse its input buffers. */
     [[nodiscard]] std::expected<void, format_error>
     append_row(std::span<const encoded_column_value> values) {
         if (values.size() != schema_.size()) {
@@ -1028,7 +1030,7 @@ class column_store_builder {
         return {};
     }
 
-    /** Serialize all row groups, checksums, index, and manifest. */
+    /** Writes the stored rows and their schema, with a row-group index and checksums. */
     template <column_checksum_policy p_policy_type>
     [[nodiscard]] std::expected<std::vector<std::byte>, format_error>
     seal(p_policy_type& policy) const {
@@ -1198,7 +1200,7 @@ class column_store_builder {
               column_store_block_sink p_friend_sink_type>
     friend class streaming_column_store_builder;
 
-    /** Serialize one internally columnar row group. */
+    /** Writes a row group as separate column chunks with null flags, value offsets and checksums. */
     template <column_checksum_policy p_policy_type>
     [[nodiscard]] std::expected<std::vector<std::byte>, format_error> serialize_group(
         const detail::pending_group& group,
@@ -1372,8 +1374,9 @@ class column_store_builder {
 };
 
 /**
- * One-row-group writer whose immutable blocks are copied directly into a
- * caller-owned sink.  Completed groups are never retained as byte vectors.
+ * Buffers one row group at a time and sends completed groups to the
+ * caller's sink. It keeps their tokens and checksums until finalization
+ * builds the file metadata.
  */
 template <column_checksum_policy p_policy_type, column_store_block_sink p_sink_type>
 class streaming_column_store_builder {
@@ -1442,7 +1445,7 @@ class streaming_column_store_builder {
         cleanup_tokens();
     }
 
-    /** Copy one row, flushing the preceding complete group when required. */
+    /** Copies a row, flushing the current group first if the row would exceed its limits. */
     [[nodiscard]] std::expected<void, format_error>
     append_row(std::span<const encoded_column_value> values) {
         if (state_ != state::open) {
@@ -1526,7 +1529,7 @@ class streaming_column_store_builder {
         return {};
     }
 
-    /** Flush the last group and emit header/schema/index/footer blocks. */
+    /** Flushes the last row group, writes the file metadata and returns ownership of the block tokens. */
     [[nodiscard]] std::expected<result_type, format_error> finalize() {
         if (state_ != state::open) {
             return std::unexpected(state_error());
@@ -1860,17 +1863,14 @@ class streaming_column_store_builder {
     std::uint64_t row_count_ = 0;
 };
 
-/** Fully prevalidated, non-owning view over a caller-owned sealed blob. */
+/** Reads a validated column store while borrowing its bytes from the caller. Keep those bytes alive and unchanged. */
 class column_store_view {
   public:
     /**
-     * One already-validated column chunk.  The spans borrow from the sealed
-     * store owned by the caller of validate_column_store().
-     *
-     * Consumers that process a column at a time should use this view instead
-     * of repeatedly resolving a global row ordinal through value().  All
-     * offsets, lengths, padding, bitmaps, and checksums have been validated
-     * before a chunk can be returned.
+     * A column chunk whose byte spans belong to the caller's column store.
+     * Use chunks to process a whole column without searching for each
+     * row's group. Stores returned by validate_column_store() have already
+     * passed layout and checksum checks.
      */
     struct column_chunk_view {
         std::uint64_t first_row_ordinal = 0;
@@ -1923,9 +1923,9 @@ class column_store_view {
     }
 
     /**
-     * Resolve one column into row-group chunks once.  This is the streaming
-     * replay interface: callers retain row-group order while avoiding a
-     * linear group lookup for every cell.
+     * Returns one column's chunks in row-group order. This avoids the
+     * group search performed by value() for each cell. The chunk bytes
+     * remain owned by the caller.
      */
     [[nodiscard]] std::expected<std::vector<column_chunk_view>, format_error>
     column_chunks(std::size_t column_index) const {
@@ -2089,7 +2089,12 @@ class column_store_view {
     std::uint64_t row_count_ = 0;
 };
 
-/** Validate every protected byte and decoder-independent layout before replay. */
+/**
+ * Checks the stored schema, identity, byte layout and checksums before
+ * returning a view for replay. Binary-send values still need PostgreSQL
+ * receive functions for decoding. The caller must keep the bytes alive
+ * and unchanged while using the view.
+ */
 template <column_checksum_policy p_policy_type>
 [[nodiscard]] std::expected<column_store_view, format_error>
 validate_column_store(std::span<const std::byte> store,

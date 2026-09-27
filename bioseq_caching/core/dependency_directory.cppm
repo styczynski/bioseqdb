@@ -1,10 +1,10 @@
 /**
  * @file bioseq_caching/core/dependency_directory.cppm
- * @brief Offset-backed, refcounted dependency epoch directory.
+ * @brief Tracks dependency versions and the references that keep them in shared memory.
  *
- * The region contains no process pointer, PostgreSQL type, lock, or allocator.
- * Every mutable operation is serialized by caller-owned partition callbacks.
- * Record and change generations come from one caller-owned monotonic source.
+ * Records use offsets within the shared region. The caller supplies
+ * partition locks and increasing sequence numbers so separate processes
+ * can update records and detect reused slots.
  */
 module;
 
@@ -42,7 +42,7 @@ inline constexpr std::uint32_t k_dependency_directory_pressure_percent = 70;
 inline constexpr std::uint32_t k_invalid_dependency_partition =
     (std::numeric_limits<std::uint32_t>::max)();
 
-/** Every error tells the adapter to bypass or use its coarse epoch. */
+/** Directory errors that the adapter handles by bypassing the cache or checking a broader dependency. */
 enum class dependency_directory_error : std::uint32_t {
     none = 0,
     invalid_argument,
@@ -69,7 +69,7 @@ enum class dependency_directory_error : std::uint32_t {
     emergency_fallback,
 };
 
-/** The three independently audited reasons a dependency remains resident. */
+/** Reference categories counted separately to decide when a dependency record can be freed. */
 enum class dependency_reference_kind : std::uint8_t {
     none = 0,
     owner = 1,
@@ -80,7 +80,7 @@ enum class dependency_reference_kind : std::uint8_t {
 enum class dependency_transition_outcome : std::uint8_t {
     aborted = 0,
     committed = 1,
-    /** PostgreSQL proved that no write became externally visible. */
+    /** PostgreSQL has confirmed that the aborted write never became visible to other transactions. */
     known_aborted = 2,
 };
 
@@ -117,12 +117,10 @@ enum class dependency_admission_outcome : std::uint8_t {
 };
 
 /**
- * Fixed preload configuration.
- *
- * logical_capacity is the admission budget.  The layout reserves a separate
- * power-of-two physical table with at least twice that many slots.  The
- * backend and generation limits are hard per-record refcount bounds supplied
- * by the adapter from its own fixed shared-resource budgets.
+ * Directory limits fixed at server startup. logical_capacity limits
+ * active records, while the hash table has at least twice as many
+ * slots to leave room for probing. Reference limits bound the number
+ * of backend and cached-generation references to each record.
  */
 struct dependency_directory_config {
     std::uint32_t logical_capacity = k_default_dependency_directory_logical_capacity;
@@ -137,7 +135,7 @@ struct dependency_directory_config {
         (const dependency_directory_config&) const noexcept = default;
 };
 
-/** Exact region-relative offsets computed before shared memory is requested. */
+/** Byte offsets and sizes used to allocate and attach the shared region. */
 struct dependency_directory_layout {
     std::uint32_t total_bytes = 0;
     std::uint32_t partitions_offset = 0;
@@ -167,7 +165,7 @@ struct dependency_directory_preload_result {
     }
 };
 
-/** One fixed partition descriptor; record_offset is always region-relative. */
+/** One directory partition. record_offset is measured from the start of the shared region. */
 struct dependency_directory_partition {
     std::uint32_t record_offset = 0;
     std::uint32_t physical_capacity = 0;
@@ -189,7 +187,7 @@ struct dependency_directory_partition {
     std::uint64_t wake_failure_count = 0;
 };
 
-/** One bounded predecessor cohort retained only for exact old-ref release. */
+/** Saves one previous record version until its outstanding references have been released. */
 struct retired_dependency_reference_cohort {
     bioseq::cache::physical_identity physical_identity{};
     std::uint64_t record_generation = 0;
@@ -207,7 +205,7 @@ struct retired_dependency_reference_cohort {
     operator==(const retired_dependency_reference_cohort&) const noexcept = default;
 };
 
-/** One pointer-free dependency epoch and all reasons it cannot be reclaimed. */
+/** Shared dependency versions, pending writes and reference counts that prevent removal. */
 struct shared_dependency_epoch {
     directory_slot_state slot_state = directory_slot_state::empty;
     std::uint32_t reserved = 0;
@@ -226,7 +224,7 @@ struct shared_dependency_epoch {
     retired_dependency_reference_cohort retired_references{};
 };
 
-/** Header occupies offset zero; process-local attachments contain the pointer. */
+/** Header at the start of the shared region. Each process keeps its own pointer to that region. */
 struct dependency_directory_header {
     std::uint32_t magic = 0;
     std::uint32_t abi_revision = 0;
@@ -246,7 +244,11 @@ struct dependency_directory_attachment {
 
 struct dependency_epoch_snapshot;
 
-/** No lock address enters the region.  A null acquire/release pair is test-safe. */
+/**
+ * Process-local callbacks for locking, sequence numbers and wakeups.
+ * Omit lock callbacks only in already_locked mode, when the caller
+ * holds the locks or an isolated test needs no concurrent access.
+ */
 struct dependency_directory_callbacks {
     void* context = nullptr;
     dependency_directory_lock_mode lock_mode = dependency_directory_lock_mode::acquire_release;
@@ -286,10 +288,11 @@ struct dependency_directory_callbacks {
 };
 
 /**
- * ABA-safe process-local linear capability; no shared address is persisted.
- * Adapters must move, not duplicate, active references.  transition_active
- * catches local replay and the transition owner ledger remains authoritative
- * when multiple owners retain the same aggregate shared record.
+ * Identifies a process-local reference by key, offset and record
+ * generation, so a reused slot cannot satisfy an old reference. Move
+ * active references between owners instead of copying them.
+ * transition_active detects repeated local writes, while the owner
+ * ledger tracks writes shared by multiple owners.
  */
 struct dependency_reference {
     dependency_key key{};
@@ -447,7 +450,7 @@ inline constexpr std::size_t k_dependency_directory_region_alignment =
 static_assert((k_dependency_directory_region_alignment &
                (k_dependency_directory_region_alignment - 1U)) == 0);
 
-/** Clamp the adapter's MaxBackends-derived logical budget without overflow. */
+/** Chooses the dependency-record budget from MaxBackends, within the configured limits. */
 [[nodiscard]] constexpr std::uint32_t
 dependency_directory_logical_capacity_for_backends(std::uint32_t max_backends) noexcept {
     const std::uint64_t requested =
@@ -458,7 +461,7 @@ dependency_directory_logical_capacity_for_backends(std::uint32_t max_backends) n
                    static_cast<std::uint64_t>(k_maximum_dependency_directory_logical_capacity)));
 }
 
-/** Return the exact power-of-two table size, or zero for an invalid budget. */
+/** Returns a power-of-two table size with room for at least twice the record budget, or zero for an invalid budget. */
 [[nodiscard]] constexpr std::uint32_t
 dependency_directory_physical_capacity(std::uint32_t logical_capacity) noexcept {
     if (logical_capacity < k_minimum_dependency_directory_logical_capacity ||
@@ -721,9 +724,9 @@ inline void latch_emergency(dependency_directory_partition& partition_value,
 }
 
 /**
- * Strictly less than 70% is a safety backstop.  Valid layouts reserve at
- * least two physical slots per logical record, so the quotient/remainder
- * logical quota normally binds at no more than 50% first.
+ * Checks that the projected table use stays below 70 percent. Valid
+ * layouts also have a smaller record budget, which limits each
+ * partition before this fallback check is reached.
  */
 [[nodiscard]] constexpr bool
 projected_below_physical_pressure(const dependency_directory_header& header_value,
@@ -1128,7 +1131,7 @@ structural_validate(std::span<std::byte> region,
 
 } // namespace dependency_directory_detail
 
-/** Compute one exact layout; invalid power-of-two slices are never rounded. */
+/** Calculates the shared-memory layout and lock count, rejecting unsupported capacities or partition sizes. */
 [[nodiscard]] inline dependency_directory_preload_result
 make_dependency_directory_preload_request(dependency_directory_config config) noexcept {
     using namespace dependency_directory_detail;
@@ -1184,7 +1187,7 @@ make_dependency_directory_preload_request(dependency_directory_config config) no
     return result;
 }
 
-/** Initialize one new region before any backend attaches it. */
+/** Clears and initializes a new shared region before any backend attaches to it. */
 [[nodiscard]] inline dependency_directory_error
 initialize_dependency_directory(std::span<std::byte> region,
                                 const dependency_directory_preload_request& request) noexcept {
@@ -1272,9 +1275,10 @@ struct dependency_directory_attach_result {
 };
 
 /**
- * Attach only after exact layout validation and one locked deep scan per
- * partition.  AlreadyLocked means the caller holds every partition lock for
- * the duration of this call; tests must opt into it explicitly.
+ * Checks the layout and every partition before attaching this process
+ * to the directory. In already_locked mode the caller must hold all
+ * partition locks for this call. Otherwise each partition is locked
+ * while its records are checked.
  */
 [[nodiscard]] inline dependency_directory_attach_result
 attach_dependency_directory(std::span<std::byte> region,
@@ -1310,7 +1314,12 @@ attach_dependency_directory(std::span<std::byte> region,
     return result;
 }
 
-/** Retain one full-equality record, reclaiming only bounded zero-ref records. */
+/**
+ * Acquires a reference to the matching dependency record, creating it
+ * if needed. Under pressure, a bounded scan first tries to free records
+ * with no references. Identity or tracking-mode mismatches require a
+ * broader dependency check.
+ */
 [[nodiscard]] inline dependency_reference_result
 acquire_dependency_reference(dependency_directory_attachment directory,
                              const dependency_reference_request& request,
@@ -1485,7 +1494,7 @@ acquire_dependency_reference(dependency_directory_attachment directory,
     return result;
 }
 
-/** Snapshot by an ABA token while retaining the caller's existing ref. */
+/** Copies a dependency's state after checking the reference still names the same record version. */
 [[nodiscard]] inline dependency_snapshot_result
 snapshot_dependency(dependency_directory_attachment directory,
                     const dependency_reference& reference,
@@ -1517,7 +1526,7 @@ snapshot_dependency(dependency_directory_attachment directory,
     return result;
 }
 
-/** Release exactly one reference kind; pressure may reclaim the now-zero record. */
+/** Releases the reference and marks its token inactive. Under pressure, it may also free unreferenced records. */
 [[nodiscard]] inline dependency_mutation_result
 release_dependency_reference(dependency_directory_attachment directory,
                              dependency_reference& reference,
@@ -1621,7 +1630,7 @@ release_dependency_reference(dependency_directory_attachment directory,
     return result;
 }
 
-/** Release one persisted generation capability by full key and ABA token. */
+/** Releases a cached generation's dependency reference using its saved key, identity and record version. */
 [[nodiscard]] inline dependency_mutation_result
 release_dependency_generation_entry(dependency_directory_attachment directory,
                                     const dependency_vector_entry& entry,
@@ -1714,7 +1723,7 @@ release_dependency_generation_entry(dependency_directory_attachment directory,
     return result;
 }
 
-/** Mark one owner-retained dependency unstable before a write can commit. */
+/** Marks an owned dependency as being written before the write can commit. */
 [[nodiscard]] inline dependency_mutation_result
 begin_dependency_transition(dependency_directory_attachment directory,
                             dependency_reference& owner_reference,
@@ -1781,7 +1790,12 @@ begin_dependency_transition(dependency_directory_attachment directory,
     return result;
 }
 
-/** Resolve one transition with epoch, decrement, generation, then wake order. */
+/**
+ * Finishes a tracked write and updates the dependency version before
+ * waking waiters. A confirmed invisible abort leaves the committed
+ * version unchanged. Other outcomes advance it so cached results are
+ * rechecked.
+ */
 [[nodiscard]] inline dependency_mutation_result
 finish_dependency_transition(dependency_directory_attachment directory,
                              dependency_reference& owner_reference,
@@ -1822,11 +1836,9 @@ finish_dependency_transition(dependency_directory_attachment directory,
         return result;
     }
 
-    /*
-     * Reserve the nonzero change generation before the critical publication
-     * sequence.  Aborted is deliberately conservative; KnownAborted is the
-     * narrow verified outcome that drains without advancing the epoch.
-     */
+    /* Reserve sequence numbers before publishing the write outcome.
+     * An unconfirmed abort still advances the dependency version. Only
+     * known_aborted can finish without changing that version. */
     const bool publish_epoch = resolution.outcome != dependency_transition_outcome::known_aborted;
     const bool epoch_overflow =
         publish_epoch && record->committed_epoch == (std::numeric_limits<std::uint64_t>::max)();
@@ -1931,7 +1943,7 @@ finish_dependency_transition(dependency_directory_attachment directory,
     return result;
 }
 
-/** Explicit bounded janitor entry point for one caller-owned partition lock. */
+/** Scans up to the requested budget in one partition and frees records with no references or pending writes. */
 [[nodiscard]] inline dependency_reclaim_result
 reclaim_dependency_partition(dependency_directory_attachment directory,
                              std::uint32_t partition_index,
@@ -1956,7 +1968,7 @@ reclaim_dependency_partition(dependency_directory_attachment directory,
     return reclaim_locked(directory, *partition_value, budget, callbacks);
 }
 
-/** Deep validation is bounded by configured capacity and takes one lock at a time. */
+/** Checks the layout and every partition under its lock. In already_locked mode, the caller supplies the locks. */
 [[nodiscard]] inline dependency_directory_error
 deep_validate_dependency_directory(dependency_directory_attachment directory,
                                    const dependency_directory_callbacks& callbacks) noexcept {
@@ -1986,7 +1998,7 @@ deep_validate_dependency_directory(dependency_directory_attachment directory,
                : dependency_directory_error::corrupt_layout;
 }
 
-/** Aggregate diagnostics without exposing region pointers. */
+/** Adds up directory statistics under partition locks and returns plain values. */
 [[nodiscard]] inline dependency_directory_stats_result
 read_dependency_directory_stats(dependency_directory_attachment directory,
                                 const dependency_directory_callbacks& callbacks) noexcept {
