@@ -1,6 +1,6 @@
 /**
  * @file scheduler/supervisor/persist_stats.cppm
- * @brief Asynchronous minimizer-sequence persistence statistics and failure instrumentation.
+ * @brief Report asynchronous index builds and test their error cleanup.
  */
 module;
 
@@ -18,10 +18,7 @@ import bioseq.postgres.storage.indexing.chunked_storage;
 
 namespace bioseq::postgres::scheduler {
 
-/**
- * @brief Initializes every shared counter for the latest async build report.
- * @param[out] stats Newly allocated shared-memory counters.
- */
+/** Initialize the shared counters for asynchronous index-build reports to zero. */
 void initialize_minimizer_sequence_build_stats(pg_minimizer_sequence_build_stats& stats) {
     pg_atomic_init_u64(&stats.generation, 0);
     pg_atomic_init_u64(&stats.backend_pid, 0);
@@ -49,10 +46,7 @@ void initialize_minimizer_sequence_build_stats(pg_minimizer_sequence_build_stats
     pg_atomic_init_u64(&stats.shareable_lazy_workers, 0);
 }
 
-/**
- * @brief Initializes async-worker PostgreSQL boundary counters and selectors.
- * @param[out] stats Newly allocated shared-memory boundary state.
- */
+/** Initialize the worker's shared error counters and failure selectors to zero. */
 void initialize_async_minimizer_sequence_worker_boundary_stats(
     pg_async_minimizer_sequence_worker_boundary_stats& stats) {
     pg_atomic_init_u64(&stats.relation_leaf_calls, 0);
@@ -69,25 +63,23 @@ void initialize_async_minimizer_sequence_worker_boundary_stats(
     pg_atomic_init_u32(&stats.armed_failure_point, 0);
 }
 
-/** @brief Marks an encoded last-failure value as test-injected. */
+/** Bit marking a recorded worker failure as deliberately injected by a test. */
 inline constexpr std::uint32_t k_async_minimizer_sequence_worker_injected_failure_flag =
     std::uint32_t{1} << 31u;
 
 #ifdef BIOSEQ_TEST_INDEXES
-/** @brief Tracks which process-local failure originated from injection. */
+/** Remember which test failure this worker just raised. */
 inline thread_local async_minimizer_sequence_worker_pg_failure
     g_async_minimizer_sequence_worker_injected_failure =
         async_minimizer_sequence_worker_pg_failure::none;
 #endif
 
 /**
- * @brief Publishes the last completed worker build into shared atomics.
- * @param[in] stats Storage-build counters and byte totals.
- * @param[in] worker_build_ns Total worker build duration in nanoseconds.
- * @param[in] pipeline_mode Serialized concurrency mode.
- * @param[in] max_concurrency Effective worker concurrency.
- * @param[in] index_memory_cap_mb Configured index-memory cap in MiB.
- * @param[in] has_shareable_lazy_worker Whether the selected source supports parallel reads.
+ * Publish the completed index build's counters and worker settings in shared
+ * memory. Do nothing when this backend has no shared scheduler state.
+ * @param worker_build_ns Build duration in nanoseconds.
+ * @param index_memory_cap_mb Worker memory cap in MiB.
+ * @param has_shareable_lazy_worker Whether the source allows parallel reads.
  */
 void publish_async_minimizer_sequence_build_stats(
     const bioseq::storage::indexing::last_minimizer_sequence_build_stats& stats,
@@ -126,10 +118,7 @@ void publish_async_minimizer_sequence_build_stats(
     pg_atomic_fetch_add_u64(&shared_stats.generation, 1);
 }
 
-/**
- * @brief Copies the last published async-build counters from shared memory.
- * @return A zero snapshot when shared memory is unavailable.
- */
+/** Read the shared build counters, or return zero values when shared memory is absent. */
 [[nodiscard]] async_minimizer_sequence_build_stats_snapshot
 snapshot_async_minimizer_sequence_build_stats() {
     async_minimizer_sequence_build_stats_snapshot snapshot_result{};
@@ -172,10 +161,7 @@ snapshot_async_minimizer_sequence_build_stats() {
     return snapshot_result;
 }
 
-/**
- * @brief Copies async-worker boundary counters and selectors from shared memory.
- * @return A zero snapshot when shared memory is unavailable.
- */
+/** Read shared worker error counters and the pending test failure selector. */
 [[nodiscard]] async_minimizer_sequence_worker_boundary_stats_snapshot
 snapshot_async_minimizer_sequence_worker_boundary_stats() noexcept {
     async_minimizer_sequence_worker_boundary_stats_snapshot snapshot_result{};
@@ -212,9 +198,9 @@ snapshot_async_minimizer_sequence_worker_boundary_stats() noexcept {
 }
 
 /**
- * @brief Arms one shared async-worker PostgreSQL failure selector.
- * @param[in] point PostgreSQL leaf that should fail once.
- * @return True when test instrumentation accepted the selector.
+ * Select a worker operation to fail once in tests. Store the selector in shared
+ * memory so the background worker can consume it. Return false when shared
+ * state or test instrumentation is unavailable, or the selector is invalid.
  */
 [[nodiscard]] bool arm_async_minimizer_sequence_worker_pg_failure(
     async_minimizer_sequence_worker_pg_failure point) noexcept {
@@ -233,7 +219,7 @@ snapshot_async_minimizer_sequence_worker_boundary_stats() noexcept {
 #endif
 }
 
-/** @brief Clears the shared async-worker PostgreSQL failure selector. */
+/** Cancel the worker's pending failure injection in shared memory. */
 void disarm_async_minimizer_sequence_worker_pg_failure() noexcept {
 #ifdef BIOSEQ_TEST_INDEXES
     if (g_shared == nullptr) {
@@ -245,11 +231,7 @@ void disarm_async_minimizer_sequence_worker_pg_failure() noexcept {
 #endif
 }
 
-/**
- * @brief Maps a worker failure selector to its stable statistics name.
- * @param[in] point Failure selector.
- * @return A process-lifetime diagnostic string.
- */
+/** Return the diagnostic name of a worker failure point, or "invalid". */
 [[nodiscard]] const char* async_minimizer_sequence_worker_failure_point_name(
     async_minimizer_sequence_worker_pg_failure point) noexcept {
     switch (point) {
@@ -279,10 +261,7 @@ void disarm_async_minimizer_sequence_worker_pg_failure() noexcept {
     return "invalid";
 }
 
-/**
- * @brief Increments the boundary counter for one worker PostgreSQL leaf.
- * @param[in] point Leaf about to execute.
- */
+/** Count a worker call to the selected PostgreSQL operation. */
 void record_async_minimizer_sequence_worker_pg_leaf_call(
     async_minimizer_sequence_worker_pg_failure point) noexcept {
     if (g_shared == nullptr) {
@@ -314,10 +293,7 @@ void record_async_minimizer_sequence_worker_pg_leaf_call(
     }
 }
 
-/**
- * @brief Records a PostgreSQL failure and its injection origin.
- * @param[in] point Leaf whose error bridge caught the failure.
- */
+/** Record where a PostgreSQL operation failed and whether a test caused it. */
 void record_async_minimizer_sequence_worker_pg_leaf_failure(
     async_minimizer_sequence_worker_pg_failure point) noexcept {
     if (g_shared == nullptr) {
@@ -341,9 +317,9 @@ void record_async_minimizer_sequence_worker_pg_leaf_failure(
 }
 
 /**
- * @brief Consumes an armed worker selector and raises PostgreSQL ERROR.
- * @param[in] point Leaf about to execute inside one PostgreSQL callback.
- * @pre The caller is inside `invoke_pg_as_cpp` with no live C++ owner below it.
+ * Consume the matching shared test selector and raise a PostgreSQL error once.
+ * @pre Call inside invoke_pg_as_cpp without C++ objects that need destruction
+ * between the error and that bridge.
  */
 void inject_async_minimizer_sequence_worker_pg_failure_leaf(
     async_minimizer_sequence_worker_pg_failure point) {
@@ -372,7 +348,7 @@ void inject_async_minimizer_sequence_worker_pg_failure_leaf(
 #endif
 }
 
-/** @brief Records a worker-side resident materialization admission. */
+/** Count a worker target copy that received a memory reservation. */
 void record_async_minimizer_sequence_materialize_admission() noexcept {
     if (g_shared != nullptr) {
         pg_atomic_fetch_add_u64(
@@ -381,8 +357,8 @@ void record_async_minimizer_sequence_materialize_admission() noexcept {
 }
 
 /**
- * @brief Records a failed materialization unwind and admission outcome.
- * @param[in] admission_restored Whether reserved bytes returned to their entry value.
+ * Count a failed target copy and whether cleanup restored its memory budget.
+ * @param admission_restored Reserved bytes equal their value before the copy.
  */
 void record_async_minimizer_sequence_materialize_failure_unwind(bool admission_restored) noexcept {
     if (g_shared == nullptr) {

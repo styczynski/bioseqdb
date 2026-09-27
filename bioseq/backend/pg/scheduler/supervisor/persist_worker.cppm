@@ -1,6 +1,6 @@
 /**
  * @file persist_worker.cppm
- * @brief PostgreSQL asynchronous persistence queue and worker dispatch.
+ * @brief Claim queued index builds and run them in a worker transaction.
  */
 module;
 
@@ -41,11 +41,12 @@ import bioseq.indexing.type;
 namespace bioseq::postgres::scheduler {
 
 /**
- * @brief Executes one worker primitive inside a PostgreSQL error bridge.
- * @tparam p_function Callable returning the leaf result.
- * @param[in] point Boundary counter and failure selector for the primitive.
- * @param[in,out] function Callable invoked once.
- * @return The callable result.
+ * Run a worker operation through the PostgreSQL-to-C++ error bridge.
+ * Count the call and any PostgreSQL failure before returning or rethrowing.
+ * @tparam p_function Callable returning the operation result.
+ * @param function Operation to run once.
+ * @param point Operation being counted.
+ * @return The operation's result.
  */
 template <class p_function>
 auto invoke_async_minimizer_sequence_worker_pg_leaf(
@@ -60,10 +61,7 @@ auto invoke_async_minimizer_sequence_worker_pg_leaf(
     }
 }
 
-/**
- * @brief Claims the first ready supported persistence slot.
- * @return A stable claim snapshot, or absence when no supported slot is ready.
- */
+/** Claim the first ready build request, or return no job when none can be claimed. */
 [[nodiscard]] std::optional<persist_claim> claim_persist_job() noexcept {
     if (g_shared == nullptr) {
         return std::nullopt;
@@ -83,8 +81,8 @@ auto invoke_async_minimizer_sequence_worker_pg_leaf(
                 rejected_generations[slot_index] = generation;
                 record_unsupported_persist_rejection("queue_claim");
             }
-            // Do not claim unsupported DSM/file payloads. The identity queue
-            // replacement reclaims administratively quarantined slots.
+            // Leave unsupported payloads untouched. This worker can only rebuild
+            // indexes from the saved sequence identity.
             continue;
         }
         std::uint32_t expected = 1;
@@ -110,10 +108,7 @@ auto invoke_async_minimizer_sequence_worker_pg_leaf(
     return std::nullopt;
 }
 
-/**
- * @brief Releases a claimed DSM and returns its matching slot to the queue.
- * @param[in] claim Slot generation and pinned payload identity.
- */
+/** Release the claimed job's shared-memory pin and make its queue slot reusable. */
 void finish_persist_claim(const persist_claim& claim) noexcept {
     if (claim.payload_kind != persist_payload_kind::direct_minimizer_build_identity) {
         record_unsupported_persist_rejection("queue_ack");
@@ -134,10 +129,9 @@ void finish_persist_claim(const persist_claim& claim) noexcept {
 }
 
 /**
- * @brief Revalidates relation identity and persistence policy inside the worker.
- * @param[in] target Relation identity captured before commit.
- * @param[in] index_name Current index policy key.
- * @return True when the relation and policy still accept update-on-insert persistence.
+ * Check that the table still has the stored file identity and allows this
+ * index to be maintained on insert. A table rewrite or changed policy makes
+ * the queued job stale.
  */
 [[nodiscard]] bool worker_target_accepts_index_persist(const persist_target& target,
                                                        std::string_view index_name) {
@@ -145,10 +139,9 @@ void finish_persist_claim(const persist_claim& claim) noexcept {
         return false;
     }
 
-    // Relation operations are independent leaves. A live SPI session is one
-    // composite PostgreSQL operation and must stay inside one checked leaf from
-    // connect through finish; restoring the caller context between its stages
-    // corrupts PostgreSQL 17's SPI procedure context.
+    // Keep SPI_connect through SPI_finish inside one error-bridge callback.
+    // Returning through the bridge between those calls would restore the
+    // caller's memory context while SPI still needs its own context.
     Relation rel = invoke_async_minimizer_sequence_worker_pg_leaf(
         async_minimizer_sequence_worker_pg_failure::relation_open, [relid = target.user_relid] {
             inject_async_minimizer_sequence_worker_pg_failure_leaf(
@@ -159,7 +152,7 @@ void finish_persist_claim(const persist_claim& claim) noexcept {
         return false;
     }
 
-    /** @brief Holds relation identity copied before releasing the relation handle. */
+    /** Table file identity saved before closing the relation handle. */
     struct relation_identity {
         Oid tablespace = InvalidOid;
         Oid relfilenode = InvalidOid;
@@ -196,7 +189,7 @@ void finish_persist_claim(const persist_claim& claim) noexcept {
                                            "FROM bioseq_internal.index_policy "
                                            "WHERE user_relid=$1 AND main_relfilenode=$2 "
                                            "AND column_attno=$3 AND index_name=$4 LIMIT 1";
-    /** @brief Holds POD results while one SPI callback owns the complete session. */
+    /** Keep policy results outside the callback that opens and closes the SPI session. */
     struct worker_policy_spi_state {
         async_minimizer_sequence_worker_pg_failure current_stage =
             async_minimizer_sequence_worker_pg_failure::none;
@@ -230,7 +223,7 @@ void finish_persist_claim(const persist_claim& claim) noexcept {
             spi.current_stage = async_minimizer_sequence_worker_pg_failure::spi_execute;
             record_async_minimizer_sequence_worker_pg_leaf_call(spi.current_stage);
             inject_async_minimizer_sequence_worker_pg_failure_leaf(spi.current_stage);
-            // SPI consumes mutable contiguous C arrays during this leaf call.
+            // SPI takes the argument types and values as mutable C arrays.
             Oid argument_types[4] = {OIDOID, OIDOID, INT2OID, TEXTOID};
             Datum arguments[4] = {
                 ObjectIdGetDatum(user_relid),
@@ -297,10 +290,7 @@ void finish_persist_claim(const persist_claim& claim) noexcept {
     return spi.enabled && spi.update_on_insert;
 }
 
-/**
- * @brief Closes the active snapshot and commits the worker transaction.
- * @param[in] registered_snapshot Snapshot registered by the current claim.
- */
+/** Release the worker's active snapshot and commit its build transaction. */
 inline void finish_persist_claim_transaction(Snapshot registered_snapshot) {
     PopActiveSnapshot();
     UnregisterSnapshot(registered_snapshot);
@@ -308,8 +298,8 @@ inline void finish_persist_claim_transaction(Snapshot registered_snapshot) {
 }
 
 /**
- * @brief Validates and processes one identity-only minimizer build claim.
- * @param[in] claim Claimed queue slot and pinned DSM handle.
+ * Open a transaction and snapshot for the claimed build request. Check its
+ * shared-memory format, run the build, then detach the metadata and commit.
  */
 void process_minimizer_sequence_identity_claim(const persist_claim& claim) {
     if (claim.payload_kind != persist_payload_kind::direct_minimizer_build_identity) {
@@ -349,10 +339,13 @@ void process_minimizer_sequence_identity_claim(const persist_claim& claim) {
     finish_persist_claim_transaction(registered_snapshot);
 }
 
-/** @brief Stores the database selected by the process-lifetime worker connection. */
+/** Database chosen by the worker's first connection. Later jobs must use it too. */
 inline Oid g_persist_worker_connected_db = InvalidOid;
 
-/** @brief Claims and processes at most one ready persistence job. */
+/**
+ * Run at most one queued build. Discard invalid jobs and jobs for another
+ * database. A build error aborts its transaction and releases the queue slot.
+ */
 void process_one_persist_job_if_ready() {
     auto claim = claim_persist_job();
     if (!claim) {

@@ -1,6 +1,6 @@
 /**
  * @file persist_target.cppm
- * @brief Declares the target identity carried by asynchronous persistence jobs.
+ * @brief Identify the table, column, and sequence for a queued index build.
  */
 module;
 
@@ -21,9 +21,9 @@ export module bioseq.postgres.scheduler.persist_target;
 export namespace bioseq::postgres::scheduler {
 
 /**
- * @brief Identifies one sequence index eligible for asynchronous persistence.
- *
- * The string view remains valid only while the owning backend-local job is alive.
+ * Identify the sequence index requested by a background build.
+ * index_name borrows its string. Keep the string owner alive while using this
+ * target, or copy the name when transferring it to a pending job.
  */
 struct persist_target {
     Oid db_oid = InvalidOid;
