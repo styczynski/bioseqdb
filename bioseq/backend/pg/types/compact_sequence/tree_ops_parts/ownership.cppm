@@ -1,6 +1,10 @@
 /**
  * @file ownership.cppm
- * @brief Piece-tree arena, dependency, and edge ownership operations.
+ * @brief Keep shared piece-tree nodes and sequence storage alive.
+ *
+ * Each arena owns a group of tree nodes and their literal bytes. References
+ * from roots and other arenas keep that storage alive. A cleanup ledger tracks
+ * unfinished results so PostgreSQL errors can release them during context reset.
  */
 module;
 
@@ -27,11 +31,9 @@ import bioseq.storage.coordinates;
 import bioseq.storage.layout;
 
 
-/* Exported inline tree factories may be emitted from any importing TU at
- * dna4_uint64 profile. Keep the fault-injection seam in one out-of-line
- * module-owned object so the self-test and the selected factory body cannot
- * arm and observe different anonymous-namespace copies. */
-/// Return the backend-thread failure-injection state shared by tree factories.
+/* Importing files can each emit an inline tree factory. Keep failure state
+ * in one out-of-line function so the test and factory see the same armed error. */
+/// Return the armed and observed test failure points for this backend thread.
 export [[nodiscard, gnu::noinline]] std::array<std::uint8_t, 2u>&
 piece_tree_failure_storage_noexcept() noexcept
 {
@@ -39,7 +41,7 @@ piece_tree_failure_storage_noexcept() noexcept
     return storage;
 }
 
-/// First invariant category that forced a piece-tree arena quarantine.
+/// Reasons cleanup may stop and keep a suspect arena allocated.
 export enum class piece_tree_quarantine_reason : std::uint8_t {
     none,
     arena_refcount,
@@ -49,7 +51,7 @@ export enum class piece_tree_quarantine_reason : std::uint8_t {
     retired_join_root,
 };
 
-/// Backend-local diagnostic state for no-throw piece-tree cleanup failures.
+/// Cleanup failure counts and details for this backend thread.
 export struct piece_tree_quarantine_snapshot {
     std::uint64_t invariant_failures;
     std::uint64_t quarantined_arenas;
@@ -60,9 +62,9 @@ export struct piece_tree_quarantine_snapshot {
     std::uint64_t last_arena_generation;
 };
 
-/* Exported inline release paths can be emitted by an importing translation
- * unit.  Keep their no-throw diagnostic state in one module-owned object. */
-/// Return the backend-thread quarantine state shared by tree release paths.
+/* Inline release functions from different importing files must record
+ * cleanup failures in the same place. */
+/// Return the shared cleanup failure record for this backend thread.
 export [[nodiscard, gnu::noinline]] piece_tree_quarantine_snapshot&
 piece_tree_quarantine_storage_noexcept() noexcept
 {
@@ -70,7 +72,7 @@ piece_tree_quarantine_storage_noexcept() noexcept
     return storage;
 }
 
-/// Read the current backend-thread quarantine counters and first/last causes.
+/// Copy this backend thread's cleanup failure counts and recorded causes.
 export [[nodiscard]] inline piece_tree_quarantine_snapshot
 read_piece_tree_quarantine_noexcept() noexcept
 {
@@ -101,10 +103,14 @@ inline void mark_piece_tree_arena_quarantined_noexcept(
     }
 }
 
-/// Record one invariant failure and quarantine every implicated arena.
+
 } // namespace
 
-/** Shared with another tree-operations partition. */
+/**
+ * Record a cleanup failure and mark the supplied arenas unsafe to release.
+ * Their reference counts are saturated so later cleanup cannot free suspect storage.
+ * This path records the problem without raising another error during cleanup.
+ */
 inline void record_piece_tree_quarantine_noexcept(
     piece_tree_quarantine_snapshot& state,
     piece_tree_quarantine_reason reason,
@@ -125,7 +131,7 @@ inline void record_piece_tree_quarantine_noexcept(
     mark_piece_tree_arena_quarantined_noexcept(state, second_arena);
 }
 
-/** Shared with another tree-operations partition. */
+/** Record a cleanup failure in this backend's shared state. */
 inline void quarantine_piece_tree_invariant_noexcept(
     piece_tree_quarantine_reason reason,
     char const* detail,
@@ -142,13 +148,10 @@ inline void quarantine_piece_tree_invariant_noexcept(
 
 namespace {
 
-/* Backend-local acceptance seam.  Production calls leave this disarmed; the
- * internal SQL self-test arms one dependency-registration point at a time so
- * PostgreSQL ERROR can interrupt a factory at the only point where a returned
- * edge has not yet made the partial retain visible to its caller. */
+
 } // namespace
 
-/** Identify a state used across tree-operation partitions. */
+/** Places where the SQL self-test can interrupt tree construction with a PostgreSQL error. */
 enum class piece_tree_injected_failure_point : std::uint8_t {
     none,
     arena_factory,
@@ -171,7 +174,7 @@ enum class piece_tree_injected_failure_point : std::uint8_t {
     split_first_leaf_intermediate,
 };
 
-/** Shared with another tree-operations partition. */
+/** Select the next test failure point, or use `none` to disable injection. */
 inline void arm_piece_tree_failure_noexcept(
     piece_tree_injected_failure_point point) noexcept
 {
@@ -190,7 +193,7 @@ armed_piece_tree_failure_noexcept() noexcept
 
 } // namespace
 
-/** Shared with another tree-operations partition. */
+/** Record which injected failure occurred. Tests also use `none` to clear it. */
 inline void observe_piece_tree_failure_noexcept(
     piece_tree_injected_failure_point point) noexcept
 {
@@ -198,7 +201,7 @@ inline void observe_piece_tree_failure_noexcept(
         static_cast<std::uint8_t>(point);
 }
 
-/** Shared with another tree-operations partition. */
+/** Return the last recorded test failure point. */
 [[nodiscard]] inline piece_tree_injected_failure_point
 observed_piece_tree_failure_noexcept() noexcept
 {
@@ -208,10 +211,10 @@ observed_piece_tree_failure_noexcept() noexcept
 
 namespace {
 
-/// Raise the armed deterministic factory error at its matching transition.
+
 } // namespace
 
-/** Shared with another tree-operations partition. */
+/** Raise the armed test error once when construction reaches this point. */
 inline void inject_piece_tree_failure(
     piece_tree_injected_failure_point point)
 {
@@ -228,12 +231,12 @@ inline void inject_piece_tree_failure(
                        static_cast<unsigned>(point))));
 }
 
-/** Shared with another tree-operations partition. */
+/** Return the node height, or zero for an empty edge. */
 [[nodiscard]] inline std::uint16_t edge_height(piece_edge edge) noexcept {
   return edge ? edge.node->height : 0u;
 }
 
-/** Shared with another tree-operations partition. */
+/** Check that both valid handles identify the same sequence source. */
 [[nodiscard]] inline bool
 same_source_handle(pg_sequence_source_handle left,
                    pg_sequence_source_handle right) noexcept {
@@ -242,7 +245,7 @@ same_source_handle(pg_sequence_source_handle left,
          left.ops->identity(left.state) == right.ops->identity(right.state);
 }
 
-/** Shared with another tree-operations partition. */
+/** Compare the complete locator records byte for byte. */
 [[nodiscard]] inline bool
 same_locator(bioseq::storage::sequence_locator const &left,
              bioseq::storage::sequence_locator const &right) noexcept {
@@ -250,10 +253,9 @@ same_locator(bioseq::storage::sequence_locator const &left,
                      sizeof(left)) == 0;
 }
 
-/* Deterministic complexity evidence for the production persistent-join path.
- * The storage accessor is out of line so exported inline tree operations from
- * different importers all report into one backend-thread instance. */
-/// Bounded work counters for joining and releasing persistent tree edges.
+/* Count join and cleanup work so tests can check how it grows with tree size.
+ * All importing files use the same backend-thread counters. */
+/// Counts of join, validation, and cleanup steps used by tree tests.
 export struct piece_tree_join_work_snapshot {
     std::uint64_t join_steps;
     std::uint64_t bounded_validation_steps;
@@ -282,7 +284,7 @@ read_piece_tree_join_work_noexcept() noexcept
     return piece_tree_join_work_storage_noexcept();
 }
 
-/** Shared with another tree-operations partition. */
+/** Count one join step in test builds, stopping at the counter limit. */
 inline void note_piece_tree_join_step_noexcept() noexcept
 {
 #ifdef BIOSEQ_TEST_INDEXES
@@ -291,7 +293,7 @@ inline void note_piece_tree_join_step_noexcept() noexcept
 #endif
 }
 
-/** Shared with another tree-operations partition. */
+/** Count one trusted-join validation step in test builds. */
 inline void note_piece_tree_bounded_validation_step_noexcept() noexcept
 {
 #ifdef BIOSEQ_TEST_INDEXES
@@ -312,7 +314,7 @@ inline void note_piece_tree_cleanup_ledger_step_noexcept() noexcept
 
 } // namespace
 
-/** Shared with another tree-operations partition. */
+/** Count one retired-root operation in test builds. */
 inline void note_piece_tree_retired_root_step_noexcept() noexcept
 {
 #ifdef BIOSEQ_TEST_INDEXES
@@ -321,7 +323,7 @@ inline void note_piece_tree_retired_root_step_noexcept() noexcept
 #endif
 }
 
-/// Allocate an empty arena in the current PostgreSQL memory context.
+/// Create an empty arena in TopMemoryContext with one owned reference.
 export [[nodiscard]] inline piece_tree_arena *make_piece_tree_arena() {
   MemoryContext saved = CurrentMemoryContext;
   piece_tree_arena *volatile arena = nullptr;
@@ -330,9 +332,9 @@ export [[nodiscard]] inline piece_tree_arena *make_piece_tree_arena() {
     MemoryContextSwitchTo(TopMemoryContext);
     arena = static_cast<piece_tree_arena *>(palloc0(sizeof(piece_tree_arena)));
     MemoryContextSwitchTo(saved);
-    /* Both the arena token and payload are independent of every EOH and
-     * per-tuple context.  Cross-EOH sharing is governed solely by the
-     * arena refcount; release_arena explicitly deletes this context. */
+    /* Shared trees can outlive any one expanded sequence or tuple context.
+     * Keep their storage under TopMemoryContext and free it when the last
+     * arena reference is released. */
     arena->payload_context = AllocSetContextCreate(
         TopMemoryContext, "bioseq piece arena", ALLOCSET_SMALL_SIZES);
     arena->refcount = 1u;
@@ -375,7 +377,13 @@ export inline void retain_arena(piece_tree_arena *arena) noexcept {
   ++arena->refcount;
 }
 
-/// Release one arena reference and iteratively destroy newly unreachable dependencies.
+/**
+ * Release an arena reference and free storage when its last reference is gone.
+ *
+ * Follow arena dependencies with a work list so a long chain does not exhaust
+ * the C++ stack. Corrupt reference counts or dependencies stop cleanup and
+ * leave the suspect arenas allocated for diagnosis.
+ */
 export inline void release_arena(piece_tree_arena *arena) noexcept {
   if (arena == nullptr) {
     return;
@@ -435,15 +443,14 @@ export inline void release_arena(piece_tree_arena *arena) noexcept {
       return;
     }
     MemoryContextDelete(current->payload_context);
-    // Exactly one decrement corresponds to the one arena allocation freed
-    // below.  Keeping it adjacent to pfree prevents a partial cleanup path
-    // from manufacturing the next release's underflow.
+    // Count an arena as freed only when cleanup reaches pfree. An earlier
+    // failure must leave the live count unchanged for that arena.
     --live_piece_tree_arenas;
     pfree(current);
   }
 }
 
-/// Return an owning copy of an edge token.
+/// Return an edge with a new reference that the caller must release.
 export [[nodiscard]] inline piece_edge retain_edge(piece_edge edge)
 {
     if (edge) {
@@ -452,7 +459,7 @@ export [[nodiscard]] inline piece_edge retain_edge(piece_edge edge)
     return edge;
 }
 
-/// Release an owning edge token.
+/// Release the arena reference owned by this edge.
 export inline void release_edge(piece_edge edge) noexcept
 {
     if (edge) {
@@ -460,7 +467,7 @@ export inline void release_edge(piece_edge edge) noexcept
     }
 }
 
-/// Report whether a cleanup ledger holds no pending edge token.
+/// Return whether the ledger reports no pending edges and has a consistent count summary.
 export [[nodiscard]] inline bool piece_edge_cleanup_ledger_empty_noexcept(
     piece_edge_cleanup_ledger const& ledger) noexcept
 {
@@ -491,7 +498,7 @@ namespace {
 
 } // namespace
 
-/** Shared with another tree-operations partition. */
+/** Check that a cleanup handle has a slot and a nonzero generation. */
 [[nodiscard]] inline bool piece_edge_cleanup_handle_valid_noexcept(
     piece_edge_cleanup_handle handle) noexcept
 {
@@ -510,15 +517,15 @@ inline void quarantine_piece_edge_cleanup_ledger_noexcept(
         piece_tree_quarantine_reason::cleanup_ledger,
         detail,
         suspect_arena);
-    // Preserve every owning token in place, but poison the summary so this
-    // ledger can neither be reused nor mistaken for a successful drain.
+    // Leave owned edges in their slots. Mark the ledger unusable so later
+    // code cannot reuse it or report successful cleanup.
     ledger.initialized = false;
     ledger.next_unused = invalid_piece_edge_cleanup_slot;
     ledger.active_head = invalid_piece_edge_cleanup_slot;
     ledger.free_head = invalid_piece_edge_cleanup_slot;
 }
 
-/// Initialize inline cleanup storage for an empty operation ledger.
+/// Prepare a zero-initialized ledger to track unfinished edge references.
 [[nodiscard]] inline bool initialize_piece_edge_cleanup_ledger_noexcept(
     piece_edge_cleanup_ledger& ledger) noexcept
 {
@@ -536,10 +543,10 @@ inline void quarantine_piece_edge_cleanup_ledger_noexcept(
     return true;
 }
 
-/// Ensure that a cleanup ledger can adopt the requested number of tokens.
+
 } // namespace
 
-/** Shared with another tree-operations partition. */
+/** Check that the fixed cleanup ledger has room for the requested extra references. */
 [[nodiscard]] inline bool ensure_piece_edge_cleanup_capacity(
     piece_edge_cleanup_ledger& ledger, std::uint16_t additional)
 {
@@ -558,10 +565,14 @@ inline void quarantine_piece_edge_cleanup_ledger_noexcept(
 
 namespace {
 
-/// Adopt one owning edge token into a preallocated cleanup slot.
+
 } // namespace
 
-/** Shared with another tree-operations partition. */
+/**
+ * Transfer an owned edge reference into a free cleanup slot.
+ * The returned generation distinguishes this use of the slot from earlier uses.
+ * Corrupt or full storage is marked unusable without raising a cleanup error.
+ */
 [[nodiscard]] inline piece_edge_cleanup_handle
 adopt_piece_edge_cleanup_token_noexcept(
     piece_edge_cleanup_ledger& ledger, piece_edge token) noexcept
@@ -638,7 +649,7 @@ struct detached_piece_edge {
     bool detached;
 };
 
-/// Remove one validated token from a cleanup ledger without releasing it.
+/// Remove the expected edge from the ledger after checking its handle and links.
 [[nodiscard]] inline detached_piece_edge
 detach_piece_edge_cleanup_token_noexcept(
     piece_edge_cleanup_ledger& ledger,
@@ -724,10 +735,10 @@ detach_piece_edge_cleanup_token_noexcept(
     return {.token = token, .detached = true};
 }
 
-/// Retain an edge and return its ledger handle as one tracked value.
+
 } // namespace
 
-/** Shared with another tree-operations partition. */
+/** Add an edge reference and register it for cleanup when a ledger is supplied. */
 [[nodiscard]] inline tracked_piece_edge retain_tracked_edge(
     piece_edge_cleanup_ledger* ledger, piece_edge edge)
 {
@@ -744,7 +755,7 @@ detach_piece_edge_cleanup_token_noexcept(
     };
 }
 
-/** Shared with another tree-operations partition. */
+/** Remove a tracked edge from its ledger and release its arena reference. */
 inline void release_tracked_edge(
     piece_edge_cleanup_ledger* ledger, tracked_piece_edge edge) noexcept
 {
@@ -758,10 +769,10 @@ inline void release_tracked_edge(
 
 namespace {
 
-/// Replace two consumed ledger tokens with the single factory result token.
+
 } // namespace
 
-/** Shared with another tree-operations partition. */
+/** Replace consumed input references in the ledger with the factory's result reference. */
 [[nodiscard]] inline tracked_piece_edge
 transition_consumed_edges_to_result_noexcept(
     piece_edge_cleanup_ledger* ledger,
@@ -789,7 +800,7 @@ transition_consumed_edges_to_result_noexcept(
     };
 }
 
-/** Shared with another tree-operations partition. */
+/** Update a tracked edge's transform while keeping the same node, arena, and cleanup slot. */
 inline void transition_piece_edge_cleanup_identity_noexcept(
     piece_edge_cleanup_ledger* ledger,
     tracked_piece_edge before,
@@ -822,7 +833,7 @@ inline void transition_piece_edge_cleanup_identity_noexcept(
     note_piece_tree_cleanup_ledger_step_noexcept();
 }
 
-/// Release every edge token retained by a cleanup ledger.
+/// Release all pending edges, stopping if the ledger is corrupt.
 export inline void release_piece_edge_cleanup_ledger_noexcept(
     piece_edge_cleanup_ledger& ledger) noexcept
 {
@@ -860,7 +871,7 @@ export inline void release_piece_edge_cleanup_ledger_noexcept(
     }
 }
 
-/// Transfer one ledger-owned root into a destination edge.
+/// Remove a finished root from cleanup tracking so its caller can keep the reference.
 export inline void transfer_piece_edge_cleanup_root_noexcept(
     piece_edge_cleanup_ledger& ledger,
     piece_edge_cleanup_handle handle,
@@ -886,7 +897,7 @@ piece_tree_live_arena_count_noexcept() noexcept
     return live_piece_tree_arenas;
 }
 
-/** Identify a state used across tree-operation partitions. */
+/** Allocation categories used to account for an arena's storage. */
 enum class arena_allocation_kind : std::uint8_t {
     node,
     arena_dependency,
@@ -897,10 +908,10 @@ enum class arena_allocation_kind : std::uint8_t {
 
 namespace {
 
-/// Validate one arena allocation against PostgreSQL's allocation limit.
+
 } // namespace
 
-/** Shared with another tree-operations partition. */
+/** Round an allocation to PostgreSQL alignment and reject sizes above MaxAllocSize. */
 [[nodiscard]] inline Size checked_arena_allocation_size(Size requested)
 {
     const Size nonzero = std::max<Size>(requested, 1u);
@@ -927,10 +938,10 @@ namespace {
 
 namespace {
 
-/// Charge one aligned allocation to the arena's matching accounting category.
+
 } // namespace
 
-/** Shared with another tree-operations partition. */
+/** Charge an aligned allocation to the arena, rejecting totals above MaxAllocSize. */
 inline void reserve_arena_allocation(
     piece_tree_arena& destination,
     Size requested,
@@ -1000,10 +1011,14 @@ inline void reserve_arena_allocation(
 
 namespace {
 
-/// Retain and record one older arena required by a newly allocated node.
+
 } // namespace
 
-/** Shared with another tree-operations partition. */
+/**
+ * Keep another arena alive while this arena uses its nodes or literal bytes.
+ * Dependencies must point to older arenas, which prevents reference cycles.
+ * A dependency on the destination itself needs no extra reference.
+ */
 inline void register_arena_dependency(
     piece_tree_arena& destination,
     piece_tree_arena* child)
@@ -1048,10 +1063,10 @@ inline void register_arena_dependency(
 
 namespace {
 
-/// Retain and record one source handle required by a newly allocated leaf.
+
 } // namespace
 
-/** Shared with another tree-operations partition. */
+/** Keep a sequence source alive until the destination arena is released. */
 inline void register_source_dependency(
     piece_tree_arena& destination,
     pg_sequence_source_handle source)
@@ -1077,10 +1092,10 @@ inline void register_source_dependency(
 
 namespace {
 
-/// Allocate zeroed node metadata from an arena's payload context.
+
 } // namespace
 
-/** Shared with another tree-operations partition. */
+/** Allocate a zeroed tree node and include it in the arena's memory budget. */
 [[nodiscard]] inline piece_node* allocate_piece_node(
     piece_tree_arena& destination)
 {
@@ -1094,7 +1109,7 @@ namespace {
     return node;
 }
 
-/** Shared with another tree-operations partition. */
+/** Add sequence lengths, rejecting any result that cannot fit in PostgreSQL bigint. */
 [[nodiscard]] inline std::uint64_t checked_tree_length_add(
     std::uint64_t left,
     std::uint64_t right)
@@ -1131,7 +1146,7 @@ namespace {
 
 } // namespace
 
-/// Allocate literal bytes from an arena and charge its exact aligned footprint.
+/// Allocate zeroed literal storage and charge its aligned size to the arena.
 export [[nodiscard]] inline std::byte* allocate_piece_literal_storage(
     piece_tree_arena& destination,
     std::size_t byte_count)
@@ -1147,7 +1162,11 @@ export [[nodiscard]] inline std::byte* allocate_piece_literal_storage(
     return storage;
 }
 
-/// Create a branch whose arena retains both child edges.
+/**
+ * Build a branch and consume both input edge references on success.
+ * The destination keeps any other arenas needed by the children alive. If one
+ * input is empty, return the other owned edge without allocating a branch.
+ */
 export [[nodiscard]] inline piece_edge make_branch_node(
     piece_tree_arena& destination,
     piece_edge left,
@@ -1173,8 +1192,8 @@ export [[nodiscard]] inline piece_edge make_branch_node(
         branch_piece{left, right};
     inject_piece_tree_failure(
         piece_tree_injected_failure_point::join_node_metadata);
-    /* Acquire the returned token before consuming either input.  If retain
-     * itself fails, an ERROR cleanup ledger still owns both inputs. */
+    /* Add the result's reference before releasing either input. If that
+     * raises an error, the cleanup ledger still owns both input references. */
     const piece_edge result = retain_edge(piece_edge{
         .arena = std::addressof(destination),
         .node = node,
@@ -1185,7 +1204,7 @@ export [[nodiscard]] inline piece_edge make_branch_node(
     return result;
 }
 
-/// Create a source leaf and retain its backing-source dependency.
+/// Create an owned source leaf and keep its sequence source alive through the arena.
 export [[nodiscard]] inline piece_edge make_source_node(
     piece_tree_arena& destination,
     source_piece piece,
@@ -1215,7 +1234,7 @@ export [[nodiscard]] inline piece_edge make_source_node(
     });
 }
 
-/// Create a literal leaf and retain any external storage arena.
+/// Create an owned literal leaf and keep any external storage arena alive.
 export [[nodiscard]] inline piece_edge make_literal_node(
     piece_tree_arena& destination,
     literal_piece piece,
@@ -1246,10 +1265,8 @@ export [[nodiscard]] inline piece_edge make_literal_node(
 }
 
 /**
- * @brief Create a source leaf whose returned edge is already owned by the cleanup ledger.
- *
- * Cleanup capacity is reserved before entering the leaf factory, so an error
- * cannot expose an owning edge outside the ledger.
+ * Create a source leaf and register its owned edge for error cleanup.
+ * Check ledger capacity before construction so recording the result needs no allocation.
  */
 export [[nodiscard]] inline tracked_piece_edge
 make_source_node_error_atomic(
@@ -1270,7 +1287,7 @@ make_source_node_error_atomic(
     };
 }
 
-/// Create a literal leaf whose returned edge is already owned by the cleanup ledger.
+/// Create a literal leaf and register its owned edge for error cleanup.
 export [[nodiscard]] inline tracked_piece_edge
 make_literal_node_error_atomic(
     piece_tree_arena& destination,
@@ -1290,13 +1307,17 @@ make_literal_node_error_atomic(
     };
 }
 
-/// Logical left/right children after applying an edge transform.
+/// Borrowed children in the order seen after applying the parent transform.
 export struct logical_children_result {
     piece_edge first;
     piece_edge second;
 };
 
-/// Return branch children in logical order with the parent transform composed.
+/**
+ * Return borrowed branch children in sequence order.
+ * Reversal swaps the children. Each child also receives the parent's reversal
+ * and complement flags, combined with its own transform.
+ */
 export [[nodiscard]] inline logical_children_result logical_children(
     piece_edge edge)
 {

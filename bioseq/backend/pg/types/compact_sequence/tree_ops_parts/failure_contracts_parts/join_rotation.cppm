@@ -1,6 +1,6 @@
 /**
  * @file join_rotation.cppm
- * @brief Transformed join rotation regression contracts.
+ * @brief Test that tree balancing preserves reversed and complemented sequences.
  */
 module;
 
@@ -42,19 +42,19 @@ enum class transformed_join_rotation_shape : std::uint8_t {
 
 inline constexpr std::size_t rotation_regression_rank_capacity = 64u;
 
-/// Bounded rank stream emitted by one rotation fixture.
+/// Ranks read from a test tree, with their count and a validity flag.
 struct rotation_regression_emission {
     std::array<std::uint8_t, rotation_regression_rank_capacity> ranks{};
     std::size_t size{};
     bool valid{};
 };
 
-/** Transfer one owning edge token and clear the source variable. */
+/** Move an owned edge out of a variable and leave the variable empty. */
 [[nodiscard]] inline piece_edge take_rotation_edge(piece_edge& edge) noexcept {
     return std::exchange(edge, {});
 }
 
-/** Concatenate two bounded self-test emissions without materializing a tree. */
+/** Join two test rank arrays, rejecting invalid inputs or insufficient space. */
 [[nodiscard]] inline rotation_regression_emission
 concat_rotation_emissions(rotation_regression_emission first,
                           rotation_regression_emission second) noexcept {
@@ -70,7 +70,7 @@ concat_rotation_emissions(rotation_regression_emission first,
     return result;
 }
 
-/** Emit a source-only regression tree through its real transform callback. */
+/** Read a test tree through its source callbacks, applying the edge transforms. */
 [[nodiscard]] inline rotation_regression_emission emit_rotation_regression_edge(piece_edge edge) {
     rotation_regression_emission result{};
     if (!edge) {
@@ -102,7 +102,7 @@ concat_rotation_emissions(rotation_regression_emission first,
     return result;
 }
 
-/** Compare the exact rank streams emitted by two bounded tree views. */
+/** Check that two valid test results contain the same ranks. */
 [[nodiscard]] inline bool
 same_rotation_emission(rotation_regression_emission const& left,
                        rotation_regression_emission const& right) noexcept {
@@ -110,7 +110,7 @@ same_rotation_emission(rotation_regression_emission const& left,
            std::equal(left.ranks.begin(), left.ranks.begin() + left.size, right.ranks.begin());
 }
 
-/** Make one non-coalescible three-rank source leaf for a rotation fixture. */
+/** Make a three-letter source leaf with a gap that prevents merging with its neighbors. */
 [[nodiscard]] inline piece_edge
 make_rotation_regression_leaf(piece_tree_arena& arena,
                               pg_sequence_source_handle source,
@@ -134,11 +134,11 @@ make_rotation_regression_leaf(piece_tree_arena& arena,
 }
 
 /**
- * Exercise one structurally distinct persistent AVL rotation.
+ * Check one AVL rotation with reversed and complemented inputs.
  *
- * Inputs live in an older arena and changed spines in a newer arena. Exact
- * emitted ranks prove that logical child order and composed transforms survive
- * the rotation. Counter and arena checks prove dependency ownership balances.
+ * The input nodes stay in their original arena. The join allocates changed
+ * branches in a new arena, then checks the output ranks and tree balance.
+ * Releasing both arenas must also release every added source reference.
  */
 [[nodiscard]] inline bool
 run_transformed_join_rotation_case(transformed_join_rotation_shape shape) {
@@ -288,7 +288,7 @@ run_transformed_join_rotation_case(transformed_join_rotation_shape shape) {
            source_state.read_calls == 8u && live_piece_tree_arenas == arena_baseline;
 }
 
-/** Exercise an inward-heavy transformed join without unbounded recursion. */
+/** Check that joining beside a reversed, uneven subtree finishes with a balanced tree. */
 [[nodiscard]] inline bool run_inward_transformed_join_regression() {
     const std::uint64_t arena_baseline = live_piece_tree_arenas;
     factory_failure_source_state source_state{};
@@ -336,10 +336,10 @@ run_transformed_join_rotation_case(transformed_join_rotation_shape shape) {
            live_piece_tree_arenas == arena_baseline;
 }
 
-/** Cover the original join and all four single/double rotation shapes. */
+
 } // namespace
 
-/** Provide the SQL facade with this deterministic piece-tree contract. */
+/** Test the reversed uneven subtree and all four single or double rotation cases. */
 [[nodiscard]] inline bool run_transformed_join_rotation_regression() {
     return run_inward_transformed_join_regression() &&
            run_transformed_join_rotation_case(transformed_join_rotation_shape::left_single) &&
