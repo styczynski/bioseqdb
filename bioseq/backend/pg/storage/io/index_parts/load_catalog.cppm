@@ -1,10 +1,10 @@
 /**
  * @file load_catalog.cppm
- * @brief Owns load-time catalog, relation, tuple descriptor, and executor setup.
+ * @brief Prepare column mappings and finish table writes before building indexes.
  */
 module;
-// Highway and PostgreSQL declarations precede the module unit because this
-// owner imports Highway-bearing module graphs.
+// Include Highway and PostgreSQL headers before the named module declaration.
+// Imported sequence modules also depend on these declarations.
 #include <bioseq/pg_compat.h>
 #include <boost/container/small_vector.hpp>
 #include <boost/integer.hpp>
@@ -30,7 +30,7 @@ extern "C" {
 #include "access/relation.h"     // index_open / index_close
 #include "access/table.h"        // table_open / table_close
 #include "access/xact.h"         // CommandCounterIncrement
-#include "catalog/namespace.h"   // (parity w/ sample_table_udf; relid arrives as regclass)
+#include "catalog/namespace.h"   
 #include "catalog/pg_type_d.h"   // TEXTOID, VARCHAROID, BPCHAROID
 #include "commands/sequence.h"   // ResetSequenceCaches
 #include "executor/executor.h"   // ExecConstraints, ExecInitExpr, ExecEvalExpr
@@ -42,16 +42,16 @@ extern "C" {
 #include "utils/lsyscache.h"     // getTypeInputInfo, get_typtype, getBaseType
 #include "utils/rel.h"           // RelationGetDescr
 #include "utils/resowner.h"      // CurrentResourceOwner, TopTransactionResourceOwner
-#include "utils/snapmgr.h" // PushActiveSnapshot/PopActiveSnapshot/GetTransactionSnapshot, ActiveSnapshotSet
+#include "utils/snapmgr.h" // Snapshot stack operations.
 #include "utils/typcache.h" // lookup_rowtype_tupdesc
 
 #include "fmgr.h"
 #include "rewrite/rewriteHandler.h" // build_column_default
 }
-// flush_relation_write_state declarations
+
 export module bioseq.postgres.storage.io:load_catalog;
 
-import bioseq.common.logging; // bioseq_log<logging_level::debug>(bioseq::settings::diagnostics::logging::enabled)
+import bioseq.common.logging; // Load diagnostics.
 import bioseq.codegen.sql.annotation_model;
 import bioseq.postgres.support;
 import bioseq.postgres.support.datums;
@@ -62,26 +62,23 @@ import bioseq.storage.size; // sequence_size_t
 import bioseq.storage.layout;
 import bioseq.common.templating.runtime_dispatch; // dispatch_exact_value_or_default
 import bioseq.common.templating.value_sequence;
-import bioseq.sequences;                       // compact_sequence_stdc_type_params::decode,
-                                               //   dispatch_storage_unit_byte_width, traits
-import bioseq.postgres.types.compact_sequence; // bioseq::pg_types::seq, pgseq_supported_alphabets
-import bioseq.postgres.storage.manager; // alloc_locator_stub_in, alloc_seq_caches, seq_caches,
-                                        //   read_max_sub_table_cap_bytes,
-//   k_sequence_fragment_storage_units, sequence_stream_writer,
-//   flush_seq_cache_write_states, sequence_locator
-import bioseq.postgres.table.io; // write_column_row, get_column_write_per_tuple_context
+import bioseq.sequences;                       // Sequence alphabets and packed storage types.
+                                               
+import bioseq.postgres.types.compact_sequence; // PostgreSQL sequence values and supported alphabets.
+import bioseq.postgres.storage.manager; // Sequence locators, fragment writers and relation caches.
+                                        
+
+import bioseq.postgres.table.io; // Column table row writes and per-row memory contexts.
 import bioseq.postgres.storage.io.index_maintenance;
 import bioseq.io.options;                      // sequence_file_format, reader_options
 import bioseq.io.file_kind;                    // detect_sequence_file_kind, sequence_file_kind
-import bioseq.io.reader;                       // stream_sequences_file, packed_sequence_chunk,
-                                               //   sample_sequence_headers
+import bioseq.io.reader;                       // Stream sequence chunks and sample input headers.
+                                               
 import bioseq.io.identifier_parser.formats;
-import bioseq.io.identifier_parser; // resolve_identifier_mapping, parse_and_route_header
+import bioseq.io.identifier_parser; // Map input header fields to destination columns.
 import bioseq.postgres.storage.metadata;
 import bioseq.postgres.storage.physical;
-// initialize_column_write_state +
-// pop_relation_column_write_state
-// (PostgreSQL support already imported above: bioseq::postgres::support::find_primary_key_oid)
+
 import bioseq.parallelism.mode;
 import bioseq.parallelism.concepts;
 import bioseq.parallelism.pool;
@@ -89,65 +86,48 @@ import bioseq.postgres.scheduler.supervisor;
 import :typed_row_writer;
 import :stream_dispatch;
 
-// --------------------------------------------------------------------------
-// Batched index build after the streamed insert
-// --------------------------------------------------------------------------
+// Build indexes after the streamed insert.
 
-/** @brief Builds update-on-insert indexes after all streamed writes finish. */
-/// @param main_relid Open load target identified by relation OID.
-/// @throws PostgreSQL ERROR when configured index maintenance fails.
+/** @brief Build indexes configured for update on insert after the load finishes writing. */
+/// @param main_relid Target table OID.
+/// @throws PostgreSQL ERROR if configured index maintenance fails.
 ///
-/// The caller must keep the portal's active snapshot installed and must flush
-/// parent and fragment write states before calling this function.
+/// Keep the caller's active snapshot installed and finish parent and fragment
+/// writes before calling this function.
 void build_indexes_if_enabled(Oid main_relid) {
     if (!bioseq::settings::index::insert_maintenance::enabled) {
         return;
     }
-    // The grouped-SoA opt-in deliberately forbids the ordinary per-tuple INSERT
-    // hook: that hook owns pre-publication bytes and cannot reopen a committed
-    // PostgreSQL locator. bioseq.load is the explicit exception because it
-    // first finishes every streamed parent/source write, then reaches this
-    // batched SPI bioseq.update_index path. The normal grouped-SoA guards still
-    // require both async-persistence GUCs OFF and the authoritative post-load
-    // row scan to prove every non-NULL source is locator-backed before clear.
-    // bioseq.load is one UDF inside one SQL command. The batched build
-    // (build_policy_update_on_insert_indexes → SPI `bioseq.update_index`) issues
-    // catalog SPI_execute(read_only=true) calls and columnar reads, both of which
-    // require the executor's active snapshot. run_load calls this AFTER
-    // finish_load_write_states (so the streamed rows are committed to stripes and
-    // read back cleanly) but BEFORE reset_sequence_caches_after_load_storage_alloc
-    // (whose DISCARD-SEQUENCES teardown leaves the snapshot unusable — building
-    // after it SIGSEGV'd inside SPI_execute). At this point the portal snapshot
-    // the SELECT pushed is still on the stack.
+    // bioseq.load finishes parent and fragment writes before calling bioseq.update_index,
+    // so the rebuild can read published locators in the same transaction.
+    // Grouped indexes still require both asynchronous persistence settings to be off,
+    // and the rebuild checks every non-NULL source locator before clearing the index.
+    // Keep the caller's active snapshot installed for SPI calls and column reads.
+    // Run this before resetting PostgreSQL's sequence caches.
     DEBUG_ASSERT(ActiveSnapshotSet(),
                  "bioseq.load: index build needs the portal's active snapshot");
     bioseq::postgres::storage::io::maintain_insert_policy_indexes(main_relid);
 }
 
-/** @brief Clears sequence caches invalidated by post-load storage allocation. */
+/** @brief Clear PostgreSQL sequence caches after allocating storage during a load. */
 ///
-/// This resets PostgreSQL's backend-local sequence cache and does not alter
-/// persisted sequence values.
+/// Stored sequence values remain unchanged. This resets PostgreSQL's local cache.
 void reset_sequence_caches_after_load_storage_alloc() {
-    // Shard allocation advances an internal sequence. Clear its backend-local
-    // cache before a same-command index scan and again before returning.
+    // Shard allocation uses an internal PostgreSQL sequence. Clear its cached state
+    // after the load and index work finish.
     bioseq::postgres::support::invoke_pg_as_cpp([] { ResetSequenceCaches(); });
 }
 
-// --------------------------------------------------------------------------
-// Open, stream, flush, close, and index
-// --------------------------------------------------------------------------
+// Finish table and fragment writes.
 
-/** @brief Flushes the current column stripe before post-load index work. */
-/// @param ctx Active load context owning parent and fragment writer state.
-/// @throws PostgreSQL ERROR when either writer cannot be flushed.
+/** @brief Flush parent and fragment writes so the index builder can read them. */
+/// @param ctx Load context holding parent and fragment write states.
+/// @throws PostgreSQL ERROR if either writer fails to flush.
 ///
-/// Writer state and relation locks remain owned by the load after this call.
+/// The load keeps its write states and relation locks after this call.
 void flush_pending_load_writes(load_context& ctx) {
-    // Parent rows go through ctx.write_state; fragment rows through per-subtable
-    // write states opened from ctx.caches. update_index_impl uses raw columnar
-    // readers + random reads, so both layers must be flushed before the same UDF
-    // starts indexing.
+    // The index builder reads both the parent locators and their sequence fragments.
+    // Flush both sets of rows before building indexes within this SQL call.
     const SubTransactionId subtransaction =
         bioseq::postgres::support::invoke_pg_as_cpp([] { return GetCurrentSubTransactionId(); });
     bioseq::postgres::support::invoke_pg_as_cpp([&ctx, subtransaction] {
@@ -159,12 +139,12 @@ void flush_pending_load_writes(load_context& ctx) {
     bioseq::postgres::support::invoke_pg_as_cpp([] { CommandCounterIncrement(); });
 }
 
-/** @brief Finalizes parent and sequence-subtable write states exactly once. */
-/// @param ctx Active load context whose write-state pointers are cleared.
-/// @throws PostgreSQL ERROR when a parent or shard writer cannot commit.
+/** @brief Finish the fragment and parent write states, then clear the load's references. */
+/// @param ctx Load context whose write-state pointers are cleared.
+/// @throws PostgreSQL ERROR if finishing a parent or fragment writer fails.
 ///
-/// Each write state is popped under `TopTransactionResourceOwner`. This does
-/// not end the surrounding SQL transaction.
+/// Finalize these writes under TopTransactionResourceOwner while keeping the
+/// surrounding SQL transaction open.
 void finish_load_write_states(load_context& ctx) {
     std::vector<Oid> shard_relfilenodes;
     shard_relfilenodes.reserve(ctx.caches == nullptr ? 0 : ctx.caches->entries.size());
@@ -198,26 +178,22 @@ void finish_load_write_states(load_context& ctx) {
     bioseq::postgres::support::invoke_pg_as_cpp([] { CommandCounterIncrement(); });
 }
 
-// --------------------------------------------------------------------------
-// Typed multi-column mapping setup
-// --------------------------------------------------------------------------
+// Map header fields to typed columns.
 
-/** @brief Minimal PostgreSQL type metadata retained for a mapped column. */
+/** @brief Column number and type information needed to convert header values. */
 struct column_attr {
-    /// One-based destination attribute number.
+    /// Destination column number, starting at one.
     std::int16_t attno;
     /// PostgreSQL destination type OID.
     Oid atttypid;
-    /// Destination typmod passed to the type input function.
+    /// Type modifier passed to the input function, such as a text length limit.
     std::int32_t atttypmod;
 };
 
-/// Decode bioseq.column_mapping[] using the element OID carried by the array.
-/// Returned string views remain in the caller's memory context for the load.
-/// @param arr Borrowed PostgreSQL array with a valid composite element type.
-/// @return Owning mapping vector whose string views refer to text copied into
-/// the current PostgreSQL memory context.
-/// @throws PostgreSQL ERROR when the descriptor or any array element is invalid.
+/// Read header-to-column mappings from a bioseq.column_mapping array.
+/// @param arr Borrowed PostgreSQL array whose element type is checked.
+/// @return A vector of mappings whose strings live in the current PostgreSQL memory context.
+/// @throws PostgreSQL ERROR for an invalid element type, a NULL element or a NULL column name.
 [[nodiscard]] std::vector<idp::user_column_mapping> parse_column_mapping_array(ArrayType* arr) {
     std::vector<idp::user_column_mapping> maps;
     const Oid mapping_type_oid = ARR_ELEMTYPE(arr);
@@ -274,18 +250,15 @@ struct column_attr {
     return maps;
 }
 
-/// Resolve column mappings and prepare coercion, defaults, and constraints
-/// before streaming.
-/// @param ctx Active load context whose parser and executor state is populated.
-/// @param path Null-terminated input path used for optional header sampling.
-/// @param kind Detected file kind and compression metadata.
-/// @param requested_fmt User-selected or automatic header format.
-/// @param user_maps Borrowed mappings that remain valid for this call.
-/// @throws PostgreSQL ERROR for unsupported columns, invalid mapping, type
-/// metadata failure, or executor setup failure.
-///
-/// Any inspected primary index is held with `AccessShareLock` only during
-/// setup. Executor objects are retained in `ctx` until load cleanup.
+/// Prepare header parsing and conversion into the target columns.
+/// Cache type input functions and defaults before reading records, keeping any
+/// executor state in ctx until cleanup. The primary-index lock is released here.
+/// @param ctx Load context to populate.
+/// @param path Input path used to sample headers.
+/// @param kind Input format and compression information.
+/// @param requested_fmt Requested header format, including automatic detection.
+/// @param user_maps Mappings borrowed during setup.
+/// @throws PostgreSQL ERROR for unsupported columns, invalid mappings or failed setup.
 void setup_typed_column_mapping(load_context& ctx,
                                 const char* path,
                                 bioseq::io::sequence_file_kind kind,
@@ -295,7 +268,7 @@ void setup_typed_column_mapping(load_context& ctx,
     const TupleDesc td = ctx.parent_td;
     const std::int16_t seq_attno = ctx.cols.seq_attno;
 
-    // Record a single-column primary key; composite keys need no special path.
+    // Tell the header mapper about a primary key made from one column.
     std::int16_t pk_attno = 0;
     {
         const Oid pk_oid = bioseq::postgres::support::invoke_pg_as_cpp(
@@ -311,8 +284,8 @@ void setup_typed_column_mapping(load_context& ctx,
         }
     }
 
-    // Flatten non-sequence columns without leaking PostgreSQL types into the
-    // identifier resolver. Identity and generated columns are unsupported.
+    // Give the header mapper plain column descriptions. Identity and generated
+    // columns are rejected because this loader does not compute their values.
     std::vector<idp::column_descriptor> columns;
     std::vector<column_attr> col_attrs;
     for (int i = 0; i < td->natts; ++i) {
@@ -355,7 +328,7 @@ void setup_typed_column_mapping(load_context& ctx,
     }
     ctx.parser_active = true;
 
-    // Sample headers to determine the effective AUTO format.
+    // Sample headers to choose the format for automatic parsing.
     idp::header_format effective_fmt = requested_fmt;
     if (requested_fmt == idp::header_format::automatic) {
         const auto samples = bioseq::io::sample_sequence_headers(
@@ -378,7 +351,7 @@ void setup_typed_column_mapping(load_context& ctx,
     }
     ctx.effective_fmt = effective_fmt;
 
-    // Resolve the PostgreSQL-independent identifier mapping.
+    // Decide which parsed fields fill which destination columns.
     auto map = idp::resolve_identifier_mapping(requested_fmt, effective_fmt, columns, user_maps);
     if (!map) {
         raise_load_error_as_cpp(ERRCODE_INVALID_TABLE_DEFINITION, map.error());
@@ -404,7 +377,7 @@ void setup_typed_column_mapping(load_context& ctx,
         }
     }
 
-    // Build one cached coercion entry per resolved destination.
+    // Cache the PostgreSQL input function and type limits for each mapped column.
     ctx.dest.clear();
     ctx.dest.reserve(slot_to_column.size());
     for (const std::uint16_t ci : slot_to_column) {
@@ -435,8 +408,7 @@ void setup_typed_column_mapping(load_context& ctx,
         });
     }
 
-    // Compile defaults as executor expressions so volatile defaults evaluate
-    // once per row.
+    // Prepare default expressions once, then evaluate them separately for each row.
     ctx.defaults.clear();
     for (std::size_t i = 0; i < columns.size(); ++i) {
         if (!columns[i].has_default) {
@@ -455,11 +427,8 @@ void setup_typed_column_mapping(load_context& ctx,
         ctx.defaults.push_back(default_col{col_attrs[i].attno, state});
     }
 
-    // A private executor is needed only when PostgreSQL must evaluate a default
-    // or enforce a relation constraint. Header parsing/coercion alone does not
-    // need an EState. Besides avoiding unnecessary executor setup on the hot
-    // load path, this keeps a nested AfterTrigger query frame out of ordinary
-    // typed loads before their same-statement SPI index build.
+    // Create an executor only for defaults and table constraints. Loads that only
+    // parse and convert header fields can skip this setup and its trigger frame.
     const bool needs_private_executor =
         !ctx.defaults.empty() || ctx.parent_rel->rd_att->constr != nullptr;
     if (!needs_private_executor) {
@@ -474,7 +443,6 @@ void setup_typed_column_mapping(load_context& ctx,
         bioseq::postgres::support::invoke_pg_as_cpp([] { return makeNode(ResultRelInfo); });
     bioseq::postgres::support::invoke_pg_as_cpp(
         [&ctx] { InitResultRelInfo(ctx.result_rel_info, ctx.parent_rel, 1, nullptr, 0); });
-    // NB: NO ExecOpenIndices here — this path only restores NOT NULL / CHECK
-    // enforcement around write_column_row; index maintenance stays on the
-    // existing Bioseq load/index policy path.
+    // This executor checks NOT NULL and CHECK constraints around direct row writes.
+    // Bioseq index maintenance runs after the load. PostgreSQL indexes are not opened here.
 }

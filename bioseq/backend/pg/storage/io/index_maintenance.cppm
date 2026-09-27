@@ -1,6 +1,6 @@
 /**
  * @file index_maintenance.cppm
- * @brief Provides the narrow index-maintenance boundary used by table loads.
+ * @brief Update configured indexes after a streamed table load.
  */
 module;
 
@@ -11,7 +11,7 @@ export module bioseq.postgres.storage.io.index_maintenance;
 
 export namespace bioseq::postgres::storage::io {
 
-/** Rebuild indexes configured for maintenance after a streamed table load. */
+/** Rebuild enabled indexes configured for update on insert, and return the total rows reported. */
 [[nodiscard]] std::int64_t maintain_insert_policy_indexes(Oid main_relation_oid);
 
 } // namespace bioseq::postgres::storage::io

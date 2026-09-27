@@ -1,6 +1,6 @@
 /**
  * @file index_maintenance_implementation.cppm
- * @brief Connects table-load maintenance to the indexing administration module.
+ * @brief Run configured index updates after a streamed table load.
  */
 module;
 
