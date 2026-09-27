@@ -1,14 +1,10 @@
 /**
- * @file Core `bioseq.seq` type integration scenarios.
+ * @file sequence_basic_test.cpp
+ * @brief Tests the bioseq.seq SQL type.
  *
- *   * `bioseq.seq` text-roundtrip preserves ASCII on a vanilla heap table.
- *   * `bioseq.len` and `bioseq.unit_len` report logical and storage lengths.
- *   * The default btree opclass provides lexicographic ordering.
- *   * Equality and range predicates use logical sequence comparisons.
- *   * Empty literals round-trip through supported typmods and heap storage.
- *   * `seq_typmod_in` rejects every expressible malformed typmod.
- *
- * Heap tables isolate type semantics from the columnar mmsearch scan contract.
+ * Checks text round trips, lengths, ordering, comparisons, and hashes. Heap
+ * tables keep the type tests separate from Bioseq table scans. Other cases
+ * check expanded-value ownership, custom sorting, and invalid type modifiers.
  */
 
 #include <fmt/format.h>
@@ -65,9 +61,8 @@ TEST_CASE("bioseq.seq round-trips ASCII payloads on heap tables",
   REQUIRE(rows[3][2].value() == "33");
 }
 
-// Heap-table ORDER BY drives the btree opclass at the planner level. We assert
-// the resulting pk ordering matches lexicographic comparison so any
-// disagreement between opclass-cmp and operator `<` lights up immediately.
+// Sort sequence values through the heap-table ORDER BY path and compare
+// the row order with the expected lexicographic order.
 TEST_CASE("ORDER BY bioseq.seq follows the documented lexicographic order",
           "[component:bioseq][layer:integration][feature:sequence][resource:postgres]") {
   auto ctx = fresh_context({k_table});
@@ -167,10 +162,8 @@ TEMPLATE_TEST_CASE_SIG(
 #endif
 }
 
-// Empty + non-empty literals stored side-by-side on a heap table. The recv
-// path is exercised because libpq round-trips the value through the binary
-// format when fetching results in some clients; we verify the basic invariant
-// that ordering and length data survive INSERT.
+// Store empty and nonempty sequences together in a heap table. Reading
+// them back must preserve their text and lengths.
 TEST_CASE("Empty literal survives INSERT-then-SELECT on heap table",
           "[component:bioseq][layer:integration][feature:sequence][resource:postgres]") {
     auto ctx = fresh_context({k_table});
@@ -269,9 +262,8 @@ TEST_CASE("bioseq.seq prefix ordering: shorter prefix sorts before its extension
 TEST_CASE("bioseq.seq_cmp accepts unequal-typmod operands and orders consistently",
           "[component:bioseq][layer:integration][feature:sequence][resource:postgres]") {
     auto ctx = fresh_context();
-    // Comparing across alphabets / widths: the function must either succeed
-    // (and return a consistent sign) or raise. Whatever the policy, both
-    // directions must agree (cmp(a,b) == -cmp(b,a)).
+    // If comparison succeeds across storage widths, reversing the operands
+    // must reverse its sign.
     constexpr std::string_view sql_pair =
         "SELECT bioseq.seq_cmp('ACGT'::bioseq.seq('dna4', 16), "
         "                      'ACGT'::bioseq.seq('dna4', 64));";
@@ -344,15 +336,13 @@ TEST_CASE("non-canonical typmod casts follow the active alphabet profile",
         ctx, "SELECT 'ACGTN'::bioseq.seq('dna4', 16)::text;");
     REQUIRE(invalid_dna4.sqlstate == "22P02");
 #if !defined(BIOSEQ_TEMPLATE_FLATTEN_HAS_ALL_ALPHABETS_UINT64)
-    /* The iteration profile registers only dna4.  PostgreSQL first constructs
-     * the parser-safe unbound value, so N is rejected at that lexical boundary
-     * before the destination typmod can bind it. */
+    /* The DNA4-only build rejects N while parsing the unbound input. */
     REQUIRE(invalid_dna4.contains(
         "invalid symbol at byte 4 in unbound bioseq.seq"));
     REQUIRE(invalid_dna4.contains("DETAIL: byte value=78"));
 #else
-    /* Richer profiles admit N in an unbound value through dna5, but binding
-     * that value to dna4 must still reject it instead of recoding N to A. */
+    /* With DNA5 available, input parsing accepts N. Casting that value to
+     * DNA4 must then reject it. */
     REQUIRE(invalid_dna4.contains(
         "invalid symbol 'N' for bioseq alphabet dna4"));
     REQUIRE(invalid_dna4.contains("DETAIL: symbol offset=4"));
@@ -371,8 +361,7 @@ TEST_CASE("non-canonical typmod casts follow the active alphabet profile",
 #endif
 }
 
-// Negative typmod matrix: every entry must raise a SQL error. Adding a new
-// invalid form is one row.
+// Each listed invalid type modifier must raise a SQL error.
 TEMPLATE_TEST_CASE_SIG(
     "Invalid bioseq.seq typmods raise a SQL error",
     "[component:bioseq][layer:integration][feature:sequence][resource:postgres]",

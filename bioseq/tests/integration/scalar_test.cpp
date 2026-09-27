@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Scalar SQL contracts for sequence length and symbol-count routines.
+ * @brief Tests SQL sequence lengths and base counts.
  */
 
 #include <fmt/format.h>
@@ -13,7 +13,7 @@ import bioseq.tests.integration.support;
 
 using namespace bioseq_int_tests;
 
-// Real tally of 'CTAGTCACTGTAGCCTGATCGTAGCTAGT' (29 bp): A=6, C=7, G=7, T=9.
+// The 29-base fixture contains A=6, C=7, G=7, and T=9.
 TEST_CASE("bioseq.symbol_count over a literal returns the real tally across vectorization",
           "[component:bioseq][layer:integration][feature:sequence][resource:postgres]") {
     auto ctx = fresh_context();
@@ -24,7 +24,7 @@ TEST_CASE("bioseq.symbol_count over a literal returns the real tally across vect
         "bioseq.vectorization.enabled");
     REQUIRE(reference.size() == 1);
     REQUIRE(reference.front().size() == 1);
-    REQUIRE(std::stoll(reference.front().front().value()) == 6); // real A count
+    REQUIRE(std::stoll(reference.front().front().value()) == 6); // A count
 }
 
 TEMPLATE_TEST_CASE_SIG("bioseq.len / bioseq.unit_len agree across widths on the empty sequence",
