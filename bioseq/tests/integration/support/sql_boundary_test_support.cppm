@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Provides SQL-boundary fixtures shared by integration cases.
+ * @brief Shared SQL fixtures, catalog checks, and lock-race helpers.
  */
 module;
 #include <libpq-fe.h>
@@ -127,7 +127,7 @@ SELECT classid, objid, objsubid,
   FROM pg_catalog.pg_depend;
 )sql";
 
-/** Terminal state and rows observed while draining an asynchronous query. */
+/** Progress, diagnostics, and rows collected from an asynchronous query. */
 struct async_query_outcome final {
   bool consume_ok = true;
   bool ready = false;
@@ -138,18 +138,18 @@ struct async_query_outcome final {
   rowset_t rows;
 };
 
-/** Owns and drains one bounded libpq query used by lock-race cases. */
+/** Track one asynchronous query and try to cancel unfinished work on scope exit. */
 class scoped_async_query final {
  public:
-  /** Bind the helper to an existing libpq connection. */
+  /** Borrow an existing libpq connection for the lifetime of this helper. */
   explicit scoped_async_query(PGconn *connection) noexcept
       : connection_(connection) {}
   scoped_async_query(const scoped_async_query &) = delete;
   scoped_async_query &operator=(const scoped_async_query &) = delete;
-  /** Cancel and drain any statement still owned at scope exit. */
+  /** Request cancellation and try to drain any query still active at scope exit. */
   ~scoped_async_query() { static_cast<void>(cancel_and_drain()); }
 
-  /** Send one statement when no prior statement remains active. */
+  /** Send SQL when no earlier query is still active. */
   [[nodiscard]] bool send(std::string_view sql) {
     if (connection_ == nullptr || active_) {
       return false;
@@ -159,7 +159,7 @@ class scoped_async_query final {
     return active_;
   }
 
-  /** Drain the active statement within the bounded polling budget. */
+  /** Poll for completion and collect results, returning ready=false if the budget runs out. */
   [[nodiscard]] async_query_outcome drain(
       unsigned attempts = 3000) noexcept {
     async_query_outcome outcome{};
@@ -217,7 +217,7 @@ class scoped_async_query final {
     return outcome;
   }
 
-  /** Cancel an active statement and drain its terminal result. */
+  /** Request cancellation, then return whether the active query could be drained. */
   [[nodiscard]] bool cancel_and_drain() noexcept {
     if (!active_ || connection_ == nullptr) {
       return true;
@@ -261,7 +261,7 @@ class scoped_async_query final {
       identity[3].value());
 }
 
-/** Wait until one exact advisory lock reaches the requested grant state. */
+/** Poll for exactly one matching advisory lock with the requested granted state. */
 [[nodiscard]] bool wait_for_exact_advisory_lock(
     const connection_test_context &observer,
     long long worker_pid,
@@ -285,7 +285,7 @@ class scoped_async_query final {
   return false;
 }
 
-/** Wait until one relation lock reaches the requested grant state. */
+/** Poll for the requested relation lock, mode, and granted state on the specified backend. */
 [[nodiscard]] bool wait_for_relation_lock(
     const connection_test_context &observer,
     long long worker_pid,
@@ -313,7 +313,7 @@ class scoped_async_query final {
   return false;
 }
 
-/** Return the aggregate dependency row for the Bioseq table AM. */
+/** Summarize the Bioseq table access method's relation dependencies. */
 [[nodiscard]] row_t am_dependency_summary(const connection_test_context &ctx) {
   return query_one(ctx,
                    "SELECT count(*)::text, "
@@ -338,7 +338,7 @@ class scoped_async_query final {
                    " WHERE am.amname = 'bioseq';");
 }
 
-/** Require the exact installed table-AM dependency set. */
+/** Require exactly the expected Bioseq table-access-method dependencies. */
 void require_exact_am_dependencies(const row_t &summary) {
   REQUIRE(summary.size() == 5);
   REQUIRE(summary[0].value() == "16");
@@ -360,7 +360,7 @@ void require_exact_am_dependencies(const row_t &summary) {
                   table));
 }
 
-/** Return the dependency count and routine identity for one view. */
+/** Count a view's dependencies on routines with this name and return one matching OID. */
 [[nodiscard]] row_t view_routine_dependency(
     const connection_test_context &ctx, std::string_view view_name,
     std::string_view routine_name) {
