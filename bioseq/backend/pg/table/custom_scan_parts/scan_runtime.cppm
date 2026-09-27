@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Aggregates scan resources, source lifetimes, tuples, and executor callbacks.
+ * @brief Collects declarations for base-scan execution and source-value lifetimes.
  */
 export module bioseq.postgres.table:custom_scan_scan_runtime;
 

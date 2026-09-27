@@ -106,15 +106,12 @@ export {
     }
 
     /**
-     * @brief Checks whether a bounded fallback can share the primary query's parameters.
+     * @brief Checks whether two mmsearch calls can share one scan's parameters.
      *
-     * The dispatch buffer owns one minimap2_parameters object for every query attached
-     * to a scan.  Consequently the bounded Param-primary/Const-extra exception can
-     * share that buffer only when the primary changes no biological option and the
-     * extra requests the default option set.  The sole permitted difference is an
-     * explicit require-absent index policy on the primary: the extra's inherited
-     * `allow` policy admits the same no-index execution, so this does not alter its
-     * Boolean result or error contract.
+     * The parameterized primary call must explicitly require an absent index and
+     * leave every other option NULL. The extra constant-query call must use the
+     * two-argument form. Both then use the same alignment settings, and the extra
+     * call's default index policy permits the primary's choice to recompute.
      */
     [[nodiscard]] bool bounded_batch_fallback_options_are_supported(FuncExpr* primary,
                                                                     FuncExpr* extra,
@@ -192,18 +189,12 @@ export {
     }
 
     /**
-     * @brief Applies non-null fields from a constant aligner-options record.
+     * @brief Applies fields explicitly set in a constant aligner_options record.
      *
-     * If the third argument of a mmsearch FuncExpr is a row-typed Const
-     * representing aligner_options(), decode its fields and overlay any
-     * non-NULL values on top of `params`. NULL field values signal "inherit
-     * the GUC" so they are skipped here.
-     *
-     * The generated row codec validates and decodes the exact
-     * bioseq_aligner_options composite layout.
-     *
-     * @return Whether the options explicitly supplied an index-read requirement.
-     * @throws PostgreSQL ERROR for an invalid call shape, row layout, or option value.
+     * NULL fields keep the values already in @p params. The generated decoder checks
+     * the SQL row layout, and algorithm selectors are checked before conversion.
+     * @return True when the record explicitly sets the index-read requirement.
+     * @throws PostgreSQL ERROR for an invalid call, record layout or selector.
      */
     [[nodiscard]] bool
     apply_aligner_options_override(FuncExpr* mmsearch_fe,
@@ -221,10 +212,7 @@ export {
         if (opt_const->constisnull) {
             return false;
         }
-        /*
-         * The composite comes through as a HeapTupleHeader varlena. Deconstruct
-         * it via heap_deform_tuple against the pg_type tupdesc.
-         */
+        /* Decode the composite value using its registered PostgreSQL row layout. */
         HeapTupleHeader header =
             reinterpret_cast<HeapTupleHeader>(PG_DETOAST_DATUM(opt_const->constvalue));
         Oid row_typeoid = HeapTupleHeaderGetTypeId(header);
@@ -339,13 +327,8 @@ export {
             params.block_max_size = static_cast<size_t>(*options.block_max_size);
         }
         if (options.chaining_algorithm) {
-            /*
-             * Range-check before the enum cast — otherwise a crafted caller
-             * (aligner_options(chaining_algorithm => 42)) injects an invalid
-             * enum value into params.chaining_algorithm. Supported
-             * ordinals are 0=SCALAR_MM2, 1=SIMD_MM2, 2=RMQ, and
-             * 3=VULKAN_TILED_DP.
-             */
+            /* Reject unknown chaining selectors before converting the SQL integer
+             * to an enum. For example, chaining_algorithm => 42 is invalid. */
             const std::int32_t raw = *options.chaining_algorithm;
             if (raw >= 0 && raw <= 3) {
                 params.chaining_algorithm = static_cast<bioseq::simd::chaining_algorithm>(raw);
@@ -370,7 +353,7 @@ export {
                                 raw)));
             }
         }
-        // Known-good minimizer ordinals are 0 through 4.
+        // Valid minimizer selectors are 0 through 4.
         if (options.minimizer_algorithm) {
             const std::int32_t raw = *options.minimizer_algorithm;
             if (raw >= 0 && raw <= 4) {
@@ -409,22 +392,17 @@ export {
             index_read_requirement_present = true;
         }
         ReleaseTupleDesc(tupdesc);
-        /* Free the detoasted copy if PG_DETOAST_DATUM actually copied. */
+        /* Release the temporary detoasted copy, if one was allocated. */
         free_detoasted_header();
         return index_read_requirement_present;
     }
 
     /**
-     * @brief Resolves the SIMD chaining policy after all per-call overrides.
+     * @brief Chooses the chaining policy after applying SQL overrides.
      *
-     * The C++ API deliberately defaults to exact_visited.  PostgreSQL promotes
-     * the explicitly selected SIMD_MM2 route to the named bounded candidate so
-     * integration and performance gates exercise the real production choice.
-     * Every non-SIMD algorithm is reset to exact: a stale bounded value must not
-     * leak through a copied parameter object, and no unsupported request may be
-     * translated into a different biological algorithm.
-     *
-     * @throws PostgreSQL ERROR when the chaining algorithm has an unknown ordinal.
+     * SIMD minimap2 uses bounded_batch_approximate. Other supported chaining
+     * algorithms use exact_visited, replacing any policy left in a copied parameter
+     * object. An unknown algorithm raises a PostgreSQL error.
      */
     void finalize_simd_chaining_policy(bioseq::simd::minimap2_parameters& params) {
         using bioseq::simd::chaining_algorithm;
