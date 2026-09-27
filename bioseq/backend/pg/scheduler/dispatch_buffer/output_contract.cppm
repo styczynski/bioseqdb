@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Defines the borrowed output view returned by the scheduler dispatch buffer.
+ * @brief Describe one row and match returned by the dispatch buffer.
  */
 module;
 #include <cstdint>
@@ -13,10 +13,10 @@ import bioseq.pipeline.minimap_port.match_result_contract;
 export namespace bioseq::scheduler {
 
 /**
- * @brief Borrows one buffered scan row and its current alignment match.
+ * @brief A buffered input row and its current alignment match.
  *
- * The buffer owns both pointers and keeps them valid until its next state
- * transition.
+ * The buffer owns the slot and match. Consume this view before clearing
+ * the batch or replacing its input or results.
  */
 struct dispatch_next_output {
     TupleTableSlot* scan_slot_copy = nullptr;

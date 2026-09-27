@@ -1,6 +1,6 @@
 /**
  * @file effective_minimap_parameters.cppm
- * @brief Derives short-pair minimap parameters when defaults are unchanged.
+ * @brief Adjust default minimizer and chaining settings for short sequence pairs.
  */
 module;
 
@@ -13,10 +13,12 @@ import bioseq.pipeline.minimap_port;
 export namespace bioseq::simd {
 
 /**
- * @brief Scales untouched minimizer defaults for short query-target pairs.
- * @param[in] base Requested parameters, preserved when any tuned field is nondefault.
- * @param[in] min_bp Shorter operand length in base pairs.
- * @return Effective parameters for the pair.
+ * @brief Use smaller minimizer and chaining thresholds for short sequence pairs.
+ * Apply this adjustment only while kmer_size, window_size, min_chain_score,
+ * and min_seed_count all have their default values.
+ * @param[in] base Requested parameters.
+ * @param[in] min_bp Length of the shorter sequence in bases.
+ * @return The adjusted parameters, with other settings preserved.
  */
 [[nodiscard]] inline minimap2_parameters
 effective_minimap_parameters_for_pair(const minimap2_parameters& base,

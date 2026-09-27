@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Defines the exact opaque runtime contract for buffered sequence dispatch.
+ * @brief Give custom scans access to the batch buffer without importing its implementation.
  */
 module;
 
@@ -27,17 +27,14 @@ import bioseq.pipeline.runtime_contract;
 
 export namespace bioseq::scheduler {
 
-/**
- * @brief Returns the registered Highway plan without exposing the processor module.
- * @return The immutable registered dispatch plan.
- */
+/** @return The registered Highway CPU dispatch plan. */
 [[nodiscard]] bioseq::simd_dispatch::highway_dispatch_plan
 highway_dispatch_plan_for_plan() noexcept;
 
 /**
- * @brief Binds the registered PostgreSQL target before freezing one request.
- * @param[in] parameters Validated executor parameters with all overrides applied.
- * @return The sole immutable statement owner, including its exact target binding.
+ * @brief Attach Highway kernels and create the statement's fixed execution plan.
+ * @param[in] parameters Validated executor settings with per-call options applied.
+ * @return The shared statement plan used by later alignment calls.
  */
 [[nodiscard]] bioseq::simd::pipe::statement_execution_plan_owner
 make_postgres_statement_execution_plan(bioseq::simd::minimap2_parameters parameters);
@@ -49,14 +46,14 @@ struct dispatch_join_query_ref {
 };
 
 /**
- * @brief Owns the opaque tuple dispatch buffer used by custom scans.
+ * @brief Own the batch buffer used by custom scans.
  *
- * The runtime is movable, not copyable, and must remain inside the PostgreSQL
- * executor lifetime that supplied its borrowed relation and memory context.
+ * The runtime can be moved. Its borrowed relation, snapshot, and memory
+ * context must remain valid while it executes. Copying is disabled.
  */
 class dispatch_buffer_runtime {
   public:
-    /** @brief Creates an empty runtime sized for the estimated tuple count. */
+    /** @brief Create an empty buffer and reserve space from the estimated row count. */
     explicit dispatch_buffer_runtime(std::size_t estimated_tuple_count);
     ~dispatch_buffer_runtime();
 
@@ -65,7 +62,7 @@ class dispatch_buffer_runtime {
     dispatch_buffer_runtime(dispatch_buffer_runtime&& other) noexcept;
     dispatch_buffer_runtime& operator=(dispatch_buffer_runtime&& other) noexcept;
 
-    /** @brief Configures alignment, index-read, relation, snapshot, and memory owners. */
+    /** @brief Save the alignment plan and borrow the executor state needed for storage reads. */
     void configure_params(bioseq::simd::pipe::statement_execution_plan_owner execution_plan,
                           bioseq::indexing::index_read_requirement index_read_requirement,
                           bool read_sequence_index,
@@ -81,30 +78,29 @@ class dispatch_buffer_runtime {
     void replace_executor_snapshot(Snapshot executor_snapshot);
 
     /**
-     * @brief Binds the statement-owned sequence source provider.
-     *
-     * The runtime borrows the provider and never closes it independently.
+     * @brief Borrow the statement's live sequence provider.
+     * The executor keeps ownership and closes it after its readers finish.
      */
     void bind_sequence_source_provider(bioseq::storage::pg_sequence_source_provider* provider);
     /** @brief Clears the borrowed sequence source provider without closing it. */
     void clear_sequence_source_provider_binding() noexcept;
 
-    /** @brief Binds the statement accumulator for persisted GPU operation statistics. */
+    /** @brief Share the statement's counters for GPU operations on stored indexes. */
     void bind_persisted_gpu_operation_stats_sink(
         bioseq::pipeline_stats::persisted_gpu_operation_accumulator& sink);
 
-    /** @brief Binds the statement-owned downstream active-wall union tracker. */
+    /** @brief Share the statement timer for downstream processing. */
     void bind_downstream_active_wall_tracker(
         bioseq::simd::downstream_active_wall_tracker& tracker);
 
-    /** @brief Binds the statement guard that owns asynchronous slice work. */
+    /** @brief Attach the owner that tracks asynchronous slice jobs and payload allocations. */
     void bind_slice_async_owner(slice_async_owner_guard* owner);
-    /** @brief Releases drained per-row asynchronous slice ownership. */
+    /** @brief Release the per-row slice owner after the batch is drained. */
     void release_per_row_slice_async_owner_after_drain();
-    /** @brief Releases drained join asynchronous slice ownership. */
+    /** @brief Release the join slice owner after all target work is drained. */
     void release_join_slice_async_owner_after_drain();
 
-    /** @brief Configures a broadcast-query mmsearch scan. */
+    /** @brief Configure mmsearch to reuse one constant query across target rows. */
     void configure_mmsearch(AttrNumber seq_attno,
                             std::string column_name,
                             std::vector<char> query_varlena_bytes,
@@ -112,7 +108,7 @@ class dispatch_buffer_runtime {
                             std::uint8_t storage_unit_byte_width,
                             AttrNumber primary_key_attno);
 
-    /** @brief Configures a per-row mmsearch scan backed by physical attributes. */
+    /** @brief Configure mmsearch to take its target and query from each input row. */
     void configure_mmsearch_per_row(AttrNumber seq_attno,
                                     std::string column_name,
                                     AttrNumber per_row_query_attno,
@@ -124,10 +120,9 @@ class dispatch_buffer_runtime {
                                     AttrNumber primary_key_attno);
 
     /**
-     * @brief Configures a per-row mmsearch whose operands are evaluated expressions.
-     *
-     * The sequence attribute still identifies source authority and preserves
-     * raw output. It does not select either evaluated operand.
+     * @brief Configure mmsearch to accept evaluated sequence expressions per row.
+     * seq_attno still identifies the source and output column. Each submission
+     * supplies the expression values used for alignment.
      */
     void configure_mmsearch_per_row_evaluated(AttrNumber seq_attno,
                                               std::string column_name,
@@ -137,11 +132,11 @@ class dispatch_buffer_runtime {
                                               std::uint8_t query_storage_unit_byte_width,
                                               AttrNumber primary_key_attno);
 
-    /** @brief Installs one coalesced query value for the active mmsearch. */
+    /** @brief Install query bytes already converted to the target storage width. */
     void apply_typmod_coalesce(std::vector<char> coalesced_bytes);
     /** @brief Clears mmsearch state and optionally removes extra queries. */
     void clear_mmsearch_context(bool clear_extras = false);
-    /** @brief Adds another constant query to the current broadcast batch. */
+    /** @brief Add a constant query that each target row must also match. */
     void add_extra_const_query(std::vector<char> query_varlena_bytes);
 
     /** @brief Configures the target and query slot layout for a batch join. */
@@ -155,41 +150,37 @@ class dispatch_buffer_runtime {
                                  std::uint8_t storage_unit_byte_width,
                                  std::uint8_t query_alphabet_code,
                                  std::uint8_t query_storage_unit_byte_width);
-    /** @brief Starts buffering query batches for one borrowed join target slot. */
+    /** @brief Copy one locator-backed target row for reuse across query batches. */
     void begin_join_target(TupleTableSlot* locator_passthrough_target);
-    /** @brief Prepares all query references needed by the current join target. */
+    /** @brief Prepare the shared target for the queries in this join pass. */
     void prepare_join_target_queries(std::span<const dispatch_join_query_ref> all_queries);
     /** @brief Selects the next query batch for the current join target. */
     void set_join_query_batch(std::span<const dispatch_join_query_ref> queries);
     /**
-     * @brief Executes the selected join batch and constructs output cursors.
-     * @return True when at least one output cursor is available.
+     * @brief Align the selected query batch and prepare its output cursors.
+     * @return True when a nonempty batch ran, even if it found no matches.
      */
     [[nodiscard]] bool run_join_query_batch_and_build_cursors();
-    /** @brief Finishes the current join target and releases its transient state. */
+    /** @brief Check and release the current target's preparation and buffered rows. */
     void finish_join_target();
-    /** @brief Resets join state while retaining reusable statement ownership. */
+    /** @brief Clear join inputs and results for a rescan, keeping the statement configuration. */
     void reset_join_runtime_for_rescan();
-    /** @brief Abandons join state after PostgreSQL ERROR without invoking PostgreSQL APIs. */
+    /** @brief Discard join state after PostgreSQL ERROR and abort active sequence reads. */
     void abandon_join_runtime_after_pg_error_noexcept() noexcept;
 
     /** @brief Copies one physical scan slot into the pending dispatch batch. */
     void submit_scan(TupleTableSlot* scan_slot);
     /**
-     * @brief Copies one recipe row with its actual physical source identity.
-     *
-     * The TID is admitted for physical dispatch only when @p source_relation_oid
-     * authenticates the relation configured for this buffer.  An inherited row
-     * remains usable by host execution without acquiring a forged parent identity.
+     * @brief Copy a transformed row with its source relation and tuple ID.
+     * Use the tuple ID for index reads only when @p source_relation_oid matches
+     * this buffer's relation. Other source rows keep no direct row identity.
      */
     void submit_scan_with_source_tid(TupleTableSlot* scan_slot,
                                      Oid source_relation_oid,
                                      ItemPointerData source_tid);
     /**
-     * @brief Copies a recipe row for which no direct-relation identity is admissible.
-     *
-     * This preserves host execution while explicitly suppressing any incidental
-     * slot TID that cannot be authenticated without an actual relation OID.
+     * @brief Copy a transformed row without assigning a physical source identity.
+     * Ignore any tuple ID in the slot because its relation is unknown.
      */
     void submit_scan_recipe_without_source_tid(TupleTableSlot* scan_slot);
     /** @brief Copies one scan slot together with evaluated target and query values. */
@@ -199,82 +190,46 @@ class dispatch_buffer_runtime {
                                bool has_query_override,
                                Datum query,
                                bool query_is_null);
-    /**
-     * @brief Reports whether the current scan batch reached dispatch capacity.
-     * @return True when the batch should be executed.
-     */
+    /** @return Whether the current scan batch has reached its row limit. */
     [[nodiscard]] bool ready_to_dispatch() const;
     /**
-     * @brief Executes the current scan batch and constructs output cursors.
-     * @return True when at least one output cursor is available.
+     * @brief Align the buffered scan rows and prepare output cursors.
+     * @return True when mmsearch ran on a nonempty buffer, regardless of matches.
      */
     [[nodiscard]] bool run_batch_and_build_cursors();
-    /** @brief Releases all copied scan slots and row-local state. */
+    /** @brief Release the batch's copied rows and results, keeping mmsearch configuration. */
     void clear_slots();
 
     /**
-     * @brief Advances to the next buffered output row.
-     * @return A borrowed row view or absence after the cursors are drained.
+     * @brief Return the next copied row and match.
+     * @return Borrowed pointers, or nullopt after the last output.
      */
     [[nodiscard]] std::optional<dispatch_next_output> read_next_output();
-    /**
-     * @brief Returns accumulated pipeline statistics for the last dispatch.
-     * @return A value snapshot independent of later buffer mutations.
-     */
+    /** @return A copy of the last batch's execution counters, including all its waves. */
     [[nodiscard]] bioseq::pipeline_stats::pipeline_execution_stats execution_stats() const;
-    /**
-     * @brief Reports the effective sequence-index read state after configuration.
-     * @return True when this buffer may read sequence indexes.
-     */
+    /** @return Whether the configured policy permits reading stored sequence indexes. */
     [[nodiscard]] bool reads_sequence_index() const;
-    /**
-     * @brief Counts additional broadcast queries.
-     * @return The number of queries beyond the primary query.
-     */
+    /** @return The number of constant filters in addition to the primary query. */
     [[nodiscard]] std::size_t extra_query_count() const;
-    /**
-     * @brief Reports whether the buffer completed its writing stage.
-     * @return True after no more input slots may be submitted.
-     */
+    /** @return Whether the current batch has finished collecting input and can be drained. */
     [[nodiscard]] bool has_finished_writing() const;
-    /**
-     * @brief Reports whether mmsearch is configured for this buffer.
-     * @return True when an mmsearch context is active.
-     */
+    /** @return Whether mmsearch is configured for this buffer. */
     [[nodiscard]] bool mmsearch_active() const;
-    /**
-     * @brief Reports whether each row supplies its own query sequence.
-     * @return True for per-row self-alignment mode.
-     */
+    /** @return Whether mmsearch uses the same source column for both operands. */
     [[nodiscard]] bool per_row_self_alignment() const;
-    /**
-     * @brief Reports whether typmod coalescing supplied the active query.
-     * @return True when a coalesced query value is installed.
-     */
+    /** @return Whether a converted constant query is active. */
     [[nodiscard]] bool coalesce_active() const;
-    /**
-     * @brief Reads the active target alphabet code.
-     * @return The encoded target alphabet identifier.
-     */
+    /** @return The target alphabet code. */
     [[nodiscard]] std::uint8_t mmsearch_alphabet_code() const;
-    /**
-     * @brief Reads the active target storage-unit width.
-     * @return The storage-unit width in bytes.
-     */
+    /** @return The target storage-unit width in bytes. */
     [[nodiscard]] std::uint8_t mmsearch_storage_unit_byte_width() const;
-    /**
-     * @brief Reads the physical target sequence attribute number.
-     * @return The target attribute number or an invalid attribute when absent.
-     */
+    /** @return The target attribute number, or InvalidAttrNumber when unavailable. */
     [[nodiscard]] AttrNumber target_sequence_attno() const noexcept;
-    /**
-     * @brief Reads the physical per-row query attribute number.
-     * @return The query attribute number or an invalid attribute when absent.
-     */
+    /** @return The per-row query attribute number, or InvalidAttrNumber when unavailable. */
     [[nodiscard]] AttrNumber per_row_query_sequence_attno() const noexcept;
 
   private:
-    /** Opaque ownership pointer defined in the implementation module unit. */
+    /** Owned tuple_dispatch_buffer, accessed through the implementation module. */
     void* implementation = nullptr;
 };
 
