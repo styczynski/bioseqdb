@@ -1,6 +1,6 @@
 /**
  * @file resident_test.cpp
- * @brief Tests resident GPU-index upload, adoption, and publication ownership.
+ * @brief Checks GPU index uploads, transfers of buffer ownership and cache reuse.
  */
 
 #include <catch2/catch_test_macros.hpp>

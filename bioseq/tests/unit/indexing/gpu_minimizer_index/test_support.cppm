@@ -1,6 +1,6 @@
 /**
  * @file test_support.cppm
- * @brief Provides GPU minimizer index fixtures shared by unit tests.
+ * @brief Builds GPU-index fixtures and CPU reference lookups for unit tests.
  */
 module;
 
@@ -31,8 +31,7 @@ using minimap_sketch_data = bioseq::indexing::minimap_sketch_data;
 using bioseq::indexing::minimizer_hashmap_fragment_index;
 namespace idx_ns = bioseq::indexing;
 
-/// Host simulation of the shader's open-addressed `find_slot`.
-/// Host simulation of open-addressed lookup over an explicit slot span.
+/// Finds a hash in the upload table using the shader's linear-probing rules.
 [[nodiscard]] std::uint32_t host_find_slot(
     const idx_ns::gpu_minimizer_index_upload& upload, std::uint64_t hash) {
     std::uint32_t p = static_cast<std::uint32_t>(idx_ns::splitmix64(hash)) & upload.slot_mask;
@@ -45,7 +44,7 @@ namespace idx_ns = bioseq::indexing;
     return 0xffffffffu;
 }
 
-/// Host simulation of the shader's sorted-dense `find_slot` branch.
+/// Finds a hash in sorted GPU slots using binary search.
 [[nodiscard]] std::uint32_t host_find_sorted_dense_slot(
     std::span<const idx_ns::gpu_minimizer_slot> slots,
     std::uint64_t hash) {
@@ -78,16 +77,16 @@ namespace idx_ns = bioseq::indexing;
     return 0xffffffffu;
 }
 
-/// Build the repeated-hash CPU index used by upload tests.
+/// Builds a CPU index with four hashes, including one with three positions.
 [[nodiscard]] minimizer_hashmap_fragment_index build_demo_index() {
     std::vector<minimap_sketch_data> minimizers;
-    // Several distinct kmers; one with multiple positions (a repeat).
+    
     minimizers.emplace_back(0x111ULL, 5u, 0u);
     minimizers.emplace_back(0x222ULL, 9u, 1u);
     minimizers.emplace_back(0x333ULL, 13u, 0u);
-    minimizers.emplace_back(0x222ULL, 40u, 0u);   // repeat kmer 0x222
+    minimizers.emplace_back(0x222ULL, 40u, 0u);   // Another occurrence of hash 0x222.
     minimizers.emplace_back(0x444ULL, 77u, 1u);
-    minimizers.emplace_back(0x222ULL, 100u, 1u);  // repeat kmer 0x222 again
+    minimizers.emplace_back(0x222ULL, 100u, 1u);  // Third occurrence of hash 0x222.
     minimizer_hashmap_fragment_index idx;
     idx.build(minimizers, 256);
     return idx;
@@ -112,7 +111,8 @@ private:
     std::uint64_t previous_ = 0u;
 };
 
-/// Allocate a valid adoptable device index with optional query gating.
+/// Allocates GPU buffers and matching ownership counters for adoption tests.
+/// The optional query gate and empty-target flag control the fixture metadata.
 [[nodiscard]] bioseq::gpu::vulkan::gpu_built_index
 make_adoptable_gpu_built_index(
     bioseq::gpu::vulkan::runtime& runtime,
@@ -223,7 +223,7 @@ make_adoptable_gpu_built_index(
     return built;
 }
 
-/// Encode one unsigned fixture scalar in little-endian order.
+/// Writes an unsigned little-endian value, rejecting writes outside the fixture buffer.
 template <class p_unsigned_integer>
 requires (std::is_unsigned_v<p_unsigned_integer>)
 void store_test_le(
@@ -240,7 +240,7 @@ void store_test_le(
     }
 }
 
-/// Own encoded grouped-SoA rows and their authenticated metadata.
+/// Owns grouped index control and position bytes with their directory and checksums.
 struct grouped_soa_gpu_resident_fixture {
     std::array<std::vector<std::byte>, 2> control_bytes;
     std::array<std::vector<std::byte>, 2> position_bytes;
@@ -250,7 +250,7 @@ struct grouped_soa_gpu_resident_fixture {
     idx_ns::grouped_soa_directory_view directory;
 };
 
-/// Construct the identity expected by grouped-SoA GPU ingestion.
+/// Builds the expected DNA4, k=15, window=10 identity for GPU index-loading tests.
 [[nodiscard]] constexpr idx_ns::expected_minimizer_generation_identity
 grouped_soa_gpu_expected_identity() noexcept {
     constexpr auto physical_layout =
@@ -280,7 +280,7 @@ grouped_soa_gpu_expected_identity() noexcept {
     };
 }
 
-/// Build two authenticated grouped-SoA partitions for GPU ingestion tests.
+/// Builds two grouped index partitions with matching row, directory and manifest checksums.
 [[nodiscard]] grouped_soa_gpu_resident_fixture
 make_grouped_soa_gpu_resident_fixture() {
     grouped_soa_gpu_resident_fixture fixture;
@@ -475,7 +475,7 @@ make_grouped_soa_gpu_resident_fixture() {
     return fixture;
 }
 
-/// Construct a deterministic synthetic Vulkan device UUID.
+/// Builds a repeatable test device UUID from the supplied byte.
 [[nodiscard]] bioseq::gpu::vulkan::gpu_device_uuid synthetic_device_uuid(
     std::uint8_t seed) noexcept
 {

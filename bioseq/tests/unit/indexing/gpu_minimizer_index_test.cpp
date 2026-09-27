@@ -1,6 +1,6 @@
 /**
  * @file gpu_minimizer_index_test.cpp
- * @brief Tests host GPU-index layouts, planning, cache identity, and decline reporting.
+ * @brief Checks GPU index layouts and memory plans on the CPU, including cache keys and upload errors.
  */
 
 #include <cstring>
@@ -39,7 +39,7 @@ TEST_CASE("vulkan index: GPU slot table resolves the same hits as CPU lookup",
     const auto upload = idx_ns::build_gpu_minimizer_upload(idx);
 
     idx.for_each_table_entry([&idx, &upload](std::uint64_t kmer, std::uint64_t) {
-        const auto cpu_hits = idx.lookup(kmer);  // span of encoded positions
+        const auto cpu_hits = idx.lookup(kmer);  // Positions include the strand bit.
         const std::uint32_t slot_idx = host_find_slot(upload, kmer);
         ASSERT(slot_idx != 0xffffffffu,
                fmt::format("GPU slot table missed kmer {}", kmer), kmer);
@@ -53,7 +53,7 @@ TEST_CASE("vulkan index: GPU slot table resolves the same hits as CPU lookup",
                    fmt::format("kmer {} position {} mismatch", kmer, j), j);
         }
     });
-    // A kmer not in the index must miss.
+    // A hash absent from the CPU index must also miss in the GPU table.
     ASSERT(host_find_slot(upload, 0xDEADBEEFULL) == 0xffffffffu,
            "absent kmer unexpectedly found in slot table", 0);
 }
@@ -199,11 +199,11 @@ TEST_CASE("vulkan index: in-memory cache key is pointer-stable and content-keyed
 
 TEST_CASE("vulkan index: distinct assembly identities do not share a cache key",
           "[component:bioseq][layer:unit][feature:index]") {
-    // Two identical local segment indexes with different add_position_offset:
-    // they must carry distinct explicit assembly_identity values and key apart.
+    // Shift one copy to a later target segment. Give each assembly its own
+    // identity so cached GPU buffers cannot be reused for the wrong coordinates.
     auto seg_lo = build_demo_index();
     auto seg_hi = build_demo_index();
-    seg_hi.add_position_offset(1'000'000);  // global offset for a later segment
+    seg_hi.add_position_offset(1'000'000);  // Move positions to the later segment.
 
     const auto key_lo = idx_ns::make_gpu_index_cache_key(
         seg_lo, idx_ns::gpu_index_cache_identity{.assembly_identity = 0xA11CEULL});
@@ -212,7 +212,7 @@ TEST_CASE("vulkan index: distinct assembly identities do not share a cache key",
 
     ASSERT(!(key_lo == key_hi),
            "different assembly identities must not share a cache key", 0);
-    // The same identity on the same index must be reproducible.
+    // Repeating the same assembly identity must reproduce the key.
     const auto key_lo2 = idx_ns::make_gpu_index_cache_key(
         seg_lo, idx_ns::gpu_index_cache_identity{.assembly_identity = 0xA11CEULL});
     ASSERT(key_lo == key_lo2, "assembly key must be reproducible", 0);

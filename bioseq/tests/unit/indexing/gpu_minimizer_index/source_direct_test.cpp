@@ -1,6 +1,6 @@
 /**
  * @file source_direct_test.cpp
- * @brief Tests source-direct GPU-index admission, fill, and cache restrictions.
+ * @brief Checks building GPU index buffers directly from sorted minimizers within memory limits.
  */
 
 #include <cstring>
