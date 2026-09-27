@@ -1,6 +1,6 @@
 /**
  * @file generation_session_contract.cppm
- * @brief Declares grouped-generation read contracts, ownership, and inline sink templates.
+ * @brief Read and validate a stored minimizer generation using one PostgreSQL snapshot.
  */
 module;
 
@@ -40,16 +40,16 @@ import bioseq.postgres.storage.manager; // seq_caches, sequence_locator, format 
 import bioseq.storage.layout;           // sequence_locator
 import bioseq.storage.size;             // sequence_size_t
 import bioseq.indexing.type; // sequence_index_layout, index_sub_key_t, k_max_index_chunk_size_bytes, sentinels
-import bioseq.indexing.storage;           // the concepts
-import bioseq.indexing.minimizer_hashmap; // encoded header/bucket validation
-import bioseq.indexing.minimizer_fragment_image; // explicit fixed-endian minimizer fragment image image ABI
+import bioseq.indexing.storage;           // Storage adapter requirements.
+import bioseq.indexing.minimizer_hashmap; // Minimizer index header and bucket format.
+import bioseq.indexing.minimizer_fragment_image; // Minimizer fragment format with a fixed byte order.
 import bioseq.indexing.compact_hash32_direct_index;
 import bioseq.indexing.minimizer_fragment_compact_hash32_adapter;
 import bioseq.postgres.table.io; // begin_column_read/read_next_column_row/end_column_read/column_read_state
 import bioseq.storage.lazy_sequence;           // lazy_sequence
 import bioseq.postgres.types.compact_sequence; // bioseq::pg_types::seq, dispatch_instance
 import bioseq.sequences;                       // compact_sequence_range
-import bioseq.sequences.simd;                  // canonical bounded base decoding
+import bioseq.sequences.simd;                  // Decode sequence bases with SIMD.
 import bioseq.parallelism.memory_admission;
 import bioseq.parallelism.mode;
 import bioseq.parallelism.concepts;
@@ -67,34 +67,34 @@ import :catalog;
 import :catalog_row_io;
 import :fragment_image;
 export namespace bioseq::storage::indexing {
-/** Setup identity carried across restart inspection of one ready generation. */
+/** Generation and source IDs with content and format checksums for restart checks. */
 struct ready_minimizer_generation_identity {
     std::uint64_t generation_id = 0;
     std::uint64_t source_identity = 0;
     std::uint64_t source_content_checksum = 0;
     std::uint64_t storage_contract_checksum = 0;
 
-    /** Compares every authenticated generation identity field. */
+    /** Compare all generation identity fields. */
     [[nodiscard]] bool operator==(const ready_minimizer_generation_identity&) const = default;
 };
 
-/** Inspects the authenticated identity of one ready generation. */
+/** Check a published generation's metadata and source and return its identity. */
 [[nodiscard]] ready_minimizer_generation_identity inspect_ready_minimizer_generation_identity_pg(
     const minimizer_generation_administration_identity& identity,
     std::uint64_t sequence_rowno,
     Snapshot executor_snapshot,
     expected_minimizer_generation_identity expected);
 
-/// Authenticated head, manifest, and directory returned by metadata discovery.
+/// Checked head, manifest and directory owned by a read session.
 struct minimizer_generation_read_metadata {
     minimizer_generation_head head{};
     minimizer_generation_manifest manifest{};
     grouped_soa_directory_view directory{};
 };
 
-/// One caller-declared admission group. A group is one exact ordered PG range
-/// scan. Every request must match one complete directory control/position
-/// extent, and every skipped row must be predeclared by that directory.
+/// Requests to read in one ordered PostgreSQL scan.
+/// Each request must cover a complete control or position extent from the
+/// directory. The directory also determines which rows the scan may skip.
 struct minimizer_generation_payload_read_group {
     index_sub_key_range range{};
     std::vector<index_sub_key_request> requests;
@@ -113,16 +113,15 @@ namespace minimizer_generation_full_crc_detail {
 
 } // namespace minimizer_generation_full_crc_detail
 
-/// Select whether a read session owns a registered snapshot reference.
+/// Choose whether to register a snapshot reference or borrow the caller's registration.
 enum class minimizer_generation_snapshot_registration : std::uint8_t {
     register_copy,
     borrow_registered,
 };
 
-/// Current-generation target session. It binds one fresh heap OID, its exact
-/// five-key primary index, one executor-owned data snapshot, and one query key
-/// for the complete head -> metadata -> controls -> positions -> finish
-/// lifecycle. Both payload sections retain the same open relations and snapshot.
+/// Read one minimizer generation using the same open table, primary index and snapshot.
+/// Check its head and metadata, then validate the source before reading controls
+/// and positions. The session also supports a full payload scan or a mapped file.
 class index_storage_fragment_generation_read_session {
   private:
     enum class operation_state : std::uint8_t {
@@ -184,9 +183,8 @@ class index_storage_fragment_generation_read_session {
     grouped_soa_minimizer_profile expected_profile_{};
     operation_state state_ = operation_state::opened;
     bool catalog_source_authorized_ = false;
-    // Permits precede every allocation they cover, so reverse member
-    // destruction cannot return admitted bytes while an owned view/buffer is
-    // still alive.
+    // Declare memory reservations before the buffers they cover so destruction
+    // frees those buffers before releasing their reservations.
     bioseq::parallelism::memory_permit metadata_permit_;
     bioseq::parallelism::memory_permit plan_permit_;
     bioseq::parallelism::memory_permit runtime_permit_;
@@ -203,28 +201,25 @@ class index_storage_fragment_generation_read_session {
     std::optional<std::uint64_t> payload_stage_begin_ns_;
     minimizer_generation_read_stats stats_{};
 
-    /// Return the sole authenticated manifest authority. Full metadata and
-    /// manifest-only state are mutually exclusive. Observing both or neither
-    /// fails closed at every transition that consumes a manifest.
+    /// Return the manifest from the active metadata form.
+    /// Return null if both forms are present or both are absent.
     [[nodiscard]] const minimizer_generation_manifest* active_manifest_() const noexcept;
 
     [[noreturn]] void fail_(std::string_view message);
 
     void checked_add_(std::uint64_t& value, std::uint64_t increment, std::string_view message);
 
-    /// Classify one physical payload TID transition. Same-page and immediately
-    /// next-page tuples are adjacent. Larger forward jumps and all backward
-    /// jumps remain separately visible.
+    /// Count how the scan moves between heap blocks.
+    /// Treat the same block and the next block as adjacent, and count larger
+    /// forward gaps and backward jumps separately.
     void record_payload_tid_(ItemPointerData tid) noexcept;
 
     void record_payload_tid_(const HeapTuple tuple) noexcept;
 
     void start_payload_timing_() noexcept;
 
-    /// Record one truthful coarse wall interval for the complete payload
-    /// scan-and-callback stage. Decode and transfer remain explicitly
-    /// unavailable (zero) until their owning sections expose coarse boundaries.
-    /// no tuple/chunk-local clock reads are permitted on the cold path.
+    /// Record elapsed time for the payload reads and their callbacks.
+    /// Decode and transfer times remain zero because they are not measured separately.
     void finalize_payload_timing_() noexcept;
 
     void release_owned_state_() noexcept;
@@ -314,24 +309,20 @@ class index_storage_fragment_generation_read_session {
                section.physical_bytes_read >= section.read.delivered_bytes;
     }
 
-    /// Allocate every auxiliary BufferHeapTuple slot before the batch reader
-    /// starts. The count advances after each successful allocation so an ERROR
-    /// part-way through setup leaves an exact cleanup prefix.
+    /// Create the tuple slots used to pin a batch of payload rows.
+    /// Record each successful allocation so cleanup can handle a partially built batch.
     void create_full_generation_batch_slots_checked_();
 
-    /// Drop pins and executor slots explicitly while PostgreSQL cleanup is
-    /// still legal. Retire each pointer before its PG call so ResourceOwner is
-    /// the single fallback if that call raises ERROR, with no later double-drop.
+    /// Release row pins and tuple slots before closing the scan.
+    /// Clear each pointer before its PostgreSQL call so error cleanup cannot release it twice.
     void drop_full_generation_batch_slots_checked_();
 
     void abandon_relations_noexcept_() noexcept;
 
     void close_relations_checked_();
 
-    /// Preserve the original PG/C++ failure while deterministically ending an
-    /// active scan and releasing both relation locks plus snapshot ownership.
-    /// Cleanup runs after invoke_pg_as_cpp restored PostgreSQL's exception
-    /// stack, never from a destructor during C++ unwinding.
+    /// Try to close a failed session, then rethrow its original exception.
+    /// Leave resources to PostgreSQL cleanup if closing also fails.
     [[noreturn]] void cleanup_failed_session_and_rethrow_();
 
     struct projected_extent_range {
@@ -340,9 +331,8 @@ class index_storage_fragment_generation_read_session {
         bool position_extent = false;
     };
 
-    /// Project one physical range onto the logical/control directory key
-    /// namespace. A range may cover controls or positions, never cross the
-    /// namespace boundary.
+    /// Convert a control or position sub-key range to directory keys.
+    /// Reject ranges that are invalid or cross between the two sections.
     [[nodiscard]] static std::optional<projected_extent_range>
     project_extent_range_(const index_sub_key_range& range) noexcept;
 
@@ -353,8 +343,7 @@ class index_storage_fragment_generation_read_session {
 
   public:
     index_storage_fragment_generation_read_session() = delete;
-    /// Bind one query and expected generation identity to a registered MVCC
-    /// snapshot without opening payload scans.
+    /// Open and check the index table and primary key for this query and snapshot.
     index_storage_fragment_generation_read_session(
         std::string_view table_name,
         std::uint64_t query_key,
@@ -378,44 +367,36 @@ class index_storage_fragment_generation_read_session {
     [[nodiscard]] minimizer_generation_head read_active_head_impl_(bool bind_expected_layout);
 
   public:
-    /// Read and authenticate an active head bound to the caller's independently
-    /// selected expected format.
+    /// Read the active head once and check that its layout matches the expected format.
     [[nodiscard]] minimizer_generation_head read_active_head_once();
 
-    /// Administrative wire-format discovery. This authenticates the head,
-    /// defers only its expected-format comparison, and closes the head-only
-    /// session before returning. The caller must reopen a normally bound
-    /// session before reading manifest or payload bytes.
+    /// Inspect the active head's format and close the session.
+    /// Reopen with that expected format before reading its manifest or payload.
     [[nodiscard]] minimizer_generation_head discover_active_head_layout_and_close();
 
-    /// Timed compact-direct metadata path. Read the exact manifest tuple under
-    /// the same snapshot as the head, using chunk_no=0 in the primary-index
-    /// qualification so no directory tuple can be visited. The fixed manifest
-    /// and its head checksum remain fully authenticated. Only the O(directory)
-    /// materialization/CRC/grouped_soa_directory_view construction is intentionally omitted.
+    /// Read and check only the manifest for the compact direct mapping path.
+    /// The primary-key lookup selects chunk zero, so it avoids loading the directory.
+    /// Check the manifest against the head and the expected storage format.
     [[nodiscard]] const minimizer_generation_manifest&
     read_manifest_once_without_directory(const minimizer_generation_head& expected_head);
 
-    /// Read and authenticate the immutable manifest and grouped directory once.
+    /// Read and check the manifest and complete directory once.
     [[nodiscard]] const minimizer_generation_read_metadata&
     read_manifest_directory_once(const minimizer_generation_head& expected_head);
 
-    /// Bind metadata to an independently reopened source row. This is the only
-    /// transition to metadata_ready: source identity alone is insufficient.
+    /// Match metadata to a source checked by reading its complete sequence.
+    /// Consume the authorization on success or failure.
     void
     consume_full_source_authorization(minimizer_generation_source_authorization&& authorization);
 
-    /// Timed cold-reader transition. Only the constant-work catalog authorization is
-    /// accepted here. The full decoded authorization has a separate, explicitly named
-    /// untimed writer/admin transition above.
+    /// Match metadata to a checked parent row and source catalog record.
+    /// Import their read counters and consume the authorization.
     void
     consume_source_authorization(minimizer_generation_catalog_source_authorization&& authorization);
 
-    /// Bind the exact LIVE image descriptor under the same registered MVCC
-    /// snapshot that supplied the head and manifest.  Both catalog locks stay
-    /// owned by this session until the mapped image has been registered and
-    /// the selected mapped grouped-SoA finish transition performs the checked
-    /// close.
+    /// Read the live image descriptor using this session's snapshot.
+    /// Require its payload table identity to match the open index table, and hold
+    /// its catalog locks until the mapped-read finish method closes the session.
     [[nodiscard]] minimizer_generation_storage_descriptor
     read_live_storage_descriptor_once(const minimizer_generation_administration_identity& identity);
 
@@ -426,12 +407,10 @@ class index_storage_fragment_generation_read_session {
                               std::span<const minimizer_generation_payload_read_group> groups);
 
   public:
-    /// Stream the complete authorized generation through one ordered physical
-    /// scan. Payload bytes remain opaque and callback-scoped: this layer does
-    /// not decode controls, globalize/rebase local positions, or retain a
-    /// payload image.  A callback may copy into already-admitted host or mapped
-    /// device storage, but command submission/fence waits must occur only after
-    /// this method returns and `active_scan_` has been closed.
+    /// Read the complete generation in one ordered scan, checking row and extent checksums.
+    /// Each callback borrows encoded bytes only for that call. It may copy them
+    /// into storage whose memory is already reserved. Submit device work and wait
+    /// for it after this method returns, when the PostgreSQL scan is closed.
     template <class p_control_sink, class p_position_sink>
         requires(bioseq::indexing::index_chunk_reader_fn<p_control_sink> ||
                  std::invocable<p_control_sink&,
@@ -474,9 +453,8 @@ class index_storage_fragment_generation_read_session {
                 fail_("full-generation directory extent equation disagrees");
             }
 
-            // The primary key yields every global control sub-key followed by
-            // every derived position sub-key. Grouped-SoA hashes that same
-            // physical order, so the payload checksum can be streamed directly.
+            // The primary key returns controls before positions. This matches the
+            // checksum order, so it can be accumulated during the scan.
             std::uint64_t total_chunks = 0;
             std::uint64_t planned_control_chunks = 0;
             std::uint64_t planned_position_chunks = 0;
@@ -541,10 +519,9 @@ class index_storage_fragment_generation_read_session {
             crc64_ecma182_accumulator extent_checksum{};
             crc64_ecma182_accumulator payload_row_checksum{};
 
-            // One bridge covers up to K fetch/deform/projection operations.
-            // Each projection borrows its own pinned slot; row authority, CRC
-            // and arbitrary sinks execute only after PG_END_TRY, so neither a
-            // receipt nor sink-owned C++ state crosses a siglongjmp boundary.
+            // Fetch and project a batch inside the PostgreSQL error bridge, keeping
+            // each row pinned in its own slot. Check CRCs and call C++ sinks
+            // after leaving PG_TRY so PostgreSQL errors cannot skip their destructors.
             pinned_minimizer_generation_projected_row_batch batch{};
             std::size_t batch_ordinal = 0;
             for (;;) {
@@ -1060,34 +1037,28 @@ class index_storage_fragment_generation_read_session {
         return local;
     }
 
-    /// Checked success close for a publication verifier that intentionally
-    /// rereads only the active head. Borrowed snapshots remain caller-owned.
+    /// Close after checking only the active head. Borrowed snapshots stay caller-owned.
     void close_head_read();
 
-    /// Finish a grouped-SoA read whose immutable payload was consumed from the
-    /// exact generation-bound mmap image. PostgreSQL remains the authority for
-    /// the active head, manifest, directory and source authorization. The image
-    /// itself was created only by the complete authenticated READY reread and
-    /// was fsynced and durably renamed before publication.
+    /// Close the metadata session for a reader using the mapped generation file.
+    /// Check metadata and source-read counters and release live-descriptor catalog
+    /// locks. The mapped reader can continue reading after this session closes.
     [[nodiscard]] minimizer_generation_read_stats finish_mapped_minimizer_fragment_payload();
 
-    /// Checked success close for the timed compact-H32 mmap route. PostgreSQL
-    /// authenticates exactly one head row and one manifest row. The exact
-    /// chunk_no=0 scan qualification ensures that no directory tuple was read.
-    /// Any control/payload planning or scan stats make this transition
-    /// invalid rather than silently falling back to the relation reader.
+    /// Close the metadata session once a compact direct reader is open.
+    /// Require one checked head and manifest, and reject directory allocation
+    /// or payload work in this session.
     [[nodiscard]] minimizer_generation_read_stats finish_mapped_compact_direct();
 
-    /// Checked success close for callers that intentionally validate only the
-    /// immutable head/manifest/directory contract and do not enter payload
-    /// sections. Borrowed snapshots remain caller-owned.
+    /// Close after metadata inspection, before payload planning or reading starts.
+    /// Borrowed snapshots stay caller-owned.
     void close_metadata_read();
 
-    /// Validate stage equations, close every PG resource, and return the receipt.
+    /// Check completed read counters, close PostgreSQL resources and return statistics.
     [[nodiscard]] minimizer_generation_read_stats finish();
 };
 
-/// Normal open outcome with either an owned session or a classified relation failure.
+/// An opened read session, or the reason the index table could not be used.
 struct minimizer_generation_read_session_open_result {
     std::optional<index_storage_fragment_generation_read_session> session{};
     minimizer_generation_relation_inspection failure{
@@ -1100,12 +1071,9 @@ struct minimizer_generation_read_session_open_result {
     }
 };
 
-/// Bind classification and reading to one heap descriptor and its primary
-/// index. Unrelated secondary indexes are deliberately neither opened nor
-/// counted.
-/// A successful result owns both AccessShareLock references until finish(). An
-/// unsuccessful normal result owns neither.  PostgreSQL ERROR remains an
-/// exception so the transaction ResourceOwner retains its ordinary authority.
+/// Open and check the index table and its primary index using the caller's snapshot.
+/// A returned session owns their AccessShareLock references until checked close.
+/// Missing or malformed tables are described in the result. PostgreSQL errors propagate.
 [[nodiscard]] inline minimizer_generation_read_session_open_result
 open_exact_minimizer_generation_read_session_pg(std::string_view table_name,
                                                 std::string_view index_name,

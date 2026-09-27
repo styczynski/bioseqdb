@@ -1,6 +1,6 @@
 /**
  * @file generation_session_completion.cppm
- * @brief Defines grouped-generation close paths and final authorization equations.
+ * @brief Check completed generation reads and close their PostgreSQL resources.
  */
 module;
 
@@ -8,7 +8,7 @@ module;
 
 export module bioseq.postgres.storage.indexing.chunked_storage:generation_session_completion;
 import bioseq.postgres.support; // bioseq::postgres::support::try_open_postgres_relation, bioseq::postgres::support::find_primary_key_oid
-import bioseq.indexing.minimizer_fragment_image; // explicit fixed-endian minimizer fragment image image ABI
+import bioseq.indexing.minimizer_fragment_image; // Minimizer fragment format with a fixed byte order.
 import :catalog;
 import :fragment_image;
 export import :generation_session_contract;
@@ -18,9 +18,9 @@ export import :generation_session_payload;
 export namespace bioseq::storage::indexing {
 
 /**
- * @brief Closes a session used only to inspect the active generation head.
+ * @brief Close after reading the active head once.
  *
- * The head must have been read exactly once and no ordered scan may remain open.
+ * Requires a completed head read with no scan still open.
  */
 inline void index_storage_fragment_generation_read_session::close_head_read() {
     try {
@@ -42,12 +42,13 @@ inline void index_storage_fragment_generation_read_session::close_head_read() {
 }
 
 /**
- * @brief Finishes a mapped grouped-SoA payload read after metadata authorization.
+ * @brief Close the metadata session for a reader using the mapped grouped-SoA payload.
  *
- * This path requires that PostgreSQL payload rows were not read because the
- * caller consumed the relation-backed mapping instead.
+ * Check that metadata and source validation completed and that this session
+ * performed no PostgreSQL payload scans. The mapped reader can continue
+ * reading after this session closes.
  *
- * @return Final metadata and source-authorization statistics.
+ * @return Final metadata and source-read statistics.
  */
 [[nodiscard]] inline minimizer_generation_read_stats
 index_storage_fragment_generation_read_session::finish_mapped_minimizer_fragment_payload() {
@@ -95,12 +96,12 @@ index_storage_fragment_generation_read_session::finish_mapped_minimizer_fragment
 }
 
 /**
- * @brief Finishes a compact direct mapping after a manifest-only read.
+ * @brief Close the metadata session once a compact direct reader is open.
  *
- * The completion contract rejects any directory allocation, payload scan, or
- * selective/full-generation counter because mapped compact access bypasses them.
+ * Require exactly one head and one manifest row, a checked source and storage
+ * descriptor, and no directory or payload work in this session.
  *
- * @return Final manifest and source-authorization statistics.
+ * @return Final metadata and source-read statistics.
  */
 [[nodiscard]] inline minimizer_generation_read_stats
 index_storage_fragment_generation_read_session::finish_mapped_compact_direct() {
@@ -179,10 +180,10 @@ index_storage_fragment_generation_read_session::finish_mapped_compact_direct() {
 }
 
 /**
- * @brief Closes a session after metadata inspection without payload delivery.
+ * @brief Close after inspecting metadata.
  *
- * The session may close before or after source authorization, provided no
- * payload scan or section plan is active.
+ * Source validation may be pending or complete. Payload planning and reading
+ * must not have started.
  */
 inline void index_storage_fragment_generation_read_session::close_metadata_read() {
     try {
@@ -205,13 +206,13 @@ inline void index_storage_fragment_generation_read_session::close_metadata_read(
 }
 
 /**
- * @brief Validates completed payload accounting and closes the read session.
+ * @brief Check completed read counters and close the session.
  *
- * Full-generation sessions use their dedicated accounting path. Selective
- * sessions require both control and position sections to be complete, with no
- * remaining scans, admitted plans, or authorization state.
+ * A selective read must finish both control and position sections. A full read
+ * uses its own checks against the manifest. Both paths require completed scans
+ * and release the session's PostgreSQL resources.
  *
- * @return Final read statistics after every row, byte, checksum, and timing equation passes.
+ * @return Final read statistics, including payload and close timings.
  */
 [[nodiscard]] inline minimizer_generation_read_stats
 index_storage_fragment_generation_read_session::finish() {
