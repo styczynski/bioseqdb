@@ -1,11 +1,10 @@
 /**
  * @file registry.cppm
- * @brief Compile-time registry for supported sequence indexes.
+ * @brief Chooses the storage and build methods for each registered index.
  *
- * The registry is the substrate the indexes build on. It does not import the
- * index modules. Every TU that instantiates `supported_indexes<...>` must import
- * the index modules whose descriptors it reads. A static assertion turns a
- * forgotten import into a diagnosed error. NO_POSTGRES.
+ * Import each index module before using supported_indexes so its descriptor
+ * is available. The registry checks the descriptors at compile time.
+ * NO_POSTGRES.
  */
 module;
 #include <array>
@@ -29,11 +28,10 @@ static_assert(__cplusplus >= 202302L, "C++23-or-later");
 export namespace bioseq::indexing {
 
 /**
- * @brief Binds registered index templates to their storage implementations.
- * @tparam p_fragment_storage Per-fragment chunk storage
- * @tparam p_sequence_storage Per-sequence inline storage
- * @tparam p_table_storage Per-table chunk storage
- * @tparam p_index_templates Registered index templates
+ * @brief Connects index types to storage and applies table index settings.
+ *
+ * Each index descriptor selects fragment, sequence, or table storage. Build
+ * calls use the enabled flags and update policies stored in this registry.
  */
 template <class p_fragment_storage,
           class p_sequence_storage,
@@ -52,10 +50,7 @@ struct supported_indexes {
     static constexpr std::size_t k_index_count =
         sizeof...(p_index_templates);
 
-    /**
-     * @brief Selects the storage type assigned to one persisted layout.
-     * @tparam p_layout Persisted layout to bind
-     */
+    /** @brief Chooses fragment, sequence, or table storage for the given layout. */
     template <sequence_index_layout p_layout>
     using storage_for_type = std::conditional_t<
         p_layout == sequence_index_layout::fragment_chunks,
@@ -125,10 +120,7 @@ struct supported_indexes {
          ...);
         return index_types;
     }
-    /**
-     * @brief Lists insert-time maintenance eligibility in registry order.
-     * @return Fixed-size eligibility table
-     */
+    /** @brief Lists which indexes can be built when a sequence is inserted. */
     [[nodiscard]] static constexpr std::array<bool, k_index_count>
     allows_on_insert_flags() noexcept {
         std::array<bool, k_index_count> allowed_flags{};
@@ -148,10 +140,8 @@ struct supported_indexes {
     std::array<index_update_policy, k_index_count> policy{};
 
     /**
-     * @brief Verifies that a SIMD backend has its selected kernel table.
-     * @param backend Selected sketch backend
-     * @param kernels Immutable selected kernel table
-     * @throws std::invalid_argument when a SIMD backend lacks its kernel
+     * @brief Rejects a SIMD build if its selected minimizer kernel is missing.
+     * @throws std::invalid_argument for a missing two-stack or bounded ntHash kernel.
      */
     static void require_selected_minimizer_kernel(
             bioseq::minimizers::minimizer_sketch_backend backend,
@@ -169,7 +159,7 @@ struct supported_indexes {
         }
     }
 
-    /** @brief Applies the enabled and update-policy defaults for a fresh table. */
+    /** @brief Enables every index and assigns its default update policy. */
     [[gnu::always_inline]] constexpr void apply_table_defaults() noexcept {
         for (std::size_t index_position = 0;
              index_position < k_index_count;
@@ -189,8 +179,8 @@ struct supported_indexes {
         }
     }
     /**
-     * @brief Enables exactly the named indexes.
-     * @param enabled_names Names to enable
+     * @brief Enables the registered indexes named in enabled_names.
+     * Unknown names are ignored. All other indexes are disabled.
      */
     [[gnu::always_inline]] void configure(const std::vector<std::string>& enabled_names) {
         constexpr auto k_index_types = list_types();
@@ -207,10 +197,10 @@ struct supported_indexes {
         }
     }
     /**
-     * @brief Applies persisted per-table policy rows over initialized defaults.
-     * @tparam p_row_range Range whose rows expose name, enabled, and
-     * update_on_insert fields
-     * @param rows Persisted policy rows
+     * @brief Loads saved table settings over the current index settings.
+     *
+     * Unknown names are ignored. An index that cannot be built on insertion
+     * receives the manual policy even if the saved row requests otherwise.
      */
     template <class p_row_range>
     [[gnu::always_inline]] void merge_overrides(const p_row_range& rows) {
@@ -232,7 +222,7 @@ struct supported_indexes {
             }
         }
     }
-    /** @brief Reports the result of a single-index policy update. */
+    /** @brief Result of changing one index update policy. */
     enum class set_policy_status {
         /// @brief The requested policy was stored.
         applied,
@@ -242,10 +232,8 @@ struct supported_indexes {
         ineligible,
     };
     /**
-     * @brief Sets the update policy of one registered index.
-     * @param name Registered index name
-     * @param requested_policy Policy requested by the caller
-     * @return Whether the policy was applied or rejected
+     * @brief Changes one index update policy if the index supports it.
+     * @return applied, unknown_index, or ineligible.
      */
     [[nodiscard]] set_policy_status set_policy(
             std::string_view name,
@@ -269,16 +257,10 @@ struct supported_indexes {
     }
 
     /**
-     * @brief Runs enabled fragmented index operations over the registry.
-     * @tparam p_is_rebuild Selects rebuild instead of build
-     * @tparam p_only_on_insert Restricts execution to insert-time indexes
-     * @tparam p_fragment_opener Callable returning storage for an index name
-     * @tparam p_alphabet Sequence alphabet accepted by the indexes
-     * @param open_storage Storage opener
-     * @param sequence Sequence view to index
-     * @param backend Selected sketch backend
-     * @param kernels Immutable selected kernel table
-     * @param alphabet_code Packed alphabet identity
+     * @brief Builds or rebuilds enabled indexes stored in per-sequence chunks.
+     *
+     * p_only_on_insert selects indexes whose policy allows insertion-time
+     * builds. The storage callback opens each selected index by name.
      */
     template <bool p_is_rebuild,
               bool p_only_on_insert,
@@ -291,8 +273,7 @@ struct supported_indexes {
             const bioseq::minimizers::minimizer_kernels* kernels,
             std::uint8_t alphabet_code) {
         std::size_t index_position = 0;
-        // Explicit minimal capture keeps registry state, the fold counter,
-        // callback, sequence, and backend ownership visible.
+        // Each registered index uses the same sequence and selected sketch backend.
         (
             [this, &index_position, &open_storage, &sequence, &backend, &kernels, &alphabet_code] {
                 using index_type = bound_type<p_index_templates>;
@@ -322,13 +303,8 @@ struct supported_indexes {
             ...);
     }
     /**
-     * @brief Runs enabled inline index operations over the registry.
-     * @tparam p_is_rebuild Selects rebuild instead of build
-     * @tparam p_only_on_insert Restricts execution to insert-time indexes
-     * @tparam p_inline_opener Callable returning storage for an index name
-     * @tparam p_alphabet Sequence alphabet accepted by the indexes
-     * @param open_storage Storage opener
-     * @param sequence Sequence view to index
+     * @brief Builds or rebuilds enabled indexes stored inside each sequence row.
+     * p_only_on_insert restricts this to indexes with the insertion-time policy.
      */
     template <bool p_is_rebuild,
               bool p_only_on_insert,
@@ -365,11 +341,8 @@ struct supported_indexes {
             ...);
     }
     /**
-     * @brief Runs enabled table index operations over the registry.
-     * @tparam p_is_rebuild Selects rebuild instead of build
-     * @tparam p_only_on_insert Restricts execution to insert-time indexes
-     * @tparam p_table_opener Callable returning storage for an index name
-     * @param open_storage Storage opener
+     * @brief Builds or rebuilds enabled indexes covering the whole table.
+     * Table indexes are skipped when p_only_on_insert is true.
      */
     template <bool p_is_rebuild,
               bool p_only_on_insert,
@@ -397,15 +370,8 @@ struct supported_indexes {
     }
 
     /**
-     * @brief Builds enabled fragmented indexes with a selected backend.
-     * @tparam p_only_on_insert Restricts execution to insert-time indexes
-     * @tparam p_fragment_opener Callable returning storage for an index name
-     * @tparam p_alphabet Sequence alphabet accepted by the indexes
-     * @param open_storage Storage opener
-     * @param sequence Sequence view to index
-     * @param backend Selected sketch backend
-     * @param kernels Immutable selected kernel table
-     * @param alphabet_code Packed alphabet identity
+     * @brief Builds enabled chunked sequence indexes with the selected sketch backend.
+     * p_only_on_insert restricts this to indexes with the insertion-time policy.
      */
     template <bool p_only_on_insert = false,
               class p_fragment_opener,
@@ -420,12 +386,8 @@ struct supported_indexes {
             open_storage, sequence, backend, kernels, alphabet_code);
     }
     /**
-     * @brief Builds enabled fragmented indexes with the scalar backend.
-     * @tparam p_only_on_insert Restricts execution to insert-time indexes
-     * @tparam p_fragment_opener Callable returning storage for an index name
-     * @tparam p_alphabet Sequence alphabet accepted by the indexes
-     * @param open_storage Storage opener
-     * @param sequence Sequence view to index
+     * @brief Builds enabled chunked sequence indexes with the scalar sketch backend.
+     * p_only_on_insert restricts this to indexes with the insertion-time policy.
      */
     template <bool p_only_on_insert = false,
               class p_fragment_opener,
@@ -441,12 +403,8 @@ struct supported_indexes {
             bioseq::minimizers::k_unbound_packed_alphabet_code);
     }
     /**
-     * @brief Builds enabled per-sequence inline indexes.
-     * @tparam p_only_on_insert Restricts execution to insert-time indexes
-     * @tparam p_inline_opener Callable returning storage for an index name
-     * @tparam p_alphabet Sequence alphabet accepted by the indexes
-     * @param open_storage Storage opener
-     * @param sequence Sequence view to index
+     * @brief Builds enabled indexes stored inside each sequence row.
+     * p_only_on_insert restricts this to indexes with the insertion-time policy.
      */
     template <bool p_only_on_insert = false,
               class p_inline_opener,
@@ -465,16 +423,7 @@ struct supported_indexes {
     void build_table(p_table_opener&& open_storage) {
         run_table<false, false>(open_storage);
     }
-    /**
-     * @brief Rebuilds enabled fragmented indexes with a selected backend.
-     * @tparam p_fragment_opener Callable returning storage for an index name
-     * @tparam p_alphabet Sequence alphabet accepted by the indexes
-     * @param open_storage Storage opener
-     * @param sequence Sequence view to index
-     * @param backend Selected sketch backend
-     * @param kernels Immutable selected kernel table
-     * @param alphabet_code Packed alphabet identity
-     */
+    /** @brief Rebuilds enabled chunked sequence indexes with the selected sketch backend. */
     template <class p_fragment_opener, sequence_alphabet p_alphabet>
     void rebuild_fragmented(
         p_fragment_opener&& open_storage,
@@ -485,13 +434,7 @@ struct supported_indexes {
         run_fragmented<true, false>(
             open_storage, sequence, backend, kernels, alphabet_code);
     }
-    /**
-     * @brief Rebuilds enabled fragmented indexes with the scalar backend.
-     * @tparam p_fragment_opener Callable returning storage for an index name
-     * @tparam p_alphabet Sequence alphabet accepted by the indexes
-     * @param open_storage Storage opener
-     * @param sequence Sequence view to index
-     */
+    /** @brief Rebuilds enabled chunked sequence indexes with the scalar sketch backend. */
     template <class p_fragment_opener, sequence_alphabet p_alphabet>
     void rebuild_fragmented(
         p_fragment_opener&& open_storage,
@@ -503,13 +446,7 @@ struct supported_indexes {
             nullptr,
             bioseq::minimizers::k_unbound_packed_alphabet_code);
     }
-    /**
-     * @brief Rebuilds enabled per-sequence inline indexes.
-     * @tparam p_inline_opener Callable returning storage for an index name
-     * @tparam p_alphabet Sequence alphabet accepted by the indexes
-     * @param open_storage Storage opener
-     * @param sequence Sequence view to index
-     */
+    /** @brief Rebuilds enabled indexes stored inside each sequence row. */
     template <class p_inline_opener, sequence_alphabet p_alphabet>
     void rebuild_sequence(
         p_inline_opener&& open_storage,
@@ -527,10 +464,8 @@ struct supported_indexes {
     }
 
     /**
-     * @brief Finds the persisted layout of a validated index name.
-     * @param name Registered index name
-     * @return Persisted layout assigned to the index
-     * @pre `name` identifies an entry returned by `list_types()`
+     * @brief Returns the storage layout for a registered index name.
+     * @pre name appears in list_types(). Unknown names return fragment_chunks.
      */
     [[nodiscard]] static constexpr sequence_index_layout layout_of(std::string_view name) {
         constexpr auto k_index_types = list_types();
@@ -542,14 +477,8 @@ struct supported_indexes {
         return sequence_index_layout::fragment_chunks;
     }
     /**
-     * @brief Rebuilds one named fragmented index with a selected backend.
-     * @tparam p_alphabet Sequence alphabet accepted by the index
-     * @param name Registered index name
-     * @param storage Fragment storage for the index
-     * @param sequence Sequence view to index
-     * @param backend Selected sketch backend
-     * @param kernels Immutable selected kernel table
-     * @param alphabet_code Packed alphabet identity
+     * @brief Rebuilds the named chunked sequence index with the selected backend.
+     * This explicit request ignores the enabled flag and update policy.
      */
     template <sequence_alphabet p_alphabet>
     void rebuild_one_fragmented(
@@ -559,7 +488,7 @@ struct supported_indexes {
         bioseq::minimizers::minimizer_sketch_backend backend,
         const bioseq::minimizers::minimizer_kernels* kernels,
         std::uint8_t alphabet_code) {
-        // Explicit minimal capture keeps task ownership visible.
+        // Dispatch the explicit rebuild request to its matching index type.
         (
             [&storage, &sequence, &name, &backend, &kernels, &alphabet_code] {
                 using index_type = bound_type<p_index_templates>;
@@ -572,13 +501,7 @@ struct supported_indexes {
             }(),
             ...);
     }
-    /**
-     * @brief Rebuilds one named fragmented index with the scalar backend.
-     * @tparam p_alphabet Sequence alphabet accepted by the index
-     * @param name Registered index name
-     * @param storage Fragment storage for the index
-     * @param sequence Sequence view to index
-     */
+    /** @brief Rebuilds the named chunked sequence index with the scalar backend. */
     template <sequence_alphabet p_alphabet>
     void rebuild_one_fragmented(
         std::string_view name,
@@ -593,11 +516,8 @@ struct supported_indexes {
             bioseq::minimizers::k_unbound_packed_alphabet_code);
     }
     /**
-     * @brief Rebuilds one named per-sequence inline index.
-     * @tparam p_alphabet Sequence alphabet accepted by the index
-     * @param name Registered index name
-     * @param storage Inline storage for the index
-     * @param sequence Sequence view to index
+     * @brief Rebuilds the named index stored inside each sequence row.
+     * This explicit request ignores the enabled flag and update policy.
      */
     template <sequence_alphabet p_alphabet>
     void rebuild_one_inline(
@@ -616,9 +536,7 @@ struct supported_indexes {
             ...);
     }
     /**
-     * @brief Rebuilds one named table-wide index.
-     * @param name Registered index name
-     * @param storage Table storage for the index
+     * @brief Rebuilds the named table index regardless of its current settings.
      */
     void rebuild_one_table(
             std::string_view name,
@@ -636,11 +554,8 @@ struct supported_indexes {
     }
 
     /**
-     * @brief Clears all persisted chunks of one named index.
-     * @param fragment_storage Fragment storage provider
-     * @param sequence_storage Inline storage provider
-     * @param table_storage Table storage provider
-     * @param name Registered index name
+     * @brief Clears the named index through the storage for its layout.
+     * Unknown index names are ignored.
      */
     void clear_index(
             p_fragment_storage& fragment_storage,

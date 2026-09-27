@@ -1,9 +1,9 @@
 /**
  * @file storage.cppm
- * @brief PostgreSQL-agnostic chunk storage contracts and checksums.
+ * @brief Storage interfaces and checksums shared by sequence indexes.
  *
- * Expressed with the `is_..._v<T, type>` bool-variable-template-then-concept
- * pattern so different `sequence_index_layout`s require different surfaces.
+ * Each index layout requires different read and write methods. The concepts
+ * below check those methods without depending on PostgreSQL.
  */
 module;
 #include <algorithm>
@@ -32,7 +32,7 @@ inline constexpr std::uint64_t k_crc64_ecma182_polynomial = 0x42F0E1EBA9EA3693UL
 
 namespace bioseq::indexing::crc64_ecma182_detail {
 
-/** @brief Represents a linear transformation of a 64-bit CRC state. */
+/** @brief Stores the result of a CRC transformation for each of its 64 input bits. */
 using linear_operator = std::array<std::uint64_t, 64>;
 
 /** @brief Builds the byte-at-a-time CRC lookup table. */
@@ -53,13 +53,13 @@ using linear_operator = std::array<std::uint64_t, 64>;
 /// @brief Byte-at-a-time CRC lookup table.
 inline constexpr auto table = make_table();
 
-/** @brief Stores the sixteen lookup slices used by the bulk CRC path. */
+/** @brief CRC lookup tables for processing sixteen bytes at a time. */
 using crc64_slicing_tables =
     std::array<std::array<std::uint64_t, 256>, 16>;
 
 /**
- * @brief Builds slicing-by-16 tables for the MSB-first CRC convention.
- * @return Tables indexed by zero-byte distance and byte value
+ * @brief Builds tables that combine sixteen input bytes into one CRC update.
+ * Each table accounts for the number of bytes following its input byte.
  */
 [[nodiscard]] consteval crc64_slicing_tables make_slicing_tables() noexcept {
     crc64_slicing_tables tables{};
@@ -73,7 +73,7 @@ using crc64_slicing_tables =
     return tables;
 }
 
-/// @brief Slicing-by-16 tables for runtime bulk updates.
+/// @brief Lookup tables used by the sixteen-byte CRC loop.
 inline constexpr auto slicing_tables = make_slicing_tables();
 
 /**
@@ -105,11 +105,10 @@ inline constexpr auto slicing_tables = make_slicing_tables();
 }
 
 /**
- * @brief Updates a CRC state with an arbitrary byte range.
- * @param checksum Initial CRC state
- * @param bytes Input byte address
- * @param byte_count Input size
- * @return Updated CRC state
+ * @brief Updates the CRC in sixteen-byte groups, then handles any remaining bytes.
+ * @param checksum CRC of the preceding bytes.
+ * @param bytes Input byte address.
+ * @param byte_count Number of input bytes.
  */
 [[nodiscard]] inline std::uint64_t update_bulk(
         std::uint64_t checksum,
@@ -153,10 +152,9 @@ inline constexpr auto slicing_tables = make_slicing_tables();
 }
 
 /**
- * @brief Applies a GF(2) linear operator to a CRC state.
- * @param operation Operator basis images
- * @param value CRC state
- * @return Transformed CRC state
+ * @brief Applies a precomputed CRC transformation to a checksum.
+ * The transformation stores the result for each input bit, which can be
+ * combined with XOR to obtain the result for the whole checksum.
  */
 [[nodiscard]] constexpr std::uint64_t apply_operator(
         const linear_operator& operation,
@@ -171,11 +169,7 @@ inline constexpr auto slicing_tables = make_slicing_tables();
     return result;
 }
 
-/**
- * @brief Squares a GF(2) linear operator.
- * @param operation Operator to compose with itself
- * @return Squared operator
- */
+/** @brief Combines a CRC transformation with itself so it advances twice as far. */
 [[nodiscard]] constexpr linear_operator square_operator(
         const linear_operator& operation) noexcept {
     linear_operator squared{};
@@ -203,10 +197,7 @@ inline constexpr auto slicing_tables = make_slicing_tables();
     return operation;
 }
 
-/**
- * @brief Builds the identity operator for CRC states.
- * @return Identity operator
- */
+/** @brief Builds the CRC transformation that leaves every input unchanged. */
 [[nodiscard]] constexpr linear_operator identity_operator() noexcept {
     linear_operator identity{};
     for (std::size_t bit = 0; bit < identity.size(); ++bit) {
@@ -216,10 +207,7 @@ inline constexpr auto slicing_tables = make_slicing_tables();
 }
 
 /**
- * @brief Composes two GF(2) linear operators.
- * @param outer Operator applied second
- * @param inner Operator applied first
- * @return Composed operator
+ * @brief Combines two CRC transformations, applying inner first and outer second.
  */
 [[nodiscard]] constexpr linear_operator compose_operators(
         const linear_operator& outer,
@@ -232,9 +220,7 @@ inline constexpr auto slicing_tables = make_slicing_tables();
 }
 
 /**
- * @brief Precomposes a fixed zero-byte advance at compile time.
- * @param zero_byte_count Number of zero bytes
- * @return Advance operator for the requested length
+ * @brief Precomputes how appending a fixed number of zero bytes changes a CRC.
  */
 [[nodiscard]] consteval linear_operator make_zero_byte_advance_operator(
         std::uint64_t zero_byte_count) noexcept {
@@ -252,20 +238,15 @@ inline constexpr auto slicing_tables = make_slicing_tables();
     return result;
 }
 
-// The dominant full payload row is 8,064 bytes. It has six set bits, so the
-// generic path otherwise performs six separate 64-bit operator scans.
-/// @brief Byte count of the dominant full persisted payload row.
+// Precompute the 8,064-byte case because full payload rows use this size.
+// Combining their checksums then needs one transformation.
+/// @brief Payload size of a full persisted row.
 inline constexpr std::uint64_t full_row_byte_count = 8'064u;
 /// @brief Precomputed advance operator for a full persisted payload row.
 inline constexpr linear_operator full_row_zero_byte_operator =
     make_zero_byte_advance_operator(full_row_byte_count);
 
-/**
- * @brief Advances a CRC state by zero bytes during constant evaluation.
- * @param checksum Initial CRC state
- * @param zero_byte_count Number of zero bytes
- * @return Advanced CRC state
- */
+/** @brief Computes the CRC after appending zero bytes during compile-time evaluation. */
 [[nodiscard]] constexpr std::uint64_t advance_zero_bytes_constexpr(
         std::uint64_t checksum,
         std::uint64_t zero_byte_count) noexcept {
@@ -282,7 +263,7 @@ inline constexpr linear_operator full_row_zero_byte_operator =
     return checksum;
 }
 
-/// @brief Cached powers used to advance runtime CRC states by zero bytes.
+/// @brief CRC transformations for appending 1, 2, 4, ... zero bytes.
 inline const auto zero_byte_operator_powers = [] {
     std::array<linear_operator, 64> powers{};
     powers[0] = zero_byte_operator();
@@ -296,9 +277,9 @@ inline const auto zero_byte_operator_powers = [] {
 
 export namespace bioseq::indexing {
 
-/** @brief Maintains incremental CRC-64/ECMA-182 state. */
+/** @brief Computes CRC-64/ECMA-182 as bytes are added. */
 struct crc64_ecma182_accumulator {
-    /// @brief Current unfinalized CRC state.
+    /// @brief CRC of the bytes added so far.
     std::uint64_t value = 0;
 
     /**
@@ -392,10 +373,8 @@ struct crc64_ecma182_accumulator {
 }
 
 /**
- * @brief Advances a CRC state by a run of zero bytes.
- * @param checksum Initial CRC state
- * @param zero_byte_count Number of zero bytes
- * @return Advanced CRC state
+ * @brief Computes the CRC after appending zero_byte_count zero bytes.
+ * Precomputed transformations avoid visiting each zero byte.
  */
 [[nodiscard]] constexpr std::uint64_t crc64_ecma182_advance_zero_bytes(
         std::uint64_t checksum,
@@ -423,11 +402,10 @@ struct crc64_ecma182_accumulator {
 }
 
 /**
- * @brief Computes the CRC of two concatenated authenticated byte ranges.
- * @param left_checksum CRC of the first range
- * @param right_checksum CRC of the second range
- * @param right_byte_count Size of the second range
- * @return CRC of the concatenated ranges
+ * @brief Computes the CRC of two byte ranges joined together from their CRCs.
+ * @param left_checksum CRC of the first range.
+ * @param right_checksum CRC of the second range.
+ * @param right_byte_count Number of bytes in the second range.
  */
 [[nodiscard]] inline std::uint64_t crc64_ecma182_concatenate(
         std::uint64_t left_checksum,
@@ -438,13 +416,10 @@ struct crc64_ecma182_accumulator {
 }
 
 /**
- * @brief Checksums the fixed little-endian address and size prefix of a row.
- * @param generation_id Immutable generation identity
- * @param position_segment Position segment identity
- * @param sub_key Logical index sub-key
- * @param chunk_no Chunk ordinal
- * @param chunk_bytes Payload size
- * @return CRC of the fixed row prefix
+ * @brief Checksums a row address and payload length in little-endian order.
+ *
+ * Including the generation, segment, sub-key and chunk number lets readers
+ * detect a payload stored under the wrong row address.
  */
 [[nodiscard]] constexpr std::uint64_t crc64_index_chunk_row_prefix(
         std::uint64_t generation_id,
@@ -464,7 +439,7 @@ struct crc64_ecma182_accumulator {
     } else {
         std::array<std::byte, 28> encoded{};
         std::size_t offset = 0u;
-        // Appends one fixed-width field to the authenticated row prefix.
+        // Encode each address field in the same byte order on every host.
         const auto append_little_endian =
             [&encoded, &offset]<class p_unsigned_integer>(p_unsigned_integer input) {
                 for (std::size_t byte = 0u; byte < sizeof(p_unsigned_integer); ++byte) {
@@ -485,14 +460,8 @@ struct crc64_ecma182_accumulator {
 }
 
 /**
- * @brief Checksums one complete persisted index row.
- * @param generation_id Immutable generation identity
- * @param position_segment Position segment identity
- * @param sub_key Logical index sub-key
- * @param chunk_no Chunk ordinal
- * @param chunk_bytes Payload size encoded in the prefix
- * @param blob Raw row payload
- * @return CRC of the prefix followed by the payload
+ * @brief Checksums a persisted row address, payload length and payload bytes.
+ * chunk_bytes is included as supplied. The caller checks it against blob.size().
  */
 [[nodiscard]] constexpr std::uint64_t crc64_index_chunk_row(
         std::uint64_t generation_id,
@@ -510,24 +479,21 @@ struct crc64_ecma182_accumulator {
 static_assert(crc64_ecma182("123456789") == 0x6C40DF5F0B497347ULL,
               "CRC-64/ECMA-182 check value must stay pinned");
 
-/** @brief Describes when a bounded tuple batch must flush around an append. */
+/** @brief Says whether to write the current tuple batch before or after an append. */
 struct index_tuple_batch_decision {
     /// @brief Whether the proposed append respects both limits.
     bool valid = false;
-    /// @brief Whether retained tuples must be flushed before the append.
+    /// @brief Whether pending tuples must be flushed before the append.
     bool flush_before = false;
     /// @brief Whether the append fills either configured limit.
     bool flush_after = false;
 };
 
 /**
- * @brief Plans one append to a row-count and byte-count bounded tuple batch.
- * @param pending_rows Rows currently retained
- * @param pending_bytes Bytes currently retained
- * @param tuple_bytes Size of the next tuple
- * @param maximum_rows Row limit
- * @param maximum_bytes Byte limit
- * @return Validity and flush decisions for the append
+ * @brief Plans when to write a batch so the next tuple fits its row and byte limits.
+ *
+ * Flush the existing batch first if needed. Flush the new batch after appending
+ * if it reaches either limit. Invalid sizes or inconsistent counters are rejected.
  */
 [[nodiscard]] constexpr index_tuple_batch_decision
 plan_index_tuple_batch_append(
@@ -558,12 +524,7 @@ plan_index_tuple_batch_append(
     };
 }
 
-/**
- * @brief Checks that a returned fixed wire image matches authenticated bytes.
- * @param proven Authenticated wire bytes submitted for publication
- * @param returned Wire bytes returned by storage
- * @return `true` only for byte-for-byte identity
- */
+/** @brief Checks that storage returned exactly the bytes submitted for publication. */
 [[nodiscard]] constexpr bool is_fixed_wire_returned_exactly(
         std::span<const std::byte> proven,
         std::span<const std::byte> returned) noexcept {
@@ -572,14 +533,10 @@ plan_index_tuple_batch_append(
 }
 
 /**
- * @brief Checks a typed chunk-writer callback signature.
+ * @brief Checks the callback used to fill a typed chunk buffer.
  *
- * The callback receives a typed, aligned, zero-initialized scratch buffer and
- * returns the next chunk ordinal to visit. Returning the current ordinal
- * advances the storage loop by one.
- *
- * @tparam p_function Candidate callback type
- * @tparam p_value Chunk element type
+ * Storage supplies a zeroed buffer and its capacity in elements. Return the
+ * next chunk number to visit, or the current number to advance by one.
  */
 template <class p_function, class p_value>
 concept index_chunk_writer_fn = requires (
@@ -590,17 +547,17 @@ concept index_chunk_writer_fn = requires (
     { fn(chunk_no, buf, capacity_units) } -> std::same_as<std::size_t>;
 };
 
-/** @brief Selects residency behavior for a qualified chunk read. */
+/** @brief Chooses whether a chunk read may add rows to the cache. */
 enum class index_chunk_cache_policy : std::uint8_t {
-    /// @brief Allow validated rows to populate the residency cache.
+    /// @brief Allow checked rows to be added to the cache.
     populate_residency,
-    /// @brief Deliver validated rows without retaining them in the cache.
+    /// @brief Deliver checked rows without adding them to the cache.
     bypass_one_shot,
 };
 
-/** @brief Identifies a half-open sub-key range within one generation segment. */
+/** @brief A sub-key range [begin, end) in one generation and position segment. */
 struct index_sub_key_range {
-    /// @brief Immutable generation identity.
+    /// @brief Generation containing the range.
     std::uint64_t generation_id = 0;
     /// @brief Position segment containing the range.
     std::int32_t position_segment = 0;
@@ -610,11 +567,11 @@ struct index_sub_key_range {
     index_sub_key_t end = 0;
 };
 
-/** @brief Describes the exact chunk extent expected for one qualified sub-key. */
+/** @brief Expected chunks, byte count and checksum for one stored sub-key. */
 struct index_sub_key_request {
-    /// @brief Immutable generation identity.
+    /// @brief Generation containing the requested chunks.
     std::uint64_t generation_id = 0;
-    /// @brief Position segment containing the extent.
+    /// @brief Position segment containing the requested chunks.
     std::int32_t position_segment = 0;
     /// @brief Requested logical sub-key.
     index_sub_key_t sub_key = 0;
@@ -624,19 +581,19 @@ struct index_sub_key_request {
     std::uint32_t expected_chunk_count = 0;
     /// @brief Exact payload bytes across all expected chunks.
     std::uint64_t expected_total_bytes = 0;
-    /// @brief CRC of the concatenated extent payload.
+    /// @brief CRC of the requested payloads joined in chunk order.
     std::uint64_t expected_checksum = 0;
 };
 
-/** @brief Identifies one validated persisted index chunk. */
+/** @brief Address of one stored index chunk. */
 struct index_chunk_address {
-    /// @brief Immutable generation identity.
+    /// @brief Generation containing the chunk.
     std::uint64_t generation_id = 0;
     /// @brief Position segment containing the chunk.
     std::int32_t position_segment = 0;
     /// @brief Logical index sub-key.
     index_sub_key_t sub_key = 0;
-    /// @brief Chunk ordinal within the sub-key.
+    /// @brief Chunk number within the sub-key.
     std::uint32_t chunk_no = 0;
 
     /** @brief Compares every persisted address component. */
@@ -644,12 +601,11 @@ struct index_chunk_address {
 };
 
 /**
- * @brief Extends an extent CRC with an already authenticated row payload.
- * @param current_extent_checksum CRC of prior payload bytes
- * @param address Qualified row address
- * @param chunk_bytes Payload size
- * @param validated_row_checksum Authenticated CRC of row prefix and payload
- * @return CRC of the prior extent followed by this payload
+ * @brief Adds a checked row payload to the CRC of preceding payloads.
+ *
+ * The row checksum includes its address and length. Remove that prefix
+ * algebraically, then combine the payload CRC without reading its bytes again.
+ * @pre validated_row_checksum has been checked against the row bytes.
  */
 [[nodiscard]] inline std::uint64_t
 crc64_append_validated_index_chunk_payload(
@@ -668,19 +624,19 @@ crc64_append_validated_index_chunk_payload(
             current_extent_checksum ^ prefix_checksum, chunk_bytes);
 }
 
-/** @brief Records work performed by one qualified bulk-read call. */
+/** @brief Counts storage work and delivered data for one bulk read. */
 struct index_chunk_read_stats {
     /// @brief Relation opens performed by the read.
     std::uint64_t relation_opens = 0;
     /// @brief Index scans performed by the read.
     std::uint64_t index_scans = 0;
-    /// @brief Qualified ranges requested by the caller.
+    /// @brief Sub-key ranges requested within a generation and segment.
     std::uint64_t requested_ranges = 0;
     /// @brief Heap rows visited by the scan.
     std::uint64_t heap_rows_read = 0;
-    /// @brief Toasted values read from storage.
+    /// @brief External or compressed PostgreSQL values read.
     std::uint64_t toast_values_read = 0;
-    /// @brief Bytes materialized by detoasting.
+    /// @brief Bytes produced when decoding PostgreSQL TOAST values.
     std::uint64_t detoast_bytes = 0;
     /// @brief Bytes copied explicitly by the reader.
     std::uint64_t explicit_copy_bytes = 0;
@@ -688,17 +644,17 @@ struct index_chunk_read_stats {
     std::uint64_t wanted_subkeys = 0;
     /// @brief Distinct requested sub-keys found in storage.
     std::uint64_t read_subkeys = 0;
-    /// @brief Exact extents requested by the caller.
+    /// @brief Requested groups of consecutive chunks.
     std::uint64_t wanted_extents = 0;
-    /// @brief Requested extents fully read and authenticated.
+    /// @brief Chunk groups read with the expected size and checksum.
     std::uint64_t read_extents = 0;
     /// @brief Exact chunks requested across all extents.
     std::uint64_t wanted_chunks = 0;
     /// @brief Unrequested rows skipped while scanning.
     std::uint64_t skipped_rows = 0;
-    /// @brief Maximum unrequested rows admitted by the plan.
+    /// @brief Number of unrequested rows the read plan allows scanning.
     std::uint64_t skip_budget_rows = 0;
-    /// @brief Duplicate chunk rows observed by the reader.
+    /// @brief Repeated or out-of-order chunk reads and rejected group execution attempts.
     std::uint64_t repeated_chunk_reads = 0;
     /// @brief Validated chunks delivered to the callback.
     std::uint64_t delivered_chunks = 0;
@@ -707,8 +663,8 @@ struct index_chunk_read_stats {
 };
 
 /**
- * @brief Checks a callback for one transient validated chunk payload.
- * @tparam p_function Candidate callback type
+ * @brief Checks the callback that receives a checked chunk address and payload.
+ * The payload is borrowed for the duration of the callback.
  */
 template <class p_function>
 concept index_chunk_reader_fn = requires (
@@ -719,49 +675,43 @@ concept index_chunk_reader_fn = requires (
     { sink(address, payload, payload_bytes) } -> std::same_as<void>;
 };
 
-/** @brief Verifies the unqualified range callback signature. */
+/** @brief Callback used to check storage methods that read an unqualified range. */
 struct index_chunk_range_probe {
-    /// @brief Accepts one transient unqualified chunk payload.
+    /// @brief Accepts a sub-key and borrowed chunk bytes.
     void operator()(index_sub_key_t, const char*, std::size_t) const noexcept {}
 };
 
-/** @brief Verifies the qualified range callback signature. */
+/** @brief Callback used to check storage methods that read a fully addressed range. */
 struct index_qualified_chunk_range_probe {
-    /// @brief Accepts one transient chunk payload with its persisted address.
+    /// @brief Accepts a chunk address and borrowed payload bytes.
     void operator()(const index_chunk_address&, const char*, std::size_t) const noexcept {}
 };
 
-/** @brief Verifies the sub-key visitor signature. */
+/** @brief Callback used to check sub-key enumeration methods. */
 struct index_sub_key_probe {
     /// @brief Accepts one logical persisted sub-key.
     void operator()(index_sub_key_t) const noexcept {}
 };
 
-/**
- * @brief Verifies the typed chunk-writer signature.
- * @tparam p_value Chunk element type
- */
+/** @brief Callback used to check typed chunk writers. */
 template <class p_value>
 struct index_chunk_writer_probe {
-    /// @brief Accepts one writable typed chunk buffer and returns its visit ordinal.
+    /// @brief Accepts a typed buffer and returns zero for the signature check.
     std::size_t operator()(
             std::size_t, p_value*, std::size_t) const noexcept {
         return std::size_t{0};
     }
 };
 
-/** @brief Verifies the merged-position batch callback signature. */
+/** @brief Callback used to check batches of merged positions. */
 struct index_merge_batch_probe {
-    /// @brief Accepts one chronological batch from the run merger.
+    /// @brief Accepts a batch of positions in sorted order.
     void operator()(std::span<const std::uint64_t>) const noexcept {}
 };
 
-/** @brief Verifies the external-run merge callback signature. */
+/** @brief Callback used to check merged runs grouped by hash. */
 struct index_merge_runs_probe {
-    /**
-     * @brief Traverses every batch in one merged hash-position range.
-     * @tparam p_positions Merged-position range supplied by storage
-     */
+    /** @brief Checks that a merged position range reports its size and visits batches. */
     template <class p_positions>
     void operator()(std::uint64_t, p_positions&& positions) const {
         (void)positions.total_count();
@@ -769,7 +719,7 @@ struct index_merge_runs_probe {
     }
 };
 
-/** @brief Verifies the table-storage sequence loader signature. */
+/** @brief Callback used to check table storage sequence loaders. */
 struct index_sequence_loader_probe {
     /**
      * @brief Accepts one lazy sequence and its table-local coordinates.
@@ -780,15 +730,11 @@ struct index_sequence_loader_probe {
             p_lazy_sequence&, std::size_t, std::size_t) const noexcept {}
 };
 
-/**
- * @brief Reports storage conformance for one persisted layout.
- * @tparam p_storage Candidate storage type
- * @tparam p_index_type Persisted layout
- */
+/** @brief Whether storage provides the methods required by the given index layout. */
 template <class p_storage, sequence_index_layout p_index_type>
 constexpr inline bool is_index_chunked_storage_for_v = false;
 
-// ---- CHUNKED_PER_FRAGMENT (per-sequence, 2-D sub_key x chunk) ----
+// Per-sequence storage addressed by sub-key and chunk number.
 template <class p_storage>
 constexpr inline bool is_index_chunked_storage_for_v<
     p_storage, sequence_index_layout::fragment_chunks> =
@@ -802,8 +748,8 @@ constexpr inline bool is_index_chunked_storage_for_v<
         { s.resize(sub_key, bytes)                } -> std::same_as<void>;
         { s.resize_chunks(sub_key, std::span<const std::size_t>{}) } -> std::same_as<void>;
         { s.prefetch_chunk(sub_key, chunk_no)     } -> std::same_as<void>;
-        // The unqualified overload remains part of the general storage contract;
-        // selected readers additionally expose the qualified overload.
+        // Every fragment store supports reads by sub-key range.
+        // Generation readers also provide ranges with complete row addresses.
         { s.read_chunks_in_range(sub_key, sub_key, index_chunk_range_probe{}) } -> std::same_as<void>;
         { cs.for_each_sub_key(index_sub_key_probe{}) } -> std::same_as<void>;
         { s.template write_to_each<std::int64_t>(
@@ -814,7 +760,7 @@ constexpr inline bool is_index_chunked_storage_for_v<
             -> std::same_as<void>;
         { s.clear_entity()                        } -> std::same_as<void>;
         { s.clear(std::string_view{})             } -> std::same_as<void>;
-        // External sorting retains admitted runs until the merge completes.
+        // Sorted runs keep their memory reservations until they are merged or released.
         { s.spill_sorted_run(std::span<const std::pair<std::uint64_t,std::uint64_t>>{}) } -> std::convertible_to<std::size_t>;
         { s.spill_sorted_run_owned(std::vector<std::pair<std::uint64_t,std::uint64_t>>{}) } -> std::convertible_to<std::size_t>;
         { s.spill_sorted_run_owned_admitted(
@@ -828,12 +774,12 @@ constexpr inline bool is_index_chunked_storage_for_v<
         { s.run_buffer_bytes()                    } -> std::convertible_to<std::size_t>;
     };
 
-// ---- INLINE_PER_SEQUENCE (exactly one chunk) ----
+// Per-sequence storage with at most one inline chunk.
 template <class p_storage>
 constexpr inline bool is_index_chunked_storage_for_v<
     p_storage, sequence_index_layout::sequence_inline> =
     requires (p_storage& s, const p_storage& cs, std::size_t bytes) {
-        { cs.number_of_chunks()                   } -> std::convertible_to<std::size_t>;   // must == 1 (runtime-asserted)
+        { cs.number_of_chunks()                   } -> std::convertible_to<std::size_t>;   // zero for an empty payload, otherwise one
         { cs.chunk_byte_size()                    } -> std::convertible_to<std::size_t>;
         { s.template read_chunk<std::int64_t>()   } -> std::same_as<const std::int64_t*>;
         { s.resize(bytes)                         } -> std::same_as<void>;
@@ -845,7 +791,7 @@ constexpr inline bool is_index_chunked_storage_for_v<
         { s.clear(std::string_view{})             } -> std::same_as<void>;
     };
 
-// ---- CHUNKED_PER_TABLE (flat chunk space + write_to(chunk_no) + for_each_sequence) ----
+// Table storage uses chunk numbers and can visit every sequence in the table.
 template <class p_storage>
 constexpr inline bool is_index_chunked_storage_for_v<
     p_storage, sequence_index_layout::table_chunks> =
@@ -867,19 +813,12 @@ constexpr inline bool is_index_chunked_storage_for_v<
         { s.clear(std::string_view{})             } -> std::same_as<void>;
     };
 
-/**
- * @brief Checks storage conformance for one persisted layout.
- * @tparam p_storage Candidate storage type
- * @tparam p_index_type Persisted layout
- */
+/** @brief Requires the storage methods used by the given index layout. */
 template <class p_storage, sequence_index_layout p_index_type>
 concept is_index_chunked_storage_for =
     is_index_chunked_storage_for_v<p_storage, p_index_type>;
 
-/**
- * @brief Checks storage conformance for any persisted layout.
- * @tparam p_storage Candidate storage type
- */
+/** @brief Requires storage methods for at least one supported index layout. */
 template <class p_storage>
 concept is_index_chunked_storage =
        is_index_chunked_storage_for<
@@ -890,8 +829,8 @@ concept is_index_chunked_storage =
            p_storage, sequence_index_layout::table_chunks>;
 
 /**
- * @brief Checks storage support for admitted external-sort spill runs.
- * @tparam p_storage Candidate storage type
+ * @brief Requires sorted-run storage that can own buffers and their memory reservations.
+ * Runs can be merged by hash and released after use.
  */
 template <class p_storage>
 concept is_external_sort_spill_storage =
