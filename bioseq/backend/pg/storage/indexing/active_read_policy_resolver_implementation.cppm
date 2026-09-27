@@ -1,6 +1,6 @@
 /**
  * @file active_read_policy_resolver_implementation.cppm
- * @brief Implements executor-scoped active-read policy resolution.
+ * @brief Read and validate the active index policy for an executing query.
  */
 module;
 
@@ -64,16 +64,14 @@ active_read_policy_resolver_error_as_cpp(std::string_view message,
 } // namespace
 
 /**
- * @brief Resolves the active read index for an executor-owned relation column.
- *
- * The policy heap and primary index are read under `AccessShareLock` with the
- * executor's registered MVCC snapshot. A single enabled active row selects its
- * index, while an authoritative empty result selects the declared default.
- *
- * @param[in] executor_read Borrowed executor relation and snapshot context.
- * @param[in] attno One-based PostgreSQL column number.
- * @param[in,out] cold_stats Optional counters updated for catalog and lock work.
- * @return Selected index name and its policy source.
+ * Select this column's active index from the executor's registered snapshot.
+ * Validate the policy catalog and scan its matching rows under shared locks.
+ * One enabled active row selects the index, zero rows select the default, and
+ * multiple rows raise an error.
+ * @param executor_read Borrowed relation context with a registered MVCC snapshot.
+ * @param attno One-based PostgreSQL column number.
+ * @param cold_stats Optional catalog-read and lock counters.
+ * @return Selected index name and the source of that choice.
  */
 [[nodiscard]] active_read_policy_resolution
 resolve_active_read_index_outcome(
@@ -94,12 +92,9 @@ resolve_active_read_index_outcome(
     if (cold_stats != nullptr) {
         cold_stats->add(cold_stats->target_relation_reuses, 1);
     }
-    // This resolver is on every physical alignment batch. Read our heap-AM
-    // catalog directly instead of recursively invoking the SQL planner and
-    // executor through SPI. Besides removing parse/plan/ExecutorStart latency,
-    // the direct catalog scan is safe while the outer Bioseq CustomScan is
-    // already inside ExecutorRun and retains the same authoritative relation.
-    // Holds the bounded result copied out of the PostgreSQL catalog scan.
+    // Read the catalog directly while the outer CustomScan is running. This
+    // avoids starting another planner and executor through SPI for each batch.
+    // Copy the selected name before returning from the catalog scan.
     struct policy_scan_result {
         std::uint64_t rows = 0;
         std::array<char, 256> index_name{};
@@ -118,12 +113,9 @@ resolve_active_read_index_outcome(
                         (errcode(ERRCODE_UNDEFINED_TABLE),
                          errmsg("bioseq active-read policy catalog is missing")));
             }
-            // index_policy is trusted extension metadata.  Installation
-            // deliberately revokes ordinary users' access to
-            // bioseq_internal; the user-facing relation is authorized by the
-            // caller before reaching this resolver.  Requiring ACL_USAGE or
-            // ACL_SELECT here would make every legitimate non-owner search
-            // fail while adding no authorization boundary.
+            // The caller has already checked access to the user table. Read Bioseq
+            // policy metadata internally, since ordinary users have no access to
+            // bioseq_internal. Row security on this catalog is unsupported.
             if (check_enable_rls(policy_oid, InvalidOid, true) == RLS_ENABLED) {
                 ereport(ERROR,
                         (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),

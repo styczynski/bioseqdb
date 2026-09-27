@@ -1,6 +1,6 @@
 /**
  * @file active_read_policy_resolution_contract.cppm
- * @brief Declares backend-local active-read resolution and dispatch diagnostics.
+ * @brief Store active index choices and count how they were selected.
  */
 module;
 
@@ -13,7 +13,7 @@ export import bioseq.postgres.storage.indexing.active_read_policy;
 
 export namespace bioseq::storage::indexing {
 
-/// @brief Selected active-read index and the authority that selected it.
+/// Selected index name and the source of that choice.
 struct active_read_policy_resolution {
     std::string index_name;
     active_read_policy_source source = active_read_policy_source::unresolved;
@@ -33,15 +33,14 @@ struct active_read_policy_dispatch_counters {
     std::uint64_t non_relation_batches = 0;
 };
 
-// PostgreSQL backends are single-threaded. These counters intentionally show
-// whether a default came from an authoritative empty policy result rather
-// than treating an SPI failure as an empty result.
+// Update these counters on the PostgreSQL backend thread. A default counts
+// only after the catalog scan confirms that no enabled active row exists.
 inline active_read_policy_resolution_counters g_active_read_policy_resolution_counters{};
 inline active_read_policy_dispatch_counters g_active_read_policy_dispatch_stats{};
 inline active_read_policy_source g_last_active_read_policy_dispatch_source =
     active_read_policy_source::unresolved;
 
-/// @brief Clears backend-local policy diagnostics between integration checks.
+/// Clear this backend's policy counters and last dispatch choice for the next test.
 inline void reset_active_read_policy_debug_state() noexcept {
     g_active_read_policy_resolution_counters = {};
     g_active_read_policy_dispatch_stats = {};
