@@ -38,7 +38,8 @@ def checkpoint(path,value):
 def hourly_log(machine,directory,progress,state):
     now=time.time()
     if now-progress.get('last_hourly_log',0)<3600:return
-    log=ROOT/'DOCS/CURRENT/BENCHMARK_FRAMEWORK/0437_EXTERNAL_ALIGNER_E2E_AWS_BENCHMARK_EXECUTION_LOG.md'
+    log=directory/'campaign_log.md'
+    log.parent.mkdir(parents=True,exist_ok=True)
     with log.open('a') as stream:
         fcntl.flock(stream,fcntl.LOCK_EX)
         stream.write('\n## '+datetime.now(timezone.utc).isoformat()+' — '+machine.upper()+' hourly checkpoint\n\n')

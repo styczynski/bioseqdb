@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Distinct approved q1024 tuples / remaining matrix cells, by machine family.
 
-Run without arguments to print counters; --log appends a DOC0432 checkpoint.
+Run without arguments to print counters; --log appends a coverage checkpoint.
 Only logging advances the delta reference. Replicas and timing scopes do not
 multiply tuple coverage. These counters do not assert comparable timing scopes.
 """
@@ -19,8 +19,7 @@ from recover_e2e_measurements import MANIFEST, ROOT, atomic, authority_path
 FAMILIES = ("local", "c7g", "m4", "m7a", "m7i")
 OUTPUT = ROOT / "reporting/bioseq_benchmark_e2e/fleet_controller"
 STATE = OUTPUT / "tuple_progress_last_logged.json"
-# Resolved through bioseq-build doc_read(DOC0432).
-LOG = ROOT / "DOCS/CURRENT/BENCHMARK_FRAMEWORK/0432_LOCAL_E2E_ALGORITHM_MATRIX_BENCHMARK_LOG.md"
+LOG = OUTPUT / "tuple_progress.md"
 DEFINITION = (
     "Distinct audited/approved q1024 tuples: original five-repeat results plus "
     "explicitly separate, user-authorized one-sample FAST results; replicas "
