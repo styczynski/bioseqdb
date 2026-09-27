@@ -28,19 +28,18 @@ import bioseq.io.fasta; // reuse parse_outcome enum
 
 export namespace bioseq::io {
 
-/// FASTQ per-record FSM progress marker.
+/// Position within a FASTQ record, kept across input refills.
 enum class fastq_parser_progress : std::uint8_t {
     at_header_sigil = 0, ///< Expect '@'.
     in_header,           ///< Accumulating header bytes.
     at_body_line_start,  ///< Peeking the first byte of the next body line.
     in_sequence_line,    ///< Mid-sequence-line scan to next '\n'.
-    at_separator_line,   ///< Just consumed '+', skipping comment to '\n'.
+    at_separator_line,   ///< At the '+' separator, waiting for its line to end.
     in_quality_line,     ///< Mid-quality-line scan. Accumulating bytes.
-    finished_record,     ///< Ready for emit.
+    finished_record,     ///< Ready to emit the completed record.
 };
 
-/// Per-record FASTQ parser state. Cache-line alignment separates parser
-/// states used by concurrent mmap shards.
+/// State for one FASTQ record, aligned to keep concurrent parser states apart.
 template <typename p_storage_unit, std::size_t p_bits_per_char, std::size_t p_letters_per_unit>
 struct alignas(64) fastq_parser_state {
     fastq_parser_progress progress = fastq_parser_progress::at_header_sigil;
@@ -48,23 +47,17 @@ struct alignas(64) fastq_parser_state {
     std::size_t quality_start_offset = 0;
     bioseq::simd::active_target::encode_state<p_storage_unit, p_bits_per_char, p_letters_per_unit>
         body{};
-    /// Raw byte count of sequence lines after newline stripping. This
-    /// is the value FASTQ qual must match — qual is one byte per
-    /// position, regardless of whether the position is a canonical
-    /// base or a skip-sentinel like `N`. Tracked independently of
-    /// `body.total_letters` because the encoder counts only
-    /// non-skip letters. dna5 inputs containing `N` have
-    /// `body.total_letters < sequence_byte_count`.
+    /// Sequence bytes excluding line endings, used as the expected quality length.
+    /// Kept separate from the encoded letter count because encoding may drop
+    /// unsupported bytes.
     std::size_t sequence_byte_count = 0;
-    /// Snapshot of `sequence_byte_count` taken at the seq → '+'
-    /// transition. Compared against qual_size to terminate qual
-    /// accumulation at the right byte count.
+    /// Expected quality length saved when sequence parsing ends.
     std::size_t sequence_letter_count = 0;
     /// Borrowed pointers to the batch's shared storage.
     std::vector<char>* header_storage = nullptr;
     std::vector<std::uint8_t>* quality_storage = nullptr;
 
-    /// Reset record-local progress while retaining attached batch storage.
+    /// Reset record-local progress while keeping attached batch storage.
     void reset_for_next_record() noexcept {
         progress = fastq_parser_progress::at_header_sigil;
         body.reset();
@@ -82,13 +75,12 @@ struct alignas(64) fastq_parser_state {
     }
 };
 
-/// Parse one FASTQ record from the slab. Multi-line bodies and
-/// multi-line quality strings are both supported.
+/// Continues one FASTQ record across input refills. Sequence and quality
+/// fields may span several lines. Quality bytes are counted against the
+/// input sequence length, so '@' and '+' within quality data stay unchanged.
 ///
-/// `emit_record` is invoked with
-/// `(header_start, header_size, seq_start, seq_word_count, padding,
-///   qual_start, qual_size)` — offsets into the batch's shared
-/// storage plus the encoder's `(word_count, padding)` summary.
+/// On completion, `emit_record` receives `(header_start, header_size, seq_start,
+/// seq_word_count, padding, qual_start, qual_size)` for the batch buffers.
 template <sequence_alphabet p_alphabet,
           typename p_storage_unit = std::uint64_t,
           typename p_emit_record,
@@ -128,7 +120,7 @@ template <sequence_alphabet p_alphabet,
         return record_parse_result{parse_outcome::incomplete, parse_cursor};
     };
 
-    // ----- Step 1: AT_HEADER_SIGIL — expect '@' -----
+    // A FASTQ record starts with '@'.
     if (state.progress == fastq_parser_progress::at_header_sigil) {
         if (parse_cursor >= slab_size) {
             return record_parse_result{
@@ -149,7 +141,7 @@ template <sequence_alphabet p_alphabet,
         state.progress = fastq_parser_progress::in_header;
     }
 
-    // ----- Step 2: IN_HEADER — scan to '\n' -----
+    // Read the header through its newline.
     if (state.progress == fastq_parser_progress::in_header) {
         const std::size_t remaining_bytes = slab_size - parse_cursor;
         const std::size_t newline_offset =
@@ -174,7 +166,7 @@ template <sequence_alphabet p_alphabet,
         state.progress = fastq_parser_progress::at_body_line_start;
     }
 
-    // ----- Step 3: body lines — accumulate seq lines until '+' -----
+    // Read sequence lines until the separator.
     while (state.progress == fastq_parser_progress::at_body_line_start ||
            state.progress == fastq_parser_progress::in_sequence_line) {
         if (state.progress == fastq_parser_progress::at_body_line_start) {
@@ -221,7 +213,7 @@ template <sequence_alphabet p_alphabet,
         state.progress = fastq_parser_progress::at_body_line_start;
     }
 
-    // ----- Step 4: AT_SEP_LINE — consume '+...\n' -----
+    // Skip the separator line, including its optional comment.
     if (state.progress == fastq_parser_progress::at_separator_line) {
         const std::size_t remaining_bytes = slab_size - parse_cursor;
         const std::size_t newline_offset =
@@ -232,7 +224,7 @@ template <sequence_alphabet p_alphabet,
         state.progress = fastq_parser_progress::in_quality_line;
     }
 
-    // ----- Step 5: IN_QUAL_LINE — multi-line qual accumulation -----
+    // Accumulate quality lines until the expected byte count is reached.
     while (state.progress == fastq_parser_progress::in_quality_line) {
         if (parse_cursor >= slab_size) {
             if (is_eof) {
@@ -303,7 +295,7 @@ template <sequence_alphabet p_alphabet,
         }
     }
 
-    // ----- Step 6: FINISHED_RECORD — finalise + emit -----
+    // Finish the packed sequence and emit the completed record.
     if (state.progress == fastq_parser_progress::finished_record) {
         const std::size_t header_size = state.header_storage->size() - state.header_start_offset;
         const std::size_t seq_start = state.body.record_start_offset;

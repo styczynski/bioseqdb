@@ -1,10 +1,9 @@
 /**
  * @file fasta.cppm
- * @brief Incremental FASTA record parser.
+ * @brief Reads FASTA records across input-buffer refills.
  *
- * Headers and packed sequence words are appended directly to batch-owned
- * storage. Parser state resumes across slab refills without per-record heap
- * allocation.
+ * Headers and packed sequence words go directly into the batch buffers.
+ * Saved parser state allows a record to continue when more input arrives.
  */
 module;
 
@@ -29,8 +28,7 @@ import bioseq.io.simd;
 
 export namespace bioseq::io {
 
-/// FASTA per-record FSM progress marker. Used to resume parsing after a
-/// refill.
+/// Position within a FASTA record, kept across input refills.
 enum class fasta_parser_progress : std::uint8_t {
     at_header_sigil = 0,
     in_header,
@@ -38,48 +36,38 @@ enum class fasta_parser_progress : std::uint8_t {
     finished_record,
 };
 
-/// Outcome of a single `parse_one_fasta_record` call.
+/// Result of one FASTA or FASTQ parser call.
 enum class parse_outcome : std::uint8_t {
     complete = 0,   ///< A record was emitted. The cursor advanced past it.
     incomplete,     ///< Need more bytes. Refill and call again.
-    at_end_of_file, ///< Slab is empty and EOF — no more records.
-    abort,          ///< The failure callback requested termination.
+    at_end_of_file, ///< The input is exhausted and no more bytes will arrive.
+    abort,          ///< A parse error was reported through the failure callback.
 };
 
-/// Returned by `parse_one_fasta_record` / `parse_one_fastq_record` to
-/// avoid an output pointer for the cursor. The caller assigns each returned
-/// cursor to `slab.parse_cursor` before the next call.
+/// Parser outcome and the input position from which the caller should continue.
 struct record_parse_result {
     parse_outcome outcome = parse_outcome::incomplete;
     std::size_t cursor = 0;
 };
 
-/// Per-record FASTA parser state. Cache-line alignment separates parser
-/// states used by concurrent mmap shards.
+/// State for one FASTA record, aligned to keep concurrent parser states apart.
 template <typename p_storage_unit, std::size_t p_bits_per_char, std::size_t p_letters_per_unit>
 struct alignas(64) fasta_parser_state {
     fasta_parser_progress progress = fasta_parser_progress::at_header_sigil;
-    /// Offset into the batch's `_header_storage` where the current
-    /// record's header bytes start. Captured when header parsing begins
-    /// and used by the emit-record callback.
+    /// Start of this record's header in the batch header buffer.
     std::size_t header_start_offset = 0;
     bioseq::simd::active_target::encode_state<p_storage_unit, p_bits_per_char, p_letters_per_unit>
         body{};
-    /// Borrowed pointer to the batch's shared header buffer. The FSM
-    /// pushes header bytes into this directly to avoid per-record allocation.
+    /// Batch header buffer used while this record is being parsed.
     std::vector<char>* header_storage = nullptr;
 
-    /// Reset record-local progress while retaining attached batch storage.
+    /// Reset record-local progress while keeping attached batch storage.
     void reset_for_next_record() noexcept {
         progress = fasta_parser_progress::at_header_sigil;
         body.reset();
     }
 
-    /// Called by the FSM driver to point this state at the active
-    /// batch's storage. Re-bound at the top of every parse iteration
-    /// so a `make_room` slide on the producer side that triggers a
-    /// realloc on the batch's vector is observed before the next
-    /// emit-record.
+    /// Attaches the header and sequence buffers that receive this record.
     void attach_to_batch(std::vector<char>& header_buf,
                          std::vector<p_storage_unit>& seq_buf) noexcept {
         header_storage = &header_buf;
@@ -87,18 +75,13 @@ struct alignas(64) fasta_parser_state {
     }
 };
 
-/// Parse one FASTA record from the slab, given the state. On COMPLETE,
-/// the caller appends the record to its batch and recycles the state.
-/// `slab_data` / `slab_size` are the readable region. `cursor` is the
-/// current parse offset and the result carries its updated value.
+/// Continues one FASTA record from the supplied input position.
+/// An incomplete result keeps the state for the next refill. At completion,
+/// the parser calls `emit_record` and resets its record state. EOF ends a
+/// trailing sequence body.
 ///
-/// `is_eof` is the producer's "no more bytes coming" flag for this
-/// slab. This lets the caller emit the trailing record.
-///
-/// `emit_record` is invoked with
-/// `(header_start_offset, header_size, seq_start_offset, seq_word_count, padding)`
-/// — offsets into the batch's shared storage, plus the encoder's
-/// `(word_count, padding)` summary.
+/// The callback receives `(header_start_offset, header_size, seq_start_offset,
+/// seq_word_count, padding)`, referring to the attached batch buffers.
 template <sequence_alphabet p_alphabet,
           typename p_storage_unit = std::uint64_t,
           typename p_emit_record,
@@ -128,7 +111,7 @@ template <sequence_alphabet p_alphabet,
     DEBUG_ASSERT(state.body.output_storage != nullptr,
                  "fasta_parser_state must be attached to a batch via attach_to_batch");
 
-    // Step 1: AT_HEADER_SIGIL — expect '>' or EOF.
+    // Expect '>' for another record, or report EOF when the input is exhausted.
     if (state.progress == fasta_parser_progress::at_header_sigil) {
         if (cursor >= slab_size) {
             return record_parse_result{
@@ -148,7 +131,7 @@ template <sequence_alphabet p_alphabet,
         state.progress = fasta_parser_progress::in_header;
     }
 
-    // Step 2: IN_HEADER — scan to '\n', strip optional '\r'.
+    // Read the header through its newline and remove a trailing carriage return.
     if (state.progress == fasta_parser_progress::in_header) {
         const std::size_t remaining = slab_size - cursor;
         const std::size_t newline_offset =
@@ -172,21 +155,9 @@ template <sequence_alphabet p_alphabet,
         state.progress = fasta_parser_progress::at_body_line_start;
     }
 
-    // Step 3 & 4: body lines, looking for the next '>' that terminates this record.
-    //
-    // Two strategies depending on alphabet:
-    //   * dna4 + uint64 (the canonical hot path): scan once for the
-    //     next '>' and feed the whole multi-line body span to the
-    //     SIMD encoder. The encoder's multiline path filters
-    //     newlines via its low-nibble LUT (which already maps `\n`
-    //     and `\r` to skip-sentinels) and lane-compacts the valid
-    //     bytes branchlessly. Eliminates per-line FSM overhead — for
-    //     a 234 MiB human-genome chromosome with ~125 K body lines
-    //     this is ~3 M state-machine iterations collapsed to one
-    //     pass.
-    //   * Other alphabets / storage units: fall back to the per-line
-    //     loop with the scalar encoder. The multiline encoder is a
-    //     dna4-uint64 specialisation.
+    // For dna4 packed into 64-bit words, the encoder skips line breaks and
+    // stops at the next header in one pass. Other encodings process one body
+    // line at a time.
     constexpr bool use_multiline_encoder = std::is_same_v<p_alphabet, seq::dna4> &&
                                            std::is_same_v<p_storage_unit, std::uint64_t> &&
                                            bits_per_char == 2 && letters_per_unit == 32;
@@ -221,8 +192,7 @@ template <sequence_alphabet p_alphabet,
                 state.progress = fasta_parser_progress::finished_record;
                 break;
             }
-            // No '>' found — either EOF closes the record or we need
-            // a refill.
+            // EOF completes the record. Otherwise, continue after a refill.
             if (is_eof) {
                 state.progress = fasta_parser_progress::finished_record;
                 break;
@@ -277,7 +247,7 @@ template <sequence_alphabet p_alphabet,
         }
     }
 
-    // Step 5: FINISHED_RECORD — finalise, emit, reset.
+    // Finish the packed sequence, emit its offsets, and reset for the next record.
     if (state.progress == fasta_parser_progress::finished_record) {
         const std::size_t header_size = state.header_storage->size() - state.header_start_offset;
         const std::size_t seq_start = state.body.record_start_offset;
