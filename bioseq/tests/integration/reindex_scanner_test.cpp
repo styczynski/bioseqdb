@@ -1,5 +1,6 @@
 /**
- * @file Reindex coverage for stub-backed rows and fragmented PostgreSQL scans.
+ * @file reindex_scanner_test.cpp
+ * @brief Tests rebuilding indexes over fragmented sequences and SQL expressions.
  */
 #include <libpq-fe.h>
 #include <fmt/format.h>
@@ -11,7 +12,7 @@ import bioseq.tests.integration.support;
 using namespace bioseq_int_tests;
 
 namespace {
-/** Return stable alignment coordinates for every matching row. */
+/** Return distinct row IDs and alignment bounds from mmsearch. */
 [[nodiscard]] std::set<std::tuple<long long, long long, long long>>
 mmsearch_set(
         const connection_test_context& ctx, std::string_view table_name) {
@@ -46,7 +47,7 @@ void require_expression_index_ids(
             == std::vector<long long>(expected_ids));
 }
 
-/** Require the columnar relation to match its heap mirror exactly. */
+/** Compare row counts, sequence text, and sequence expressions with the heap copy. */
 void require_flat_mirror_equivalence(
         const connection_test_context& ctx, long long expected_rows) {
     REQUIRE(query_scalar_int(ctx,
@@ -70,7 +71,7 @@ void require_flat_mirror_equivalence(
 TEST_CASE("update_index reindexes stub-backed rows with row-number query keys",
           "[component:bioseq][layer:integration][feature:index][resource:postgres]") {
     auto ctx = fresh_context({"reindex_stub_rows"});
-    exec_sql(ctx, "SET bioseq.index.insert_maintenance.enabled = off;");   // no on-insert index; update_index only
+    exec_sql(ctx, "SET bioseq.index.insert_maintenance.enabled = off;");   // build the index with update_index
     exec_sql(ctx,
         "SELECT bioseq.create_query_target_sample_table('reindex_stub_rows', 3, 5000, 100.0, 200000, "
         "0.001, 0.0005, 0.0005, 1.0, 1.0, 0.0, 90210);");
@@ -78,8 +79,7 @@ TEST_CASE("update_index reindexes stub-backed rows with row-number query keys",
     REQUIRE(query_scalar_int(ctx,
         "SELECT bioseq.update_index('reindex_stub_rows'::regclass, 'minimizers_per_fragment')") == 3);
 
-    // Every resolved columnar rowno has its full fragment count
-    // (~7 for a 200 kbp target), filed under that rowno.
+    // Each sequence row number must have at least seven fragment index keys.
     const auto row_numbers = query_int_column(ctx,
         "SELECT bioseq.column_row_number('reindex_stub_rows'::regclass, ctid) FROM reindex_stub_rows ORDER BY 1");
     REQUIRE(row_numbers.size() == 3);
@@ -89,7 +89,8 @@ TEST_CASE("update_index reindexes stub-backed rows with row-number query keys",
             sequence_row_number) >= 7);
     }
 
-    // Assemble and recompute results match on the scanner_pg fragmented path.
+    // Stored-index and recomputed searches must return the same row IDs
+    // and alignment bounds.
     guc_scope sequence_read_on(ctx, "bioseq.index.sequence_read.enabled", "on");
     const auto assembled = mmsearch_set(ctx, "reindex_stub_rows");
     REQUIRE(assembled.size() == 3);
@@ -125,9 +126,8 @@ TEST_CASE("slice reverse concat expression indexes survive full lifecycle",
         " (1,repeat('A',40000)::bioseq.seq('dna4',32)),"
         " (2,repeat('C',40000)::bioseq.seq('dna4',32));");
 
-    // A duplicate-key ERROR occurs inside the TableAM's index tuple callback.
-    // The trace self-check requires default ambient TLS after the PG_CATCH
-    // path restores the index_tuple classification scope.
+    // Make index creation fail on a duplicate empty-slice key. The trace
+    // self-test then checks that error cleanup restored the normal state.
     const auto duplicate = sql_error(ctx,
         "CREATE UNIQUE INDEX expression_reindex_failed_idx "
         "ON expression_reindex ((s[0:0]));");
@@ -169,9 +169,8 @@ TEST_CASE("slice reverse concat expression indexes survive full lifecycle",
         "(s[4:36] OPERATOR(bioseq.||) s[16380:16412]) "
         "OPERATOR(bioseq.=) "
         "repeat('A',64)::bioseq.seq('dna4',32) ORDER BY id";
-    // The ordinary BioseqScan is a CustomPath, so PostgreSQL's
-    // enable_seqscan penalty does not disable it.  Turn that alternative off
-    // while requiring the expression index itself to remain usable.
+    // Turn off Bioseq custom scans and discourage sequential scans so
+    // PostgreSQL selects the expression indexes.
     exec_sql(ctx,
         "SET bioseq.planner.custom_scan.enabled=off;"
         "SET enable_seqscan=off;");
@@ -201,7 +200,7 @@ TEST_CASE("slice reverse concat expression indexes survive full lifecycle",
         "ORDER BY id", {3});
     require_flat_mirror_equivalence(ctx, 3);
 
-    // UPDATE must delete every old C key and install every new T key.
+    // After UPDATE, searches must find the new T values and no old C values.
     exec_sql(ctx,
         "UPDATE expression_reindex SET "
         "s=repeat('T',40000)::bioseq.seq('dna4',32) WHERE id=2;"
@@ -249,10 +248,8 @@ TEST_CASE("slice reverse concat expression indexes survive full lifecycle",
     require_expression_index_ids(ctx, concat_index, concat_a_query, {1});
     require_flat_mirror_equivalence(ctx, 3);
 
-    // Safe VACUUM and table-rewrite interaction is required, not indexed
-    // CLUSTER support. Keep the access method's existing rejection explicit
-    // and verify that the backend remains usable before exercising the shared
-    // relation_copy_for_cluster callback through VACUUM FULL.
+    // CLUSTER through an index is unsupported. Check that error, then use
+    // VACUUM FULL to test rewriting the table while preserving its indexes.
     const auto cluster_error = sql_error(ctx,
         "CLUSTER expression_reindex USING "
         "expression_reindex_pkey;");
@@ -293,11 +290,9 @@ TEST_CASE("slice reverse concat expression indexes survive full lifecycle",
         " (4096::bigint * v.storage_unit_byte_width) - 1) / "
         " (4096::bigint * v.storage_unit_byte_width);") == 3);
 
-    // Request PostgreSQL's parallel-maintenance path.  The Bioseq relation
-    // hook intentionally advertises zero parallel workers, so PostgreSQL may
-    // select a successful serial build instead.  Exact DEBUG selection output
-    // is the capability boundary: it is reported as unsupported, never counted
-    // as parallel coverage.
+    // Request parallel index creation and observe what PostgreSQL selects.
+    // A reported serial build is accepted as unsupported parallel maintenance.
+    // Otherwise, the test must observe a parallel worker.
     REQUIRE(query_scalar_int(ctx,
         "SELECT current_setting('max_parallel_workers')::int;") > 0);
     exec_sql(ctx,
@@ -391,9 +386,7 @@ TEST_CASE("slice reverse concat expression indexes survive full lifecycle",
             WARN("parallel expression-index build explicitly unsupported: "
                  "PostgreSQL selected the Bioseq TableAM serial capability");
         } else {
-            // With no exact serial-selection attestation, a live worker is
-            // mandatory condition that PostgreSQL actually selected parallel
-            // maintenance rather than silently falling back.
+            // Without a reported serial build, require an observed parallel worker.
             REQUIRE(saw_parallel_worker);
         }
     } else {
@@ -416,8 +409,7 @@ TEST_CASE("slice reverse concat expression indexes survive full lifecycle",
         "DROP INDEX IF EXISTS expression_parallel_reindex_idx;"
         "DROP FUNCTION IF EXISTS public.bioseq_parallel_index_delay(int);");
 
-    // The direct helper covers zero, aligned, overflow, and exact MaxAlloc
-    // edges in the same storage/index boundary suite.
+    // Check materialization-size limits alongside the index tests.
     REQUIRE(query_scalar(ctx,
         "SELECT bioseq_internal.materialization_size_self_test();") == "t");
 }

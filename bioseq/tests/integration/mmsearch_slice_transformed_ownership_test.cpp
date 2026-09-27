@@ -1,4 +1,7 @@
-/** @file Slice and transformed-ownership mmsearch scenarios. */
+/**
+ * @file mmsearch_slice_transformed_ownership_test.cpp
+ * @brief Tests mmsearch on slices and sequences built from SQL expressions.
+ */
 
 #include <cctype>
 #include <libpq-fe.h>
@@ -14,7 +17,7 @@ using namespace bioseq_int_tests;
 using namespace bioseq_int_tests::mmsearch_test_support;
 
 namespace {
-/** Identify one completed GPU dispatch record with the selected host suffix. */
+/** Recognize GPU seed and chain dispatches with no GPU backtracking or extension. */
 [[nodiscard]] bool is_completed_vulkan_dispatch_line(
         const std::string_view line) {
     const auto has_positive_counter = [line](const std::string_view marker) {
@@ -33,7 +36,7 @@ namespace {
             "backend_declines=0 backend_fallbacks=0]");
 }
 
-/** Check execution identity and physical GPU work from the same owning scan. */
+/** Check GPU dispatch and execution labels for the expected custom scan. */
 void require_completed_vulkan_host_suffix(
         const std::span<const std::string> plan,
         const std::string_view expected_owner) {
@@ -93,12 +96,9 @@ void require_completed_vulkan_host_suffix(
 
 TEST_CASE("target base mmsearch keeps ordinary parameterized scan ownership",
           "[component:bioseq][layer:integration][feature:prefilter][resource:postgres]") {
-    /* A locator-passthrough BatchJoin child cannot also own a target-side
-     * base mmsearch.  The ordinary parameterized BioseqScan can safely bind
-     * the join Param and stack the Const base qual, covering both negative
-     * planning and executable AND semantics. Query 0 is intentionally a
-     * no-match: if the join mmsearch leaked to its SQL rendezvous stub it
-     * would incorrectly survive the target's literal-only base filter. */
+    /* The target has both a base filter and a join search. Keep BioseqScan
+     * responsible for both. Query 0 cannot match, so it must be removed even
+     * though the target passes the base filter. */
     auto ctx = fresh_context({k_batch_join_target});
     seed_batch_join_target(ctx);
     load_batch_join_queries(ctx, 2, /*only_last_can_match=*/true);
@@ -232,8 +232,8 @@ TEST_CASE("GPU target outcomes count logical rows with identical sequence conten
     REQUIRE(plan_contains(
         plan, "attempted=2 fully_attested=2 unattested=0"));
 #else
-    // Hybrid route identity is accepted only by the E2E interval consumer.
-    // Physical operation counters below remain authoritative in TEST builds.
+    // This build reports fully_attested=0 for hybrid execution. Check the
+    // GPU dispatch counters below.
     REQUIRE(plan_contains(
         plan, "attempted=2 fully_attested=0 unattested=2"));
 #endif
@@ -271,8 +271,7 @@ TEST_CASE("USING bioseq table without mmsearch qual scans all rows",
     auto ctx = fresh_context({k_hoe});
     seed_hoe_fixture(ctx, k_hoe);
 
-    // Without an executor-owned mmsearch qualifier, BioseqScan follows its
-    // ordinary projection path and preserves every seeded row.
+    // A scan without mmsearch must return all five fixture rows.
     REQUIRE(query_scalar_int(
                 ctx, fmt::format("SELECT COUNT(*)::bigint FROM {};", k_hoe)) ==
             5);
@@ -306,8 +305,7 @@ TEST_CASE(
             {"bioseq.aligner.profiling.enabled", {"on", "off"}},
         });
 
-    // CIGAR strings on materialised rows must be either empty (no alignment)
-    // or syntactically valid.
+    // Check the syntax of each nonempty CIGAR string.
     for (const auto& row : reference) {
         REQUIRE(row.size() == 6);
         if (row[5].has_value() && !row[5].value().empty()) {
@@ -340,11 +338,9 @@ TEST_CASE("Sliced concat reverse mmsearch preserves coordinates across GUCs",
 
     for (const std::string_view table :
          std::array{k_hoe, k_hoe_lazy_no_insert}) {
-        /* A persisted fixture sidecar is pinned to k=15,w=10. It is not an
-         * eager oracle for this 29-bp query, whose ordinary recompute path
-         * deliberately applies the short-pair k=8,w=3 heuristic. Require the
-         * absent-index route so this comparison isolates representation and
-         * coordinate parity between a flat target and its streamed recipe. */
+        /* Recompute the flat-target baseline so a stored index cannot change
+         * its minimizer settings. Compare that result with the sequence built
+         * from slices, concatenation, and two reversals. */
         const std::string plain = eager_mmsearch_coordinate_sql(table);
         const std::string transformed = transformed_mmsearch_sql(table);
         const auto expected = query_rows(ctx, plain);
@@ -653,8 +649,8 @@ TEST_CASE("Base-local sliced mmsearch preserves algorithm-route parity",
             "block_aligner", "hybrid_cpu_vulkan", "hybrid_cpu_vulkan", 28u,
             true, true});
 #else
-        // The non-interval TEST consumer does not accept hybrid aggregate
-        // identity. Per-stage plan fields and physical counters prove it below.
+        // This build reports hybrid work as mixed_invalid. GPU dispatch
+        // counters below still check which operations ran.
         routes.push_back({
             "physical Vulkan", "vulkan_minimap_integer", "vulkan_tiled_dynamic_programming",
             "block_aligner", "mixed_invalid", "mixed_invalid", 28u,
@@ -1051,8 +1047,8 @@ TEST_CASE("Transformed INNER mmsearch matches a flat logical oracle",
             "block_aligner", "hybrid_cpu_vulkan", "hybrid_cpu_vulkan", 28u,
             true, true});
 #else
-        // The non-interval TEST consumer does not accept hybrid aggregate
-        // identity. Per-stage plan fields and physical counters prove it below.
+        // This build reports hybrid work as mixed_invalid. Check its GPU
+        // stages and dispatch counters below.
         routes.push_back({
             "Vulkan", "vulkan_minimap_integer", "vulkan_tiled_dynamic_programming",
             "block_aligner", "mixed_invalid", "mixed_invalid", 28u,
@@ -1119,10 +1115,9 @@ TEST_CASE("Transformed INNER mmsearch matches a flat logical oracle",
                                 "Bioseq Mmsearch Ownership: per-row recipe")
                                 != std::string::npos;
                         }) == 1);
-                    /* The parent-only carrier shape lets the non-projecting
-                     * BioseqScan retain whole helper
-                     * identities in its dummy targetlist while the single
-                     * PerRow owner above it supplies the executed values. */
+                    /* Keep one BatchJoin responsible for the transformed search while
+                     * BioseqScan supplies rows and SliceProject evaluates the
+                     * sequence expressions. */
                     REQUIRE(plan_contains(
                         plan, "Custom Scan (BioseqScan)"));
                     REQUIRE(plan_contains(
@@ -1163,9 +1158,8 @@ TEST_CASE("Transformed INNER mmsearch matches a flat logical oracle",
                             execution_stats.front(), 139) == 0);
                         REQUIRE(stats_i64(
                             execution_stats.front(), 140) == 0);
-                        /* A concrete CPU actual_backend is retained only
-                         * after the selected minimizer/chaining/alignment
-                         * tuple supplies its algorithm-local attestation. */
+                        /* Confirm that each stage ran the selected CPU implementation before
+                         * accepting the overall backend label. */
                         for (const std::size_t stage_no : {
                                  std::size_t{0}, std::size_t{1},
                                  std::size_t{7}, std::size_t{8}}) {
@@ -1301,10 +1295,8 @@ TEST_CASE("Transformed mmsearch owns cross-table concat",
     auto ctx = fresh_context({k_transform_target});
     const std::string source = high_entropy_sequence(320u);
     const std::string prefix = high_entropy_sequence(96u);
-    /* Keep enough independent minimizers on both sides of the concat seam for
-     * every admitted scalar/SIMD backend.  The hit still necessarily crosses
-     * the logical boundary, but is not sensitive to short-query chain
-     * thresholds. */
+    /* Build a 96-base query with 48 bases from each side of the concatenation.
+     * Its expected match crosses the join at target position 64. */
     const std::string needle = source.substr(16u, 48u)
         + prefix.substr(0u, 48u);
     const seq_typmod dna4{.alphabet = "dna4", .width = 32};
@@ -1378,8 +1370,8 @@ TEST_CASE("Outer-join match quals fail closed",
         "LEFT", "RIGHT", "FULL"};
     for (const auto join_type : join_types) {
         const std::string sql = fmt::format(
-            /* Consume both sides so outer-join removal cannot legally erase
-             * the ineligible match qual before the fail-closed SQL stub. */
+            /* Select columns from both sides so PostgreSQL keeps the outer join
+             * and its unsupported mmsearch condition. */
             "SELECT t.pk, q.id FROM {} AS t {} JOIN "
             "outer_match_queries AS q "
             "ON t.pk=q.id AND mmsearch(t.seq0[0:], q.seq[0:]);",

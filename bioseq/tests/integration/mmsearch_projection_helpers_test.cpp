@@ -1,4 +1,7 @@
-/** @file MatchResult projection helper integration scenarios. */
+/**
+ * @file mmsearch_projection_helpers_test.cpp
+ * @brief Tests SQL helpers that return values from mmsearch results.
+ */
 
 #include <cctype>
 #include <libpq-fe.h>
@@ -60,15 +63,12 @@ TEST_CASE("mmsearch projection helpers run cleanly for the produced row set",
     }
 }
 
-// All remaining MatchResult helpers exercised in one parameterised pass.
-// Each row of `k_projection_helpers` is a (sql_function, expected_pg_type)
-// pair; for any rows the alignment pipeline materialises we assert the
-// helper either returns NULL or a value parseable by the named type. Adding
-// a new helper takes one line.
+// Pair each helper call with a PostgreSQL type to cast its result to.
+// Run the same query check for every pair.
 namespace {
 struct projection_probe {
     std::string_view sql_call;     // e.g. "bioseq.score(pk)"
-    std::string_view pg_typename;  // "int4", "bool", "float4", "text"
+    std::string_view pg_typename;  // PostgreSQL type name, such as "int8"
 };
 
 constexpr std::array<projection_probe, 14> k_projection_helpers = {{
@@ -78,8 +78,7 @@ constexpr std::array<projection_probe, 14> k_projection_helpers = {{
     {"bioseq.chain_score(pk)",            "int4"},
     {"bioseq.secondary_chain_score(pk)",  "int4"},
     {"bioseq.seed_count(pk)",             "int4"},
-    // These four are sequence_size_t (uint64) in MatchResult, so the
-    // projections return BIGINT (int8), not int4.
+    // Match counts, edit counts, and sequence lengths use BIGINT results.
     {"bioseq.num_matches(pk)",            "int8"},
     {"bioseq.block_length(pk)",           "int8"},
     {"bioseq.edit(pk)",                   "int8"},
@@ -94,9 +93,8 @@ void check_projection_helper(const projection_probe& probe) {
     auto ctx = fresh_context({k_hoe});
     seed_hoe_fixture(ctx, k_hoe);
 
-    // The cast forces Postgres to type-check the helper's return value at
-    // query time — a misdeclared return type lights up here as a server
-    // error rather than as a silent text-is-text comparison.
+    // Cast the result in PostgreSQL so an unsupported conversion fails
+    // before libpq returns the value as text.
     const std::string sql = fmt::format(
         "SELECT pk, ({})::{} "
         "  FROM {} "
@@ -111,7 +109,7 @@ void check_projection_helper(const projection_probe& probe) {
         // The pk column must come back as an integer.
         REQUIRE(row[0].has_value());
         (void)std::stoll(row[0].value());
-        // Cast itself succeeded: any value, even NULL, is acceptable here.
+        // Successful execution is enough here, including a NULL helper result.
     }
 }
 }  // namespace
