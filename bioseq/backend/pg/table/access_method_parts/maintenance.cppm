@@ -108,7 +108,7 @@ void bioseq_relation_nontransactional_truncate(Relation rel) {
     RelFileLocator relfilelocator = rel->rd_locator;
 
     drop_write_state_outside_transaction(relfilelocator.relNumber);
-    
+
     delete_metadata_rows(relfilelocator);
 
     /* PostgreSQL uses this path for storage that is private to the current
@@ -131,7 +131,7 @@ void bioseq_relation_copy_data(Relation rel, const RelFileLocator* newrnode) {
 
     SMgrRelation srel = RelationCreateStorage(*newrnode, persistence, true);
 
-    
+
     RelationCopyStorage(RelationGetSmgr(rel), srel, MAIN_FORKNUM, persistence);
 
     for (ForkNumber fork_num = static_cast<ForkNumber>(MAIN_FORKNUM + 1); fork_num <= MAX_FORKNUM;
@@ -345,13 +345,13 @@ static bool truncate_and_compact_column_stripes(Relation rel, int elevel) {
         return false;
     }
 
-    
+
     column_options bioseq_column_options =
         read_column_options(rel->rd_id).value_or(column_options{});
 
     /* Consider the newest stripes first. */
     List* stripe_metadata_list = list_stripes_for_relation(rel->rd_locator, BackwardScanDirection);
-    
+
     if (stripe_metadata_list == NIL) {
         bioseq_log_pg(
             elevel, "\"{}\": stopping vacuum due to empty table", RelationGetRelationName(rel));
@@ -390,7 +390,7 @@ static bool truncate_and_compact_column_stripes(Relation rel, int elevel) {
 
     /* Rewriting a single stripe only saves space if enough rows were deleted. */
     else if (starting_stripe_list_position == 1) {
-        
+
         float percentage_of_delete_rows =
             static_cast<float>(last_stripe_deleted_rows) /
             static_cast<float>(total_row_number_count + last_stripe_deleted_rows);
@@ -523,7 +523,7 @@ void bioseq_vacuum_rel(Relation rel,
 
             BlockNumber new_rel_pages = smgrnblocks(RelationGetSmgr(rel), MAIN_FORKNUM);
 
-            
+
             List* index_list = RelationGetIndexList(rel);
             int nindexes = list_length(index_list);
 
@@ -689,7 +689,7 @@ static void log_relation_statistics(Relation rel, int elevel) {
             continue;
         }
 
-        
+
         if (compression_stats[compression_algorithm] == 0) {
             continue;
         }
@@ -716,7 +716,7 @@ static void truncate_column_storage_tail(Relation rel, int elevel) {
 
     pg_rusage_init(&ru0);
 
-    
+
     pgstat_progress_update_param(PROGRESS_VACUUM_PHASE, PROGRESS_VACUUM_PHASE_TRUNCATE);
 
     /* Avoid waiting in the lock queue while holding a weaker relation lock.
@@ -793,7 +793,7 @@ static bool try_lock_relation_until_timeout(
             break;
         }
 
-        
+
         CHECK_FOR_INTERRUPTS();
 
         if (!acquire && (++lock_retry > (timeout / retry_interval))) {

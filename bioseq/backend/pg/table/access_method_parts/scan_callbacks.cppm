@@ -268,7 +268,7 @@ TableScanDesc bioseq_beginscan_with_options(Relation relation,
         ;
         scan->parallel_scan = parallel_column_scan;
 
-        
+
         scan->returns_vectorized_tuple = returns_vectorized_tuples;
 
         /* Keep fragment readers and the sequence-loading policy for this scan. */
@@ -344,7 +344,7 @@ static bool
 bioseq_getnextslot_impl(TableScanDesc sscan, ScanDirection direction, TupleTableSlot* slot) {
     column_scan_handle scan = reinterpret_cast<column_scan_handle>(sscan);
 
-    
+
     if (scan->read_state == nullptr) {
         bool random_access = false;
         // Old stripes need column defaults added by ALTER TABLE. Vector-slot
@@ -606,7 +606,7 @@ bool bioseq_index_fetch_tuple(column_index_fetch_base* sscan,
     index_fetch_state* scan = reinterpret_cast<index_fetch_state*>(sscan);
     Relation bioseq_column_relation = scan->fetch_base.rel;
 
-    
+
     if (scan->read_state == nullptr) {
         /* The index scan evaluates its own predicates. */
         List* scan_qual = NIL;
@@ -885,7 +885,7 @@ TransactionId bioseq_index_delete_tuples(Relation rel, TM_IndexDeleteOp* delstat
     previous_cache_enabled_state = bioseq::settings::column_cache::enabled;
     bioseq::settings::column_cache::enabled = false;
 
-    
+
 
     if (delstate->bottomup) {
         /* Keep all index entries during bottom-up btree cleanup. */

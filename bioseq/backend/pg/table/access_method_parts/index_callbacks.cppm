@@ -300,7 +300,7 @@ double bioseq_index_build_range_scan(Relation bioseq_column_relation,
  */
 static void
 report_total_virtual_blocks(Relation relation, Snapshot snapshot, int progress_arr_index) {
-    
+
     Assert(progress_arr_index == PROGRESS_SCAN_BLOCKS_TOTAL ||
            progress_arr_index == PROGRESS_SCAN_BLOCKS_DONE);
     BlockNumber nvirtual_blocks = column_virtual_block_count(relation, snapshot);

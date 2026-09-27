@@ -927,5 +927,5 @@ void bioseq_finish_bulk_insert(Relation relation,
                               int options
 #endif
 ) {
-    
+
 }
