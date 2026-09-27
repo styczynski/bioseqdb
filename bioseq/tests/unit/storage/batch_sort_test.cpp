@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Verifies GPU and CPU sequence-sort permutations against a scalar oracle.
+ * @brief Compare CPU and GPU sequence order with scalar sequence comparisons.
  */
 
 #include <catch2/catch_test_macros.hpp>
@@ -25,10 +25,11 @@ using bioseq::storage::sequence_batch_sorter;
 using bioseq::storage::sequence_sort_options;
 
 /**
- * @brief Owns symbols, packed ranges, and lazy views for one record type.
- * @tparam p_record Alphabet and storage-width configuration.
+ * @brief Keep sequence storage alive while the batch sorter borrows its views.
+ * @tparam p_record Alphabet and packed-word configuration.
  *
- * Deques keep symbol and range addresses stable for every lazy view.
+ * Deques keep existing symbol vectors and ranges at stable addresses as the
+ * batch grows.
  */
 template <class p_record> struct owned_batch {
     using alphabet_t = typename p_record::alphabet_type;
@@ -40,10 +41,7 @@ template <class p_record> struct owned_batch {
     std::deque<compact_sequence_range<p_record>> ranges; // stable addresses
     std::vector<lazy_t> lazies;
 
-    /**
-     * @brief Appends one rank vector and constructs its resident lazy owner.
-     * @param[in] ranks Valid ranks for the batch alphabet.
-     */
+    /** Append valid alphabet ranks and create their packed range and lazy sequence. */
     void push(const std::vector<std::uint8_t>& ranks) {
         std::vector<alphabet_t> v(ranks.size());
         for (std::size_t i = 0; i < ranks.size(); ++i) {
@@ -56,10 +54,7 @@ template <class p_record> struct owned_batch {
         lazies.push_back(make_resident_lazy_sequence(ranges.back()));
     }
 
-    /**
-     * @brief Erases all resident owners to their common lazy-view type.
-     * @return Views backed by this batch.
-     */
+    /** Return lazy views backed by this batch's sequence storage. */
     [[nodiscard]] std::vector<view_t> views() const {
         std::vector<view_t> result;
         result.reserve(lazies.size());
@@ -68,22 +63,21 @@ template <class p_record> struct owned_batch {
         }
         return result;
     }
-    /** @brief Returns the number of resident sequence owners. */
+    /** Return the number of sequences in the batch. */
     [[nodiscard]] std::size_t size() const {
         return lazies.size();
     }
-    /** @brief Returns the resident owner at `i`. */
+    /** Return the resident sequence at index i. */
     [[nodiscard]] const lazy_t& operator[](std::size_t i) const {
         return lazies[i];
     }
 };
 
 /**
- * @brief Computes the scalar sequence order with the production tie-break rule.
- * @tparam p_batch Owning batch type.
- * @param[in] batch Sequence owners to compare.
- * @param[in] descending Whether to reverse sequence and index order.
- * @return Permutation of batch indices.
+ * @brief Sort indices with scalar sequence comparisons and index-based tie breaking.
+ * @param[in] batch Sequences to compare.
+ * @param[in] descending Reverse both sequence order and the order of equal-sequence indices.
+ * @return Sorted batch indices.
  */
 template <class p_batch>
 [[nodiscard]] std::vector<std::size_t> oracle_order(p_batch& batch, bool descending) {
@@ -100,16 +94,16 @@ template <class p_batch>
     return order;
 }
 
-/// Smallest alphabet rank used for uniform-tail fixtures.
+/// Lowest alphabet rank, used for repeated tails.
 constexpr std::uint8_t rank_a = 0;
 
 /**
- * @brief Builds varied rank sequences around packed-unit boundaries.
- * @param[in,out] rng Deterministic random engine.
- * @param[in] count Number of sequences to return.
- * @param[in] alphabet_size Count of valid ranks.
- * @param[in] lpu Symbols stored in one packed unit.
- * @return Empty, boundary, shared-prefix, duplicate, and random fixtures.
+ * @brief Build sequences that test length boundaries and equal prefixes.
+ * @param[in,out] rng Generator for reproducible ranks.
+ * @param[in] count Number of sequences.
+ * @param[in] alphabet_size Number of valid ranks.
+ * @param[in] lpu Symbols per packed unit.
+ * @return Empty and partial-unit sequences, shared prefixes, duplicates, and random inputs.
  */
 [[nodiscard]] std::vector<std::vector<std::uint8_t>>
 make_shapes(std::mt19937_64& rng, std::size_t count, std::uint32_t alphabet_size, std::size_t lpu) {
@@ -125,8 +119,8 @@ make_shapes(std::mt19937_64& rng, std::size_t count, std::uint32_t alphabet_size
         return v;
     };
 
-    // A shared prefix used by several rows (forces equal-key runs / deep tie-break).
-    const std::size_t prefix_len = lpu * 3 + 5; // spans >1 unit + partial
+    // Shared prefixes force comparisons beyond the first packed words.
+    const std::size_t prefix_len = lpu * 3 + 5; // Extends beyond three packed units.
     std::vector<std::uint8_t> shared_prefix = rand_seq(prefix_len);
 
     if (count == 0) {
@@ -139,29 +133,29 @@ make_shapes(std::mt19937_64& rng, std::size_t count, std::uint32_t alphabet_size
         }
     };
 
-    // Deterministic shape seeds first, then random filler to reach `count`.
+    // Start with boundary cases, then fill the rest of the batch with random inputs.
     add({});                    // empty
     add(rand_seq(1));           // single base
     add(rand_seq(lpu - 1));     // sub-unit
     add(rand_seq(lpu));         // exactly one unit
     add(rand_seq(lpu + 1));     // just over a unit
-    add(rand_seq(lpu * 4 + 3)); // multi-unit + partial
+    add(rand_seq(lpu * 4 + 3)); // Several units with a partial tail.
     {
-        auto p = shared_prefix; // shared prefix, extended
+        auto p = shared_prefix; // Shared prefix with a seven-rank tail.
         auto tail = rand_seq(7);
         p.insert(p.end(), tail.begin(), tail.end());
         add(p);
     }
     {
-        auto p = shared_prefix; // SAME shared prefix, diff tail
+        auto p = shared_prefix; // Shared prefix with a different tail.
         auto tail = rand_seq(9);
         p.insert(p.end(), tail.begin(), tail.end());
         add(p);
     }
-    add(shared_prefix); // prefix-of the two above
+    add(shared_prefix); // Exact prefix of the preceding two sequences.
     {
         auto p = shared_prefix;
-        p.push_back(rank_a); // prefix + uniform tail
+        p.push_back(rank_a); // Follow the prefix with the lowest rank.
         for (std::size_t i = 0; i < lpu * 2; ++i)
             p.push_back(rank_a);
         add(p);
@@ -171,11 +165,11 @@ make_shapes(std::mt19937_64& rng, std::size_t count, std::uint32_t alphabet_size
     add(std::vector<std::uint8_t>(lpu * 2, rank_a));        // smallest rank
     add(std::vector<std::uint8_t>(
         lpu * 2,
-        static_cast<std::uint8_t>(alphabet_size - 1))); // all-max (largest)
+        static_cast<std::uint8_t>(alphabet_size - 1))); // Repeated highest rank.
 
     while (out.size() < count) {
         const std::size_t len = rng() % (lpu * 5 + 1);
-        // Half the random rows reuse the shared prefix to stress equal-key runs.
+        // Reuse the shared prefix in roughly half the random rows to create ties.
         if (rng() & 1u) {
             auto p = shared_prefix;
             auto t = rand_seq(len % (lpu + 1));
@@ -190,12 +184,12 @@ make_shapes(std::mt19937_64& rng, std::size_t count, std::uint32_t alphabet_size
 }
 
 /**
- * @brief Checks both sort directions through GPU-enabled and CPU-only routes.
- * @tparam p_record Alphabet and storage-width configuration.
- * @param[in] label Diagnostic fixture label.
- * @param[in] count Number of sequences in the batch.
- * @param[in] seed Random fixture seed.
- * @param[in] alphabet_size Count of valid ranks.
+ * @brief Check both sort directions with Vulkan enabled and disabled.
+ * @tparam p_record Alphabet and packed-word configuration.
+ * @param[in] label Name used in test diagnostics.
+ * @param[in] count Number of sequences.
+ * @param[in] seed Seed for input generation.
+ * @param[in] alphabet_size Number of valid ranks.
  */
 template <class p_record>
 void run_case(const char* label,
@@ -223,7 +217,7 @@ void run_case(const char* label,
         DYNAMIC_SECTION(label << " n=" << count << (descending ? " DESC" : " ASC")) {
             const std::vector<std::size_t> expected = oracle_order(ob, descending);
 
-            // ---- GPU-enabled path (device when present, else CPU fallback) ----
+            // Allow GPU sorting, with CPU fallback when hardware is unavailable.
             sequence_sort_options gspec{};
             gspec.descending = descending;
             gspec.vulkan_enabled = true;
@@ -232,28 +226,27 @@ void run_case(const char* label,
             const std::uint64_t after = rt.seq_sort_dispatch_count();
             REQUIRE(got_gpu == expected);
             if (gpu_present && count > 1) {
-                // The façade declines only on oversize/admission; these batches
-                // are tiny, so the device path MUST have executed.
+                // These small batches should reach the GPU when hardware is available.
                 REQUIRE(after > before);
             }
 
-            // ---- CPU-only path (vulkan_enabled = false) ----
+            // Sort the same batch on the CPU.
             sequence_sort_options cspec{};
             cspec.descending = descending;
             cspec.vulkan_enabled = false;
             const auto got_cpu = sorter::sort(batch, cspec);
             REQUIRE(got_cpu == expected);
 
-            // GPU and CPU permutations are bit-identical.
+            // Both calls must return the same permutation.
             REQUIRE(got_gpu == got_cpu);
         }
     }
 }
 
 /**
- * @brief Checks global comparison for an equal-prefix run larger than one workgroup.
- * @tparam p_record Alphabet and storage-width configuration.
- * @param[in] label Diagnostic fixture label.
+ * @brief Check equal-prefix sorting when the tied group exceeds one GPU workgroup.
+ * @tparam p_record Alphabet and packed-word configuration.
+ * @param[in] label Name used in test diagnostics.
  */
 template <class p_record> void run_oversized_equal_key_case(const char* label) {
     using traits = typename compact_sequence_range<p_record>::traits;
@@ -261,13 +254,13 @@ template <class p_record> void run_oversized_equal_key_case(const char* label) {
     using view_t = bioseq::storage::lazy_sequence_view<alphabet_t>;
     using sorter = sequence_batch_sorter<alphabet_t>;
 
-    constexpr std::size_t count = 300;       // > seq-sort LOCAL_SIZE_X (256)
-    constexpr std::size_t suffix_digits = 6; // 4^6 leaves plenty of unique suffixes
+    constexpr std::size_t count = 300;       // Larger than one 256-thread workgroup.
+    constexpr std::size_t suffix_digits = 6; // Enough base-four suffixes for 300 distinct rows.
     const std::size_t prefix_len = traits::letters_per_unit * 3u;
 
     owned_batch<p_record> ob;
     for (std::size_t i = 0; i < count; ++i) {
-        const std::size_t value = (i * 73u) % count; // deterministic unsorted permutation
+        const std::size_t value = (i * 73u) % count; // Reproducible unsorted row order.
         std::vector<std::uint8_t> ranks(prefix_len, rank_a);
         for (std::size_t digit = 0; digit < suffix_digits; ++digit) {
             const std::size_t shift = 2u * (suffix_digits - 1u - digit);

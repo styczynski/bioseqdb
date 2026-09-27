@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Verifies Highway kernel inventory, alignment tables, and target masks.
+ * @brief Check Highway kernel tables and selection from compiled and CPU-supported targets.
  */
 
 #include <hwy/highway.h>
@@ -187,7 +187,7 @@ TEST_CASE("Highway dispatch inventory obeys the synthetic mask matrix",
     REQUIRE(unsupported_bits != 0u);
     const std::uint64_t unsupported_bit = unsupported_bits & (~unsupported_bits + std::uint64_t{1});
 
-    /// Expected dispatch fields for one synthetic compiled-target mask.
+    /// Expected runnable and selected targets for a simulated compiled-target mask.
     struct mask_case {
         std::string_view name;
         std::uint64_t compiled;

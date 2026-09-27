@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Verifies fixed-target Highway probes without runtime redispatch.
+ * @brief Run SIMD property checks through the Highway target selected for this test.
  */
 
 #include <catch2/catch_test_macros.hpp>
@@ -12,10 +12,7 @@ import bioseq.highway.test_support;
 
 namespace {
 
-/**
- * @brief Returns the target bit bound to the generated test kernel table.
- * @return Nonzero Highway target bit selected by the fixed-target fixture.
- */
+/** Return the Highway target bound to the generated test kernels. */
 [[nodiscard]] auto fixed_target() -> std::int64_t {
     return bioseq::simd_dispatch::highway_test_target_binding().target;
 }

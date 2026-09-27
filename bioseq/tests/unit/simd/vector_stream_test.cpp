@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Verifies vector-stream operations against direct Highway operations.
+ * @brief Compare operations on vector streams with Highway operations on each slot.
  */
 
 #include <hwy/highway.h>
@@ -19,15 +19,15 @@ namespace bioseq::simd::HWY_NAMESPACE {
 namespace hn = hwy::HWY_NAMESPACE;
 
 /**
- * @brief Checks stream-stream and both stream-vector broadcast shapes.
- * @tparam p_descriptor Highway descriptor type.
- * @tparam p_stream_width Number of independent vector slots.
- * @tparam p_lifted Lifted vector-stream operation type.
- * @tparam p_highway_operation Direct Highway operation type.
- * @param[in] d Highway descriptor used for lanes and direct operations.
- * @param[in] lifted Vector-stream operation under test.
- * @param[in] hn_op Equivalent Highway operation.
- * @param[in] name Operation name used for diagnostics.
+ * @brief Check a binary operation on two streams and with one shared vector.
+ * @tparam p_descriptor Highway lane descriptor.
+ * @tparam p_stream_width Number of vector slots.
+ * @tparam p_lifted Stream operation type.
+ * @tparam p_highway_operation Highway operation type.
+ * @param[in] d Lane descriptor.
+ * @param[in] lifted Stream operation to check.
+ * @param[in] hn_op Highway reference operation.
+ * @param[in] name Operation name for diagnostics.
  */
 template <class p_descriptor,
           std::size_t p_stream_width,
@@ -73,15 +73,15 @@ auto check_binary_vec_op(p_descriptor d,
 }
 
 /**
- * @brief Checks a lifted comparison through mask-to-vector round trips.
- * @tparam p_descriptor Highway descriptor type.
- * @tparam p_stream_width Number of independent mask slots.
- * @tparam p_lifted Lifted mask-stream comparison type.
- * @tparam p_highway_operation Direct Highway comparison type.
- * @param[in] d Highway descriptor used for lanes and mask conversion.
- * @param[in] lifted Mask-stream operation under test.
- * @param[in] hn_op Equivalent Highway comparison.
- * @param[in] name Operation name used for diagnostics.
+ * @brief Compare stream masks with Highway masks after conversion to vectors.
+ * @tparam p_descriptor Highway lane descriptor.
+ * @tparam p_stream_width Number of mask slots.
+ * @tparam p_lifted Stream comparison type.
+ * @tparam p_highway_operation Highway comparison type.
+ * @param[in] d Lane descriptor.
+ * @param[in] lifted Stream comparison to check.
+ * @param[in] hn_op Highway reference comparison.
+ * @param[in] name Operation name for diagnostics.
  */
 template <class p_descriptor,
           std::size_t p_stream_width,
@@ -107,9 +107,7 @@ auto check_binary_cmp_op(p_descriptor d,
     bioseq_log<logging_level::debug>("[vector_stream cmp] op={} OK", name);
 }
 
-// =============================================================================
-// Tests — one TEST_CASE per op family for clean failure isolation.
-// =============================================================================
+
 
 TEMPLATE_TEST_CASE("vector_stream binary arithmetic equivalence",
                    "[component:bioseq][layer:unit][feature:simd_primitives][resource:highway]",
@@ -176,8 +174,8 @@ TEMPLATE_TEST_CASE("mask_stream AndNot broadcasts a plain mask",
                    std::uint16_t,
                    std::uint32_t,
                    std::uint64_t) {
-    // The two-stack collector combines a mask stream with one live-lane mask.
-    // Verify that the plain mask is broadcast to each stream slot.
+    // The two-stack collector applies one live-lane mask to every stream
+    // slot. Check that broadcasting preserves Highway's AndNot result.
     using lane_type = TestType;
     const hn::ScalableTag<lane_type> d;
 
@@ -190,7 +188,7 @@ TEMPLATE_TEST_CASE("mask_stream AndNot broadcasts a plain mask",
 
     auto pal_stream = mask_stream<decltype(d), 2>::pack(pal_a, pal_b);
 
-    // Lifted: mask_stream ⊕ plain mask
+    // Apply AndNot with the same plain mask in every slot.
     auto result_stream = bit_and_not(pal_stream, live);
     for (std::size_t s = 0; s < 2; ++s) {
         const auto got = extract_lanes<lane_type>(d, hn::VecFromMask(d, result_stream[s]));
@@ -322,7 +320,7 @@ TEMPLATE_TEST_CASE("vector_stream if_then_else — every argument shape",
     auto sa = vector_stream<decltype(d), lane_type, stream_width>::pack(va, vb);
     auto sb = vector_stream<decltype(d), lane_type, stream_width>::pack(vb, va);
 
-    // (mask_stream, vector_stream, vector_stream)
+    // Each slot has its own mask and both vectors.
     {
         auto rs = if_then_else(ms, sa, sb);
         static_assert(k_is_vector_stream<decltype(rs)>);
@@ -333,7 +331,7 @@ TEMPLATE_TEST_CASE("vector_stream if_then_else — every argument shape",
         }
     }
 
-    // (mask_stream, vector_stream, plain_vec)
+    // Share the false-case vector across slots.
     {
         auto rs = if_then_else(ms, sa, vb);
         for (std::size_t k = 0; k < stream_width; ++k) {
@@ -343,7 +341,7 @@ TEMPLATE_TEST_CASE("vector_stream if_then_else — every argument shape",
         }
     }
 
-    // (mask_stream, plain_vec, vector_stream)
+    // Share the true-case vector across slots.
     {
         auto rs = if_then_else(ms, va, sb);
         for (std::size_t k = 0; k < stream_width; ++k) {
@@ -353,7 +351,7 @@ TEMPLATE_TEST_CASE("vector_stream if_then_else — every argument shape",
         }
     }
 
-    // (mask_stream, plain_vec, plain_vec) — broadcast both vectors.
+    // Share both vectors while using each slot's mask.
     {
         auto rs = if_then_else(ms, va, vb);
         static_assert(k_is_vector_stream<decltype(rs)>,
@@ -365,7 +363,7 @@ TEMPLATE_TEST_CASE("vector_stream if_then_else — every argument shape",
         }
     }
 
-    // (plain_mask, vector_stream, vector_stream) — broadcast mask
+    // Share one mask across both vector streams.
     {
         auto rs = if_then_else(m_a, sa, sb);
         for (std::size_t k = 0; k < stream_width; ++k) {
@@ -499,7 +497,8 @@ TEMPLATE_TEST_CASE("vector_stream mask_from_vector round-trip",
 
     auto ms = mask_from_vector(sa);
     static_assert(k_is_mask_stream<decltype(ms)>);
-    // First slot has all-true (lane bits = -1), second is all-false.
+    // All-one bits produce a true mask in the first slot. Zero bits produce
+    // a false mask in the second.
     ASSERT(!hn::AllFalse(d, ms[0]));
     ASSERT(hn::AllFalse(d, ms[1]));
 }
@@ -537,7 +536,7 @@ TEMPLATE_TEST_CASE("vector_stream collect_all_false_per_stream",
     constexpr std::size_t stream_width = 2;
 
     const auto m_false = hn::MaskFalse(d);
-    const auto m_first = hn::FirstN(d, 1); // at least one lane true
+    const auto m_first = hn::FirstN(d, 1); // Only the first lane is true.
     auto ms = mask_stream<decltype(d), stream_width>::pack(m_false, m_first);
 
     const auto per = collect_all_false_per_stream(d, ms);
@@ -564,9 +563,7 @@ TEMPLATE_TEST_CASE("vector_stream stream count 1 collapses cleanly",
     ASSERT(got == want);
 }
 
-// =============================================================================
-// Trivially-copyable / destructible static_asserts — module-load-time check.
-// =============================================================================
+// Check copy and destruction properties at compile time.
 
 static_assert(
     std::is_trivially_copyable_v<vector_stream<hn::ScalableTag<std::uint32_t>, std::uint32_t, 2>>,
@@ -577,7 +574,7 @@ static_assert(std::is_trivially_destructible_v<
 static_assert(std::is_trivially_copyable_v<mask_stream<hn::ScalableTag<std::uint32_t>, 2>>,
               "mask_stream must be trivially copyable");
 
-// Stream traits sanity.
+// Check which types and argument lists contain streams.
 static_assert(k_is_vector_stream<vector_stream<hn::ScalableTag<std::uint32_t>, std::uint32_t, 2>>);
 static_assert(!k_is_vector_stream<hn::Vec<hn::ScalableTag<std::uint32_t>>>);
 static_assert(k_is_mask_stream<mask_stream<hn::ScalableTag<std::uint32_t>, 2>>);
