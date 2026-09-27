@@ -1,6 +1,6 @@
 /**
  * @file common/durable_file_io/stable_read_at.cppm
- * @brief Internal stable no-follow read relative to a pinned directory.
+ * @brief Read a file through an open directory and check its metadata for changes.
  */
 module;
 

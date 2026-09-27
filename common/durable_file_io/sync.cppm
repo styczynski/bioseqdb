@@ -1,6 +1,6 @@
 /**
  * @file common/durable_file_io/sync.cppm
- * @brief Internal durable descriptor synchronization and close handling.
+ * @brief Sync file descriptors and report errors when closing directories.
  */
 module;
 

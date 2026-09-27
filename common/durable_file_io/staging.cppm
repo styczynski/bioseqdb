@@ -1,6 +1,6 @@
 /**
  * @file common/durable_file_io/staging.cppm
- * @brief Internal staging-file creation, synchronization, and verification.
+ * @brief Write and sync temporary files before publishing their destination names.
  */
 module;
 
@@ -340,7 +340,10 @@ verify_staged_file(
     return {};
 }
 
-/** Stage, fsync, close, reopen, and identity-check one publication payload. */
+/**
+ * Prepare a temporary file for publication. Write and sync the bytes, then
+ * close and reopen the file to check that its name and metadata still match.
+ */
 [[nodiscard]] inline std::expected<staged_regular_file, file_error>
 stage_verified_regular_file(
     int directory_descriptor,
