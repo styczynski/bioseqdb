@@ -255,13 +255,13 @@ auto check_transpose(group_receipt& receipt) -> void {
     const std::size_t lanes = hn::Lanes(simd_tag);
     if constexpr (two_stack_internal::exact_compiled_target_is_scalar) {
         receipt.expect(
-            !two_stack_internal::u64_lane_transpose_shape_supported(
+            !u64_lane_transpose_shape_supported(
                 simd_tag));
         return;
     }
     receipt.expect(
-        two_stack_internal::u64_lane_transpose_shape_supported(simd_tag));
-    if (!two_stack_internal::u64_lane_transpose_shape_supported(simd_tag)) {
+        u64_lane_transpose_shape_supported(simd_tag));
+    if (!u64_lane_transpose_shape_supported(simd_tag)) {
         return;
     }
 
@@ -274,7 +274,7 @@ auto check_transpose(group_receipt& receipt) -> void {
         }
         columns[column] = hn::LoadU(simd_tag, column_lanes.data());
     }
-    receipt.expect(two_stack_internal::transpose_u64_lane_matrix(
+    receipt.expect(transpose_u64_lane_matrix(
         simd_tag, columns.data()));
     HWY_ALIGN std::array<std::uint64_t, k_capacity> row_lanes{};
     for (std::size_t row = 0U; row < lanes; ++row) {
