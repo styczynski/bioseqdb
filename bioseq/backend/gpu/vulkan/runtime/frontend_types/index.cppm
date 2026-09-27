@@ -1,6 +1,6 @@
 /**
  * @file index.cppm
- * @brief Preserves the Vulkan runtime frontend contract across semantic partitions.
+ * @brief Makes the runtime classes and GPU input and result types available through one import.
  */
 
 export module bioseq.gpu.vulkan.runtime:frontend_types;

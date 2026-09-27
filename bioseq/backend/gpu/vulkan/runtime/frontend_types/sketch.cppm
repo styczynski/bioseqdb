@@ -1,6 +1,6 @@
 /**
  * @file sketch.cppm
- * @brief Defines sketch results, query authority, and seed lookup inputs.
+ * @brief Defines GPU sketch results and the inputs used to find matching seeds.
  */
 module;
 
@@ -21,18 +21,17 @@ import std;
 
 export namespace bioseq::gpu::vulkan {
 
-/// @brief The 36-byte push-constant block consumed by the tiled-DP shader. Layout is
-/// pinned to the GLSL `Params` block.
+/// @brief Parameters shared with the chaining shader. Field order must match its 36-byte GLSL block.
 struct chaining_push_constants {
     std::uint32_t anchor_count;  ///< Number of anchors loaded for chaining.
     std::uint32_t range_count;   ///< Number of sorted anchor ranges.
-    std::int32_t max_dist_x;     ///< Maximum anchor distance along the query axis.
-    std::int32_t max_dist_y;     ///< Maximum anchor distance along the target axis.
-    std::int32_t bandwidth;      ///< DP band half-width in anchor index space.
-    std::int32_t max_iter;       ///< Maximum DP iterations per anchor.
-    float gap_penalty;           ///< Gap-open penalty passed to the shader.
-    float skip_penalty;          ///< Skip penalty passed to the shader.
-    std::int32_t max_chain_skip; ///< Nearest-first early-exit limit (minimap2 `max_skip`), or disabled when `<= 0`.
+    std::int32_t max_dist_x;     ///< Maximum distance between anchors in query or target coordinates.
+    std::int32_t max_dist_y;     ///< Additional limit on distance between anchors in query coordinates.
+    std::int32_t bandwidth;      ///< Maximum difference between query and target distances, in bases.
+    std::int32_t max_iter;       ///< Maximum number of preceding anchors considered for each anchor.
+    float gap_penalty;           ///< Penalty per base of difference between query and target distances.
+    float skip_penalty;          ///< Penalty for the distance shared by the query and target steps.
+    std::int32_t max_chain_skip; ///< Stops after enough predecessor batches fail to improve the score. Disabled at zero or below.
 };
 static_assert(sizeof(chaining_push_constants) == 36);
 static_assert(offsetof(chaining_push_constants, anchor_count) == 0);
@@ -45,7 +44,7 @@ static_assert(offsetof(chaining_push_constants, gap_penalty) == 24);
 static_assert(offsetof(chaining_push_constants, skip_penalty) == 28);
 static_assert(offsetof(chaining_push_constants, max_chain_skip) == 32);
 
-/// @brief Push-constant block for the  packed sequence generator kernel.
+/// @brief Parameters for generating packed sequences on the GPU.
 struct generate_units_push {
     std::uint32_t symbols_per_seq = 0;   ///< Total symbols generated per sequence.
     std::uint32_t units_per_seq = 0;     ///< Packed units emitted per sequence.
@@ -53,7 +52,7 @@ struct generate_units_push {
     std::uint32_t chunk_units = 0;       ///< Packed units produced per chunk.
     std::uint32_t letters_per_unit = 0;  ///< Letters encoded in each packed unit.
     std::uint32_t bits_per_char = 0;     ///< Bits per alphabet symbol in packed units.
-    std::uint32_t alphabet_size = 0;     ///< Alphabet cardinality used by the generator.
+    std::uint32_t alphabet_size = 0;     ///< Number of symbols in the alphabet.
     std::uint32_t total_chunks = 0;      ///< Global chunk count across the batch.
     std::uint32_t chunk_base = 0;        ///< First global chunk index in this dispatch.
     std::uint32_t seed_lo = 0;           ///< Low 32 bits of the deterministic seed.
@@ -63,76 +62,64 @@ struct generate_units_push {
 static_assert(sizeof(generate_units_push) == 48);
 static_assert(std::is_standard_layout_v<generate_units_push>);
 
-/// @brief Result of one complete minimizer sketch roundtrip. The
-/// resident `minimizer_words` device buffer is moved into the caller's
-/// `vulkan_device_minimizer_storage` for seed-lookup reuse.  Host materialisation
-/// is deliberately deferred to the caller, after the arena and packed-sequence
-/// transients have been released and the exact `count` is known.
+/// @brief Minimizers from one GPU sketch, ready for seed lookup.
+/// The caller keeps the device buffer and can copy its contents to host memory
+/// after the temporary sequence buffers are freed.
 struct runtime_sketch_result {
-    buffer minimizer_words;              ///< Resident minimizer device buffer moved to the caller.
+    buffer minimizer_words;              ///< Device minimizers owned by the caller after return.
     std::uint64_t count = 0;             ///< Exact minimizer count from the count pass.
-    // Operation-originated lifetime receipt.  A successful roundtrip may hand
-    // its standalone output buffer to the caller only after every shared-arena
-    // backing buffer has been destroyed.  The caller consumes this receipt
-    // before shrinking dispatch admission or reserving exact host storage.
+    // The caller checks this before reducing the sketch memory reservation or
+    // allocating host output. It confirms that temporary arena buffers have
+    // already been freed.
     bool arena_trimmed_before_return = false; ///< Arena idle capacity was released before return.
     bool overflow = false;                   ///< Set when the exact count exceeded caller limits.
 };
 
-/// @brief Whether a completed Vulkan sketch must also materialize its packed hashes
-/// in a host vector.  Device-only consumers still receive the exact count and
-/// resident device buffer. They do not pay for a hash download/decode.
+/// @brief Chooses whether a sketch batch also returns a host copy of its minimizers.
+/// Both modes return the device buffer and exact count.
 enum class vulkan_sketch_host_materialization : std::uint8_t {
-    host_and_device, ///< Download minimizer hashes to host after one queue roundtrip.
-    device_only,     ///< Keep minimizer words resident on device across two roundtrips.
+    host_and_device, ///< Return host and device minimizers after one queue submission.
+    device_only,     ///< Keep output on the device, allocating it after a separate counting submission.
 };
 
-/// @brief Dispatch statistics recorded by both batch sketch protocols.  The
-/// established host-materialized path records count/scan/emit in one submit.
-/// device-only mode separates emit so its output can use the exact scanned
-/// count.  Default construction is deliberately invalid.
+/// @brief Records the GPU work completed by a sketch batch.
+/// A batch counts tiles, scans their counts, then writes minimizers. Keeping
+/// output on the device splits this work into two submissions so the output
+/// buffer can be sized from the count. A default object describes no completed batch.
 class runtime_sketch_dispatch_stats {
   public:
-    /// @brief Constructs an intentionally invalid zero-dispatch statistic set.
+    /// @brief Starts with no recorded dispatches.
     runtime_sketch_dispatch_stats() = default;
-    /// @brief Copies immutable dispatch statistics.
+    /// @brief Copies the recorded dispatch counts and output mode.
     runtime_sketch_dispatch_stats(const runtime_sketch_dispatch_stats&) = default;
-    /// @brief Replaces this object with copied dispatch statistics.
-    /// @return This statistics object.
+    /// @brief Replaces the recorded dispatch counts and output mode.
     runtime_sketch_dispatch_stats& operator=(const runtime_sketch_dispatch_stats&) = default;
 
-    /// @brief Returns the requested host-materialization policy.
-    /// @return Materialization policy recorded for the operation.
+    /// @brief Returns whether the batch requested a host copy.
     [[nodiscard]] constexpr vulkan_sketch_host_materialization materialization() const noexcept {
         return materialization_;
     }
-    /// @brief Returns exact-count dispatches.
-    /// @return Number of exact-count dispatches.
+    /// @brief Returns the number of tile-counting dispatches.
     [[nodiscard]] constexpr std::uint64_t count_dispatches() const noexcept {
         return count_dispatches_;
     }
-    /// @brief Returns sequences covered by prefix scanning.
-    /// @return Number of prefix-scanned sequences.
+    /// @brief Returns the number of complete prefix-scan operations.
     [[nodiscard]] constexpr std::uint64_t prefix_scan_sequences() const noexcept {
         return prefix_scan_sequences_;
     }
-    /// @brief Returns prefix-scan dispatches.
-    /// @return Number of prefix-scan dispatches.
+    /// @brief Returns the number of dispatches used to scan tile counts.
     [[nodiscard]] constexpr std::uint64_t prefix_scan_dispatches() const noexcept {
         return prefix_scan_dispatches_;
     }
-    /// @brief Returns minimizer-emission dispatches.
-    /// @return Number of emit dispatches.
+    /// @brief Returns the number of dispatches that wrote minimizers.
     [[nodiscard]] constexpr std::uint64_t emit_dispatches() const noexcept {
         return emit_dispatches_;
     }
-    /// @brief Returns completed queue roundtrips.
-    /// @return Number of completed roundtrips.
+    /// @brief Returns the number of submissions whose completion was awaited.
     [[nodiscard]] constexpr std::uint64_t completed_roundtrips() const noexcept {
         return completed_roundtrips_;
     }
-    /// @brief Validates dispatch shape against the materialization policy.
-    /// @return `true` when all dispatch and roundtrip counts form a valid operation.
+    /// @brief Checks that the count, scan, and emit stages completed for the selected output mode.
     [[nodiscard]] constexpr bool is_internally_consistent() const noexcept {
         const bool dispatch_shape_accepted =
             count_dispatches_ == 1u && prefix_scan_sequences_ == 1u &&
@@ -152,19 +139,19 @@ class runtime_sketch_dispatch_stats {
     friend class runtime;
 
     vulkan_sketch_host_materialization materialization_ =
-        vulkan_sketch_host_materialization::host_and_device; ///< Recorded host-materialization policy.
-    std::uint64_t count_dispatches_ = 0;                     ///< Exact-count dispatches recorded.
-    std::uint64_t prefix_scan_sequences_ = 0;                ///< Prefix-scanned sequences recorded.
+        vulkan_sketch_host_materialization::host_and_device; ///< Whether the batch requested a host copy.
+    std::uint64_t count_dispatches_ = 0;                     ///< Tile-counting dispatches.
+    std::uint64_t prefix_scan_sequences_ = 0;                ///< Complete prefix-scan operations.
     std::uint64_t prefix_scan_dispatches_ = 0;               ///< Prefix-scan dispatches recorded.
-    std::uint64_t emit_dispatches_ = 0;                      ///< Emit dispatches recorded.
-    std::uint64_t completed_roundtrips_ = 0;                 ///< Completed queue roundtrips recorded.
+    std::uint64_t emit_dispatches_ = 0;                      ///< Dispatches that wrote minimizers.
+    std::uint64_t completed_roundtrips_ = 0;                 ///< Submissions with completed fence waits.
 };
 
 static_assert(!runtime_sketch_dispatch_stats{}.is_internally_consistent());
 
-/// @brief Exact per-query partition of one batched query-minimizer image.
+/// @brief Locates one query's minimizers in a shared batch buffer.
 struct gpu_seed_query_record_wire {
-    std::uint32_t minimizer_offset = 0; ///< Offset into the batched minimizer image.
+    std::uint32_t minimizer_offset = 0; ///< First minimizer record for this query.
     std::uint32_t minimizer_count = 0;  ///< Minimizer records belonging to one query.
     std::uint32_t query_len = 0;        ///< Query length in bases for this partition.
     std::uint32_t flags = 0;            ///< Reserved wire flags, zero for valid records.
@@ -172,35 +159,32 @@ struct gpu_seed_query_record_wire {
 static_assert(sizeof(gpu_seed_query_record_wire) == 16);
 static_assert(alignof(gpu_seed_query_record_wire) == alignof(std::uint32_t));
 
-/// @brief Query-to-tile grouping supplied with the exact sketch submission. runtime
-/// derives and seals the final query records from this layout plus the device
-/// count/scan output. Coordinate callers cannot repartition the resident image.
+/// @brief Groups sketch tiles by query.
+/// After counting, the runtime uses these groups to record each query's exact
+/// minimizer range. Later seed lookup must use the same query ranges.
 struct gpu_sketch_query_layout_wire {
     std::uint32_t begin = 0;     ///< First tile index included in the query partition.
     std::uint32_t count = 0;     ///< Number of tiles in the partition.
     std::uint32_t query_len = 0; ///< Query length in bases for the partition.
 };
 
-/// @brief Move-only authority for one device-only query sketch.  Only runtime can
-/// issue it, after the exact count/scan/emit submissions have completed.  The
-/// authority is consumed by either persisted grouped-SoA coordinate execution
-/// or its seed-only MPS prefix. The authorized host readback borrows it without
-/// consuming it. A copied dispatch counter can therefore never stand in for the
-/// resident query buffer that produced the operation.
+/// @brief Records which completed GPU sketch produced a query buffer.
+/// Only the runtime can fill this object. It ties the buffer and query ranges
+/// to the completed dispatches, so seed lookup can check that they belong
+/// together. Moving transfers this one-use record. Host readback can borrow it.
 class device_query_sketch_authorization {
   public:
     /// @brief Constructs an empty invalid authorization.
     device_query_sketch_authorization() = default;
-    /// @brief Prevents copying one-shot query authority.
+    /// @brief Keeps a query completion record from being copied.
     device_query_sketch_authorization(const device_query_sketch_authorization&) = delete;
-    /// @brief Prevents copy-assignment of one-shot query authority.
+    /// @brief Keeps a query completion record from being copied by assignment.
     device_query_sketch_authorization& operator=(const device_query_sketch_authorization&) = delete;
-    /// @brief Transfers query authority and clears the source.
+    /// @brief Moves the query completion record and invalidates the source.
     device_query_sketch_authorization(device_query_sketch_authorization&& other) noexcept {
         move_from(other);
     }
-    /// @brief Clears current authority, then transfers authority from another object.
-    /// @return This authorization.
+    /// @brief Replaces this query completion record by moving another one.
     device_query_sketch_authorization&
     operator=(device_query_sketch_authorization&& other) noexcept {
         if (this != &other) {
@@ -210,9 +194,8 @@ class device_query_sketch_authorization {
         return *this;
     }
 
-    /// @brief Structural, device-output coverage. This deliberately does not claim
-    /// the immutable pipeline provenance required by persisted grouped-SoA.
-    /// @return `true` when every authorized minimizer span covers device output.
+    /// @brief Checks that the recorded query ranges cover the device minimizers exactly.
+    /// Also checks the buffer size and sketch settings. Pipeline checks are in is_valid().
     [[nodiscard]] bool does_cover_device_output() const noexcept {
         const auto exact_logical_bytes = minimizer_word_kind_ == 0u
             ? bioseq::common::checked_mul(
@@ -245,23 +228,20 @@ class device_query_sketch_authorization {
         }
         return cursor == minimizer_count_;
     }
-    /// @brief Strong one-shot authority accepted by the persisted grouped-SoA consumer.
-    /// @return `true` when output coverage and the pipeline token are valid.
+    /// @brief Checks the query ranges and the completed sketch's pipeline record.
     [[nodiscard]] bool is_valid() const noexcept {
         return does_cover_device_output() && pipeline_token_.is_valid_for_query_sketch();
     }
-    /// @brief Returns the unique authorization identity.
-    /// @return Runtime-issued identity, or zero for an invalid authorization.
+    /// @brief Returns the runtime's identifier for this sketch, or zero after it is cleared.
     [[nodiscard]] std::uint64_t identity() const noexcept {
         return identity_;
     }
-    /// @brief Returns the exact typed minimizer payload covered by this authority.
-    /// @return Logical payload bytes, excluding Vulkan's nonzero empty-buffer padding.
+    /// @brief Returns minimizer bytes, excluding padding required for an empty Vulkan buffer.
     [[nodiscard]] std::uint64_t logical_minimizer_bytes() const noexcept {
         return logical_minimizer_bytes_;
     }
-    /// @brief Computes retained host-vector capacity owned by the authorization.
-    /// @return Retained bytes, saturated at the maximum `uint64_t` value.
+    /// @brief Returns the bytes reserved by this object's host vectors.
+    /// Returns the largest uint64_t value if the total would overflow.
     [[nodiscard]] std::uint64_t owned_capacity_bytes() const noexcept {
         constexpr std::uint64_t maximum = (std::numeric_limits<std::uint64_t>::max)();
         if (query_records_.capacity() > maximum / sizeof(gpu_seed_query_record_wire) ||
@@ -279,7 +259,7 @@ class device_query_sketch_authorization {
   private:
     friend class runtime;
 
-    /// @brief Invalidates authority and releases all retained host elements.
+    /// @brief Invalidates the record and clears its query lists while keeping their allocated capacity.
     void clear() noexcept {
         identity_ = 0u;
         runtime_ = nullptr;
@@ -302,7 +282,7 @@ class device_query_sketch_authorization {
         query_records_.clear();
         query_tile_counts_.clear();
     }
-    /// @brief Transfers every authority field and clears the source.
+    /// @brief Moves all fields and invalidates the source.
     void move_from(device_query_sketch_authorization& other) noexcept {
         identity_ = other.identity_;
         runtime_ = other.runtime_;
@@ -327,57 +307,56 @@ class device_query_sketch_authorization {
         other.clear();
     }
 
-    std::uint64_t identity_ = 0u;                              ///< Runtime-issued one-shot authorization identity.
+    std::uint64_t identity_ = 0u;                              ///< Runtime identifier for this one-use query record.
     runtime* runtime_ = nullptr;                                 ///< Issuing runtime, or null after `clear`.
     VkBuffer buffer_ = VK_NULL_HANDLE;                           ///< Resident minimizer buffer handle.
     std::uint64_t memory_identity_ = 0u;                        ///< Device-memory identity for `buffer_`.
     std::uint64_t buffer_bytes_ = 0u;                           ///< Vulkan buffer range, including required padding.
     std::uint64_t allocation_bytes_ = 0u;                        ///< Physical allocation bytes for `buffer_`.
-    std::uint64_t logical_minimizer_bytes_ = 0u;                 ///< Exact record payload excluding Vulkan's empty minimum.
-    std::uint64_t minimizer_count_ = 0u;                         ///< Total minimizer records authorized.
-    std::uint32_t window_size_ = 0u;                             ///< Sketch window size sealed into authority.
-    std::uint32_t kmer_size_ = 0u;                               ///< Sketch k-mer size sealed into authority.
+    std::uint64_t logical_minimizer_bytes_ = 0u;                 ///< Minimizer bytes without empty-buffer padding.
+    std::uint64_t minimizer_count_ = 0u;                         ///< Total minimizer records in the completed sketch.
+    std::uint32_t window_size_ = 0u;                             ///< Window size used by the sketch.
+    std::uint32_t kmer_size_ = 0u;                               ///< K-mer size used by the sketch.
     std::uint32_t minimizer_word_kind_ = 0u;                     ///< Minimizer word encoding kind.
     std::uint32_t minimizer_words32_per_record_ = 0u;            ///< `uint32_t` words per minimizer record.
-    std::uint32_t hash_shift_ = 0u;                              ///< Hash shift sealed into authority.
-    std::uint32_t pos_bits_ = 0u;                                ///< Encoded-position bit width sealed into authority.
+    std::uint32_t hash_shift_ = 0u;                              ///< Shift used to extract a minimizer hash.
+    std::uint32_t pos_bits_ = 0u;                                ///< Bits reserved for a minimizer position.
     vulkan_sketch_host_materialization materialization_ =
-        vulkan_sketch_host_materialization::host_and_device; ///< Materialization policy at issuance.
-    runtime_sketch_dispatch_stats dispatch_stats_{};             ///< Dispatch statistics sealed into authority.
-    runtime_pipeline_operation_token pipeline_token_{};            ///< Pipeline provenance token for grouped-SoA.
+        vulkan_sketch_host_materialization::host_and_device; ///< Whether the sketch requested a host copy.
+    runtime_sketch_dispatch_stats dispatch_stats_{};             ///< Dispatch counts from the completed sketch.
+    runtime_pipeline_operation_token pipeline_token_{};            ///< Record of the pipelines used for the completed sketch.
     std::array<std::uint8_t, VK_UUID_SIZE> device_uuid_{};       ///< Device UUID at issuance.
-    std::vector<gpu_seed_query_record_wire> query_records_{};      ///< Exact per-query minimizer partitions.
+    std::vector<gpu_seed_query_record_wire> query_records_{};      ///< Minimizer range belonging to each query.
     std::vector<std::uint32_t> query_tile_counts_{};               ///< Tile counts parallel to `query_records_`.
 };
 
 static_assert(!std::is_copy_constructible_v<device_query_sketch_authorization>);
 static_assert(std::is_nothrow_move_constructible_v<device_query_sketch_authorization>);
 
-/// @brief Resident and optionally host-materialized outputs from a sketch batch.
+/// @brief Device minimizers from a batch, with a host copy when requested.
 struct runtime_sketch_batch_result {
-    buffer minimizer_words;                         ///< Resident minimizer device buffer for the batch.
-    std::vector<std::byte> host_minimizer_bytes;    ///< Host minimizer bytes when materialized.
-    std::vector<std::uint32_t> tile_counts;         ///< Per-tile minimizer counts from the scan pass.
-    std::vector<std::uint32_t> tile_offsets;        ///< Prefix offsets into the minimizer image.
+    buffer minimizer_words;                         ///< Device buffer holding this batch's minimizers.
+    std::vector<std::byte> host_minimizer_bytes;    ///< Host copy, filled when requested.
+    std::vector<std::uint32_t> tile_counts;         ///< Minimizers counted for each tile.
+    std::vector<std::uint32_t> tile_offsets;        ///< Starting minimizer offset for each tile.
     runtime_sketch_dispatch_stats dispatch_stats{}; ///< Recorded count, scan, and emit dispatches.
-    device_query_sketch_authorization query_authority{}; ///< One-shot device-only query authority.
+    device_query_sketch_authorization query_authority{}; ///< One-use record linking the query buffer to its completed sketch.
     std::uint64_t count = 0;                        ///< Exact minimizer count across the batch.
     bool overflow = false;                          ///< Set when the count exceeded caller limits.
 };
 
-/// @brief Physical admission plan for one batched GPU frontend sketch.  The arena
-/// allocation includes any larger persistent high-water buffer already owned
-/// by the runtime. The output allocation uses the runtime-private compute
-/// buffer usage flags rather than asking callers to reproduce them.
+/// @brief Memory sizes used to reserve space for a sketch batch.
+/// The arena size includes any larger buffer the runtime already keeps.
+/// Output sizes include the allocation padding required by Vulkan.
 struct gpu_sketch_batch_allocation_requirements {
-    bool valid = false; ///< Whether the planner produced a consistent admission plan.
+    bool valid = false; ///< Whether the requested shape has a valid memory plan.
     std::uint64_t arena_requested_bytes = 0;              ///< Logical arena bytes requested for the batch.
-    std::uint64_t arena_allocation_bytes = 0;             ///< Physical arena bytes including runtime high-water.
-    std::uint64_t pessimistic_output_requested_bytes = 0; ///< Logical output bytes at caller pessimistic cap.
-    std::uint64_t pessimistic_output_allocation_bytes = 0; ///< Physical output bytes at pessimistic cap.
+    std::uint64_t arena_allocation_bytes = 0;             ///< Arena allocation bytes, including any larger existing buffer.
+    std::uint64_t pessimistic_output_requested_bytes = 0; ///< Output bytes at the caller's maximum minimizer count.
+    std::uint64_t pessimistic_output_allocation_bytes = 0; ///< Vulkan allocation size for that maximum output.
 };
 
-/** @brief Owns downloaded anchor bytes and telemetry from one seed lookup. */
+/** @brief Downloaded seed matches and measurements from their GPU lookup. */
 struct seed_lookup_result {
     std::vector<std::byte> host_bytes;
     std::uint64_t count = 0;
@@ -390,32 +369,31 @@ struct seed_lookup_result {
     std::uint64_t sorted_dense_lookup_dispatches = 0;
     seed_lookup_sort_execution_stats sort_stats{};
 #if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
-    // Host operation ownership belongs to the runtime, not its wire ABI. The
-    // token is attached only after actual dispatch/fence and readback checks.
+    // Attach the completed operation record after the dispatch, fence wait,
+    // and host copy have been checked. This token stays on the host.
     runtime_pipeline_operation_token seed_operation_receipt{};
 #endif
 };
 
 
-/// @brief Inputs to the seed-hit lookup roundtrip. The query minimizers
-/// arrive either as a resident device buffer (`device_minimizer_words`,
-/// all-Vulkan sketch+seed path) or as host bytes to upload once. `slots` and
-/// `positions` are the GPU-resident index buffers owned by
-/// `gpu_minimizer_index_cache`. The runtime never uploads the index itself.
+/// @brief Query minimizers and a target index used to find matching seeds.
+/// The query can use an existing device buffer or host bytes uploaded for this
+/// lookup. The caller keeps the target index buffers alive on the device
+/// throughout the call.
 struct runtime_seed_lookup_inputs {
     std::span<const std::byte> host_minimizer_bytes{}; ///< Host minimizer bytes uploaded once when absent on device.
-    const buffer* device_minimizer_words = nullptr;    ///< Resident minimizer buffer for the all-Vulkan path.
-    const buffer* slots = nullptr;                     ///< GPU-resident index slot table from the minimizer cache.
-    const buffer* positions = nullptr;                 ///< GPU-resident encoded positions buffer.
+    const buffer* device_minimizer_words = nullptr;    ///< Existing device minimizers, when the sketch ran on Vulkan.
+    const buffer* slots = nullptr;                     ///< Target hash buckets or an open-addressed slot table.
+    const buffer* positions = nullptr;                 ///< Device buffer of encoded target positions.
     std::uint32_t slot_mask = 0;                       ///< Open-addressing mask when `bucket_count` is zero.
-    // Nonzero selects hash-sorted dense controls and is the exact control
-    // count. Zero selects open addressing via `slot_mask`.
+    // A nonzero count selects binary search over hash-sorted buckets.
+    // Zero selects an open-addressed table indexed with slot_mask.
     std::uint32_t bucket_count = 0;                    ///< Dense bucket count when slots are hash-sorted, else zero.
     std::uint32_t position_count = 0;                ///< Number of encoded positions in `positions`.
-    std::uint32_t query_minimizer_record_offset = 0; ///< First query record in the bound whole buffer.
+    std::uint32_t query_minimizer_record_offset = 0; ///< First query minimizer record within the shared buffer.
     std::uint32_t minimizer_word_kind = 0;             ///< Minimizer word encoding kind for shaders.
     std::uint32_t minimizer_words32_per_record = 0;    ///< `uint32_t` words per minimizer record.
-    std::uint32_t hash_shift = 0;                      ///< Right-shift applied before slot indexing.
+    std::uint32_t hash_shift = 0;                      ///< Right shift used to extract the hash from a minimizer word.
     std::uint32_t pos_bits = 0;                        ///< Bit width of encoded positions.
     std::uint64_t target_len = 0;                      ///< Target sequence length in bases.
     std::uint64_t target_position_offset = 0;            ///< Base offset added to decoded target positions.
