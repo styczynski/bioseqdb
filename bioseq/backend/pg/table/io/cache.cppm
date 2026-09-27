@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Backend-local cache of decompressed column chunks.
+ * @brief Cache decompressed column chunks within a PostgreSQL backend.
  */
 module;
 
@@ -23,7 +23,7 @@ std::uint64_t allocated_bytes = 0;
 List* chunk_groups_in_use = NIL;
 column_cache_statistics cache_statistics{};
 
-/** Intrusive cache entry. `list_node` must remain the first member. */
+/** One cached column buffer and its list link. Keep `list_node` first. */
 struct column_cache_entry {
     dlist_node list_node{};
     std::uint64_t relation_id = 0;
@@ -48,7 +48,7 @@ struct active_chunk_group {
         bioseq::settings::column_cache::capacity_mb) * 1024u * 1024u;
 }
 
-/** @brief Report whether a scan currently protects an entry's chunk group. */
+/** @brief Check whether a reader still needs this cached chunk group. */
 [[nodiscard]] bool entry_is_in_use(const column_cache_entry& entry) {
     for (const auto* active : bioseq::postgres::support::postgres_list<active_chunk_group>(chunk_groups_in_use)) {
         if (active->relation_id == entry.relation_id
@@ -69,7 +69,7 @@ void release_entry_storage(column_cache_entry& entry) noexcept {
     pfree(buffer);
 }
 
-/** Find a cache entry and increment its frequency counter on a hit. */
+/** Find a column buffer and count this lookup if it is present. */
 [[nodiscard]] column_cache_entry* find_column_cache_entry(
         std::uint64_t relation_id,
         std::uint64_t stripe_id,
@@ -95,9 +95,9 @@ void release_entry_storage(column_cache_entry& entry) noexcept {
 }
 
 /**
- * Evict least-frequently-read entries while eligible storage remains.
- * Active chunk groups can temporarily exceed capacity: their borrowed Datums
- * must stay live until the reader advances or the cache is reset.
+ * Free the least-used buffers until enough bytes are released or only active
+ * chunk groups remain. Readers borrow values from active groups, so those
+ * buffers must stay alive even when the cache exceeds its configured size.
  */
 void evict_column_cache_bytes(std::uint64_t bytes_to_release) {
     std::uint64_t current_read_count = 0;
@@ -175,7 +175,7 @@ export [[nodiscard]] MemoryContext get_column_cache_memory_context() {
     return column_cache_context;
 }
 
-/** Delete all decompressed entries and reset backend-local cache accounting. */
+/** Free all cached buffers and clear the current size and entry list. */
 export void reset_column_cache() noexcept {
     if (column_cache_context != nullptr) {
         MemoryContextDelete(column_cache_context);
@@ -187,7 +187,9 @@ export void reset_column_cache() noexcept {
 }
 
 /**
- * @brief Mark the relation's current chunk group as unavailable for eviction.
+ * @brief Protect this relation's current chunk group from eviction.
+ *
+ * Advancing a reader replaces the previously protected group for that relation.
  */
 export void mark_chunk_group_in_use(
         std::uint64_t relation_id,
@@ -214,8 +216,11 @@ export void mark_chunk_group_in_use(
 }
 
 /**
- * @brief Add or replace a decompressed chunk buffer.
- * @param storage Owned `StringInfo`. Ownership transfers to the cache.
+ * @brief Store a decompressed column buffer, replacing an existing entry.
+ * @param storage `StringInfo` allocated in the column-cache memory context.
+ *
+ * With caching enabled, the cache owns the buffer. If caching is disabled,
+ * this function leaves ownership with the caller.
  */
 export void add_column_cache_entry(
         std::uint64_t relation_id,
@@ -266,8 +271,10 @@ export void add_column_cache_entry(
 }
 
 /**
- * @brief Borrow a decompressed chunk buffer from the cache.
- * @return Live cache-owned `StringInfo`, or null on a miss.
+ * @brief Borrow a decompressed column buffer from the cache.
+ * @return Cache-owned `StringInfo`, or null if absent or caching is disabled.
+ *
+ * Keep the chunk group marked in use while reading its borrowed values.
  */
 export [[nodiscard]] void* retrieve_column_cache_entry(
         std::uint64_t relation_id,
@@ -288,7 +295,7 @@ export [[nodiscard]] void* retrieve_column_cache_entry(
     return entry->storage;
 }
 
-/** @return Mutable backend-local metrics after refreshing size counters. */
+/** @return Cache statistics with the current byte and entry counts filled in. */
 export [[nodiscard]] column_cache_statistics* get_column_cache_statistics() noexcept {
     cache_statistics.ending_cache_size = allocated_bytes;
     cache_statistics.entries = count_column_cache_entries();

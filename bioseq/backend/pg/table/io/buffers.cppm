@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Shared allocation and cleanup helpers for table-I/O chunk buffers.
+ * @brief Allocate and free column buffers for one chunk group.
  */
 module;
 
@@ -14,7 +14,7 @@ import bioseq.postgres.support;
 
 namespace {
 
-/** @return Whether a StringInfo is owned by the shared chunk cache. */
+/** @return Whether the column cache owns this buffer. */
 [[nodiscard]] bool is_cached_string_info(StringInfo buffer) noexcept {
     return reinterpret_cast<cached_string_info*>(buffer)->cached;
 }
@@ -22,11 +22,11 @@ namespace {
 } // namespace
 
 /**
- * @brief Allocate per-column arrays for one decoded chunk group.
- * @param column_count Number of entries in `column_mask`.
- * @param column_mask Columns whose existence and value arrays are required.
- * @param row_count Number of rows represented by the chunk group.
- * @return Zero-initialized chunk metadata owned by the current memory context.
+ * @brief Allocate row values and presence flags for the requested columns.
+ * @param column_count Number of columns in `column_mask`.
+ * @param column_mask True for each column to allocate.
+ * @param row_count Number of rows in the chunk group.
+ * @return Zeroed buffers allocated in the current PostgreSQL memory context.
  */
 export [[nodiscard]] chunk_data*
 allocate_chunk_data(std::uint32_t column_count, const bool* column_mask, std::uint32_t row_count) {
@@ -52,8 +52,10 @@ allocate_chunk_data(std::uint32_t column_count, const bool* column_mask, std::ui
 }
 
 /**
- * @brief Release decoded value buffers that are not owned by the shared cache.
- * @param data Chunk metadata. Null is accepted.
+ * @brief Free decoded value buffers owned by this chunk group.
+ * @param data Chunk group to clean up, or null.
+ *
+ * Buffers borrowed from the column cache remain in the cache.
  */
 export void free_chunk_value_buffers(chunk_data* data) noexcept {
     if (data == nullptr) {
@@ -70,11 +72,10 @@ export void free_chunk_value_buffers(chunk_data* data) noexcept {
 }
 
 /**
- * @brief Release existence/value arrays and the chunk metadata container.
- * @param data Chunk metadata. Null is accepted.
+ * @brief Free the per-column row arrays and chunk-group metadata.
+ * @param data Chunk group to clean up, or null.
  *
- * Call `free_chunk_value_buffers()` first when uncached serialized buffers
- * must also be released.
+ * Call `free_chunk_value_buffers()` first to release owned decoded values.
  */
 export void free_chunk_data(chunk_data* data) noexcept {
     if (data == nullptr) {
