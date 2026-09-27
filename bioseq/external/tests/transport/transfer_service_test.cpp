@@ -1,10 +1,9 @@
 /**
  * @file external/tests/transport/transfer_service_test.cpp
- * @brief Transfer-service erasure and passkey invariant tests.
+ * @brief Check transfer-service callbacks and passkey access.
  */
 
-// A spy service checks transfer-service erasure and passkey invariants without
-// opening sockets.
+// Use a fake service to check callback forwarding without network requests.
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -43,7 +42,7 @@ struct spy_service {
     void request_stop() noexcept { stopped = true; }
 };
 
-// Compile-time erasure and passkey invariants.
+// Check the service interface and restricted passkey construction.
 static_assert(tx::external_transfer_service_compatible<spy_service>);
 static_assert(tx::external_transfer_service_compatible<tx::curl_transfer_service>);
 static_assert(!std::is_default_constructible_v<tx::transfer_service_passkey>,
