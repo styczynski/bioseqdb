@@ -1,11 +1,10 @@
 /**
  * @file ksw2_batched_kernel.cppm
- * @brief Bucketed inter-region KSW2 alignment for one Highway target.
+ * @brief Split alignment regions into KSW2 jobs and combine their results.
  *
- * Fills are collected in stable chain order, grouped by geometry and
- * orientation, aligned through the current recurrence, and stitched back
- * into their regions. Short groups retain the target-lane dispatch shape.
- * Long fills retain the existing single-fill route.
+ * A job, called a fill, covers an extension or a gap between anchors. Group fills
+ * by size and orientation, run KSW2 for each one, then restore chain order to
+ * join their CIGARs and update region coordinates.
  */
 module;
 
@@ -40,54 +39,51 @@ export namespace bioseq::simd {
 namespace [[bioseq::simd]] target {
 namespace hn = hwy::HWY_NAMESPACE;
 
-/** Role of one alignment fill within its containing region. */
+/** Which part of an alignment region this fill covers. */
 enum class fill_kind : std::uint8_t {
     left_extension  = 0,  ///< Extension preceding the first seed.
-    gap_between     = 1,  ///< Gap between retained seed groups.
+    gap_between     = 1,  ///< Gap between seed groups kept for alignment.
     right_extension = 2,  ///< Extension following the last seed.
 };
 
-/** Geometry, result storage, and stable ordering key for one KSW2 fill. */
+/** Input interval, ordering and result storage for one KSW2 alignment job. */
 struct alignas(16) fill_descriptor {
     std::int32_t query_offset;   ///< Inclusive query offset.
     std::int32_t target_offset;  ///< Inclusive target offset.
-    std::int32_t query_length;   ///< Query extent in symbols.
-    std::int32_t target_length;  ///< Target extent in symbols.
-    std::int32_t bandwidth;      ///< Admitted recurrence bandwidth.
-    std::int32_t region_index;   ///< Owning region's stable index.
+    std::int32_t query_length;   ///< Query length in symbols.
+    std::int32_t target_length;  ///< Target length in symbols.
+    std::int32_t bandwidth;      ///< Bandwidth used to group this fill.
+    std::int32_t region_index;   ///< Index of the region that receives this result.
     std::int32_t fill_order;     ///< Fill order within the owning region.
-    fill_kind     kind;          ///< Semantic role within the region.
+    fill_kind     kind;          ///< Left extension, gap between anchors, or right extension.
     bool         is_reversed;    ///< Whether query ranks use reverse orientation.
-    std::uint8_t reserved[2];    ///< Explicit layout-preserving padding.
+    std::uint8_t reserved[2];    ///< Padding to keep the descriptor layout fixed.
 
-    /// Per-fill CIGAR scratch — chain-arena slab allocated before the
-    /// fill is bucketed. The stitch stage concatenates these into the
-    /// region's CIGAR in chain order.
+    /// CIGAR operations owned by a slab in the chain arena.
+    /// Stitching appends them to the region in chain order.
     ::bioseq::chaining::arena_slab<cigar_operation>* cigar_scratch;
 
-    /// Per-fill score accumulator — written by the kernel's per-lane
-    /// scalar backtrace, accumulated into `region.dp_score` during stitch.
+    /// The fill score is added to region.dp_score during stitching.
     std::int32_t fill_score;               ///< Alignment score for this fill.
-    std::uint64_t fill_edit_distance;       ///< Exact edit distance for this fill.
+    std::uint64_t fill_edit_distance;       ///< Edit count from replaying this fill's CIGAR, or zero when not requested.
 
-    /// Per-fill final-coordinates accumulator — used by the stitch stage
-    /// to fold the final-position fields back into the region.
-    std::int32_t final_reference_offset;  ///< Final target coordinate.
-    std::int32_t final_query_offset;      ///< Final query coordinate.
+    /// Endpoints used to update the region after alignment.
+    std::int32_t final_reference_offset;  ///< Target start for a left extension, or end for other fills.
+    std::int32_t final_query_offset;      ///< Query start for a left extension, or end for other fills.
     bool         is_z_dropped;            ///< Whether Z-drop terminated the fill.
 
-    std::uint8_t pad[3];  ///< Explicit layout-preserving tail padding.
+    std::uint8_t pad[3];  ///< Tail padding to keep the descriptor layout fixed.
 };
 
-/** Bucket key shared with the Highway-free ordering contract. */
+/** Shared key for grouping fills by size, bandwidth and orientation. */
 using fill_bucket_key =
     ::bioseq::simd::detail_ksw2_batched_ordering::fill_bucket_key;
-/** Construct a bucket key through the Highway-free ordering contract. */
+/** Use the shared fill-to-bucket mapping. */
 using ::bioseq::simd::detail_ksw2_batched_ordering::bucket_key_for;
 
 namespace detail_ksw2_batched {
 
-/** Compute the established 1.5x alignment bandwidth without narrowing. */
+/** Widen the configured bandwidth for alignment, rejecting integer overflow. */
 [[nodiscard]] constexpr auto
 try_calculate_alignment_bandwidth(std::int32_t configured_bandwidth,
                                   std::int32_t& alignment_bandwidth) noexcept -> bool {
@@ -105,7 +101,7 @@ try_calculate_alignment_bandwidth(std::int32_t configured_bandwidth,
     return true;
 }
 
-/** Return whether every coordinate fits the batched descriptor domain. */
+/** Check sequence lengths, region bounds and anchor ranges before batching. */
 [[nodiscard]] inline auto
 are_alignment_coordinates_supported(std::span<const alignment_region> regions,
                                     std::span<const ::bioseq::chaining::anchor> anchors,
@@ -174,7 +170,7 @@ inline auto clear_unsupported_alignment_outputs(std::span<alignment_region> regi
     return total;
 }
 
-/** Estimate CIGAR capacity from nonnegative query/reference extents. */
+/** Estimate CIGAR space from both interval lengths, with room for extra runs. */
 [[nodiscard, gnu::always_inline]] inline auto
 estimated_cigar_operation_count(std::int32_t query_extent, std::int32_t reference_extent) noexcept
     -> std::size_t {
@@ -190,7 +186,7 @@ estimated_cigar_operation_count(std::int32_t query_extent, std::int32_t referenc
 
 }  // namespace detail_ksw2_batched
 
-/** Group fills by stable geometry and orientation buckets. */
+/** Groups fills by size and orientation, keeping their original order keys. */
 [[nodiscard]] inline auto
 bucket_fills_by_geometry(::bioseq::chaining::arena_slab<fill_descriptor>& fills,
                          std::int32_t default_bandwidth)
@@ -220,20 +216,19 @@ bucket_fills_by_geometry(::bioseq::chaining::arena_slab<fill_descriptor>& fills,
     return buckets;
 }
 
-// Per-fill execution uses the same recurrence as the single-pair path.
-//
-// The implementation runs the matching single- or dual-affine KSW2 callable
-// once per lane and writes the resulting CIGAR into the lane's
-// `cigar_scratch` slab.  This produces lane-correct output identical
-// (modulo bucketed tie-break ordering) to the intra-sequence kernel.
-//
-// The batching boundary admits a fused inter-sequence SIMD kernel without
-// changing descriptor layout, bucketing, or stitching semantics.
-// ============================================================================
+// Each fill uses the single-pair KSW2 kernel. Short buckets are split into
+// groups bounded by the target's maximum SIMD lane count, and the fills run
+// one after another. Their CIGARs remain separate until stitching.
 
 namespace detail_ksw2_batched {
 
-/** Align one fill through the matching current KSW2 recurrence. */
+/**
+ * Align one extension or gap and save its score, endpoints and CIGAR.
+ *
+ * Choose one or two gap-penalty pairs from params. Left extensions read both
+ * inputs backwards. When exact edit counts are requested, gaps between anchors
+ * use unbanded alignment with Z-drop disabled, then count edits from the CIGAR.
+ */
 template <bool p_is_reversed, sequence_alphabet p_alphabet>
 [[gnu::always_inline]] inline auto
 align_single_fill(fill_descriptor& fill,
@@ -368,10 +363,8 @@ align_single_fill(fill_descriptor& fill,
     }
 
     if (fill.cigar_scratch != nullptr && !result.cigar.empty()) {
-        // Unpack the KSW2 packed CIGAR (length << 4 | opcode) into
-        // cigar_operation { length, opcode }.  Direct push without merging
-        // adjacent same-opcode entries — the stitch stage merges across
-        // fill boundaries instead.
+        // Unpack each KSW2 CIGAR entry into a length and opcode.
+        // Stitching will merge matching runs across fill boundaries.
         for (std::uint32_t entry : result.cigar) {
             const std::uint32_t opcode    = entry & 0xfU;
             const std::uint32_t op_length = entry >> 4;
@@ -383,12 +376,10 @@ align_single_fill(fill_descriptor& fill,
 }  // namespace detail_ksw2_batched
 
 /**
- * @brief Dispatch one target-lane-sized fill group.
+ * Run a short group of fills, up to p_lane_count entries.
  *
- * Sequences whose query and target lengths fit the bucket bracket are
- * processed lane-by-lane through the existing intra-sequence striped KSW2
- * kernel. The structural batching preserves descriptor layout, bucket order,
- * and stitching semantics.
+ * Each fill calls the single-pair KSW2 kernel in sequence. The bucket size
+ * limits are unused here. Each result stays in its own descriptor for stitching.
  */
 template <std::size_t p_lane_count, bool p_is_reversed, sequence_alphabet p_alphabet>
 auto align_ksw2_fill_batch(fill_descriptor* fills,
@@ -415,7 +406,7 @@ auto align_ksw2_fill_batch(fill_descriptor* fills,
     }
 }
 
-/** Execute every short or long fill bucket without changing route policy. */
+/** Run all fill buckets with the selected query orientation. */
 template <sequence_alphabet p_alphabet>
 auto align_fill_buckets(std::span<std::pair<fill_bucket_key, std::span<fill_descriptor>>> buckets,
                         bioseq::storage::lazy_sequence_view<p_alphabet> query_seq,
@@ -430,8 +421,7 @@ auto align_fill_buckets(std::span<std::pair<fill_bucket_key, std::span<fill_desc
     for (auto& [bucket_key, bucket_fills] : buckets) {
         const bool is_reversed = bucket_key.is_reversed;
         if (bucket_key.is_long_fill) {
-            // Long fills route through the intra-sequence striped KSW2
-            // kernel per fill — same code path the unbatched kernel uses.
+            // Run each long fill through the single-pair KSW2 kernel.
             for (auto& fill : bucket_fills) {
                 if (is_reversed) {
                     detail_ksw2_batched::align_single_fill<true>(
@@ -476,7 +466,14 @@ auto align_fill_buckets(std::span<std::pair<fill_bucket_key, std::span<fill_desc
     }
 }
 
-/** Stitch per-fill CIGAR and coordinate results into stable region order. */
+/**
+ * Combine fill results into their regions in chain order.
+ *
+ * Merge adjacent CIGAR runs, sum scores and edit counts, and update endpoints.
+ * After a gap stops at Z-drop, omit later gaps and the right extension.
+ * A single-seed region also omits its right extension if the left one stops.
+ * Convert reverse-strand query coordinates back to the original sequence.
+ */
 inline auto stitch_cigars_into_regions(std::span<alignment_region> regions,
                                        std::span<const ::bioseq::chaining::anchor> anchors,
                                        ::bioseq::chaining::arena_slab<fill_descriptor>& fills,
@@ -597,8 +594,7 @@ inline auto stitch_cigars_into_regions(std::span<alignment_region> regions,
     }
 }
 
-// Fill collection walks each region in stable chain order and preserves the
-// exact coordinates consumed by the single-pair KSW2 route.
+// Collect fills in chain order before grouping them for execution.
 
 namespace detail_ksw2_batched {
 
@@ -641,7 +637,12 @@ append_fill(::bioseq::chaining::arena_slab<fill_descriptor>& fills,
 }  // namespace detail_ksw2_batched
 
 /**
- * @brief Collect, bucket, execute, and stitch all KSW2 fills for the regions.
+ * Align all regions by splitting them into extensions and gaps between anchors.
+ *
+ * Collect the fills, group them by size and orientation, and run KSW2. Stitch
+ * their results back into each region in chain order, then update length
+ * estimates from the CIGAR. Invalid coordinates or an overflowing bandwidth
+ * clear the alignment outputs and return without running the kernels.
  */
 template <sequence_alphabet p_alphabet>
 auto align_regions_with_batched_ksw2(std::span<alignment_region> regions,
@@ -682,11 +683,9 @@ auto align_regions_with_batched_ksw2(std::span<alignment_region> regions,
     auto fills = ::bioseq::chaining::make_arena_slab<fill_descriptor>();
     fills.reserve(detail_ksw2_batched::estimated_fill_count(regions));
 
-    // Per-fill cigar scratch slabs.  The slab object itself is not
-    // trivially-copyable (it owns a chain-arena pointer + destructor),
-    // so the outer container is a plain std::vector that owns the slab
-    // wrappers; the slab payloads still live in the chain arena and are
-    // reclaimed at the end of this scope.
+    // Keep the CIGAR slab objects in an owning vector because they need
+    // destructors. Their payloads use the chain arena and remain available
+    // until all fills have been stitched into the region results.
     std::vector<::bioseq::chaining::arena_slab<cigar_operation>> cigar_scratch_pool;
     cigar_scratch_pool.reserve(detail_ksw2_batched::estimated_fill_count(regions));
 
@@ -747,7 +746,7 @@ auto align_regions_with_batched_ksw2(std::span<alignment_region> regions,
         }
         if (outer_query_end > query_length) outer_query_end = query_length;
 
-        // Reserve once from the admitted outer extents.
+        // Reserve CIGAR space for the full interval, including end extensions.
         region.cigar.reserve(
             detail_ksw2_batched::estimated_cigar_operation_count(
                 outer_query_end - outer_query_start,
@@ -880,8 +879,7 @@ auto align_regions_with_batched_ksw2(std::span<alignment_region> regions,
         regions, anchors, fills, query_length,
         params.do_cigar || params.compute_edit_distance);
 
-    // Derive final region coordinates and match/block lengths from the
-    // stitched fill results.
+    // Mark aligned regions and count CIGAR M/= columns and block length.
     for (auto& region : regions) {
         if (region.seed_count <= 0) continue;
         region.dp_max_score = region.dp_score;
@@ -909,7 +907,7 @@ auto align_regions_with_batched_ksw2(std::span<alignment_region> regions,
     }
 }
 
-/** Fixed-target callable for the batched KSW2 route. */
+/** Run batched KSW2 using this CPU instruction set. */
 template <sequence_alphabet p_alphabet>
 auto align_ksw2_batched(std::span<alignment_region> regions,
                         std::span<const ::bioseq::chaining::anchor> anchors,

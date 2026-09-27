@@ -1,6 +1,6 @@
 /**
  * @file block_aligner_traceback.cppm
- * @brief Reconstructs adaptive-block alignments from recorded SIMD trace data.
+ * @brief Build a CIGAR and optional edit count from BlockAligner trace data.
  */
 module;
 
@@ -34,23 +34,23 @@ export namespace bioseq::simd {
 namespace [[bioseq::simd]] target {
 namespace hn = hwy::HWY_NAMESPACE;
 
-// =============================================================================
-// Traceback — CIGAR generation from recorded trace data
-// =============================================================================
+// CIGAR reconstruction from the saved block trace.
 
 /** Packed CIGAR and optional edit count produced by traceback. */
 struct block_traceback_result {
     alignment_result_vector<std::uint32_t> cigar;  ///< Packed KSW2-compatible operations.
-    std::uint64_t edit_distance = 0;  ///< Exact unit-cost edit distance.
+    std::uint64_t edit_distance = 0;  ///< Number of mismatches and gap bases in the traced alignment, when requested.
 };
 
 /**
- * Account for the exact unit-cost edit represented by one traceback step.
+ * Count edits for one traceback step when edit output is requested.
  *
- * Traceback coordinates are one-based sequence positions because index zero
- * in each block_padded_bytes is the DP sentinel. Reversed left extensions need
- * no special handling: both padded inputs and the trace use the same reversed
- * orientation, and edit distance is invariant when both strings are reversed.
+ * An M step compares the two ranks because CIGAR M includes mismatches.
+ * Insertions and deletions each add one edit. Coordinates start at one because
+ * position zero in each padded input is the DP sentinel.
+ *
+ * Left extensions already have both inputs reversed, so the same comparisons
+ * work in that direction.
  */
 template <bool p_should_compute_edit_distance>
 HWY_INLINE void record_block_traceback_edit(
@@ -89,8 +89,11 @@ HWY_INLINE void record_block_traceback_edit(
 }
 
 /**
- * Materialize the packed CIGAR and, when requested, derive exact edit
- * accounting during the same traceback walk over resident padded ranks.
+ * Walk the saved blocks backwards and build the packed CIGAR.
+ *
+ * Merge adjacent operations into runs, then reverse the runs into alignment
+ * order. When requested, count edits during the same walk using the padded
+ * input ranks. The returned CIGAR owns its storage.
  */
 template <bool p_should_compute_edit_distance>
 [[nodiscard]] block_traceback_result build_block_cigar(
@@ -114,8 +117,8 @@ template <bool p_should_compute_edit_distance>
 #endif
     cigar.reserve(cigar_step_bound);
 
-    // All diagonal trace variants project to the packed match opcode. Adjacent
-    // operations are coalesced before materialization.
+    // Store every diagonal step as M, including matches and mismatches.
+    // Merge adjacent operations into CIGAR runs.
     block_cigar_operation pending_operation = block_cigar_operation::sentinel;
     size_t pending_length = 0;
     const auto flush_pending_operation = [&cigar, &pending_operation, &pending_length]() {
@@ -187,7 +190,7 @@ template <bool p_should_compute_edit_distance>
         const auto& trace_lookup = k_block_trace_lookup[is_right_block ? 1 : 0];
 
         if (is_right_block) {
-            // Right block: vectors vertical (height/lane_count per column)
+            // Rightward blocks store trace vectors down each column.
             while (query_position >= block_row_start && reference_position >= block_column_start && (query_position > 0 || reference_position > 0)) {
                 size_t row_offset = query_position - block_row_start;
                 size_t column_offset = reference_position - block_column_start;
@@ -215,7 +218,7 @@ template <bool p_should_compute_edit_distance>
                 append_operation(entry.operation);
             }
         } else {
-            // Down block: vectors horizontal (width/lane_count per row)
+            // Downward blocks store trace vectors across each row.
             while (query_position >= block_row_start && reference_position >= block_column_start && (query_position > 0 || reference_position > 0)) {
                 size_t row_offset = query_position - block_row_start;
                 size_t column_offset = reference_position - block_column_start;

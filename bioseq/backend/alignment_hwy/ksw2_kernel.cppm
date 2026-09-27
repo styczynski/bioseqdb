@@ -1,6 +1,6 @@
 /**
  * @file ksw2_kernel.cppm
- * @brief Exposes the KSW2 core, facade, and registered dispatch slots.
+ * @brief KSW2 alignment kernels for one CPU instruction set.
  */
 module;
 
@@ -36,34 +36,22 @@ export namespace bioseq::simd {
 namespace [[bioseq::simd]] target {
 namespace hn = hwy::HWY_NAMESPACE;
 
-// =============================================================================
-// align_ksw2_core — unified single/dual-affine banded extension alignment
-// =============================================================================
+// KSW2 alignment with one or two affine gap-penalty pairs.
 
 /**
- * @brief Executes the banded KSW2 recurrence for one sequence pair.
- * @tparam p_mode Single- or dual-affine recurrence mode.
- * @tparam p_is_reversed Whether query ranks use reverse orientation.
- * @tparam p_alphabet Logical sequence alphabet.
- * @tparam p_alphabet_dimension Matrix dimension including the sentinel rank.
- * @tparam p_partial_score_type Narrow difference-score lane type.
- * @tparam p_full_score_type Exact accumulated-score lane type.
- * @param[in] query_seq Query sequence facade.
- * @param[in] target_seq Target sequence facade.
- * @param[in] query_start Inclusive query coordinate.
- * @param[in] query_end Exclusive query coordinate.
- * @param[in] target_start Inclusive target coordinate.
- * @param[in] target_end Exclusive target coordinate.
- * @param[in] scoring_matrix Canonical scalar and shuffle score matrix.
- * @param[in] gap_open Short-gap open penalty.
- * @param[in] gap_extend Short-gap extension penalty.
- * @param[in] gap_open_long Long-gap open penalty.
- * @param[in] gap_extend_long Long-gap extension penalty.
- * @param[in] configured_band_width Configured maximum band width.
- * @param[in] z_drop Z-drop threshold.
- * @param[in] end_bonus Query-end bonus.
- * @param[in] flags Traceback and extension-mode flags.
- * @return Alignment score, endpoints, termination state, and optional CIGAR.
+ * Align two half-open sequence intervals with KSW2.
+ *
+ * SIMD lanes hold score differences along matrix anti-diagonals, while wider
+ * integers track accumulated scores and p_mode selects one gap-penalty pair
+ * or the cheaper of two pairs for each gap. Temporary buffers are local.
+ *
+ * Query strand comes from p_is_reversed. Negative configured_band_width allows
+ * the full matrix, and negative z_drop disables that stopping check. Output
+ * flags select score-only results and CIGAR tie handling, and also control
+ * end extension, where end_bonus favors reaching the query end.
+ *
+ * Return the score, endpoints, stopping state and optional owning CIGAR.
+ * Throw std::length_error when coordinates or buffer sizes cannot be represented.
  */
 template<
     ksw_aligner_mode p_mode,
@@ -92,7 +80,7 @@ template<
     constexpr bool k_is_dual_affine =
         p_mode == ksw_aligner_mode::dual_affine;
 
-    // --- SIMD tags ---------------------------------------------------------
+    // SIMD types for narrow score differences and wider total scores.
     hn::ScalableTag<p_partial_score_type> simd_tag;
     hn::ScalableTag<p_full_score_type>    full_score_tag;
 
@@ -100,10 +88,8 @@ template<
     const size_t score_lane_count = hn::Lanes(full_score_tag);
     constexpr size_t k_maximum_score_lanes = hn::MaxLanes(hn::ScalableTag<p_full_score_type>{});
 
-    // Every internal buffer (DP state, backtrack matrix, exact-score row,
-    // encoded sequences) lives in this scope. The CIGAR output lives on
-    // the result struct's own vector (heap) and is built before the scope
-    // unwinds, so the dangling-span hazard is contained here.
+    // Release DP buffers when this alignment finishes. The result owns its
+    // CIGAR separately, so callers can keep it after the arena scope ends.
     auto align_scope = context::current().push<context::arena::alignment>();
 
     ksw_alignment_result result;
@@ -130,7 +116,7 @@ template<
     const bool should_compute_cigar = !flags.score_only;
     const bool should_use_approximate_maximum = flags.approx_max;
 
-    // --- SIMD constant vectors ---------------------------------------------
+    // Reuse scoring constants across all SIMD updates.
     const auto zero_scores          = hn::Zero(simd_tag);
     const auto match_scores   = hn::Set(simd_tag, scoring_matrix.match_score());
     const auto mismatch_scores = hn::Set(simd_tag, scoring_matrix.mismatch_score());
@@ -172,13 +158,13 @@ template<
     const auto long_horizontal_gap_continuation = hn::Set(simd_tag, static_cast<p_partial_score_type>(0x20));
     const auto long_vertical_gap_continuation = hn::Set(simd_tag, static_cast<p_partial_score_type>(0x40));
 
-    // --- Band width --------------------------------------------------------
+    // A negative bandwidth allows every matrix cell.
     const int band_width = configured_band_width < 0
         ? std::max(target_length_i32, query_length_i32) : configured_band_width;
     const int left_band  = band_width;
     const int right_band = band_width;
 
-    // --- Score range sanity check ------------------------------------------
+    // Reject scores outside the range supported by difference encoding.
     int minimum_matrix_score = scoring_matrix.mismatch_score();
     for (size_t score_index = 1; score_index < scoring_matrix.entries.size(); ++score_index) {
         if (scoring_matrix.entries[score_index] < minimum_matrix_score)
@@ -186,7 +172,7 @@ template<
     }
     if (-minimum_matrix_score > 2 * (gap_open + gap_extend)) return result;
 
-    // --- Dual-affine long-gap threshold ------------------------------------
+    // Find the gap length where the long-gap penalty becomes cheaper.
     [[maybe_unused]] int long_gap_threshold = 0;
     [[maybe_unused]] int long_gap_difference = 0;
     if constexpr (k_is_dual_affine) {
@@ -203,7 +189,7 @@ template<
                         - (gap_open_long - gap_open) - gap_extend_long;
     }
 
-    // --- Checked storage geometry ------------------------------------------
+    // Check buffer sizes before allocating the DP state.
     const auto storage_plan = derive_ksw2_storage_plan(
         query_length, target_length, byte_lane_count, k_is_dual_affine,
         configured_band_width, !should_use_approximate_maximum,
@@ -211,7 +197,7 @@ template<
     if (!storage_plan) {
         throw std::length_error{"KSW2 storage geometry is not representable"};
     }
-    // --- State arena -------------------------------------------------------
+    // Allocate the DP state in the alignment arena.
     ksw_state_for<p_mode> state(*storage_plan);
 
     if constexpr (k_is_dual_affine) {
@@ -223,9 +209,8 @@ template<
             static_cast<uint8_t>(-gap_open_long - gap_extend_long));
     }
 
-    // --- Exact max tracking ------------------------------------------------
-    // Exact-score row goes in the align arena; it's re-read every anti-
-    // diagonal but never survives the call.
+    // Keep full scores for each anti-diagonal when exact maximum tracking
+    // is requested. This row is temporary alignment storage.
     p_full_score_type* exact_score_row = nullptr;
     if (!should_use_approximate_maximum) {
         const size_t exact_score_row_length = storage_plan->exact_score_elements;
@@ -236,7 +221,7 @@ template<
         exact_score_row = exact_row_span.data();
     }
 
-    // --- Backtrack storage -------------------------------------------------
+    // Save traceback data only when CIGAR output is requested.
     ksw_backtrack_matrix backtrack;
     std::span<int32_t> anti_diagonal_band_starts{};
     std::span<int32_t> anti_diagonal_band_ends{};
@@ -246,49 +231,35 @@ template<
         anti_diagonal_band_ends   = backtrack.band_ends();
     }
 
-    // --- Prepare sequences -------------------------------------------------
-    // The DP body reads a reversed query (qr in minimap2 notation) and an
-    // ordered target (sf). The orientation-aware encoder writes both views
-    // directly into their final DP-state buffers.
-    //
-    // KSW2 orientation matrix (qr/sf relative to the source region):
-    //   normal:        qr = reverse(query),               sf = target
-    //   reverse_cigar: qr = query (already aligned),      sf = reverse(target)
-    //
-    // The strand-template p_is_reversed flips the query letters (rc); the
-    // write_reversed flag flips the destination ordering. Both axes
-    // are independently controlled by the strand and ordering parameters.
+    // Store the query backwards so corresponding symbols line up on each
+    // anti-diagonal. For a left extension, reverse the target instead.
+    // p_is_reversed independently selects the query strand.
     std::span<uint8_t> query_destination(state.query_reversed, query_length);
     std::span<uint8_t> target_destination(state.target_bytes, target_length);
     if (flags.reverse_cigar) {
-        // qr stays in source order — no extra mirror.
+        // Keep the oriented query in its current order for a left extension.
         query_seq.template copy_ranks<p_is_reversed, false>(
             query_destination, query_start, query_end);
-        // Target is reversed; no rc on target, so the second template arg is
-        // the only orientation flip.
+        // Read the target backwards for the left extension.
         target_seq.template copy_ranks<false, true>(
             target_destination, target_start, target_end);
     } else {
-        // qr = reverse(encoded query). For a reversed strand the
-        // existing <true, false> path produced rc(query); we want rc then
-        // reverse-again, which is just complement-only. Captured as
-        // <true, true> (see overload comment).
+        // Reverse the oriented query for the anti-diagonal calculation.
+        // On the reverse strand, the two reversals leave complemented bases.
         query_seq.template copy_ranks<p_is_reversed, true>(
             query_destination, query_start, query_end);
         target_seq.template copy_ranks<false, false>(
             target_destination, target_start, target_end);
     }
 
-    // --- Approximate max tracking ------------------------------------------
+    // Track one promising position when approximate maxima are requested.
     p_full_score_type approx_score = 0;
     int approximate_score_target_position = 0;
 
-    // --- Determine fusion eligibility (non-generic-score path) -------------
+    // Compare ranks inside the SIMD loop for the standard scoring matrix.
     const bool should_use_fused_score = !flags.generic_score;
 
-    // ====================================================================
-    // Main DP loop
-    // ====================================================================
+    // Advance through the scoring matrix one anti-diagonal at a time.
     const int byte_lane_count_i32 = static_cast<int>(byte_lane_count);
     int previous_band_start = -1;
     int previous_band_end   = -1;
@@ -314,7 +285,7 @@ template<
         band_start = (band_start / byte_lane_count_i32) * byte_lane_count_i32;
         band_end   = ((band_end + byte_lane_count_i32) / byte_lane_count_i32) * byte_lane_count_i32 - 1;
 
-        // --- Boundary conditions -------------------------------------------
+        // Supply boundary values for cells entering the active band.
         int8_t horizontal_gap_boundary_carry;
         int8_t horizontal_difference_boundary_carry;
         [[maybe_unused]] int8_t long_horizontal_gap_boundary_carry = 0;
@@ -381,9 +352,8 @@ template<
             }
         }
 
-        // --- Compute per-cell scores (only for generic_score path) ---------
-        // When !generic_score the scores are computed inline inside the DP
-        // loop (diag_score fusion optimisation).
+        // Precompute symbol-pair scores for a custom scoring matrix.
+        // Standard match, mismatch and wildcard scores are computed in the SIMD loop.
         if (flags.generic_score) {
             for (int target_position = unaligned_band_start; target_position <= unaligned_band_end; ++target_position) {
                 state.diag_score_base[target_position] = scoring_matrix.at(
@@ -391,19 +361,17 @@ template<
             }
         }
 
-        // --- Boundary vectors ----------------------------------------------
+        // Put boundary values in the first vector lane.
         auto horizontal_gap_carry  = set_lane_zero(simd_tag, horizontal_gap_boundary_carry);
         auto horizontal_difference_carry  = set_lane_zero(simd_tag, horizontal_difference_boundary_carry);
         [[maybe_unused]] auto long_horizontal_gap_carry = set_lane_zero(simd_tag, long_horizontal_gap_boundary_carry);
         const int first_band_vector = band_start / byte_lane_count_i32;
         const int last_band_vector   = band_end / byte_lane_count_i32;
 
-        // ================================================================
-        // Core DP inner loop — three paths depending on CIGAR / alignment
-        // ================================================================
+        // Choose score-only updates or traceback updates with the requested gap tie rule.
 
         if (!should_compute_cigar) {
-            // ---- Score-only path ------------------------------------------
+            // Update scores without saving traceback directions.
             for (int band_vector_index = first_band_vector; band_vector_index <= last_band_vector; ++band_vector_index) {
                 const int state_offset = band_vector_index * byte_lane_count_i32;
                 auto cell = should_use_fused_score
@@ -424,7 +392,7 @@ template<
                     short_gap_costs, long_gap_costs, zero_scores);
             }
         } else if (!flags.right_align) {
-            // ---- CIGAR, gap left-alignment ---------------------------------
+            // Save a CIGAR trace with left-aligned gaps.
             anti_diagonal_band_starts[static_cast<size_t>(anti_diagonal)] = band_start;
             anti_diagonal_band_ends  [static_cast<size_t>(anti_diagonal)] = band_end;
             for (int band_vector_index = first_band_vector; band_vector_index <= last_band_vector; ++band_vector_index) {
@@ -441,7 +409,7 @@ template<
                         mismatch_scores, wildcard_scores,
                         wildcard_ranks);
 
-                // Direction tracking — left-align tie-break
+                // Keep the earlier direction when scores tie.
                 auto backtrack_directions = hn::IfThenElseZero(
                     hn::Gt(cell.short_horizontal_gap_candidates, cell.selected_scores), short_horizontal_gap_direction);
                 cell.selected_scores = hn::Max(cell.selected_scores, cell.short_horizontal_gap_candidates);
@@ -464,7 +432,7 @@ template<
                     cell.selected_scores = hn::Min(cell.selected_scores, match_scores);
                 }
 
-                // Store diff + gap states
+                // Save score differences and gap state for the next anti-diagonal.
                 hn::Store(hn::Sub(cell.selected_scores, cell.shifted_left_differences), simd_tag,
                           state.diff_up_base + state_offset);
                 hn::Store(hn::Sub(cell.selected_scores, cell.current_up_differences), simd_tag,
@@ -521,7 +489,7 @@ template<
                     backtrack.vector_slot_bytes(anti_diagonal, band_vector_index - first_band_vector));
             }
         } else {
-            // ---- CIGAR, gap right-alignment --------------------------------
+            // Save a CIGAR trace with right-aligned gaps.
             anti_diagonal_band_starts[static_cast<size_t>(anti_diagonal)] = band_start;
             anti_diagonal_band_ends  [static_cast<size_t>(anti_diagonal)] = band_end;
             for (int band_vector_index = first_band_vector; band_vector_index <= last_band_vector; ++band_vector_index) {
@@ -538,7 +506,7 @@ template<
                         mismatch_scores, wildcard_scores,
                         wildcard_ranks);
 
-                // Direction tracking — right-align tie-break
+                // Prefer the later gap direction when scores tie.
                 auto backtrack_directions = hn::IfThenZeroElse(
                     hn::Gt(cell.selected_scores, cell.short_horizontal_gap_candidates), short_horizontal_gap_direction);
                 cell.selected_scores = hn::Max(cell.selected_scores, cell.short_horizontal_gap_candidates);
@@ -618,9 +586,7 @@ template<
             }
         }
 
-        // ================================================================
-        // Max score tracking and Z-drop
-        // ================================================================
+        // Track the best score and stop if the Z-drop limit is exceeded.
         const int8_t z_drop_gap_extend = k_is_dual_affine
             ? gap_extend_long
             : gap_extend;
@@ -793,7 +759,7 @@ template<
                 result.score = exact_score_row[target_length_i32 - 1];
             }
         } else {
-            // --- Approximate max -------------------------------------------
+            // Follow the better adjacent score to estimate the maximum.
             if (anti_diagonal > 0) {
                 if (approximate_score_target_position >= unaligned_band_start
                     && approximate_score_target_position <= unaligned_band_end
@@ -879,9 +845,7 @@ template<
         previous_band_end   = band_end;
     }
 
-    // ====================================================================
-    // Backtrack
-    // ====================================================================
+    // Reconstruct the CIGAR from the selected endpoint.
     if (should_compute_cigar) {
 #if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
         result.cigar.set_logical_bounds(
@@ -907,26 +871,16 @@ template<
     return result;
 }
 
-// =============================================================================
-// highway_ksw2_aligner — public API
-// =============================================================================
+// Entry points for the selected CPU instruction set.
 
-/** Fixed-target facade for the single- and dual-affine KSW2 callables. */
+/** KSW2 entry points with one or two gap-penalty pairs. */
 class highway_ksw2_aligner {
 public:
     /**
-     * @brief Aligns with the single-affine recurrence.
-     * @tparam p_is_reversed Whether query ranks use reverse orientation.
-     * @tparam p_alphabet Logical sequence alphabet.
-     * @param[in] query_sequence Query sequence facade.
-     * @param[in] target_sequence Target sequence facade.
-     * @param[in] query_start Inclusive query coordinate.
-     * @param[in] query_end Exclusive query coordinate.
-     * @param[in] target_start Inclusive target coordinate.
-     * @param[in] target_end Exclusive target coordinate.
-     * @param[in] scoring_matrix Canonical scalar and shuffle score matrix.
-     * @param[in] parameters Single-affine KSW2 contract.
-     * @return Alignment score, endpoints, termination state, and optional CIGAR.
+     * Align half-open query and target intervals with one gap-penalty pair.
+     *
+     * p_is_reversed selects the query strand. parameters sets the band, Z-drop,
+     * end bonus and output flags. Return the score, endpoints and optional CIGAR.
      */
     template<
         bool p_is_reversed,
@@ -952,18 +906,12 @@ public:
     }
 
     /**
-     * @brief Aligns with the dual-affine recurrence.
-     * @tparam p_is_reversed Whether query ranks use reverse orientation.
-     * @tparam p_alphabet Logical sequence alphabet.
-     * @param[in] query_sequence Query sequence facade.
-     * @param[in] target_sequence Target sequence facade.
-     * @param[in] query_start Inclusive query coordinate.
-     * @param[in] query_end Exclusive query coordinate.
-     * @param[in] target_start Inclusive target coordinate.
-     * @param[in] target_end Exclusive target coordinate.
-     * @param[in] scoring_matrix Canonical scalar and shuffle score matrix.
-     * @param[in] parameters Dual-affine KSW2 contract.
-     * @return Alignment score, endpoints, termination state, and optional CIGAR.
+     * Align half-open query and target intervals with two gap-penalty pairs.
+     *
+     * The cheaper pair determines the cost of each gap. This wrapper puts the
+     * pair with the cheaper one-symbol gap first before calling the core.
+     * p_is_reversed selects the query strand, and parameters controls the band
+     * and output flags. Return the score, endpoints and optional CIGAR.
      */
     template<
         bool p_is_reversed,
@@ -1000,18 +948,11 @@ public:
 };
 
 /**
- * @brief Dispatches the single-affine callable for the requested orientation.
- * @tparam p_alphabet Logical sequence alphabet.
- * @param[in] is_reversed Whether query ranks use reverse orientation.
- * @param[in] query_sequence Query sequence facade.
- * @param[in] target_sequence Target sequence facade.
- * @param[in] query_start Inclusive query coordinate.
- * @param[in] query_end Exclusive query coordinate.
- * @param[in] target_start Inclusive target coordinate.
- * @param[in] target_end Exclusive target coordinate.
- * @param[in] scoring_matrix Canonical scalar and shuffle score matrix.
- * @param[in] parameters Single-affine KSW2 contract.
- * @return Alignment score, endpoints, termination state, and optional CIGAR.
+ * Run single-affine KSW2 in the requested query orientation.
+ *
+ * The query and target intervals are half-open. parameters supplies the gap
+ * penalties, band, Z-drop, end bonus and output flags. Return the alignment
+ * score, endpoints, stopping state and optional CIGAR.
  */
 template <sequence_alphabet p_alphabet>
 [[nodiscard]] ksw_alignment_result align_ksw2_single_affine(
@@ -1035,18 +976,11 @@ template <sequence_alphabet p_alphabet>
 }
 
 /**
- * @brief Dispatches the dual-affine callable for the requested orientation.
- * @tparam p_alphabet Logical sequence alphabet.
- * @param[in] is_reversed Whether query ranks use reverse orientation.
- * @param[in] query_sequence Query sequence facade.
- * @param[in] target_sequence Target sequence facade.
- * @param[in] query_start Inclusive query coordinate.
- * @param[in] query_end Exclusive query coordinate.
- * @param[in] target_start Inclusive target coordinate.
- * @param[in] target_end Exclusive target coordinate.
- * @param[in] scoring_matrix Canonical scalar and shuffle score matrix.
- * @param[in] parameters Dual-affine KSW2 contract.
- * @return Alignment score, endpoints, termination state, and optional CIGAR.
+ * Run dual-affine KSW2 in the requested query orientation.
+ *
+ * The query and target intervals are half-open. parameters supplies both
+ * gap-penalty pairs, the band, Z-drop, end bonus and output flags. Return
+ * the score, endpoints, stopping state and optional CIGAR.
  */
 template <sequence_alphabet p_alphabet>
 [[nodiscard]] ksw_alignment_result align_ksw2_dual_affine(
