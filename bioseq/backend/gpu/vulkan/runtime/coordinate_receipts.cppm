@@ -1,6 +1,6 @@
 /**
  * @file coordinate_receipts.cppm
- * @brief Validates and finalizes persisted grouped-SoA coordinate operation receipts.
+ * @brief Accepts completed grouped-SoA coordinate operations and claims their cache metrics.
  */
 module;
 
@@ -22,12 +22,17 @@ import std;
 
 namespace bioseq::gpu::vulkan {
 
-/// @brief Prepares a side-effect-free claim plan after validating receipt and live identities.
-/// @param[in] receipt Sealed operation receipt whose jobs and pipeline uses are inspected.
-/// @param[in] expected_preview Caller-provided SQL-visible acceptance preview.
-/// @param[in] live_features Current Vulkan device and driver identity.
-/// @param[in] seed_metrics_claimed Whether process-wide seed metrics were already reported.
-/// @return Valid claim plan on exact identity agreement, otherwise an invalid plan.
+/**
+ * @brief Checks an operation and prepares its cache metrics for one-time reporting.
+ *
+ * Preparation leaves the receipt and metric claims unchanged. The preview, saved
+ * pipeline records, and current device identity must agree.
+ * @param[in] receipt Runtime-issued batch receipt whose jobs were accepted.
+ * @param[in] expected_preview Values the caller plans to report.
+ * @param[in] live_features Current Vulkan device and driver identity.
+ * @param[in] seed_metrics_claimed Whether cache seed metrics were already reported.
+ * @return A valid plan on agreement, or an invalid plan on failure.
+ */
 runtime_detail::persisted_grouped_soa_coordinate_finalization_plan
 runtime::prepare_persisted_grouped_soa_coordinate_finalization(
     const persisted_grouped_soa_coordinate_operation_receipt& receipt,
@@ -183,9 +188,11 @@ runtime::prepare_persisted_grouped_soa_coordinate_finalization(
     return result;
 }
 
-/// @brief Exercises finalizer rejection paths without consuming cache metric claims.
-/// @param[in] base_audit Valid pipeline audit used to construct sealed test receipts.
-/// @return `true` when every mutated identity is rejected without claiming metrics.
+/**
+ * @brief Tests that changed identities are rejected before cache metrics are claimed.
+ * @param[in] base_audit Valid pipeline record used to create test receipts.
+ * @return True if every mismatch is rejected and all metrics remain unclaimed.
+ */
 bool runtime::self_test_persisted_grouped_soa_finalizer_preclaim_contract(
     runtime_metal_archive_pipeline_audit base_audit) {
     if (!base_audit.is_internally_consistent() || base_audit.pipeline_create_ns == 0u) {
@@ -350,7 +357,7 @@ bool runtime::self_test_persisted_grouped_soa_finalizer_preclaim_contract(
     live_features.device_id = expected.device_id;
     live_features.pipeline_cache_uuid = expected.pipeline_cache_uuid;
     bool seed_claimed = false;
-    // Confirms that validation has not consumed any report-once claim.
+    // Check that the seed and pipeline metric flags are still clear.
     const auto claims_unchanged = [&receipts, &seed_claimed]() {
         return !seed_claimed &&
                std::none_of(receipts.begin(), receipts.end(), [](const auto& receipt) {
@@ -372,14 +379,14 @@ bool runtime::self_test_persisted_grouped_soa_finalizer_preclaim_contract(
     if (!claims_unchanged())
         return false;
 
-    // Requires a candidate mismatch to fail before any claim is committed.
+    // Check that a mismatch fails while all metrics remain unclaimed.
     const auto rejected = [&claims_unchanged, &receipt, &seed_claimed](
                               const auto& candidate, const vulkan_feature_set& live) {
         auto plan = prepare_persisted_grouped_soa_coordinate_finalization(
             receipt, candidate, live, seed_claimed);
         return !plan.is_valid() && claims_unchanged();
     };
-    // Applies one mutation to the sealed caller preview.
+    // Change a copy of the caller preview.
     const auto rejected_preview = [&expected, &live_features, &rejected](auto mutate) {
         auto candidate = expected;
         mutate(candidate);
@@ -392,8 +399,8 @@ bool runtime::self_test_persisted_grouped_soa_finalizer_preclaim_contract(
         return rejected(expected, candidate);
     };
 
-    // Every fixed field crossing the SQL-preview/finalizer equality gate gets
-    // an independent mutation. Rejection must leave all report-once bits clear.
+    // Change preview fields independently and check that rejection leaves the
+    // cache metrics available for a later valid operation.
     if (!rejected_preview([](auto& value) {
             ++value.acceptance.operation_identity;
             value.shape_pipeline_operation_identity = value.acceptance.operation_identity;
@@ -457,16 +464,13 @@ bool runtime::self_test_persisted_grouped_soa_finalizer_preclaim_contract(
         return false;
     }
 
-    // Mutates one retained pipeline receipt while preserving its standalone validity.
+    // Change one saved pipeline receipt while keeping its own checks valid.
     const auto rejected_receipt =
         [&claims_unchanged, &expected, &live_features, &receipts, &rejected](auto mutate) {
             runtime_metal_archive_pipeline_audit saved = receipts[10].audit_;
             mutate(receipts[10].audit_);
-            // Receipt mutations exercise the finalizer's frozen PREPARED/USED
-            // equality gate, not the qualification's own self-consistency gate.
-            // Keep the process qualification bound to the mutated live audit so
-            // the receipt remains independently accepted before the finalizer
-            // rejects its drift from the sealed operation receipt.
+            // Keep the changed pipeline receipt internally valid. The finalizer should
+            // reject its disagreement with the operation's saved pipeline record.
             runtime_metal_archive_process_qualification& qualification =
                 receipts[10].audit_.cache_qualification;
             qualification.archive_set = receipts[10].audit_.expected_archives;
@@ -533,9 +537,11 @@ bool runtime::self_test_persisted_grouped_soa_finalizer_preclaim_contract(
     return claims_unchanged();
 }
 
-/// @brief Exercises partial cache-metric deltas and their one-shot claim behavior.
-/// @param[in] base_audit Valid pipeline audit used to create independent receipts.
-/// @return `true` when partial and zero deltas obey their one-shot contracts.
+/**
+ * @brief Tests reporting a subset of cache metrics, then the remainder, exactly once.
+ * @param[in] base_audit Valid pipeline record used to create independent receipts.
+ * @return True if partial reports, moves, and later zero reports follow the contract.
+ */
 bool runtime::self_test_gpu_cache_partial_delta_contract(
     runtime_metal_archive_pipeline_audit base_audit) {
     if (!base_audit.is_internally_consistent() || base_audit.pipeline_create_ns == 0u) {
@@ -666,11 +672,13 @@ bool runtime::self_test_gpu_cache_partial_delta_contract(
     return !zero_delta.is_valid() && zero_delta.audit() == runtime_gpu_cache_metrics_audit{};
 }
 
-/// @brief Validates and commits one persisted grouped-SoA coordinate receipt.
-/// @param[in,out] receipt Rvalue receipt cleared after successful publication.
-/// @param[in] expected_preview Caller-provided acceptance preview that must match exactly.
-/// @return Single-use accepted operation carrying environment and cache-metric audits.
-/// @throws vulkan_runtime_error When validation or the final live policy gate fails.
+/**
+ * @brief Accepts a completed grouped-SoA operation and claims its unreported cache metrics.
+ * @param[in,out] receipt Batch receipt, cleared after successful acceptance.
+ * @param[in] expected_preview Caller's values, which must match the saved operation.
+ * @return The accepted operation, GPU environment, and report-once cache metrics.
+ * @throws vulkan_runtime_error If validation or the final cache-policy check fails.
+ */
 persisted_grouped_soa_coordinate_accepted_operation
 runtime::finalize_persisted_grouped_soa_coordinate_operation(
     persisted_grouped_soa_coordinate_operation_receipt&& receipt,
@@ -683,12 +691,12 @@ runtime::finalize_persisted_grouped_soa_coordinate_operation(
             "persisted grouped-SoA operation finalization payload is invalid");
     }
 
-    // This is deliberately the last external-state check. Everything after it
-    // is fixed-field move/copy construction and cannot dispatch or allocate.
+    // Check the live cache policy before claiming metrics. The remaining work
+    // only copies fixed fields, releases the old receipt, and returns the result.
     require_immutable_metal_policy_live("persisted grouped-SoA operation final publication");
 
-    // No failing work follows this mutation. The queue/cache mutex makes the
-    // seed and receipt claims one transaction with authority minting.
+    // Hold the runtime mutex while claiming metrics and issuing the accepted
+    // result. All checks that can reject the operation have already passed.
     const runtime_gpu_cache_metrics_audit cache_metrics = plan.cache_claim_plan.audit();
     plan.cache_claim_plan.commit(seed_metrics_claimed_);
     persisted_grouped_soa_coordinate_accepted_operation accepted{};
@@ -701,26 +709,16 @@ runtime::finalize_persisted_grouped_soa_coordinate_operation(
     return accepted;
 }
 
-/// @brief Runs a coordinate batch and returns only its host-visible result wires.
-/// @param[in] query_inputs Shared minimizer storage for the synthetic single query record.
-/// @param[in] jobs Ordered coordinate jobs.
-/// @param[in] query_len Query length in symbols.
-/// @param[in] kmer_size K-mer span encoded into anchors.
-/// @param[in] max_occ Maximum target occurrences emitted per minimizer.
-/// @param[in] coordinate_algorithm Tiled-DP or diagonal-vote reduction.
-/// @param[in] chain_key Chaining pipeline specialization.
-/// @param[in] max_dist_x Maximum reference-coordinate chaining distance.
-/// @param[in] max_dist_y Maximum query-coordinate chaining distance.
-/// @param[in] bandwidth Chaining diagonal bandwidth.
-/// @param[in] max_iter Maximum predecessors examined per anchor.
-/// @param[in] gap_penalty Chaining gap penalty.
-/// @param[in] skip_penalty Chaining skip penalty.
-/// @param[in] max_chain_skip Maximum consecutive unproductive predecessors.
-/// @param[in] min_chain_score Minimum accepted chain score.
-/// @param[in] min_seed_count Minimum accepted seed count.
-/// @param[in] probe_limit Maximum coordinate candidates examined.
-/// @return One host-visible coordinate result per job.
-/// @throws vulkan_runtime_error When validation or batched execution fails.
+/**
+ * @brief Runs coordinate jobs for one query and returns their results in job order.
+ *
+ * Creates one query record covering all supplied minimizers, so each job must use
+ * query index zero. The batch routine performs seeding and chaining with the
+ * supplied settings. Results are copied back to the CPU.
+ * @param[in] query_len Query length in symbols, which must fit in 32 bits.
+ * @throws vulkan_runtime_error If the query length or batch inputs are invalid,
+ * or GPU execution fails.
+ */
 std::vector<gpu_coordinate_result_wire> runtime::run_seed_to_coordinate_results_roundtrip(
     const gpu_seed_query_inputs& query_inputs,
     std::span<const gpu_seed_coordinate_job> jobs,

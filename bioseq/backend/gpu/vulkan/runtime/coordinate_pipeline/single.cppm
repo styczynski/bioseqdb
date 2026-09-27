@@ -1,6 +1,6 @@
 /**
  * @file single.cppm
- * @brief Records the single-query seed-to-coordinate descriptor and submission sequence.
+ * @brief Runs GPU seeding and chaining for one query and target pair.
  */
 module;
 

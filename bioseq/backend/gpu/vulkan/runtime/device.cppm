@@ -1,6 +1,6 @@
 /**
  * @file device.cppm
- * @brief Owns Vulkan loader initialization, device lifetime, and buffer allocation.
+ * @brief Creates the Vulkan runtime and manages its device and buffers.
  */
 module;
 
@@ -42,14 +42,14 @@ void buffer::reset() noexcept {
     mapped = nullptr;
 }
 
-// ---------------------------------------------------------------------------
-// runtime lifecycle
-// ---------------------------------------------------------------------------
+// Runtime lifetime
 
-/// @brief Initializes the process runtime and retains any diagnostic on failure.
-///
-/// Construction is non-throwing by policy. An initialization failure leaves
-/// `features().available` false and is exposed through the runtime diagnostic.
+/**
+ * @brief Initializes Vulkan and saves an error message if initialization fails.
+ *
+ * A failed initialization cleans up the runtime and leaves `features().available`
+ * false. Callers can read the saved diagnostic.
+ */
 runtime::runtime() {
     try {
         init();
@@ -66,7 +66,7 @@ runtime::runtime() {
     }
 }
 
-/// @brief Releases runtime-owned Vulkan state in dependency-safe order.
+/// @brief Shuts down Vulkan and releases the runtime's resources.
 runtime::~runtime() {
     shutdown();
 }
@@ -108,8 +108,7 @@ void runtime::resolve_moltenvk_private_api() noexcept {
 #endif
 }
 
-/// @brief Checks whether the installed provider must supply shader modules.
-/// @return `true` when a provider with a module loader is installed.
+/// @brief Reports whether an installed shader provider can load modules.
 bool runtime::should_use_shader_provider_locked() const noexcept {
     runtime_shader_provider* provider = runtime_shader_provider_slot();
     return provider != nullptr && provider->load_module != nullptr;
@@ -129,18 +128,17 @@ void prepare_shader_provider_runtime() {
     }
 }
 
-/// @brief Selects a physical device and creates the synchronous Vulkan runtime.
+/// @brief Selects a compute device and creates the Vulkan resources used by the runtime.
 void runtime::init() {
-    // --- Instance ---
+    // Vulkan instance
     ensure_homebrew_moltenvk_icd_visible();
     ensure_vulkan_loader_loaded_for_runtime();
     prepare_shader_provider_runtime();
 #if defined(__APPLE__)
-    // MoltenVK can compile its internal command shaders while enumerating or
-    // creating the device. In a forked PostgreSQL backend that source compile
-    // path reaches MTLCompilerService over XPC and aborts, so install the
-    // cached command-library interpose before the first Vulkan loader query that
-    // may enter MoltenVK device setup.
+    // MoltenVK may compile internal command shaders during device setup. In a
+    // forked PostgreSQL backend, this can call MTLCompilerService over XPC and
+    // abort the process. Install the cached command-library hooks before any
+    // loader query can start that setup.
     install_moltenvk_command_library_interpose();
     if (is_runtime_metal_archive_configuration_installed()) {
         auto& command_state = moltenvk_command_interpose_state();
@@ -214,7 +212,7 @@ void runtime::init() {
 #endif
     resolve_moltenvk_private_api();
 
-    // --- Physical device selection (compute queue + shaderInt64) ---
+    // Select a device with a compute queue and 64-bit shader integers.
     std::uint32_t device_count = 0;
     check_vk(vkEnumeratePhysicalDevices(instance_, &device_count, nullptr),
              "vkEnumeratePhysicalDevices(count)");
@@ -231,7 +229,7 @@ void runtime::init() {
         VkPhysicalDeviceFeatures candidate_features{};
         vkGetPhysicalDeviceFeatures(candidate, &candidate_features);
         if (candidate_features.shaderInt64 != VK_TRUE) {
-            continue; // Vulkan chaining requires native 64-bit ints in the shader
+            continue; // Chaining shaders require 64-bit integer support.
         }
 
         std::uint32_t family_count = 0;
@@ -263,7 +261,7 @@ void runtime::init() {
         throw vulkan_runtime_error("no Vulkan device with a compute queue + shaderInt64");
     }
 
-    // --- Logical device (enable shaderInt64) ---
+    // Create the logical device with 64-bit shader integers enabled.
     std::vector<const char*> enabled_dev_exts;
     if (device_has_portability_subset) {
         enabled_dev_exts.push_back(k_portability_subset);
@@ -288,9 +286,8 @@ void runtime::init() {
         enabled_dev_exts.empty() ? nullptr : enabled_dev_exts.data();
     device_info.pEnabledFeatures = &enabled_features;
 
-    // Seal the selected physical-device UUID before vkCreateDevice: MoltenVK
-    // may create Metal compute pipelines during logical-device construction,
-    // so the process-wide interpose must already be bound to this identity.
+    // Bind the Metal archive hooks to the selected device before vkCreateDevice.
+    // MoltenVK may create compute pipelines during that call.
     VkPhysicalDeviceIDProperties selected_id_properties{};
     selected_id_properties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES;
     VkPhysicalDeviceProperties2 selected_properties2{};
@@ -412,7 +409,7 @@ void runtime::init() {
     vkGetDeviceQueue(device_, queue_family_, 0, &queue_);
     metallib_provider_capable_ = set_workgroup_size_mvk_ != nullptr;
 
-    // --- Limits + scalar-block-layout probe ---
+    // Query device limits and scalar block layout support.
     VkPhysicalDeviceScalarBlockLayoutFeatures scalar_features{};
     scalar_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SCALAR_BLOCK_LAYOUT_FEATURES;
     VkPhysicalDeviceFeatures2 features2{};
@@ -462,7 +459,7 @@ void runtime::init() {
     }
     features_.device_local_bytes = device_local;
 
-    // --- Command pool / buffer / fence ---
+    // Create command buffers and a completion fence.
     VkCommandPoolCreateInfo pool_info{};
     pool_info.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
     pool_info.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
@@ -489,7 +486,7 @@ void runtime::init() {
     fence_info.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
     check_vk(vkCreateFence(device_, &fence_info, nullptr, &fence_), "vkCreateFence");
 
-    // --- Fixed descriptor-set layout (4 storage buffers) + pipeline layout ---
+    // Chaining uses four storage buffers and one push-constant block.
     std::array<VkDescriptorSetLayoutBinding, 4> bindings{};
     for (std::uint32_t binding_index = 0; binding_index < 4; ++binding_index) {
         bindings[binding_index].binding = binding_index;
@@ -519,7 +516,7 @@ void runtime::init() {
     check_vk(vkCreatePipelineLayout(device_, &layout_info, nullptr, &pipeline_layout_),
              "vkCreatePipelineLayout");
 
-    // --- Descriptor pool + one reusable descriptor set ---
+    // Create a pool for one reusable descriptor set.
     VkDescriptorPoolSize pool_size{};
     pool_size.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
     pool_size.descriptorCount = 4;
@@ -540,11 +537,10 @@ void runtime::init() {
     check_vk(vkAllocateDescriptorSets(device_, &set_alloc, &descriptor_set_),
              "vkAllocateDescriptorSets");
 
-    // Pick the largest power-of-two anchor count the per-query
-    // bitonic sort can hold in one workgroup: bounded by workgroup invocations
-    // and by shared memory (each lane holds a 24-byte AnchorWire + a 4-byte
-    // original index). Anchor spans above this capacity are routed to the
-    // scalable stable GPU radix path; selected Vulkan lookup never host-sorts.
+    // Choose the largest power-of-two anchor count that fits one workgroup,
+    // accounting for invocation limits and shared memory. Each lane needs a
+    // 24-byte anchor and a 4-byte original index. Larger anchor ranges use
+    // GPU radix sort.
     {
         gpu_anchor_sort_capacity_ =
             compute_seed_anchor_bitonic_capacity(features_.max_workgroup_invocations,
@@ -578,8 +574,7 @@ void runtime::shutdown() noexcept {
         vkDeviceWaitIdle(device_);
         prefilter_recorded_commands_ = {};
         release_prefilter_workspace_locked();
-        // Release arena buffers (host-visible, owned via buffer RAII)
-        // and the GPU frontend descriptor pool before the device goes away.
+        // Free arena buffers and descriptor sets while the device is still alive.
         gpu_arena_.reset();
         if (dispatch_descriptor_pool_ != VK_NULL_HANDLE) {
             vkDestroyDescriptorPool(device_, dispatch_descriptor_pool_, nullptr);
@@ -617,9 +612,8 @@ void runtime::shutdown() noexcept {
     set_workgroup_size_mvk_ = nullptr;
     metallib_provider_capable_ = false;
 #if defined(__APPLE__)
-    // runtime initialization can still fail after vkCreateDevice.  Never
-    // leave process-wide Metal IMPs or resident archive authority behind when
-    // the owning Vulkan runtime is unavailable or being destroyed.
+    // Initialization can fail after vkCreateDevice. Restore the Metal methods
+    // and release archive state when this runtime is shut down.
     rollback_metal_pipeline_archive_interpose_install(metal_pipeline_archive_interpose_state());
 #endif
 }
@@ -643,9 +637,7 @@ std::uint32_t runtime::find_memory_type(std::uint32_t type_bits,
     throw vulkan_runtime_error("no compatible Vulkan memory type");
 }
 
-// ---------------------------------------------------------------------------
-// buffer allocation
-// ---------------------------------------------------------------------------
+// Buffer allocation
 
 /// @brief Creates one persistently mapped host-visible buffer.
 /// @param[in] bytes Logical buffer size in bytes. Zero requests allocate one byte.
@@ -674,9 +666,8 @@ buffer runtime::create_host_buffer(std::uint64_t bytes, VkBufferUsageFlags usage
     VkMemoryAllocateInfo alloc{};
     alloc.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
     alloc.allocationSize = reqs.size;
-    // These persistently mapped buffers are read as well as written by the
-    // CPU. Prefer cached host memory; coherent memory alone may be uncached
-    // on a discrete GPU and makes every host payload read unnecessarily slow.
+    // The CPU reads these buffers as well as writing them. Prefer cached host
+    // memory to avoid slow reads from uncached coherent memory on discrete GPUs.
     try {
         alloc.memoryTypeIndex = find_memory_type(
             reqs.memoryTypeBits,
@@ -728,10 +719,12 @@ buffer runtime::create_host_buffer(std::uint64_t bytes, VkBufferUsageFlags usage
                   mapped};
 }
 
-/// @brief Queries physical allocation bytes for a logical buffer shape.
-/// @param[in] bytes Logical buffer size in bytes. Zero is queried as one byte.
-/// @param[in] usage Vulkan usages that affect the memory requirements.
-/// @return Device-reported allocation size in bytes.
+/**
+ * @brief Asks Vulkan how many allocation bytes a buffer needs.
+ * @param[in] bytes Logical buffer size. Zero is treated as one byte.
+ * @param[in] usage Buffer usage flags used for the query.
+ * @return Vulkan's required allocation size in bytes.
+ */
 std::uint64_t runtime::buffer_memory_requirement_locked(std::uint64_t bytes,
                                                         VkBufferUsageFlags usage) const {
     if (bytes == 0u)
@@ -749,7 +742,7 @@ std::uint64_t runtime::buffer_memory_requirement_locked(std::uint64_t bytes,
     return requirements.size;
 }
 
-/// @brief Totals physical bytes retained by the shared prefilter workspace.
+/// @brief Totals physical bytes held by the shared prefilter workspace.
 std::uint64_t runtime::prefilter_workspace_allocation_bytes_locked() const noexcept {
     using bioseq::common::saturating_add;
     return saturating_add(
@@ -834,9 +827,11 @@ void runtime::ensure_prefilter_workspace_buffer_locked(buffer& allocation,
     prefilter_workspace_permit_.shrink_to(retained);
 }
 
-/// @brief Computes physical arena bytes including retained high-water capacity.
-/// @param[in] requested_bytes Logical arena size in bytes.
-/// @return Larger of the requested allocation requirement and retained arena allocation.
+/**
+ * @brief Returns the arena allocation size that a memory reservation must cover.
+ * @param[in] requested_bytes Requested logical capacity.
+ * @return The larger of Vulkan's required size and the current arena allocation.
+ */
 std::uint64_t runtime::gpu_arena_allocation_requirement(std::uint64_t requested_bytes) {
     std::lock_guard<std::mutex> guard(mu_);
     if (!features_.available) {
@@ -846,18 +841,19 @@ std::uint64_t runtime::gpu_arena_allocation_requirement(std::uint64_t requested_
         requested_bytes,
         VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
             VK_BUFFER_USAGE_TRANSFER_DST_BIT);
-    // The GPU frontend arena is persistent.  A smaller later case reuses the prior
-    // high-water allocation, so its count admission must cover that actual live
-    // allocation rather than only the current request's VkBuffer size.
+    // The arena keeps its allocation between requests. A smaller request must
+    // still account for the larger buffer that remains alive.
     const std::uint64_t current_requirement =
         gpu_arena_ ? gpu_arena_->device_buffer().allocation_bytes : 0u;
     return std::max(requested_requirement, current_requirement);
 }
 
-/// @brief Computes physical allocation bytes for one buffer usage contract.
-/// @param[in] requested_bytes Logical buffer size in bytes.
-/// @param[in] usage Vulkan usage flags for the proposed buffer.
-/// @return Device-reported allocation size in bytes.
+/**
+ * @brief Returns Vulkan's allocation size for the requested buffer.
+ * @param[in] requested_bytes Logical buffer size.
+ * @param[in] usage Buffer usage flags.
+ * @return Device-reported allocation size in bytes.
+ */
 std::uint64_t runtime::buffer_allocation_requirement(std::uint64_t requested_bytes,
                                                      VkBufferUsageFlags usage) {
     std::lock_guard<std::mutex> guard(mu_);
@@ -867,11 +863,16 @@ std::uint64_t runtime::buffer_allocation_requirement(std::uint64_t requested_byt
     return buffer_memory_requirement_locked(requested_bytes, usage);
 }
 
-/// @brief Creates one device buffer admitted against its physical allocation.
-/// @param[in] bytes Logical buffer size in bytes. Zero requests allocate one byte.
-/// @param[in] usage Vulkan usages enabled for the buffer.
-/// @return Move-only runtime-owned allocation, persistently mapped when supported.
-/// @throws vulkan_runtime_error When allocation or binding fails.
+/**
+ * @brief Creates a buffer, preferring device-local memory that the host can access.
+ *
+ * The caller handles memory admission. Check the returned `mapped` pointer before
+ * using host access, because a mapping failure leaves it null.
+ * @param[in] bytes Logical buffer size. Zero is treated as one byte.
+ * @param[in] usage Buffer usage flags.
+ * @return A move-only buffer owned by this runtime.
+ * @throws vulkan_runtime_error If creation, allocation, or binding fails.
+ */
 buffer runtime::create_device_buffer(std::uint64_t bytes, VkBufferUsageFlags usage) {
     if (!features_.available) {
         throw vulkan_runtime_error("create_device_buffer on unavailable device");
@@ -891,9 +892,8 @@ buffer runtime::create_device_buffer(std::uint64_t bytes, VkBufferUsageFlags usa
     VkMemoryRequirements reqs{};
     vkGetBufferMemoryRequirements(device_, buffer_handle, &reqs);
 
-    // GPU working sets prefer device-local memory. Cached host memory is a
-    // fallback, not a substitute for VRAM bandwidth on discrete GPUs. Callers
-    // performing repeated CPU payload searches use create_host_buffer instead.
+    // Prefer device-local memory for GPU work. Use create_host_buffer for
+    // buffers that the CPU searches repeatedly, where cached reads matter.
     std::uint32_t mem_type = 0;
     bool found = false;
     constexpr VkMemoryPropertyFlags mapped_memory_preferences[] = {
@@ -916,7 +916,7 @@ buffer runtime::create_device_buffer(std::uint64_t bytes, VkBufferUsageFlags usa
             found = true;
             break;
         } catch (const vulkan_runtime_error&) {
-            // This preference is unavailable; try the next compatible type.
+            // Try the next memory type preference.
         }
     }
     if (!found) {
@@ -943,10 +943,10 @@ buffer runtime::create_device_buffer(std::uint64_t bytes, VkBufferUsageFlags usa
         vkDestroyBuffer(device_, buffer_handle, nullptr);
         throw vulkan_runtime_error("vkBindBufferMemory(device)");
     }
-    // Map persistently: every selected type supports direct host access.
+    // Keep the host mapping for the buffer's lifetime.
     void* mapped = nullptr;
     if (vkMapMemory(device_, memory, 0, VK_WHOLE_SIZE, 0, &mapped) != VK_SUCCESS) {
-        // Leave a failed mapping unusable; the direct round-trip rejects it.
+        // Callers must reject a null mapping before accessing the buffer on the CPU.
         mapped = nullptr;
     }
     const bool footprint_reflected =
@@ -983,8 +983,6 @@ void runtime::destroy_buffer(buffer& allocation) noexcept {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Pipeline creation / cache
-// ---------------------------------------------------------------------------
+
 
 } // namespace bioseq::gpu::vulkan
