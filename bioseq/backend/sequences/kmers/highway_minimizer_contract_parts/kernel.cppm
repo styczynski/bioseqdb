@@ -1,6 +1,6 @@
 /**
  * @file kernel.cppm
- * @brief Target-neutral packed input and kernel dispatch contracts.
+ * @brief Shared packed-input views, output callbacks and minimizer kernel calls.
  */
 module;
 
@@ -31,19 +31,16 @@ import :execution;
 
 export namespace bioseq::minimizers {
 
-/** @brief Marks an invocation whose alphabet identity is not yet attached. */
+/** @brief Sentinel for a packed view whose alphabet has not been set. */
 inline constexpr std::uint8_t k_unbound_packed_alphabet_code =
     (std::numeric_limits<std::uint8_t>::max)();
 
 /**
- * @brief Describes a borrowed resident packed-sequence segment.
+ * @brief Borrows packed symbols in the local range [begin_symbol, end_symbol).
  *
- * `storage` points at the first aligned packed unit. `begin_symbol` is the
- * leading-symbol offset within that borrowed unit range and `end_symbol` is
- * the exclusive local packed coordinate, so the biological length is
- * `end_symbol - begin_symbol`. Continuation state owns the global biological
- * coordinate. Packing is least-significant-symbol first, matching the only
- * sequence storage order currently registered by the scheduler.
+ * storage starts at an aligned storage word. Symbol offsets are relative
+ * to that pointer, with the first symbol in the lowest bits of each word.
+ * Continuation state tracks the position in the full sequence.
  */
 struct packed_sequence_kernel_view final {
     const std::byte* storage = nullptr;
@@ -56,7 +53,7 @@ struct packed_sequence_kernel_view final {
     bool final_segment = false;
 };
 
-/** @brief Describes writable storage for live records of one exact layout. */
+/** @brief Writable space for a batch of one specified minimizer record format. */
 struct minimizer_sink_batch_view final {
     void* data = nullptr;
     std::size_t capacity = 0u;
@@ -69,13 +66,11 @@ static_assert(std::is_standard_layout_v<minimizer_sink_batch_view>);
 static_assert(std::is_trivially_copyable_v<minimizer_sink_batch_view>);
 
 /**
- * @brief Provides batch allocation and commit callbacks to a target kernel.
+ * @brief Lets a kernel acquire output space and commit batches of records.
  *
- * Callbacks are never invoked per base or lane.
- * `acquire` returns uninitialized storage whose identity is validated once by
- * the target collector before any `minimizer_representation` object is constructed.
- * Genuine u64 layouts may retain their raw representation through the
- * optional layout-checked fast path.
+ * acquire returns uninitialized storage. The collector checks its format,
+ * size and alignment before constructing records there. append_raw_u64 is
+ * an optional callback for sending packed 64-bit records directly.
  */
 struct minimizer_sink final {
     void* state = nullptr;
@@ -100,11 +95,8 @@ struct packed_sequence_kernel_fragment final {
 };
 
 /**
- * @brief Pulls packed fragments for one bounded interval.
- *
- * The target-local continuation
- * is created and finalized during the single table call. Only borrowed packed
- * fragments cross this neutral callback boundary.
+ * @brief Reads and releases borrowed fragments during one synchronous kernel call.
+ * The kernel keeps its continuation state while consuming the fragment interval.
  */
 struct packed_sequence_fragment_source final {
     void* state = nullptr;
@@ -120,14 +112,11 @@ struct packed_sequence_fragment_source final {
 };
 
 /**
- * @brief Adapts a neutral batch sink to an exact minimizer collector.
+ * @brief Writes minimizer records directly into batches supplied by the output sink.
  *
- * Exact kernels keep
- * their established collector surface. Acquire and commit are crossed only when a
- * full batch is ready or the coarse wrapper finishes. The batch is acquired
- * lazily from the sink and written in place, avoiding a second local buffer.
- *
- * @tparam p_minimizer_type Exact record constructed in sink-owned storage.
+ * Requests space lazily, commits full batches and keeps a final partial batch
+ * until flush() is called. The caller must check is_ok() because collect()
+ * cannot report a rejected sink.
  */
 template<class p_minimizer_type>
 class minimizer_sink_collector {
@@ -142,10 +131,7 @@ public:
     static_assert(std::is_trivially_copyable_v<p_minimizer_type>);
     static_assert(std::is_trivially_destructible_v<p_minimizer_type>);
 
-    /**
-     * @brief Binds a batch sink and validates its required callbacks.
-     * @param sink Neutral batch sink borrowed for the collector lifetime.
-     */
+    /** @brief Binds the sink and checks that acquire and commit callbacks are present. */
     explicit minimizer_sink_collector(minimizer_sink sink) noexcept
         : sink_(sink),
           failed_(sink_.acquire == nullptr || sink_.commit == nullptr) {}
@@ -167,11 +153,9 @@ public:
     }
 
     /**
-     * @brief Appends exact packed storage through the fastest compatible sink path.
-     * @tparam p_record_type Record type reconstructed from each raw word.
-     * @param raw First raw storage word.
-     * @param count Number of raw words.
-     * @return `false` when acquisition, identity validation, or commit fails.
+     * @brief Sends packed records through the raw callback or reconstructs them in batches.
+     * Flushes pending records first.
+     * @return false if the sink rejects raw records or supplies invalid output storage.
      */
     template<class p_record_type = p_minimizer_type>
     [[nodiscard]] bool append_raw_storage(
@@ -234,10 +218,7 @@ public:
         return true;
     }
 
-    /**
-     * @brief Validates reserve intent without allocating collector storage.
-     * @return `false` when the sink is already invalid.
-     */
+    /** @brief Reports whether the sink is usable without allocating or reserving records. */
     [[nodiscard]] bool reserve(std::size_t) const noexcept {
         return !failed_;
     }
@@ -247,12 +228,12 @@ public:
         return emitted_ + buffered_;
     }
 
-    /** @brief Returns the number of records accepted by the commit callback. */
+    /** @brief Returns the number of committed records, including direct raw appends. */
     [[nodiscard]] std::size_t committed_size() const noexcept {
         return emitted_;
     }
 
-    /** @brief Reports whether every sink operation has succeeded. */
+    /** @brief Reports whether the sink and output-buffer checks have succeeded. */
     [[nodiscard]] bool is_ok() const noexcept {
         return !failed_;
     }
@@ -274,9 +255,8 @@ public:
 
 private:
     /**
-     * @brief Acquires aligned storage for an exact number of records.
-     * @param minimum Minimum writable record count.
-     * @return `false` when the returned batch violates the sink contract.
+     * @brief Requests space for at least minimum records and checks its format and alignment.
+     * @return false if the returned buffer is incompatible or too small.
      */
     [[nodiscard]] bool acquire_slots(const std::size_t minimum) {
         const minimizer_sink_batch_view batch =
@@ -295,11 +275,7 @@ private:
         return true;
     }
 
-    /**
-     * @brief Constructs one record in the current sink-owned batch.
-     * @tparam p_value_type Movable or copied record reference type.
-     * @param sketch Record constructed in the pending batch.
-     */
+    /** @brief Copies or moves one record into the current output batch. */
     template<class p_value_type>
     void enqueue(p_value_type&& sketch) {
         if (failed_) {
@@ -313,10 +289,9 @@ private:
                 return;
             }
         }
-        // Preserve the exact object representation selected by the owner.
-        // In particular, split 128-bit layouts carry an explicit span byte;
-        // rebuilding from only hash/position/strand would silently replace a
-        // non-default span even though the neutral ABI promises exact p_record_type.
+        // Copy the complete record so fields such as a 128-bit record's span
+        // survive unchanged. Rebuilding from hash, position and strand
+        // would lose an explicitly supplied span.
         std::construct_at(
             pending_ + buffered_, std::forward<p_value_type>(sketch));
         ++buffered_;
@@ -331,7 +306,7 @@ private:
 
 namespace kernel_detail {
 
-/** @brief Supplies the fields required by the zero-copy compact range adapter. */
+/** @brief Header used to borrow packed memory as a compact sequence range. */
 struct borrowed_packed_header {
     const void* data = nullptr;
     std::size_t bp_size = 0u;
@@ -339,11 +314,7 @@ struct borrowed_packed_header {
     std::uint16_t padding_letters = 0u;
 };
 
-/**
- * @brief Brands a borrowed header with one alphabet and storage width.
- * @tparam p_alphabet Logical sequence alphabet.
- * @tparam p_storage_unit Packed storage word type.
- */
+/** @brief Associates the borrowed header with an alphabet and storage word type. */
 template<sequence_alphabet p_alphabet, class p_storage_unit>
 struct borrowed_packed_instance {
     using alphabet_type = p_alphabet;
@@ -357,13 +328,10 @@ struct borrowed_packed_instance {
 };
 
 /**
- * @brief Validates and borrows a packed view without materialization.
- * @tparam p_alphabet Logical sequence alphabet.
- * @tparam p_storage_unit Packed storage word type.
- * @tparam p_function Callback receiving the validated compact range.
- * @param sequence Neutral packed-sequence view.
- * @param function Callback invoked synchronously on success.
- * @return `false` when geometry, alignment, or storage width is invalid.
+ * @brief Calls function with a compact range that borrows the packed storage.
+ * Checks symbol width, storage size and alignment before the call.
+ * The constructed range covers [0, end_symbol). The caller handles begin_symbol.
+ * @return false if the packed view is inconsistent.
  */
 template<
     sequence_alphabet p_alphabet,
@@ -419,7 +387,7 @@ template<
 
 } // namespace kernel_detail
 
-/** Target-neutral completion status for a minimizer kernel call. */
+/** Shared completion status for minimizer kernel calls. */
 enum class minimizer_kernel_status : std::uint8_t {
     ok = 0u,
     invalid_sequence_view,
@@ -437,19 +405,16 @@ enum class minimizer_kernel_algorithm : std::uint8_t {
 };
 
 /**
- * Biological two_stack_nthash sub-route selected by neutral orchestration.
- *
- * This is not a Highway target choice.  The scheduler has already selected
- * one fixed-target table before either algorithm is entered. The target leaf
- * merely selects between the two existing two-stack algorithms for the
- * admitted input shape.
+ * Selects the two-stack algorithm after the scheduler has chosen a CPU target.
+ * One path carries state across ordered fragments. The other scans a complete
+ * resident sequence through vector streams.
  */
 enum class two_stack_route : std::uint8_t {
     chronological_continuation = 0u,
     resident_vector_stream = 1u,
 };
 
-/** @brief Carries complete type-erased input and output for one kernel call. */
+/** @brief Input view, minimizer settings and output sink for one kernel call. */
 struct minimizer_kernel_invocation final {
     packed_sequence_kernel_view sequence{};
     packed_sequence_fragment_source fragments{};
@@ -464,7 +429,7 @@ struct minimizer_kernel_invocation final {
     minimizer_sink sink{};
 };
 
-/** Operation-derived counters for the minimap2 reference SIMD kernel. */
+/** Work counters for the minimap2 reference SIMD kernel. */
 struct reference_minimizer_execution_stats final {
     std::uint64_t kernel_calls = 0u;
     std::uint64_t vector_callback_batches = 0u;
@@ -475,7 +440,7 @@ struct reference_minimizer_execution_stats final {
     std::uint64_t scalable_storage_fallback_minimizers_emitted = 0u;
 };
 
-/** @brief Holds counters for exactly the minimizer family named by `algorithm`. */
+/** @brief Groups work counters by algorithm and records the selected CPU target. */
 struct minimizer_execution_stats final {
     minimizer_kernel_algorithm algorithm = minimizer_kernel_algorithm::none;
     reference_minimizer_execution_stats reference{};
@@ -484,7 +449,7 @@ struct minimizer_execution_stats final {
     std::int64_t target = 0;
 };
 
-/** Target-neutral result returned by every registered minimizer kernel. */
+/** Shared result format returned by registered minimizer kernels. */
 struct minimizer_kernel_result final {
     minimizer_execution_stats stats{};
     std::size_t emitted = 0u;
@@ -492,17 +457,17 @@ struct minimizer_kernel_result final {
     /** Unchanged numeric value of the selected family's native status enum. */
     std::uint32_t family_status = 0u;
 
-    /** @brief Reports whether the neutral kernel call succeeded. */
+    /** @brief Reports whether the kernel call succeeded. */
     [[nodiscard]] constexpr bool is_ok() const noexcept {
         return status == minimizer_kernel_status::ok;
     }
 };
 
-/** Uniform function-pointer signature stored in the Highway dispatch table. */
+/** Function signature used for every entry in the minimizer dispatch table. */
 using minimizer_kernel_function = minimizer_kernel_result (*)(
     minimizer_kernel_invocation&);
 
-/** Registered minimizer algorithms for one Highway target. */
+/** Minimizer implementations compiled for one Highway CPU target. */
 struct minimizer_kernels final {
     minimizer_kernel_function minimap2_reference = nullptr;
     minimizer_kernel_function two_stack_nthash = nullptr;

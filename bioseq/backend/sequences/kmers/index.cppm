@@ -27,7 +27,7 @@ import bioseq.sequences.kmers.highway_minimizer_contract;
 
 export namespace bioseq::simd {
 
-/** Re-export the target-independent minimizer contract through the facade. */
+/** Export shared minimizer records and collectors through this module. */
 // clang-format off
 using ::bioseq::minimizers::minimizer_layout;
 using ::bioseq::minimizers::minimizer_representation;
@@ -42,10 +42,7 @@ using ::bioseq::minimizers::sketch_collector;
 using ::bioseq::minimizers::admitted_sketch_collector;
 // clang-format on
 
-/**
- * @brief Number of logical sequence bits represented by one alphabet symbol.
- * @tparam p_sequence_view Sequence view whose traits provide the logical width.
- */
+/** @brief Number of bits needed for one logical alphabet symbol. */
 template <class p_sequence_view>
 inline constexpr std::size_t logical_bits_per_symbol_v = [] {
     using traits = typename std::remove_cvref_t<p_sequence_view>::traits;
@@ -57,24 +54,12 @@ inline constexpr std::size_t logical_bits_per_symbol_v = [] {
 }();
 
 /**
- * @brief Collects minimizers from an iterator-bounded sequence view.
+ * @brief Collects scalar minimizers from the selected sequence interval.
  *
- * Resident and fragmented views share this scalar implementation. Ambiguous
- * nucleotide symbols reset both the rolling hash and minimizer window so no
- * k-mer spanning an unsupported symbol can be emitted.
- *
- * @tparam p_scalar_hasher_template Scalar rolling-hash provider.
- * @tparam p_minimizer_type Stored minimizer representation.
- * @tparam p_sequence_view Iterator-addressable sequence view.
- * @tparam p_iterator Iterator type used by the sequence view.
- * @tparam p_hash_value Unsigned rolling-hash value type.
- * @tparam p_collector_type Destination collector type.
- * @param[in,out] collector Receives minimizers in sequence order.
- * @param[in] sequence Sequence view that owns both iterator bounds.
- * @param[in] sequence_begin First symbol in the requested range.
- * @param[in] sequence_end One-past-last symbol in the requested range.
- * @param[in] window_size Number of k-mers in each minimizer window.
- * @param[in] kmer_size Number of symbols in each rolling hash.
+ * Rolling hashes feed a circular window. A new minimum replaces the current
+ * one, and an expired minimum triggers a window scan. Tied hashes keep
+ * their separate positions. Ambiguous nucleotides restart k-mer construction.
+ * Reported positions start at zero within the selected interval.
  */
 template <template <typename p_hash_alphabet> typename p_scalar_hasher_template,
           class p_minimizer_type,
@@ -98,9 +83,8 @@ inline void collect_minimizers_view(p_collector_type& collector,
 
     using sequence_traits = typename p_sequence_view::traits;
     using alphabet_type = typename sequence_traits::alphabet_type;
-    // Nucleotide ranks use minimap2's two-bit nt4 code space. The dna5
-    // ambiguity symbol maps to the reset sentinel. Other alphabets retain their
-    // native ranks.
+    // Convert nucleotide ranks to minimap2's A/C/G/T codes. DNA5 N
+    // becomes the ambiguity sentinel. Other alphabets keep their ranks.
     static constexpr bool k_is_nucleotide = seqan3::nucleotide_alphabet<alphabet_type>;
     using hash_alphabet = std::conditional_t<k_is_nucleotide, seq::dna4, alphabet_type>;
     using hasher_type =
@@ -120,7 +104,7 @@ inline void collect_minimizers_view(p_collector_type& collector,
     auto iter = sequence.template iter<logical_rank>(sequence_begin);
     const auto end = sequence.template iter<logical_rank>(sequence_end);
 
-    // Consumes one valid rank run while preserving rolling hash and window state.
+    // Fill the first window, then continue using the same rolling state.
     auto collect_range = [&collector,
                           &iter,
                           &end,
@@ -136,8 +120,7 @@ inline void collect_minimizers_view(p_collector_type& collector,
         for (; iter != end && (valid_length < window_size + kmer_size || !p_is_initializing);
              ++iter, ++sequence_position) {
             const auto nucl = *iter;
-            // The nt4 sentinel marks an ambiguous nucleotide and therefore a
-            // hard rolling-window boundary.
+            // An nt4 sentinel restarts the run of valid nucleotide symbols.
             std::uint8_t code;
             bool is_ambiguous;
             if constexpr (k_is_nucleotide) {
@@ -148,28 +131,19 @@ inline void collect_minimizers_view(p_collector_type& collector,
                 is_ambiguous = (logical_bits_per_symbol_v<p_sequence_view> > 2 && nucl >= 4);
             }
             if (is_ambiguous) {
-                // Reset both state machines so a k-mer spanning the ambiguity can
-                // never reach the output.
+                // Mark this position unusable and restart k-mer construction.
                 buffer.push_back(p_minimizer_type::maximum());
                 valid_length = 0u;
-                // hasher_type's copy-assignment is deleted. Reset its rolling state
-                // in place (destroy + reconstruct) so the post-N k-mer is clean.
+                // Reconstruct the hasher in place because it cannot be copy-assigned.
                 hasher.~hasher_type();
                 ::new (static_cast<void*>(&hasher)) hasher_type(kmer_size);
             } else {
                 const auto [canonical_hash, strand] =
                     hasher.next(static_cast<p_hash_value>(code), static_cast<p_hash_value>(code));
 
-                // NOTE: minimap2 skips "symmetric k-mers" (fwd == rc palindromes) by
-                // `continue`ing past the push/update logic — the iteration disappears from
-                // the minimizer window entirely. The SIMD path cannot mirror that without
-                // per-lane pos tracking (different lanes see different palindromes), so to
-                // keep scalar and SIMD in lock-step we let the palindrome iter through but
-                // push `minimap_sketch_data::maximum()`. A max-valued sketch can never become a
-                // window minimum, so the "don't know the strand" intent is preserved: the
-                // palindromic k-mer never gets emitted as a minimizer. The difference is
-                // only structural (window slot is consumed instead of skipped), which is
-                // exactly what the SIMD path does with the equivalent IfThenElse mask.
+                // A palindromic k-mer occupies a window slot with the maximum sentinel.
+                // The SIMD path uses the same rule, so neither emits a palindrome.
+                // Minimap2 itself skips that slot, which can change later window minima.
                 const auto kmer_span = (valid_length + 1 < kmer_size && p_is_initializing)
                                            ? valid_length + 1
                                            : kmer_size;
@@ -178,8 +152,8 @@ inline void collect_minimizers_view(p_collector_type& collector,
                 if (strand == sequence_strand_mode::equal) {
                     buffer.push_back(p_minimizer_type::maximum());
                 } else if (valid_length >= kmer_size) {
-                    // Span remains part of the parity calculation even though the
-                    // compact output stores only hash, position, and strand.
+                    // Compact records carry no span field. The constructor uses its
+                    // default span for wider record formats.
                     (void)kmer_span;
                     buffer.push_back(p_minimizer_type(
                         /*kmer=*/canonical_hash,
@@ -192,7 +166,7 @@ inline void collect_minimizers_view(p_collector_type& collector,
 
             if ((valid_length == window_size + kmer_size - 1 && p_is_initializing) &&
                 !current_min.is_max()) { // first full window
-                // Emits every first-window record tied with the selected minimum.
+                // Emit the other positions tied with the first window's minimum.
                 buffer.for_each_filled_value_unsafe(
                     [&collector, &current_min](const auto&, const auto& candidate, const auto&) {
                         if (p_minimizer_type::does_sketch_match(current_min, candidate)) {
@@ -225,8 +199,8 @@ inline void collect_minimizers_view(p_collector_type& collector,
                     });
 
                 if ((valid_length >= window_size + kmer_size - 1 || !p_is_initializing) &&
-                    !current_min.is_max()) { // write identical k-mers
-                    // Emits all distinct ring records tied with the replacement minimum.
+                    !current_min.is_max()) { // emit other tied positions
+                    // Emit tied records with a different position or strand.
                     buffer.for_each_filled_value_unsafe(
                         [&collector,
                          &current_min](const auto&, const auto& candidate, const auto&) {
@@ -239,8 +213,7 @@ inline void collect_minimizers_view(p_collector_type& collector,
         }
     };
 
-    // First kmers. Walk the prefix in INIT mode (until the first window
-    // is fully populated), then the rest in non-INIT mode.
+    // Initialize through the first complete window, then scan the remaining symbols.
     collect_range(std::bool_constant<true>{});
     collect_range(std::bool_constant<false>{});
 
@@ -249,7 +222,7 @@ inline void collect_minimizers_view(p_collector_type& collector,
     }
 }
 
-/** Re-export backend selection and sorted-pair contracts. */
+/** Export backend choices and the position/hash pair type. */
 // clang-format off
 using ::bioseq::minimizers::minimizer_sketch_backend;
 using ::bioseq::minimizers::minimizer_sketch_backend_name;
@@ -258,16 +231,9 @@ using ::bioseq::minimizers::minimizer_sorted_pair;
 // clang-format on
 
 /**
- * @brief Collects one bounded lazy-sequence segment with the scalar backend.
- * @tparam p_minimizer_type Stored minimizer representation.
- * @tparam p_alphabet Alphabet used by the lazy sequence.
- * @tparam p_collector_type Destination collector type.
- * @param[in,out] collector Receives minimizers in sequence order.
- * @param[in] sequence Lazy sequence view that owns the selected segment.
- * @param[in] lo_bp Inclusive base-pair offset.
- * @param[in] hi_bp Exclusive base-pair offset.
- * @param[in] window_size Number of k-mers in each minimizer window.
- * @param[in] kmer_size Number of symbols in each rolling hash.
+ * @brief Collects scalar minimizers from the lazy range [lo_bp, hi_bp).
+ * Output positions are relative to lo_bp.
+ * @throws std::out_of_range if the interval lies outside the sequence or is reversed.
  */
 template <class p_minimizer_type, sequence_alphabet p_alphabet, class p_collector_type>
 [[gnu::always_inline]] inline void
@@ -296,12 +262,7 @@ template <class p_sequence>
 inline constexpr std::size_t letters_per_unit_v =
     std::remove_cvref_t<p_sequence>::traits::letters_per_unit;
 
-/**
- * @brief Converts a base-pair count to packed storage units without truncation.
- * @tparam p_sequence Packed sequence type.
- * @param[in] bp Base-pair count to cover.
- * @return Number of storage units required for the count.
- */
+/** @brief Rounds a symbol count up to the number of packed storage words needed. */
 template <class p_sequence>
 [[nodiscard]] inline bioseq::storage::sequence_size_t
 unit_count_for_bp(bioseq::storage::sequence_size_t bp) noexcept {
@@ -318,12 +279,7 @@ template <class p_minimizer_type>
 inline constexpr bioseq::storage::sequence_size_t minimizer_pos_field_mask_v =
     static_cast<bioseq::storage::sequence_size_t>(p_minimizer_type::k_position_field_mask);
 
-/**
- * @brief Reports whether every output position fits the minimizer representation.
- * @tparam p_minimizer_type Stored minimizer representation.
- * @param[in] collected_bp Base-pair span addressed by collected positions.
- * @return `true` when every position is representable.
- */
+/** @brief Checks that zero-based positions across collected_bp symbols fit the record. */
 template <class p_minimizer_type>
 [[nodiscard]] inline bool
 collected_span_fits_minimizer_pos_field(bioseq::storage::sequence_size_t collected_bp) noexcept {
@@ -331,19 +287,9 @@ collected_span_fits_minimizer_pos_field(bioseq::storage::sequence_size_t collect
 }
 
 /**
- * @brief Collects minimizers from a concrete compact sequence range.
- * @tparam p_scalar_hasher_template Scalar rolling-hash provider.
- * @tparam p_minimizer_type Stored minimizer representation.
- * @tparam p_sequence_range Compact sequence range type.
- * @tparam p_iterator Iterator type used by the range.
- * @tparam p_hash_value Unsigned rolling-hash value type.
- * @tparam p_collector_type Destination collector type.
- * @param[in,out] collector Receives minimizers in sequence order.
- * @param[in] sequence Compact sequence range that owns both iterator bounds.
- * @param[in] sequence_begin First symbol in the requested range.
- * @param[in] sequence_end One-past-last symbol in the requested range.
- * @param[in] window_size Number of k-mers in each minimizer window.
- * @param[in] kmer_size Number of symbols in each rolling hash.
+ * @brief Collects scalar minimizers between compact-sequence iterators.
+ * Uses the selected hasher and runtime window and k-mer sizes.
+ * Output positions start at zero within the selected interval.
  */
 template <template <typename p_hash_alphabet> typename p_scalar_hasher_template,
           class p_minimizer_type,
@@ -371,21 +317,7 @@ inline void collect_minimizers(p_collector_type& collector,
         collector, sequence, sequence_begin, sequence_end, window_size, kmer_size);
 }
 
-/**
- * @brief Collects minimizers with compile-time window and k-mer sizes.
- * @tparam p_window_size Number of k-mers in each minimizer window.
- * @tparam p_kmer_size Number of symbols in each rolling hash.
- * @tparam p_scalar_hasher_template Scalar rolling-hash provider.
- * @tparam p_minimizer_type Stored minimizer representation.
- * @tparam p_sequence_range Compact sequence range type.
- * @tparam p_iterator Iterator type used by the range.
- * @tparam p_hash_value Unsigned rolling-hash value type.
- * @tparam p_collector_type Destination collector type.
- * @param[in,out] collector Receives minimizers in sequence order.
- * @param[in] sequence Compact sequence range that owns both iterator bounds.
- * @param[in] sequence_begin First symbol in the requested range.
- * @param[in] sequence_end One-past-last symbol in the requested range.
- */
+/** @brief Collects scalar minimizers using template-specified window and k-mer sizes. */
 template <std::size_t p_window_size,
           std::size_t p_kmer_size,
           template <typename p_hash_alphabet> typename p_scalar_hasher_template,

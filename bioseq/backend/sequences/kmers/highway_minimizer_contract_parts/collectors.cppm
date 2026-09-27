@@ -1,6 +1,6 @@
 /**
  * @file collectors.cppm
- * @brief Exact minimizer collectors and output-layout dispatch.
+ * @brief Stores minimizer records and identifies supported output formats.
  */
 module;
 
@@ -30,13 +30,9 @@ import :representation;
 export namespace bioseq::minimizers {
 
 /**
- * @brief Collects records of one exact minimizer representation.
- *
- * The default representation is the canonical 64-bit minimap2 sketch record.
- * Wider position and hash layouts select another `minimizer_representation`
- * instantiation without changing collection semantics.
- *
- * @tparam p_minimizer_type Packed record stored by the collector.
+ * @brief Appends minimizer records to a vector in collection order.
+ * The record type controls how hashes and positions are packed. The default
+ * is minimap_sketch_data, a 64-bit record with a 28-bit position field.
  */
 template<class p_minimizer_type = minimap_sketch_data>
 struct basic_sketch_collector {
@@ -45,13 +41,10 @@ private:
 public:
     using minimizer_type = p_minimizer_type;
 
-    /** Construct an empty collector without speculative allocation. */
+    /** Creates an empty collector without allocating a record buffer. */
     basic_sketch_collector() = default;
 
-    /**
-     * @brief Reserves storage for a known output bound.
-     * @param expected_count Maximum anticipated record count.
-     */
+    /** @brief Reserves room for at least expected_count records. */
     void reserve(size_t expected_count) {
         sketches_.reserve(expected_count);
     }
@@ -74,8 +67,8 @@ public:
 
     /**
      * @brief Appends an already-constructed record batch.
-     * @param records Records retained in their existing order.
-     * @return `false` when the resulting size exceeds vector limits.
+     * @param records Records copied in their existing order.
+     * @return false when the resulting size exceeds vector limits.
      */
     [[nodiscard, always_inline]] bool append_records(
         const std::span<const p_minimizer_type> records)
@@ -88,11 +81,8 @@ public:
     }
 
     /**
-     * @brief Appends exact raw storage emitted by a SIMD collector.
-     * @tparam p_record_type Record type reconstructed from each raw word.
-     * @param raw First raw storage word.
-     * @param count Number of raw words.
-     * @return `false` when the resulting size exceeds vector limits.
+     * @brief Reconstructs records from packed words and appends them in order.
+     * @return false if the resulting record count exceeds the vector limit.
      */
     template<class p_record_type = p_minimizer_type>
     [[nodiscard, always_inline]] bool append_raw_storage(
@@ -120,7 +110,7 @@ public:
         return sketches_;
     }
 
-    /** @brief Borrows all records for the collector lifetime. */
+    /** @brief Returns a reference to the collector's record vector. */
     constexpr const std::vector<p_minimizer_type>& extract_sketches_data() const & {
         return sketches_;
     }
@@ -130,7 +120,7 @@ public:
         return std::move(sketches_);
     }
 
-    /** @brief Returns sorted unique position and hash pairs. */
+    /** @brief Returns unique (k-mer end position, hash) pairs sorted by position, then hash. */
     constexpr auto extract_pairs() const {
         auto pairs = sketches_
                | std::ranges::views::transform([](const p_minimizer_type& el) -> std::pair<size_t, uint64_t> {
@@ -143,32 +133,23 @@ public:
         return pairs;
     }
 
-    /** @brief Removes all records while retaining allocated capacity. */
+    /** @brief Removes all records while keeping allocated capacity. */
     [[always_inline]] constexpr void clear() {
         sketches_.clear();
     }
 };
 
-/** Collector for the canonical 28-position-bit minimap2 representation. */
+/** Collector for 64-bit minimizer records with 28-bit positions. */
 using sketch_collector = basic_sketch_collector<minimap_sketch_data>;
 
 /**
- * @brief Collects minimizers under a caller-supplied memory permit.
+ * @brief Stores minimizers while reserving memory for the vector's capacity.
  *
- * Vector capacity is owned by the supplied memory
- * admission permit.  `p_permit_type` is intentionally a template parameter: the core
- * k-mer module stays independent of the backend memory-admission module while
- * PostgreSQL and tests can supply `memory_permit`.
+ * Growth reserves room for both old and replacement buffers before allocating.
+ * A denied reservation stops further appends. Check is_ok() after collection.
  *
- * The permit is declared before the vector, hence the vector is destroyed
- * first.  Each growth reserves the old retained capacity plus headroom for the
- * replacement allocation before calling `std::vector::reserve()`, then
- * reconciles the permit to the allocator-reported retained capacity.  A denied
- * growth is sticky and emits no partial record. Callers must check `is_ok()` after
- * kernels whose scalar `collect()` surface cannot return a status.
- *
- * @tparam p_minimizer_type Packed record stored by the collector.
- * @tparam p_permit_type Move-only permit with grow, shrink, and byte queries.
+ * The permit type is supplied by the caller so this module stays independent
+ * of the memory controller. Member order frees the vector before its permit.
  */
 template<class p_minimizer_type, class p_permit_type>
 class admitted_sketch_collector {
@@ -177,9 +158,9 @@ public:
     static constexpr std::size_t k_initial_growth_records = 8u;
 
     /**
-     * @brief Binds an empty vector to an exact zero-byte permit.
-     * @param permit Permit that owns all future vector capacity.
-     * @param allocation_headroom_factor Allocator peak multiplier for growth.
+     * @brief Starts an empty collector with a valid zero-byte memory permit.
+     * allocation_headroom_factor reserves extra room for allocator growth.
+     * An invalid permit or zero factor marks the collector as failed.
      */
     explicit admitted_sketch_collector(
             p_permit_type permit,
@@ -200,18 +181,14 @@ public:
         admitted_sketch_collector&&) = delete;
 
     /**
-     * @brief Reserves admitted capacity for an anticipated record count.
-     * @param expected_count Required vector capacity.
-     * @return `false` when capacity cannot be admitted safely.
+     * @brief Reserves memory and vector capacity for at least expected_count records.
+     * @return false if the collector has failed or cannot reserve enough memory.
      */
     [[nodiscard]] bool reserve(std::size_t expected_count) {
         return ensure_capacity(expected_count);
     }
 
-    /**
-     * @brief Appends a movable record if its capacity is admitted.
-     * @param sketch Record transferred into the collector.
-     */
+    /** @brief Moves one record into the vector if its memory reservation succeeds. */
     [[always_inline]] void collect(p_minimizer_type&& sketch) {
         if (sketches_.size() == sketches_.max_size()) {
             failed_ = true;
@@ -220,10 +197,7 @@ public:
         }
     }
 
-    /**
-     * @brief Appends a copied record if its capacity is admitted.
-     * @param sketch Record copied into the collector.
-     */
+    /** @brief Copies one record into the vector if its memory reservation succeeds. */
     [[always_inline]] void collect(const p_minimizer_type& sketch) {
         if (sketches_.size() == sketches_.max_size()) {
             failed_ = true;
@@ -233,9 +207,8 @@ public:
     }
 
     /**
-     * @brief Appends a batch after admitting its final capacity.
-     * @param records Records retained in their existing order.
-     * @return `false` when capacity cannot be admitted safely.
+     * @brief Reserves room for the whole batch before appending records in order.
+     * @return false if the size or memory reservation is rejected.
      */
     [[nodiscard, always_inline]] bool append_records(
         const std::span<const p_minimizer_type> records)
@@ -251,11 +224,8 @@ public:
     }
 
     /**
-     * @brief Appends exact raw storage after admitting its final capacity.
-     * @tparam p_record_type Record type reconstructed from each raw word.
-     * @param raw First raw storage word.
-     * @param count Number of raw words.
-     * @return `false` when capacity cannot be admitted safely.
+     * @brief Reserves room, reconstructs records from packed words and appends them.
+     * @return false if the size or memory reservation is rejected.
      */
     template<class p_record_type = p_minimizer_type>
     [[nodiscard, always_inline]] bool append_raw_storage(
@@ -281,18 +251,18 @@ public:
         return true;
     }
 
-    /** @brief Borrows all collected records for the collector lifetime. */
+    /** @brief Returns a reference to the collected record vector. */
     [[nodiscard]] const std::vector<p_minimizer_type>&
     extract_sketches_data() const & noexcept {
         return sketches_;
     }
 
-    /** @brief Reports whether every requested growth and append succeeded. */
+    /** @brief Reports whether capacity checks and memory reservations have succeeded. */
     [[nodiscard]] bool is_ok() const noexcept {
         return !failed_;
     }
 
-    /** @brief Returns bytes currently retained by the capacity permit. */
+    /** @brief Returns the bytes currently reserved by the memory permit. */
     [[nodiscard]] std::uint64_t admitted_capacity_bytes() const noexcept {
         return permit_.bytes();
     }
@@ -324,9 +294,9 @@ private:
     }
 
     /**
-     * @brief Grows vector capacity while retaining its allocation peak permit.
-     * @param required Minimum record capacity.
-     * @return `false` when admission or capacity reconciliation fails.
+     * @brief Grows the record buffer after reserving memory for the allocation peak.
+     * Reduces the reservation to the buffer capacity after allocation.
+     * @return false if capacity checks or memory reservations fail.
      */
     [[nodiscard]] bool ensure_capacity(std::size_t required) {
         if (failed_) return false;
@@ -344,11 +314,9 @@ private:
                 ? old_capacity * 2u
                 : required;
         }
-        // A coarse exact-p_record_type sink batch must retain the same observable
-        // admission/capacity boundary as the established per-record collector.
-        // Walk the *logical* geometric capacities, but perform only the final
-        // allocation: this preserves the last old-plus-replacement peak without
-        // reintroducing every intermediate copy.
+        // Use the capacity and peak reservation that repeated single-record
+        // appends would reach. Allocate only the final buffer to avoid
+        // copying through every intermediate size.
         while (requested_capacity < required) {
             predecessor_capacity = requested_capacity;
             if (requested_capacity > sketches_.max_size() / 2u) {
@@ -391,9 +359,8 @@ private:
         std::uint64_t retained_bytes = 0u;
         if (!checked_bytes(sketches_.capacity(), retained_bytes)
             || retained_bytes > allocation_headroom) {
-            // The allocation already exists.  Retain all reserved headroom
-            // until destruction and fail closed instead of emitting into an
-            // allocation whose exact ownership could not be reconciled.
+            // Keep the reservation while this allocation exists. Stop collecting
+            // because its reported capacity exceeds the reserved allowance.
             failed_ = true;
             return false;
         }
@@ -411,10 +378,7 @@ inline constexpr std::size_t k_max_two_stack_window = 256u;
 inline constexpr std::size_t k_max_two_stack_kmer = 32u;
 inline constexpr std::size_t k_max_exact_two_stack_kmer = 31u;
 
-/**
- * @brief Requires the exact native-uint64 minimizer surface used by SIMD sinks.
- * @tparam p_minimizer_type Candidate minimizer record.
- */
+/** @brief Requires a 64-bit minimizer record with packed-word access and field masks. */
 template<class p_minimizer_type>
 concept exact_simd_minimizer_representation =
     std::is_trivially_copyable_v<p_minimizer_type>
@@ -434,10 +398,7 @@ concept exact_simd_minimizer_representation =
         { p_minimizer_type::k_position_shift } -> std::convertible_to<unsigned>;
     };
 
-/**
- * @brief Requires the existing split 128-bit minimizer surface used by typed sinks.
- * @tparam p_minimizer_type Candidate minimizer record.
- */
+/** @brief Requires a 128-bit minimizer record stored as two accessible 64-bit halves. */
 template<class p_minimizer_type>
 concept wide_simd_minimizer_representation =
     std::is_standard_layout_v<p_minimizer_type>
@@ -464,17 +425,15 @@ concept wide_simd_minimizer_representation =
             -> std::convertible_to<std::uint64_t>;
     };
 
-/** Native raw-word or split typed record accepted by the two-stack SIMD recurrence. */
+/** Record formats accepted by the two-stack SIMD minimizer kernel. */
 template<class p_minimizer_type>
 concept two_stack_simd_minimizer_representation =
     exact_simd_minimizer_representation<p_minimizer_type>
     || wide_simd_minimizer_representation<p_minimizer_type>;
 
 /**
- * @brief Identifies exact record layouts reachable by generated minimizers.
- *
- * This is invocation metadata for one coarse typed switch, never a generated
- * source-record axis or a per-record packing authority.
+ * @brief Identifies the output record format requested from a generated kernel.
+ * The selected minimizer_representation type defines how that format is packed.
  */
 enum class minimizer_output_layout : std::uint8_t {
     unsupported = 0u,
@@ -493,10 +452,7 @@ enum class minimizer_output_layout : std::uint8_t {
     sequence_log2_63_kmer_20_uint128 = 13u,
 };
 
-/**
- * @brief Maps a minimizer record type to its exact runtime layout identity.
- * @tparam p_minimizer_type Candidate minimizer record.
- */
+/** @brief Returns a record type's output format, or unsupported for unregistered types. */
 template<class p_minimizer_type>
 inline constexpr minimizer_output_layout k_minimizer_output_layout = [] {
     using output_type = std::remove_cv_t<p_minimizer_type>;

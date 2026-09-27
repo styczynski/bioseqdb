@@ -38,11 +38,7 @@ enum class minimizer_sketch_backend : std::uint8_t {
     bounded_nthash_simd = 3,
 };
 
-/**
- * @brief Returns the stable diagnostic name for a minimizer backend.
- * @param backend Backend identity.
- * @return Static lower-snake-case name.
- */
+/** @brief Returns the diagnostic name of a backend, or "unknown". */
 [[nodiscard]] constexpr const char* minimizer_sketch_backend_name(
     const minimizer_sketch_backend backend) noexcept
 {
@@ -57,18 +53,14 @@ enum class minimizer_sketch_backend : std::uint8_t {
     return "unknown";
 }
 
-/**
- * @brief Tests whether a backend executes the Vulkan segment route.
- * @param backend Backend identity.
- * @return `true` only for `vulkan_segment`.
- */
+/** @brief Checks whether the selected backend is vulkan_segment. */
 [[nodiscard]] constexpr bool is_vulkan_minimizer_backend(
     const minimizer_sketch_backend backend) noexcept
 {
     return backend == minimizer_sketch_backend::vulkan_segment;
 }
 
-/** Canonical sorted (position, hash) pair. */
+/** A (position, hash) pair used for sorted minimizer output. */
 using minimizer_sorted_pair =
     std::pair<std::uint64_t, std::uint64_t>;
 
@@ -91,17 +83,13 @@ enum class two_stack_continuation_status : std::uint8_t {
     collector_overflow,
 };
 
-/** Operation-originated two_stack_nthash kernel identity. */
+/** Two-stack implementation recorded for the executed kernel. */
 enum class exact_simd_kernel : std::uint8_t {
     generic_u64 = 0,
     kmer_15_window_10_byte_8_uint32_hash,
 };
 
-/**
- * @brief Returns the stable diagnostic name for a continuation status.
- * @param status Continuation outcome.
- * @return Static lower-snake-case name.
- */
+/** @brief Returns the diagnostic name of a continuation status, or "unknown". */
 [[nodiscard]] constexpr std::string_view two_stack_continuation_status_name(
     two_stack_continuation_status status) noexcept
 {
@@ -139,14 +127,10 @@ enum class exact_simd_kernel : std::uint8_t {
     return "unknown";
 }
 
-/** @brief Reports a strict exact-SIMD continuation rejection. */
+/** @brief Reports a rejected two-stack SIMD operation with its status code. */
 class exact_simd_runtime_error final : public std::runtime_error {
 public:
-    /**
-     * @brief Builds a strict SIMD rejection with its typed status.
-     * @param status Continuation rejection status.
-     * @param operation Operation name prefixed to the diagnostic.
-     */
+    /** @brief Builds an error message from the operation name and continuation status. */
     exact_simd_runtime_error(
         two_stack_continuation_status status,
         std::string_view operation)
@@ -156,7 +140,7 @@ public:
               + std::string{two_stack_continuation_status_name(status)}),
           status_(status) {}
 
-    /** @brief Returns the typed continuation rejection status. */
+    /** @brief Returns the continuation error code. */
     [[nodiscard]] two_stack_continuation_status status() const noexcept {
         return status_;
     }
@@ -165,7 +149,7 @@ private:
     two_stack_continuation_status status_;
 };
 
-/** Operation-derived counters for the two-stack minimizer algorithms. */
+/** Work counters for the two-stack minimizer algorithms. */
 struct two_stack_execution_stats {
     std::uint64_t bp_consumed = 0;
     std::uint64_t minimizers_emitted = 0;
@@ -207,15 +191,13 @@ struct two_stack_execution_stats {
     std::uint64_t scalar_event_records = 0;
     std::uint64_t scalar_sort_records = 0;
     std::uint64_t scalar_dedup_records = 0;
-    // Scalable-vector storage fallbacks are distinct from fixed-width routes.
+    // Count scalable-vector storage fallbacks separately from fixed-width SIMD work.
     std::uint64_t scalable_storage_fallback_calls = 0;
     std::uint64_t scalable_storage_fallback_input_symbols = 0;
     std::uint64_t scalable_storage_fallback_minimizers_emitted = 0;
-    // Full, contiguous dna4/u32 inputs may use the resident vector stream
-    // collector. These counters are written by the wrapper that
-    // actually invokes that collector; they are deliberately separate from
-    // the chronological continuation counters below.  In particular, a
-    // resident call is never relabelled as a typed continuation call.
+    // These counters record calls that scan a complete DNA4/u32 sequence
+    // through the vector-stream collector. Continuation calls use their
+    // own counters, allowing the checker to detect mixed execution paths.
     std::uint64_t resident_vector_stream_kernel_calls = 0;
     std::uint64_t resident_vector_stream_single_calls = 0;
     std::uint64_t resident_vector_stream_dual_calls = 0;
@@ -233,10 +215,8 @@ struct two_stack_execution_stats {
     bool saturated = false;
 
     /**
-     * @brief Adds a counter while preserving overflow as saturation state.
-     * @param destination Aggregate counter updated in place.
-     * @param increment Counter value to add.
-     * @param did_saturate Set when the sum exceeds `uint64_t`.
+     * @brief Adds a counter, stopping at UINT64_MAX on overflow.
+     * did_saturate records an overflow and remains set once raised.
      */
     static void add_counter(
             std::uint64_t& destination,
@@ -251,10 +231,7 @@ struct two_stack_execution_stats {
         destination += increment;
     }
 
-    /**
-     * @brief Merges another execution using saturating counters.
-     * @param other Execution counters to aggregate.
-     */
+    /** @brief Adds another execution's counters and carries forward overflow flags. */
     void merge(const two_stack_execution_stats& other) noexcept {
         saturated = saturated || other.saturated;
 #define BIOSEQ_MERGE_TWO_STACK_COUNTER(name) \
@@ -334,16 +311,15 @@ struct two_stack_execution_stats {
     }
 
     /**
-     * @brief Validates route identity and mutually exclusive counter families.
-     * @param require_nonempty_vector_work Require authenticated nonempty SIMD work.
-     * @return `true` when all counter relationships are valid.
+     * @brief Checks that counters describe one supported SIMD execution path.
+     * Rejects overflow, fallback work and incompatible groups of counters.
+     * require_nonempty_vector_work also requires actual SIMD work.
      */
     [[nodiscard]] constexpr bool is_internally_consistent(
             bool require_nonempty_vector_work = false) const noexcept {
         const std::uint64_t maximum =
             (std::numeric_limits<std::uint64_t>::max)();
-        // A fixed-width Highway identity cannot authenticate a scalable or
-        // scalar storage fallback; reject every non-zero fallback payload.
+        // Fixed-width SIMD statistics must contain no scalable-storage fallback work.
         if (scalable_storage_fallback_calls != 0
             || scalable_storage_fallback_input_symbols != 0
             || scalable_storage_fallback_minimizers_emitted != 0) {
@@ -562,12 +538,11 @@ inline constexpr std::uint32_t k_bounded_nthash_scheme_id =
 inline constexpr std::size_t k_bounded_nthash_max_window = 64;
 
 /**
- * @brief Records counters for one packed bounded ntHash execution.
+ * @brief Counts bounded ntHash work and records its input and SIMD settings.
  *
- * The scalar append count is truthful orchestration after fixed-width SIMD
- * has selected a complete (hash, position, strand) event. It is not a
- * hash/window fallback. All scalar-work and fallback counters must remain zero
- * on every is_internally_consistent execution.
+ * SIMD selects the hashes and window minima. Scalar collector appends only
+ * transfer selected records. The consistency check rejects scalar hashing,
+ * scalar window selection and fallback calls.
  */
 struct bounded_nthash_execution_stats {
     std::uint32_t scheme_id = 0;
@@ -582,7 +557,7 @@ struct bounded_nthash_execution_stats {
     std::uint64_t physical_vector_lanes = 0;
     std::uint64_t vector_registers_per_step = 0;
     std::uint64_t packed_decode_batches = 0;
-    /** SIMD lane visits, including per-lane k-mer and window context rather than unique input symbols. */
+    /** SIMD lane visits, including symbols revisited in overlapping k-mer and window context. */
     std::uint64_t packed_decode_lane_visits = 0;
     std::uint64_t hash_initialization_batches = 0;
     std::uint64_t rolling_hash_batches = 0;
@@ -614,10 +589,8 @@ struct bounded_nthash_execution_stats {
         const bounded_nthash_execution_stats&) const noexcept = default;
 
     /**
-     * @brief Adds a counter while preserving overflow as saturation state.
-     * @param destination Aggregate counter updated in place.
-     * @param increment Counter value to add.
-     * @param did_saturate Set when the sum exceeds `uint64_t`.
+     * @brief Adds a counter, stopping at UINT64_MAX on overflow.
+     * did_saturate remains set after an overflow.
      */
     static void saturating_add(
         std::uint64_t& destination,
@@ -634,8 +607,8 @@ struct bounded_nthash_execution_stats {
     }
 
     /**
-     * @brief Aggregates one segment after checking algorithm identity.
-     * @param other Segment counters to aggregate.
+     * @brief Adds another segment's counters and flags incompatible settings.
+     * An empty aggregate takes the first segment's settings.
      */
     void merge(const bounded_nthash_execution_stats& other) noexcept {
         if (other == bounded_nthash_execution_stats{}) return;
@@ -693,9 +666,9 @@ struct bounded_nthash_execution_stats {
     }
 
     /**
-     * @brief Validates identity and vector-only execution relationships.
-     * @param require_nonempty_vector_work Require nonempty fixed-width work.
-     * @return `true` when all identity and counter relationships are valid.
+     * @brief Checks ntHash settings and relationships between its work counters.
+     * Rejects mixed settings, overflow and scalar fallback work.
+     * require_nonempty_vector_work also requires nonzero SIMD stage counts.
      */
     [[nodiscard]] constexpr bool is_internally_consistent(
         bool require_nonempty_vector_work = true) const noexcept {
@@ -736,7 +709,7 @@ struct bounded_nthash_execution_stats {
     }
 };
 
-/** @brief Couples a bounded ntHash status with its execution counters. */
+/** @brief Bounded ntHash status and work counters. */
 struct bounded_nthash_result {
     bounded_nthash_status status = bounded_nthash_status::ok;
     bounded_nthash_execution_stats stats{};
@@ -746,11 +719,7 @@ struct bounded_nthash_result {
         return status == bounded_nthash_status::ok;
     }
 
-    /**
-     * @brief Validates successful kernel-local counters.
-     * @param require_nonempty_vector_work Require nonempty fixed-width work.
-     * @return `true` when status and counters describe a valid execution.
-     */
+    /** @brief Requires a successful result with consistent ntHash work counters. */
     [[nodiscard]] constexpr bool has_valid_kernel_stats(
         bool require_nonempty_vector_work = true) const noexcept {
         return is_ok() && stats.is_internally_consistent(require_nonempty_vector_work);
