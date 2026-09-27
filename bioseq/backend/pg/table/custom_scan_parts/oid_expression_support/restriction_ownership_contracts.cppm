@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Declares exact mmsearch restriction ownership without importing planner walks.
+ * @brief Declares selection of the mmsearch clauses a scan will execute.
  */
 module;
 extern "C" {
@@ -23,13 +23,19 @@ import :custom_scan_oid_expression_support_oid_catalog_contracts;
 import :custom_scan_oid_expression_support_expression_analysis_contracts;
 export import :custom_scan_oid_expression_support_storage_pruning_contracts;
 
-/** @brief Test whether a primary and fallback mmsearch use the admitted option pairing. */
+/**
+ * @brief Checks whether two calls can share the supported fallback alignment settings.
+ *
+ * The primary must explicitly require execution without an index. Its other
+ * options must be unspecified, and the extra call must use the two-argument
+ * form with default options.
+ */
 export [[nodiscard]] bool bounded_batch_fallback_options_are_supported(
     FuncExpr* primary,
     FuncExpr* extra,
     const bioseq_stub_oids& oids);
 
-/** @brief Select the bounded mmsearch restriction set owned by one custom scan. */
+/** @brief Selects one mmsearch call or the supported join-parameter and constant-filter pair. */
 export [[nodiscard]] owned_mmsearch_restriction choose_owned_mmsearch_restriction(
     PlannerInfo* root,
     RelOptInfo* rel,
@@ -39,7 +45,7 @@ export [[nodiscard]] owned_mmsearch_restriction choose_owned_mmsearch_restrictio
     Relids param_relids,
     const bioseq_stub_oids& oids);
 
-/** @brief Copy restrictions while excluding the exact mmsearch-owned clauses. */
+/** @brief Builds a restriction list excluding clauses assigned to the mmsearch executor. */
 export [[nodiscard]] List* restrictions_without_owned_mmsearch(
     List* restrictions,
     List* owned,

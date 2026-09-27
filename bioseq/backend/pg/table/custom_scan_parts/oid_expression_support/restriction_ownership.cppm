@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Selects the exact owned mmsearch restriction and residual quals.
+ * @brief Selects the mmsearch clauses a base scan can execute and separates the remaining filters.
  */
 module;
 #include <bioseq/pg_compat.h>
@@ -35,11 +35,14 @@ using namespace bioseq::postgres::support;
 
 export {
     /**
-     * @brief Selects the bounded set of mmsearch restrictions one custom scan may own.
+     * @brief Selects mmsearch clauses that this base scan can execute.
      *
-     * Selection uses original planner-node identity so later path construction removes only
-     * the restrictions whose execution the custom scan assumes.
-     * @throws PostgreSQL ERROR when stacked calls cannot satisfy the single admitted fallback shape.
+     * Keep the original restriction nodes so plan construction removes the same
+     * clauses. Copy their expressions and fold constant options. A scan may own
+     * one call, or the supported parameterized-call and constant-filter pair.
+     * Return an empty result when this path cannot take ownership.
+     *
+     * @throws PostgreSQL ERROR for unsupported combinations of stacked calls.
      */
     [[nodiscard]] owned_mmsearch_restriction
     choose_owned_mmsearch_restriction(PlannerInfo* root,
@@ -62,16 +65,16 @@ export {
             return {};
         }
         if (semantic_calls != static_cast<std::size_t>(list_length(semantic_restrictions))) {
-            /* More than one occurrence inside one Boolean expression is never the
-             * narrow Param-primary/Const-extra ownership shape below. */
+            /* Multiple mmsearch calls inside one Boolean expression cannot use
+             * the separate primary-call and constant-filter path below. */
             ereport(ERROR,
                     (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
                      errmsg("stacked mmsearch qualifiers are unsupported"),
                      errhint("Split the alignment predicates into separate query levels.")));
         }
 
-        /* Fail closed under row-level security, security-barrier quals, leaky
-         * ordering, pseudoconstants, or volatile siblings. */
+        /* Keep security-sensitive filters and volatile sibling expressions
+         * in PostgreSQL's original execution order. */
         if (root == nullptr || root->parse == nullptr || root->parse->hasRowSecurity ||
             rte == nullptr || rte->securityQuals != NIL) {
             return {};
@@ -83,13 +86,11 @@ export {
             }
         }
 
-        /* A parameterized baserel candidate can rendezvous restrictions from any
-         * number of higher owners.  Provenance, not operand syntax, decides whether
-         * this candidate may classify them together. */
+        /* Parameterized paths can receive mmsearch clauses from several joins.
+         * Check where each restriction belongs before combining any of them. */
         if (semantic_calls > 1u) {
-            /* Walk PostgreSQL Lists directly.  Do not retain a std::vector (or any
-             * other nontrivial C++ owner) across ereport(ERROR): PostgreSQL's longjmp
-             * would skip its destructor in the backend. */
+            /* Use PostgreSQL lists here. ereport(ERROR) jumps past C++ destructors,
+             * so a local vector would leak its allocation on that path. */
             for (ListCell* current_cell = list_head(semantic_restrictions); current_cell != nullptr;
                  current_cell = lnext(semantic_restrictions, current_cell)) {
                 RestrictInfo* current = reinterpret_cast<RestrictInfo*>(lfirst(current_cell));
@@ -178,8 +179,8 @@ export {
         FuncExpr* constant_expr = nullptr;
         for (RestrictInfo* semantic_restriction :
              postgres_list<RestrictInfo>(semantic_restrictions)) {
-            /* Nested Boolean/CASE/NOT shapes are not equivalent to a consumed,
-             * strict top-level predicate and therefore remain executable SQL quals. */
+            /* Consume only a whole mmsearch predicate. Removing a call from
+             * inside CASE, NOT, or another Boolean expression could change its result. */
             FuncExpr* original =
                 try_cast_pg_node<FuncExpr>(reinterpret_cast<Node*>(semantic_restriction->clause));
             if (original == nullptr || !is_mmsearch_funcid(original->funcid, oids) ||
@@ -227,18 +228,15 @@ export {
                                           query_var->vartype == oids.bioseq_seq_type_oid &&
                                           query_var->vartypmod >= 0 &&
                                           (same_relation || available_outer);
-                    /* A same-relation per-row query remains a valid sole owner, but
-                     * cannot be combined with a constant extra: the dispatcher has one
-                     * dynamic primary slot and the bounded stacked contract is specifically
-                     * the parameterized join case. */
+                    /* A query column from this same row is supported as a single call.
+                     * The two-call path below requires a parameter supplied by a join. */
                     if (same_relation && semantic_calls == 2) {
                         parameterized_query = false;
                     }
                 } else {
-                    /* A complete base-local query recipe (slice/concat/reverse,
-                     * CASE/COALESCE, dynamic bounds, or an opaque effectful arm) is
-                     * evaluated once per row after the target.  The later validation
-                     * checks every Var/nulling frontier and derives its bound type. */
+                    /* A query expression from this relation can be evaluated per row.
+                     * Check its shape here. Full validation later checks its column
+                     * references and determines the sequence type. */
                     parameterized_query =
                         semantic_calls == 1 &&
                         coarse_base_mmsearch_operand_candidate(query,
@@ -319,17 +317,11 @@ export {
                     primary_query_var->varno > static_cast<Index>(list_length(root->parse->rtable))
                 ? nullptr
                 : rt_fetch(primary_query_var->varno, root->parse->rtable);
-        /* Preserve the established general stacked-qualifier rejection.  The sole
-         * admitted exception is the BatchJoin fallback contract: an explicitly
-         * require-absent primary over an outer Var from an ordinary relation becomes
-         * PARAM_EXEC for a Bioseq target scan whose same target column also has one
-         * non-NULL, default-options Const filter.  Both calls therefore share the
-         * exact biological parameters, while require-absent is a valid execution of
-         * the extra's default "allow" index policy.  A second Bioseq relation,
-         * PARAM_EXTERN, same-row Var, view/subquery, security-qualified provider,
-         * NULL extra, or independent option set remains unsupported; accepting those
-         * would silently broaden the generic multi-owner surface beyond the one
-         * executor shape that has an AND-stack runtime and integration contract. */
+        /* The two-call case uses one join parameter from an ordinary table
+         * and one non-NULL constant filter on the same target column. The
+         * primary explicitly requires execution without an index. The extra
+         * uses default options, so both calls can share the alignment settings.
+         * Reject a query source with security filters or a different relation kind. */
         const bool bounded_batch_fallback =
             primary_query_var != nullptr &&
             bms_is_member(static_cast<int>(primary_query_var->varno), param_relids) &&
@@ -354,7 +346,13 @@ export {
                                           list_make1(constant_expr)};
     }
 
-    /** @brief Copies a restriction list while excluding the exact clauses owned by mmsearch. */
+    /**
+     * @brief Builds a list of restrictions left for PostgreSQL after mmsearch ownership is assigned.
+     *
+     * Match original restrictions by pointer. For private copies, also accept an
+     * equal clause expression. The returned list reuses the remaining restriction
+     * nodes.
+     */
     [[nodiscard]] List* restrictions_without_owned_mmsearch(List* restrictions,
                                                             List* owned,
                                                             bool restrictions_are_private_copies) {
@@ -375,7 +373,7 @@ export {
         return result.release();
     }
 
-    /** @brief Removes every remaining mmsearch expression from storage-pruning qualifiers. */
+    /** @brief Excludes whole filter expressions containing mmsearch from storage pruning. */
     [[nodiscard]] List* storage_prunable_quals_without_mmsearch(List* quals,
                                                                 const bioseq_stub_oids& oids) {
         postgres_list<Node> filtered;

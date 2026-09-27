@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Owns Bioseq OID lookup, invalidation, and syscache validation.
+ * @brief Looks up and caches the SQL function and type OIDs used by Bioseq scans.
  */
 module;
 #include <bioseq/pg_compat.h>
@@ -29,7 +29,7 @@ export import :custom_scan_oid_expression_support_oid_catalog_contracts;
 
 export {
 
-    /** @brief Resolves a fully defined type without failing during partial extension setup. */
+    /** @brief Returns the named type's OID, or InvalidOid if it is missing or still a shell type. */
     [[nodiscard]] Oid lookup_defined_type_missing_ok(const char* schema_name,
                                                      const char* type_name) {
         const Oid namespace_oid = get_namespace_oid(schema_name, /*missing_ok=*/true);
@@ -49,7 +49,7 @@ export {
         return is_defined ? type_oid : InvalidOid;
     }
 
-    /** @brief Returns the extension installation schema when the extension is available. */
+    /** @brief Returns Bioseq's installation schema, or no value if it cannot be found. */
     [[nodiscard]] std::optional<std::string> bioseq_extension_schema_missing_ok() {
         const Oid extension_oid = get_extension_oid("bioseq", /*missing_ok=*/true);
         if (!OidIsValid(extension_oid))
@@ -94,7 +94,7 @@ export {
                                              /*missing_ok=*/true));
     }
 
-    /** @brief Checks that the complete type and function surface needed by custom scans exists. */
+    /** @brief Checks that the types and exact function signatures needed by custom scans exist. */
     [[nodiscard]] bool bioseq_stub_oid_surface_ready() {
         const std::optional<std::string> extension_schema = bioseq_extension_schema_missing_ok();
         if (!extension_schema)
@@ -163,8 +163,12 @@ export {
     }
 
     /**
-     * @brief Resolves the complete Bioseq stub catalog after extension installation.
-     * @throws PostgreSQL ERROR when a required type or function is absent.
+     * @brief Looks up the SQL function and type OIDs required by custom scans.
+     *
+     * Find mmsearch and its options type in the extension's installation schema.
+     * The sequence functions and match helpers use the bioseq schema.
+     *
+     * @throws PostgreSQL ERROR if a required type or function is missing.
      */
     [[nodiscard]] bioseq_stub_oids lookup_stub_oids() {
         bioseq_stub_oids result{};
@@ -256,12 +260,12 @@ export {
         return result;
     }
 
-    /** @brief Holds the lazily initialized OID surface for one PostgreSQL backend. */
+    /** @brief Holds this backend's cached function and type OIDs and whether they are current. */
     struct cached_stub_oids {
         bioseq_stub_oids oids{};
         bool initialised = false;
     };
-    /** @brief Backend-local OID cache invalidated by catalog and relation callbacks. */
+    /** @brief Caches Bioseq OIDs for this PostgreSQL backend. */
     cached_stub_oids g_cached_stub_oids{};
 
     /** @brief Marks the backend-local OID cache stale after relation invalidation. */
@@ -354,8 +358,12 @@ export {
     }
 
     /**
-     * @brief Returns the backend-local stub OIDs, registering invalidation callbacks on first use.
-     * @throws PostgreSQL ERROR when the complete extension catalog cannot be resolved.
+     * @brief Returns this backend's Bioseq function and type OIDs.
+     *
+     * Reload stale or missing catalog entries. Register catalog-invalidation
+     * callbacks on first use so later lookups refresh the cache after changes.
+     *
+     * @throws PostgreSQL ERROR if required extension objects cannot be found.
      */
     [[nodiscard]] const bioseq_stub_oids& get_cached_stub_oids() {
         if (g_cached_stub_oids.initialised && cached_stub_oids_are_valid(g_cached_stub_oids.oids)) {
@@ -375,7 +383,12 @@ export {
         return g_cached_stub_oids.oids;
     }
 
-    /** @brief Returns cached stub OIDs only when the extension catalog surface is complete. */
+    /**
+     * @brief Returns the cached OIDs when the required extension objects are available.
+     *
+     * Return null during missing or incomplete extension setup. Otherwise refresh
+     * the cache as needed.
+     */
     [[nodiscard]] const bioseq_stub_oids* try_get_cached_stub_oids() {
         if (g_cached_stub_oids.initialised && cached_stub_oids_are_valid(g_cached_stub_oids.oids)) {
             return &g_cached_stub_oids.oids;
