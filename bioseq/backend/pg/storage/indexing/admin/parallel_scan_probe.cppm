@@ -1,6 +1,6 @@
 /**
  * @file admin/parallel_scan_probe.cppm
- * @brief Owns hash-major restart inspection and authenticated parallel transport probes.
+ * @brief Check stored hash-major indexes and measure parallel row reads.
  */
 module;
 
@@ -43,13 +43,13 @@ import bioseq.postgres.storage.indexing.admin;
 export namespace bioseq::storage::indexing {
 
 /**
- * @brief Resolve and fully authenticate one READY hash-major generation.
- * @param rel_oid Source Bioseq relation.
- * @param index_name Registered logical index name.
- * @param sequence_rowno Source-row ordinal and query key.
- * @return Fixed-wire metadata plus recomputed directory, control, and posting receipts.
+ * @brief Check a stored hash-major generation against its visible source.
  *
- * The restart audit validates the 128-bit source identity and bounded-rereads every stream.
+ * Reread every stream and compare its row count, byte count, and checksum with
+ * the manifest. The source identity and active k/w profile must also match.
+ * The caller must own a Bioseq table with one sequence column.
+ *
+ * @return Stored metadata and the counts and checksums recomputed from catalog rows.
  */
 [[nodiscard]] inline hash_major_minimizer_generation_inspection
 inspect_hash_major_minimizer_generation(Oid rel_oid,
@@ -269,7 +269,7 @@ inspect_hash_major_minimizer_generation(Oid rel_oid,
         bioseq::postgres::support::invoke_pg_as_cpp(
             [finished_snapshot] { UnregisterSnapshot(finished_snapshot); });
     } catch (...) {
-        // The translated PostgreSQL ERROR owns snapshot cleanup.
+        // PostgreSQL error cleanup releases the registered snapshot.
         registered_snapshot = nullptr;
         throw;
     }
@@ -277,10 +277,9 @@ inspect_hash_major_minimizer_generation(Oid rel_oid,
 }
 
 /**
- * Run the authenticated process-parallel row transport probe.
- *
- * This path validates READY metadata and source authority once. It then
- * delegates the timed row transport to the hash-major storage session.
+ * Check the source and selected index profile, then measure parallel reads of
+ * the hash-major rows. The storage session validates the READY generation
+ * before workers read it.
  */
 [[nodiscard]] inline hash_major_minimizer_parallel_scan_stats
 hash_major_minimizer_parallel_scan_probe_impl(Oid rel_oid,
@@ -399,7 +398,7 @@ hash_major_minimizer_parallel_scan_probe_impl(Oid rel_oid,
             [finished_snapshot] { UnregisterSnapshot(finished_snapshot); });
         return result;
     } catch (...) {
-        // The SQL ERROR boundary owns registered snapshot cleanup.
+        // PostgreSQL error cleanup releases the registered snapshot.
         registered_snapshot = nullptr;
         throw;
     }

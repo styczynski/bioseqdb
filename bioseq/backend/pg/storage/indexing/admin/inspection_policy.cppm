@@ -1,6 +1,6 @@
 /**
  * @file admin/inspection_policy.cppm
- * @brief PostgreSQL minimizer index inspection, audit, cleanup and policy support.
+ * @brief Inspect stored minimizer indexes, remove index tables, and select read policies.
  */
 module;
 #include <fmt/format.h>
@@ -43,12 +43,9 @@ static_assert(__cplusplus >= 202302L, "C++23-or-later");
 
 export namespace bioseq::storage::indexing {
 
-/// Resolve and fully validate one READY grouped-SoA generation under one
-/// registered MVCC snapshot. This setup-only bridge reads no payload extents
-/// and never enables ordinal 2. A preliminary metadata pass obtains and
-/// validates the generation geometry against the active k/w and fixed ABI.
-/// The inspector then independently revalidates the source row and
-/// complete metadata directory.
+/// Inspect a READY grouped-SoA generation under one registered snapshot.
+/// Check its source and directory against the current k/w settings and storage
+/// format before returning metadata. This inspection reads no index payload extents.
 [[nodiscard]] ready_minimizer_generation_inspection inspect_ready_minimizer_generation_impl(
     Oid rel_oid, std::string_view index_name, std::uint64_t sequence_rowno) {
     const bool is_bioseq_table =
@@ -392,10 +389,9 @@ export namespace bioseq::storage::indexing {
     return total;
 }
 
-/// Fail-closed, metadata-only validation for one no-index policy. It reads
-/// Bioseq stripe metadata for target cardinality and PostgreSQL catalogs/index
-/// relations for persisted-index absence. It never forms a target tuple and
-/// therefore cannot hydrate or decode a sequence source.
+/// Count source rows and stored index data for a no-index test. Source row
+/// counts come from stripe metadata, so this audit does not read or decode
+/// sequence values. The caller checks the returned counts for index absence.
 [[nodiscard]] cold_no_index_absence_audit
 cold_no_index_absence_audit_impl(Oid rel_oid, std::string_view name) {
     if (name != "minimizers_per_fragment" && name != "minimizers_per_sequence") {
@@ -437,7 +433,7 @@ cold_no_index_absence_audit_impl(Oid rel_oid, std::string_view name) {
     return audit;
 }
 
-/// Drop every physical index relation through the shared cleanup boundary.
+/// Drop all index tables and translate failures after C++ cleanup has finished.
 void drop_all_index_tables_impl() {
     ErrorData* postgres_error = nullptr;
     std::array<char, 2048> cpp_error_detail{};
@@ -456,8 +452,7 @@ void drop_all_index_tables_impl() {
         unknown_cpp_error = true;
     }
 
-    // The SPI session and every owning C++ value have unwound before the
-    // PostgreSQL C ABI is re-entered.
+    // Report the saved error after the SPI session and C++ owners have closed.
     if (postgres_error != nullptr)
         ReThrowError(postgres_error);
     if (cpp_error) {
@@ -474,7 +469,7 @@ void drop_all_index_tables_impl() {
     }
 }
 
-/// Persist one active read index for every sequence column of a relation.
+/// Make this index the active read choice for every sequence column.
 [[nodiscard]] int set_active_read_index_impl(Oid rel_oid, std::string_view name) {
     if (!name_is_registered(name))
         return 1;
