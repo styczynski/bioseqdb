@@ -3,8 +3,7 @@
  * @brief Exercises Bioseq administration views and native table options.
  */
 
-// Integration coverage for the Bioseq administration views and the native
-// table-option functions.
+// Tests option changes, reset behavior, validation errors, and table ownership.
 
 #include <fmt/format.h>
 #include <catch2/catch_test_macros.hpp>

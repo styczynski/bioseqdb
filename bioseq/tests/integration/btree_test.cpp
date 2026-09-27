@@ -1,9 +1,9 @@
 /**
  * @file btree_test.cpp
- * @brief Verifies btree and hash index behavior for Bioseq sequences.
+ * @brief Checks equality and range queries using Bioseq sequence indexes.
  *
- * The cases cover equality, range ordering, disabled sequential scans, and
- * planner index-scan settings on heap relations.
+ * Tests btree and hash indexes on heap tables, including queries with
+ * sequential scans disabled.
  */
 
 #include <fmt/format.h>
