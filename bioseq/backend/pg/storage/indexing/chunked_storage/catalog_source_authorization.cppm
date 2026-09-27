@@ -1,6 +1,6 @@
 /**
  * @file catalog_source_authorization.cppm
- * @brief Defines generation-row validation and snapshot-bound source authorization.
+ * @brief Check index rows before writing and match an index to the sequence visible to a query.
  */
 module;
 
@@ -32,25 +32,25 @@ export module bioseq.postgres.storage.indexing.chunked_storage:catalog_source_au
 
 import std;
 import bioseq.common.checked_arithmetic;
-import bioseq.postgres.support; // bioseq::postgres::support::try_open_postgres_relation, bioseq::postgres::support::find_primary_key_oid
-import bioseq.postgres.storage.manager; // seq_caches, sequence_locator, format helpers
+import bioseq.postgres.support; // Relation opening and primary-key lookup.
+import bioseq.postgres.storage.manager; // Sequence fragment tables and locator helpers.
 import bioseq.storage.layout;           // sequence_locator
-import bioseq.indexing.type; // sequence_index_layout, index_sub_key_t, k_max_index_chunk_size_bytes, sentinels
-import bioseq.indexing.minimizer_fragment_image; // explicit fixed-endian minimizer fragment image image ABI
-import bioseq.postgres.table.io; // begin_column_read/read_next_column_row/end_column_read/column_read_state
-import bioseq.postgres.types.compact_sequence; // bioseq::pg_types::seq, dispatch_instance
+import bioseq.indexing.type; // Index row addresses, chunk limits and reserved keys.
+import bioseq.indexing.minimizer_fragment_image; // On-disk format for minimizer fragment indexes.
+import bioseq.postgres.table.io; // Read sequence and fragment rows by row number.
+import bioseq.postgres.types.compact_sequence; // PostgreSQL sequence values.
 import bioseq.sequences;                       // compact_sequence_range
-import bioseq.sequences.simd;                  // canonical bounded base decoding
+import bioseq.sequences.simd;                  // Decode packed sequence fragments.
 
 import :catalog_contracts;
 import :catalog_metadata;
 export namespace bioseq::storage::indexing {
-/// Validate one current-generation address and its row checksum before a PostgreSQL
-/// tuple is formed. The active-head row is never accepted by the immutable
-/// generation sink and has a separate atomic publication helper below.
+/// Check an index row address and checksum before the writer forms a PostgreSQL tuple.
+/// Publishing the active generation uses a separate writer.
 struct minimizer_generation_row_validator;
 
-/// Move-only authority for a row validated against the frozen wire contract.
+/// An index row that has passed address and checksum checks.
+/// Only minimizer_generation_row_validator can create one from an unchecked row.
 class validated_minimizer_generation_row {
   private:
     minimizer_generation_row_view row_{};
@@ -68,10 +68,8 @@ class validated_minimizer_generation_row {
     }
 };
 
-/// Sole validation and construction authority. Defining this after the token is
-/// complete avoids instantiating std::expected<validated_minimizer_generation_row, ...>
-/// while preserving the invariant that no caller can construct an unchecked
-/// token.
+/// Create validated rows after checking their address and checksum.
+/// Define this after the row type so std::expected has a complete value type.
 struct minimizer_generation_row_validator {
   private:
     [[nodiscard]] static std::expected<void, minimizer_generation_encoding_error>
@@ -129,8 +127,8 @@ struct minimizer_generation_row_validator {
         return validated_minimizer_generation_row{row};
     }
 
-    /// Compute and bind the sole grouped-SoA payload-row CRC. The caller does
-    /// not provide a checksum that would require a second verification pass.
+    /// Check a grouped payload row and calculate its checksum for the writer.
+    /// The checksum covers both the row address and its bytes.
     [[nodiscard]] static std::expected<validated_minimizer_generation_row,
                                        minimizer_generation_encoding_error>
     validate_and_checksum(std::uint64_t expected_generation_id,
@@ -156,7 +154,7 @@ struct minimizer_generation_row_validator {
     }
 };
 
-/// Validate one row before forming a PostgreSQL tuple.
+/// Check the index row address and checksum before writing its PostgreSQL tuple.
 [[nodiscard]] inline std::expected<validated_minimizer_generation_row,
                                    minimizer_generation_encoding_error>
 validate_minimizer_generation_row_for_write(std::uint64_t expected_generation_id,
@@ -175,9 +173,7 @@ same_minimizer_generation_sequence_locator(const sequence_locator& left,
            left.source_epoch == right.source_epoch;
 }
 
-/// Canonical locator-derived identity. The independently streamed content
-/// checksum prevents a same-length mutation from being hidden by a
-/// self-consistent rewrite of the head and manifest.
+/// Return the source epoch that identifies this stored sequence version.
 [[nodiscard]] constexpr std::uint64_t
 minimizer_generation_source_identity(Oid /*main_relfilenode*/,
                                      const minimizer_generation_source_locator& source) noexcept {
@@ -520,9 +516,8 @@ minimizer_generation_source_identity(Oid /*main_relfilenode*/,
     return authorization;
 }
 
-/// Fixed work equation for cold, timed source admission. These counters travel
-/// inside the move-only authorization and are rechecked by the read session, so a later
-/// accidental source scan cannot be benchmark-accepted as an O(1) load.
+/// Count the source reads needed to open an index.
+/// The reader checks these counts to catch an unexpected scan of sequence fragments.
 struct minimizer_generation_catalog_source_stats {
     std::uint64_t parent_rows_read = 0;
     std::uint64_t catalog_rows_read = 0;
@@ -538,10 +533,9 @@ struct minimizer_generation_catalog_source_stats {
     }
 };
 
-/// O(1), PostgreSQL-owned source authorization for a cold reader. It validates one
-/// visible parent stub and one source-epoch catalog tuple, plus constant-size
-/// relation storage-incarnation metadata. It never opens a source fragment
-/// read state and never decodes bases.
+/// Details of the sequence version visible to this query, checked against its
+/// source catalog row and storage tables. Creating this authorization reads
+/// the parent locator and catalog metadata without reading sequence fragments.
 class minimizer_generation_catalog_source_authorization {
   private:
     minimizer_generation_source_locator source_{};
@@ -639,7 +633,7 @@ class minimizer_generation_catalog_source_authorization {
         return table_name_;
     }
 
-    /** Check the immutable catalog identity expected by a hash-major reader. */
+    /** Check that this authorization belongs to the requested reader and snapshot. */
     [[nodiscard]] bool matches_hash_major_reader(Snapshot expected_snapshot,
                                                  Oid expected_database_oid,
                                                  Oid expected_tablespace_oid,
@@ -653,7 +647,7 @@ class minimizer_generation_catalog_source_authorization {
                table_name_ == expected_table_name;
     }
 
-    /** Copy the authenticated source work counters into one reader receipt. */
+    /** Copy source lookup counts and merge cold preparation statistics into the reader statistics. */
     void record_hash_major_reader_stats(minimizer_generation_read_stats& destination) const {
         destination.source_parent_rows_read = stats_.parent_rows_read;
         destination.source_catalog_rows_read = stats_.catalog_rows_read;
@@ -664,7 +658,7 @@ class minimizer_generation_catalog_source_authorization {
         destination.cold.merge(cold_stats_);
     }
 
-    /** Consume the authorization without releasing PostgreSQL resources. */
+    /** Clear this authorization after the reader consumes it. PostgreSQL keeps resource ownership. */
     void invalidate_after_consumption() noexcept {
         invalidate_();
     }
@@ -905,9 +899,8 @@ authorize_minimizer_generation_catalog_source_pg(
             [state] { end_column_read(state->source_read); });
         state->source_read = nullptr;
         switch_context(previous_context);
-        // The executor owns this Relation and its AccessShareLock. The authorization
-        // closes only its column read state and never closes the borrowed
-        // descriptor.
+        // The executor owns the relation and its AccessShareLock.
+        // Close our column reader, then leave the borrowed relation open.
         state->source_relation = nullptr;
         MemoryContext finished_context = std::exchange(state->work_context, nullptr);
         bioseq::postgres::support::invoke_pg_as_cpp(
@@ -928,9 +921,8 @@ authorize_minimizer_generation_catalog_source_pg(
     return authorization;
 }
 
-/// Administrative overload. Admin callers do not own an
-/// executor Relation descriptor, so they retain the explicit open. The timed
-/// BatchJoin production path above never enters this overload.
+/// Open the source relation for administrative callers that have no executor reader.
+/// BatchJoin uses the overload that borrows its already open relation.
 [[nodiscard]] inline minimizer_generation_catalog_source_authorization
 authorize_minimizer_generation_catalog_source_pg(
     const minimizer_generation_administration_identity& identity,

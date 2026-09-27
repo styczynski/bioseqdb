@@ -1,6 +1,6 @@
 /**
  * @file catalog.cppm
- * @brief Preserves the public chunked-storage catalog partition.
+ * @brief Exports catalog helpers for reading and writing stored index generations.
  */
 export module bioseq.postgres.storage.indexing.chunked_storage:catalog;
 

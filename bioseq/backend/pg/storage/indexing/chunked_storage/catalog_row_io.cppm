@@ -1,6 +1,6 @@
 /**
  * @file catalog_row_io.cppm
- * @brief Defines immutable generation-row formation, deformation, projection, and authentication.
+ * @brief Build index-generation tuples and read their payloads with checksum checks.
  */
 module;
 
@@ -36,7 +36,7 @@ import std;
 import bioseq.postgres.support; // bioseq::postgres::support::try_open_postgres_relation, bioseq::postgres::support::find_primary_key_oid
 import bioseq.postgres.support.datums;
 import bioseq.indexing.type; // sequence_index_layout, index_sub_key_t, k_max_index_chunk_size_bytes, sentinels
-import bioseq.indexing.minimizer_fragment_image; // explicit fixed-endian minimizer fragment image image ABI
+import bioseq.indexing.minimizer_fragment_image; // minimizer fragment byte layout
 import bioseq.parallelism.mode;
 import bioseq.parallelism.concepts;
 import bioseq.parallelism.pool;
@@ -46,9 +46,9 @@ import :catalog_metadata;
 import :catalog_source_authorization;
 import :catalog_storage_descriptors;
 export namespace bioseq::storage::indexing {
-/// Register a private MVCC copy for rereading rows after CommandCounterIncrement.
-/// Source readers may retain the caller's active snapshot. Refresh only the
-/// copy, never their visibility boundary; the caller must unregister the result.
+/// Copy and register a snapshot with the current command ID so a writer can
+/// reread its new rows. Keep the source reader's snapshot unchanged. The caller
+/// must unregister the returned copy.
 [[nodiscard]] inline Snapshot register_minimizer_reread_snapshot_pg(Snapshot source) {
     return bioseq::postgres::support::invoke_pg_as_cpp([source] {
         PushCopiedSnapshot(source);
@@ -69,11 +69,9 @@ export namespace bioseq::storage::indexing {
     });
 }
 
-/// Form one immutable current-generation payload/directory/manifest tuple. The caller
-/// transfers the tuple into a TTSOpsHeapTuple slot and flushes a bounded group
-/// with CatalogTuplesMultiInsertWithInfo, PostgreSQL 17's supported catalog
-/// heap-multi-insert + index-maintenance API. This helper never inserts, probes
-/// for, or replaces a row by itself.
+/// Form a heap tuple from a validated generation row. The caller owns the
+/// tuple and inserts it through a heap-tuple slot, usually with a batch of
+/// other rows. This helper only builds the tuple.
 [[nodiscard]] inline std::expected<HeapTuple, minimizer_generation_encoding_error>
 form_minimizer_generation_row_pg(Relation relation,
                                  std::uint64_t query_key,
@@ -111,7 +109,7 @@ form_minimizer_generation_row_pg(Relation relation,
     return tuple;
 }
 
-/// Exact PostgreSQL ABI validation result for the S1 one-page PLAIN payload contract.
+/// Sizes checked to ensure an inline index payload and tuple fit on one PostgreSQL page.
 struct pg_inline_payload_layout {
     std::uint32_t block_bytes = 0;
     std::uint32_t max_heap_tuple_bytes = 0;
@@ -196,29 +194,26 @@ struct pg_inline_payload_layout {
     return *cached;
 }
 
-/// Callback-scoped payload row with address-bound checksum authority.
+/// Borrowed row payload with a checked address and checksum, valid during its callback.
 struct minimizer_generation_loaded_row {
     std::uint64_t query_key = 0;
     index_chunk_address address{};
     std::uint32_t chunk_bytes = 0;
     std::uint64_t checksum = 0;
-    // The schema is frozen to PLAIN and the loader rejects every external or
-    // compressed datum. Payload bytes either borrow the current scan slot or
-    // one admitted batch; neither form needs detoast ownership or pfree.
+    // The payload is inline and uncompressed. These bytes borrow the scan slot
+    // or batch storage, so this row does not own memory that needs pfree.
     std::span<const std::byte> bytes;
     std::optional<validated_minimizer_generation_row_receipt> validated_receipt;
 
     void release() noexcept {
-        // The receipt seals a callback-scoped span into blob storage. Destroy
-        // that authority before the scan slot may be advanced.
+        // Discard the checksum receipt before its borrowed tuple can be reused.
         validated_receipt.reset();
         bytes = {};
     }
 };
 
-/// One deformation of the frozen eight-column heap tuple.  This object is
-/// deliberately trivial: the hot full-generation scan can form it inside one
-/// outer PostgreSQL error boundary without a longjmp crossing a C++ owner.
+/// The eight fields read from a heap tuple. PostgreSQL error handling may
+/// skip C++ destructors, so this value owns no resources.
 struct minimizer_generation_deformed_row {
     HeapTuple tuple = nullptr;
     std::array<Datum, k_minimizer_generation_index_attribute_descriptors.size()> values{};
@@ -228,7 +223,7 @@ struct minimizer_generation_deformed_row {
 static_assert(std::is_trivially_copyable_v<minimizer_generation_deformed_row>);
 static_assert(std::is_trivially_destructible_v<minimizer_generation_deformed_row>);
 
-/// Trivial optional row returned from one protected ordered-scan step.
+/// A fetched tuple's fields and a flag indicating whether the scan found a row.
 struct minimizer_generation_next_deformed_row {
     minimizer_generation_deformed_row row{};
     bool found = false;
@@ -237,9 +232,9 @@ struct minimizer_generation_next_deformed_row {
 static_assert(std::is_trivially_copyable_v<minimizer_generation_next_deformed_row>);
 static_assert(std::is_trivially_destructible_v<minimizer_generation_next_deformed_row>);
 
-/// PostgreSQL leaf: deform all fixed attributes once instead of entering one
-/// PG_TRY/sigsetjmp bridge per heap_getattr call.  Call either from an existing
-/// invoke_pg_as_cpp boundary or through deform_minimizer_generation_row_or_error().
+/// Read all tuple fields together. Call inside invoke_pg_as_cpp(), or use
+/// deform_minimizer_generation_row_or_error() to convert PostgreSQL errors
+/// into C++ exceptions.
 [[nodiscard]] inline minimizer_generation_deformed_row
 deform_minimizer_generation_row_pg_leaf(Relation relation, HeapTuple tuple) {
     minimizer_generation_deformed_row deformed{.tuple = tuple};
@@ -248,18 +243,16 @@ deform_minimizer_generation_row_pg_leaf(Relation relation, HeapTuple tuple) {
     return deformed;
 }
 
-/// Standalone deformation bridge used by metadata, publication validation,
-/// and selective reads. The full-generation route instead combines its fetch
-/// and deformation through next_minimizer_generation_row_or_error().
+/// Read a tuple's fields and translate PostgreSQL failures into C++ exceptions.
 [[nodiscard]] inline minimizer_generation_deformed_row
 deform_minimizer_generation_row_or_error(Relation relation, HeapTuple tuple) {
     return bioseq::postgres::support::invoke_pg_as_cpp(
         [relation, tuple] { return deform_minimizer_generation_row_pg_leaf(relation, tuple); });
 }
 
-/// Fetch and deform one ordered-scan row under one PostgreSQL boundary. The
-/// returned object is trivial. Authentication and arbitrary sinks run only
-/// after PG_END_TRY has restored PostgreSQL's exception stack.
+/// Fetch the next ordered-scan tuple and read its fields in one
+/// invoke_pg_as_cpp() call. The caller checks checksums and runs callbacks
+/// after it returns.
 [[nodiscard]] inline minimizer_generation_next_deformed_row
 next_minimizer_generation_row_or_error(Relation relation, SysScanDesc scan) {
     return bioseq::postgres::support::invoke_pg_as_cpp([relation, scan] {
@@ -273,10 +266,8 @@ next_minimizer_generation_row_or_error(Relation relation, SysScanDesc scan) {
     });
 }
 
-/// Trivial borrowed projection used while a PostgreSQL sigsetjmp frame is
-/// active.  It performs no allocation, owns no receipt, and reports semantic
-/// failure as a static message for the C++ caller to raise after leaving the
-/// PostgreSQL boundary.
+/// Borrowed row fields and an optional error message. This value owns no
+/// resources, so PostgreSQL error handling can safely skip its destructor.
 struct minimizer_generation_projected_row {
     std::uint64_t query_key = 0;
     index_chunk_address address{};
@@ -289,9 +280,8 @@ struct minimizer_generation_projected_row {
 static_assert(std::is_trivially_copyable_v<minimizer_generation_projected_row>);
 static_assert(std::is_trivially_destructible_v<minimizer_generation_projected_row>);
 
-/// Decode the frozen eight-column projection and validate inline PLAIN/length
-/// shape without constructing any C++ authority object.  Address-bound CRC
-/// validation remains outside PostgreSQL error frames.
+/// Check required fields and the inline payload length, then borrow its bytes.
+/// Return an error message for malformed rows. Check the checksum separately.
 [[nodiscard]] inline minimizer_generation_projected_row project_minimizer_generation_deformed_row(
     const minimizer_generation_deformed_row& deformed) noexcept {
     const auto read_attribute = [&deformed](AttrNumber attribute_number) {
@@ -380,13 +370,11 @@ static_assert(std::is_trivially_destructible_v<minimizer_generation_projected_ro
     };
 }
 
-/// Bound simultaneous heap-buffer pins while amortizing PostgreSQL's
-/// PG_TRY/sigsetjmp bridge. At the measured 562,075-row production geometry,
-/// K=128 reduces the hot-path boundary count to at most 4,392 without copying
-/// or materializing the 4.46-GB payload image.
+/// Fetch several rows per invoke_pg_as_cpp() call. Bound the number of pinned
+/// rows while their payloads stay in their buffer slots.
 inline constexpr std::size_t k_minimizer_generation_full_scan_pinned_batch_rows = 128;
 
-/// Projected row paired with the TID of its independently pinned tuple.
+/// Borrowed row fields and the physical location of their pinned tuple.
 struct pinned_minimizer_generation_projected_row {
     minimizer_generation_projected_row projected{};
     ItemPointerData tid{};
@@ -395,10 +383,9 @@ struct pinned_minimizer_generation_projected_row {
 static_assert(std::is_trivially_copyable_v<pinned_minimizer_generation_projected_row>);
 static_assert(std::is_trivially_destructible_v<pinned_minimizer_generation_projected_row>);
 
-/// Trivial output from one PostgreSQL boundary. Each projection borrows the
-/// independently pinned BufferHeapTuple slot at the same ordinal. Receipts,
-/// CRC work and arbitrary sinks are deliberately constructed only after the
-/// boundary has been left.
+/// Rows fetched together. Each payload borrows its matching pinned slot.
+/// Check checksums and run callbacks after invoke_pg_as_cpp() returns,
+/// while those slots remain pinned.
 struct pinned_minimizer_generation_projected_row_batch {
     std::array<pinned_minimizer_generation_projected_row,
                k_minimizer_generation_full_scan_pinned_batch_rows>
@@ -410,9 +397,8 @@ struct pinned_minimizer_generation_projected_row_batch {
 static_assert(std::is_trivially_copyable_v<pinned_minimizer_generation_projected_row_batch>);
 static_assert(std::is_trivially_destructible_v<pinned_minimizer_generation_projected_row_batch>);
 
-/// Keep systable_getnext_ordered's concurrent-abort contract while using
-/// caller-owned slots. PostgreSQL keeps this helper private to genam.c, so the
-/// extension mirrors its PG17 implementation inside the same protected leaf.
+/// Check for a concurrent transaction abort when reading into caller-owned slots.
+/// This repeats the check PostgreSQL normally performs in systable_getnext_ordered().
 inline void handle_minimizer_generation_concurrent_abort_pg_leaf() {
     if (TransactionIdIsValid(CheckXidAlive) && !TransactionIdIsInProgress(CheckXidAlive) &&
         !TransactionIdDidCommit(CheckXidAlive)) {
@@ -422,10 +408,9 @@ inline void handle_minimizer_generation_concurrent_abort_pg_leaf() {
     }
 }
 
-/// Fetch, deform and project up to K rows under one PostgreSQL error boundary.
-/// Every slot owns its buffer pin until the caller has consumed the complete
-/// batch. A semantic projection error stops the fill at that row so its error
-/// identity remains the first observable failure, matching single-row reads.
+/// Fetch and decode a batch while keeping each tuple pinned in its slot.
+/// Stop at the first malformed row so the caller reports errors in scan order.
+/// Consume the batch before calling again, because the next call clears the slots.
 [[nodiscard]] inline pinned_minimizer_generation_projected_row_batch
 next_pinned_minimizer_generation_projected_row_batch_or_error(
     Relation relation,
@@ -436,9 +421,8 @@ next_pinned_minimizer_generation_projected_row_batch_or_error(
         Assert(scan != nullptr);
         Assert(scan->irel != nullptr);
 
-        // All receipts and callbacks from the preceding batch are gone
-        // before this function is entered, so its buffer pins may now be
-        // released in bulk before the slots are reused.
+        // The caller has finished the previous batch. Release its pins before
+        // filling these slots with new rows.
         for (TupleTableSlot* slot : slots) {
             Assert(slot != nullptr);
             ExecClearTuple(slot);
@@ -476,9 +460,8 @@ next_pinned_minimizer_generation_projected_row_batch_or_error(
     return batch;
 }
 
-/// Validate the address-bound row checksum only after PostgreSQL deformation
-/// has completed.  Callers outside a PG boundary may safely own the receipt
-/// and invoke arbitrary C++ sinks.
+/// Check a projected row's checksum and return a borrowed payload with its receipt.
+/// Call this after invoke_pg_as_cpp() returns.
 [[nodiscard]] inline minimizer_generation_loaded_row
 load_minimizer_generation_projected_row_or_error(
     const minimizer_generation_projected_row& projected) {
@@ -508,12 +491,12 @@ using validated_minimizer_generation_row_receipt_batch =
     std::array<std::optional<validated_minimizer_generation_row_receipt>,
                k_minimizer_generation_full_scan_pinned_batch_rows>;
 
-/// Minimum batch size eligible for storage-neutral parallel authentication.
+/// Smallest batch for which parallel checksum checks are considered.
 inline constexpr std::size_t k_minimizer_generation_parallel_row_authentication_min_rows = 32u;
-/// Row grain used by parallel checksum authentication.
+/// Row count used to split parallel checksum work into smaller ranges.
 inline constexpr std::size_t k_minimizer_generation_parallel_row_authentication_grain_rows = 8u;
 
-/// Destroy every row authority before its pinned slot can be advanced.
+/// Discard all checksum receipts before their pinned tuple slots are reused.
 inline void clear_validated_minimizer_generation_row_receipt_batch(
     validated_minimizer_generation_row_receipt_batch& receipts) noexcept {
     for (auto& receipt : receipts) {
@@ -521,10 +504,9 @@ inline void clear_validated_minimizer_generation_row_receipt_batch(
     }
 }
 
-/// Authenticate one already-projected pinned batch. Only immutable payload
-/// spans and storage-neutral CRC code enter TBB. No PostgreSQL API or callback
-/// is invoked off the backend thread. The call joins before returning, so all
-/// borrowed spans remain inside the lifetime of their pinned tuple slots.
+/// Check the batch's row checksums, using worker threads when enough rows
+/// and workers are available. Workers read pinned bytes and leave failed rows
+/// without a receipt. All workers finish before this function returns.
 inline void authenticate_minimizer_generation_projected_row_batch(
     const pinned_minimizer_generation_projected_row_batch& batch,
     validated_minimizer_generation_row_receipt_batch& receipts) {
@@ -562,8 +544,8 @@ inline void authenticate_minimizer_generation_projected_row_batch(
     }
 }
 
-/// Transfer one pre-authenticated row authority into the callback-scoped
-/// loaded-row form without repeating its address-bound CRC pass.
+/// Move a checked receipt into a loaded row after confirming its address,
+/// byte span, and checksum match. Reuse the earlier checksum calculation.
 [[nodiscard]] inline minimizer_generation_loaded_row
 load_authenticated_minimizer_generation_projected_row_or_error(
     const minimizer_generation_projected_row& projected,
@@ -597,16 +579,15 @@ load_authenticated_minimizer_generation_projected_row_or_error(
     };
 }
 
-/// Decode all eight non-NULL fields and validate PLAIN storage, byte count and
-/// the address-bound row checksum before any caller observes the payload.
+/// Check the tuple fields, inline payload length, and address-based checksum
+/// before returning a borrowed payload to the caller.
 [[nodiscard]] inline minimizer_generation_loaded_row
 load_minimizer_generation_deformed_row_or_error(const minimizer_generation_deformed_row& deformed) {
     return load_minimizer_generation_projected_row_or_error(
         project_minimizer_generation_deformed_row(deformed));
 }
 
-/// General single-row loader.  Its hot-path PostgreSQL work is one deformation
-/// bridge regardless of the eight-column schema width.
+/// Read and validate one tuple using a single PostgreSQL call for its fields.
 [[nodiscard]] inline minimizer_generation_loaded_row
 load_minimizer_generation_row_or_error(Relation relation, HeapTuple tuple) {
     const minimizer_generation_deformed_row deformed =
