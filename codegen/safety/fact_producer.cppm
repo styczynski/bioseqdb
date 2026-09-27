@@ -13,10 +13,10 @@ import :model;
 
 export namespace bioseq::codegen::safety {
 
-/// Immutable inputs for one prepared compiler-fact pass.
+/// Inputs for one Clang safety-analysis pass.
 ///
-/// The owned compile database and PCM manifest must have been prepared with
-/// the `safety` authority for the same exact source list and profile.
+/// Prepare the compilation database and precompiled-module manifest with
+/// the `safety` authority for the same source list and build configuration.
 struct compiler_fact_request {
     std::uint32_t schema_version{2};
     compilation_profile profile{compilation_profile::production};
@@ -30,35 +30,35 @@ struct compiler_fact_request {
     std::filesystem::path producer_executable;
 };
 
-/// Canonical compiler facts and the independently persisted compile graph
-/// whose exact bytes are named by `facts.compile_graph_sha256`.
+/// Compiler analysis results and the JSON compile graph saved beside them.
+/// `facts.compile_graph_sha256` identifies the exact graph bytes.
 struct compiler_fact_product {
     compiler_analysis_facts facts;
     std::string compile_graph_json;
 };
 
-/// Isolated compiler facts used by structural contract tests.
+/// Clang results for a test source, before filtering by SQL wrapper reachability.
 ///
-/// Production applies SQL-manifest reachability after the same per-function
-/// pass.  Keeping the isolated probe facts beside their flow facts lets tests
-/// exercise the exact AST/CFG extraction without fabricating a manifest.
+/// Tests use these function and probe records to check the same analysis as
+/// production without preparing a SQL manifest.
 struct isolated_compiler_fact_scan {
     std::vector<function_flow> functions;
     std::vector<runtime_probe_fact> runtime_probes;
     std::vector<postgres_callback_root> callback_roots;
 };
 
-/// Runs the authoritative Clang AST/CFG/lifetime pass over an owned prepared
-/// compilation closure. Any missing command, body, target, source range,
-/// provenance record, CFG edge, or lifetime fact in the reachable SQL-wrapper
-/// closure is a hard failure.
+/// Uses Clang to follow SQL-wrapper calls and check C++ object lifetimes.
+///
+/// Fails if the reachable calls have missing bodies, unresolved targets, or
+/// incomplete control-flow or lifetime information. The prepared build inputs
+/// and reviewed source records must also pass validation.
 [[nodiscard]] compiler_fact_product produce_compiler_analysis_facts(
     const compiler_fact_request& request);
 
-/// Isolated Clang entry point used only by producer contract tests.
+/// Analyzes an in-memory test source with the production Clang pass.
 ///
-/// It uses the same AST/CFG implementation as production but has no SQL
-/// manifest, compile database, PCM, or artifact-authority semantics.
+/// Accepts compiler arguments directly, so tests need no SQL manifest,
+/// prepared compilation database, or precompiled-module manifest.
 [[nodiscard]] std::vector<function_flow>
 scan_safety_flow_from_code(
     const std::filesystem::path& source_path,
@@ -67,7 +67,7 @@ scan_safety_flow_from_code(
     std::string_view compiler_profile = "contract",
     const provenance_bundle* provenance = nullptr);
 
-/// Isolated variant that also returns compiler-derived runtime-probe facts.
+/// Analyzes a test source and also returns runtime probes and PostgreSQL callbacks.
 [[nodiscard]] isolated_compiler_fact_scan
 scan_safety_facts_from_code(
     const std::filesystem::path& source_path,

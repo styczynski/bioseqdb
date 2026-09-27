@@ -239,9 +239,9 @@ require_postgresql_severity_authority(
             "numeric severity interpretation is not bound to "
             "the exact reviewed PostgreSQL-17 declaration");
     }
-    // These numeric values are admitted only under the exact declaration
-    // fragment above. A PostgreSQL revision changing them must first change
-    // the reviewed provenance and this mapping together.
+    // These error levels match the reviewed PostgreSQL declaration above.
+    // If PostgreSQL changes them, update both the reviewed source record and
+    // this mapping.
     return {
         .error_level = 20,
         .fatal_level = 21,

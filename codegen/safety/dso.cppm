@@ -15,10 +15,10 @@ import :validation;
 
 export namespace bioseq::codegen::safety {
 
-/// Returns the exact current production DSO ownership contract.
+/// Returns the expected SQL function counts and exported symbols.
 ///
-/// The contract describes live generated wrappers and the separately owned
-/// external handler. Only current ABI ownership contributes to validation.
+/// Generated wrappers belong to the main extension.
+/// `bioseq_external_handler` belongs to the external-data extension.
 [[nodiscard]] inline dso_contract current_dso_contract() {
     return {
         .main_identity_count = 272,
@@ -86,12 +86,11 @@ inline void require_unique_global_export(
 
 }  // namespace dso_detail
 
-/// Validates live SQL, wrapper, and dynamic-library symbol ownership.
+/// Checks that each SQL function has the expected generated wrapper and C export.
 ///
-/// Every production SQL owner must have generated boundary code, while the
-/// external handler remains the sole symbol owned outside the main extension.
-/// Each public symbol and its `pg_finfo_` companion must be a unique global
-/// dynamic export with tool provenance.
+/// Each public symbol and its `pg_finfo_` companion must appear once as a
+/// global dynamic export, with the inspection tool recorded. The external-data
+/// extension must own only `bioseq_external_handler`.
 inline void validate_dso_ownership(
     const safety_ledger& production,
     const dso_inventory& inventory,

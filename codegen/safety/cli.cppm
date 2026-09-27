@@ -761,11 +761,11 @@ inline int run_validate_pair(
 
 }  // namespace cli_detail
 
-/// Runs the PostgreSQL safety evidence component.
+/// Runs the PostgreSQL error-safety command selected by the arguments.
 ///
-/// `emit-facts` performs the authoritative Clang AST/CFG/lifetime pass and
-/// `analyze-facts` consumes only those sealed facts. Neither command falls
-/// back to scanning source text.
+/// `emit-facts` uses Clang to inspect calls and C++ object lifetimes.
+/// `analyze-facts` checks the saved results and their input hashes.
+/// Both commands require compiler analysis instead of source-text matching.
 [[nodiscard]] inline int run_cli(
     std::span<std::string_view const> args) {
     try {
