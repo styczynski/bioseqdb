@@ -1,6 +1,6 @@
 /**
  * @file compact_direct/reader/opening.cppm
- * @brief Compact-direct and grouped reader validation, admission, and opening.
+ * @brief Check reader metadata and prepare access to mapped index data.
  */
 
 export module bioseq.indexing.minimizer_hashmap:compact_direct.reader_opening;
@@ -39,12 +39,12 @@ import bioseq.parallelism.pipeline_ops;
 export namespace bioseq::indexing {
 
 /**
- * Validate grouped-SoA segment-local profile geometry, generation identity, and compact-direct image
- * against the expected storage contract.
- * Returns profile and hash-domain bit width when layout, max_occ, checksums, and direct header geometry
- * match the manifest and owned image span.
- * Otherwise returns storage_contract_mismatch, identity_mismatch, checksum, or the storage-contract
- * validation error.
+ * Check that the manifest and compact-direct image describe the expected index.
+ *
+ * Validate the grouped-SoA profile, occurrence limit, generation identity and
+ * metadata checksums, then compare direct-image identity and bounds. Return
+ * the profile and hash-domain width. The caller supplies an already validated
+ * image, so this check does not scan posting contents.
  */
 [[nodiscard]] inline std::expected<prepared_minimizer_fragment_reader::direct_open_contract,
                                    minimizer_generation_encoding_error>
@@ -169,24 +169,22 @@ prepared_minimizer_fragment_reader::open_compact_direct(
                                 ? fragment_encoding_dispatch::h32_c16_p16
                                 : fragment_encoding_dispatch::checked_dynamic;
 
-    // validate_direct_open_contract_ has already authenticated the
-    // manifest checksum and its standalone uniform-segment equations.
-    // Compact-direct queries address postings through the direct image,
-    // so re-deriving every segment core and retaining fragment_block_plan
-    // objects would be redundant O(segment_count) cold-open work.
+    // The manifest's uniform segment layout has already been checked.
+    // Direct queries use the compact image, so no per-segment address
+    // plans are needed here.
 
     reader.ready_ = true;
     return reader;
 }
 
 /**
- * Open a grouped-SoA minimizer fragment reader over a mapped payload and encoded directory.
- * Optionally attaches a compact-direct index view validated with the same identity and geometry checks
- * as validate_direct_open_contract_.
- * Decodes the directory under admission, builds per-entry control and position address plans, and packs
- * fragment block plans that never split a position-segment run.
- * Returns admission, arithmetic_overflow, directory_size, position_segment, byte_count, bp_range,
- * directory_order, or decode errors when mapping sizes, payload layout, or segment ordering disagree.
+ * Open a reader over an already validated grouped-SoA payload.
+ *
+ * Admit and decode the directory, then build addresses for each entry's hashes,
+ * counts and positions. Group entries into blocks without splitting a position
+ * segment. If supplied, the compact-direct view must match the same generation
+ * and profile. Return an error when metadata, ranges, ordering or memory
+ * admission checks fail.
  */
 [[nodiscard]] inline std::expected<prepared_minimizer_fragment_reader,
                                    minimizer_generation_encoding_error>
@@ -453,9 +451,8 @@ prepared_minimizer_fragment_reader::open(
                                 ? fragment_encoding_dispatch::h32_c16_p16
                                 : fragment_encoding_dispatch::checked_dynamic;
 
-    // Build a compact address plan whose block boundaries can never split
-    // an equal-position-segment run. Empty physical segments are permitted
-    // gaps and need no synthetic directory entry.
+    // Keep each position segment in one block, even when it needs
+    // more entries than the block target. Empty segments need no entries.
     constexpr std::size_t target_entries_per_block = 128u;
     for (std::size_t ordinal = 1u; ordinal < entries.size(); ++ordinal) {
         if (entries[ordinal].position_segment < entries[ordinal - 1u].position_segment) {
@@ -546,12 +543,10 @@ prepared_minimizer_fragment_reader::open(
         return std::unexpected(minimizer_generation_encoding_error::directory_size);
     }
 
-    // The PostgreSQL-owned image is published only after a complete
-    // address-bound row and fragment-extent CRC reread, fsync, and durable
-    // rename. Its exact generation header was checked before this call.
-    // Trust those immutable fragment payloads here. Reader open owns only
-    // directory/address plans; max-occ reduction is fused into the later
-    // fragment-parallel query wave so minimizer-fragment has no target-wide open scan.
+    // The caller supplies an immutable payload validated before
+    // opening. Keep its mapping and the decoded address plans here.
+    // Queries later count target occurrences across fragments when
+    // applying max_occ.
 
     reader.owned_bytes_ = reader.final_owned_bytes_();
     if (reader.owned_bytes_ == (std::numeric_limits<std::uint64_t>::max)() ||
@@ -567,8 +562,9 @@ prepared_minimizer_fragment_reader::open(
 }
 
 /**
- * Report open-side retained capacity for the decoded directory, entry plans, and fragment block plans.
- * Query-wave counters and payload span fields stay zero until prepare_fragment_anchor_batch runs.
+ * Report allocated directory and address-plan memory.
+ * Query arrays and counters belong to separate batch and scratch objects, so
+ * their fields remain zero in this reader report.
  */
 [[nodiscard]] inline grouped_soa_query_reader_memory_stats
 prepared_minimizer_fragment_reader::memory_stats() const noexcept {
