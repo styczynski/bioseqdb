@@ -1,9 +1,9 @@
 /**
  * @file value_sequence.cppm
- * @brief Unconstrained carrier for a non-type template-argument pack.
+ * @brief Groups compile-time values in a type for runtime dispatch.
  *
- * `std::integer_sequence` accepts integral element types only. This carrier also
- * supports enumeration and structural class values used by runtime dispatch.
+ * The values may be integers, enums, or class values allowed as template
+ * arguments.
  */
 module;
 
@@ -14,7 +14,7 @@ export module bioseq.common.templating.value_sequence;
 export namespace bioseq::common::templating {
 
 /**
- * @brief Carries a homogeneous pack of structural compile-time values.
+ * @brief A list of compile-time values that all have the same type.
  * @tparam p_element_type Value type.
  * @tparam p_values Values in the sequence.
  */
@@ -24,8 +24,7 @@ struct value_sequence {
     using value_type = p_element_type;
 
     /**
-     * @brief Returns the number of compile-time values.
-     * @return Size of `p_values`.
+     * @brief Returns the number of values in the sequence.
      */
     [[nodiscard]] static constexpr std::size_t size() noexcept {
         return sizeof...(p_values);
