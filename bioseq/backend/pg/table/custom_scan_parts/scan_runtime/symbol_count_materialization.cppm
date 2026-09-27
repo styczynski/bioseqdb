@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Owns symbol-count resources, reads, and PostgreSQL error translation.
+ * @brief Reads or recomputes symbol counts and cleans up their temporary readers.
  */
 module;
 #include <bioseq/pg_compat.h>
@@ -47,7 +47,7 @@ using namespace bioseq::postgres::support;
 
 export {
 
-    /** @brief Owns temporary readers and memory used to materialize symbol counts for one row. */
+    /** @brief Tracks temporary readers and memory used to count symbols in one row. */
     struct symbol_count_read_resources {
         MemoryContext caller_context = nullptr;
         MemoryContext scratch = nullptr;
@@ -86,15 +86,14 @@ export {
         }
     }
 
-    /** @brief Discharges C++ ownership after PostgreSQL has unwound resource-managed objects. */
+    /** @brief Drops C++ cache contents and leaves PostgreSQL resources for error cleanup. */
     void abandon_symbol_count_read_resources_after_error(
         symbol_count_read_resources* resources) noexcept {
         if (resources == nullptr) {
             return;
         }
-        // PostgreSQL's transaction/ResourceOwner will release readers, relations,
-        // and palloc contexts.  Do not issue any PG call while preserving the
-        // original ErrorData; only discharge ordinary C++ heap ownership.
+        // Leave readers, relations and PostgreSQL memory to transaction cleanup.
+        // Only release C++ containers here, so cleanup cannot replace the original error.
         resources->row_read_state = nullptr;
         if (resources->caches != nullptr) {
             bioseq::storage::seq_caches* abandoned = std::exchange(resources->caches, nullptr);
@@ -113,7 +112,7 @@ export {
         resources->scratch = nullptr;
     }
 
-    /** @brief Raises a symbol-count failure through the PostgreSQL-to-C++ bridge. */
+    /** @brief Raises a PostgreSQL error that the surrounding C++ cleanup code can catch. */
     [[noreturn]] void symbol_count_error_as_cpp(int sqlstate, std::string_view message) {
         bioseq::postgres::support::invoke_pg_as_cpp([sqlstate, message] {
             ereport(ERROR,
@@ -124,13 +123,12 @@ export {
     }
 
     /**
-     * @brief Populates symbol-count placeholders for one columnar row.
+     * @brief Fills symbol_count results for one stored row.
      *
-     * When index reads are enabled, stored counts are preferred for locator-backed sequences.
-     * Missing counts are recomputed from the sequence, so a present row produces a value
-     * regardless of the index-read setting.
-     *
-     * @param registered_snapshot Registered MVCC snapshot used by all storage reads.
+     * Uses saved counts when index reads are enabled and the sequence has a locator.
+     * Otherwise counts symbols from the sequence. Missing rows and NULL sequences
+     * produce NULL placeholders.
+     * @param registered_snapshot Registered MVCC snapshot for all storage reads.
      */
     void populate_symbol_count_placeholders(placeholder_constants& consts,
                                             Relation main,
@@ -168,9 +166,8 @@ export {
             const auto rid = bsi::index_relation_identity(relid);
             TupleDesc td = RelationGetDescr(main);
 
-            /* Mutable ownership lives in this record so ordinary C++ catches can either
-             * checked-close it on success or abandon PG handles without replacing the
-             * original ErrorData. */
+            /* Keep resources in one record so success can close them in order
+             * and error handling can preserve the original PostgreSQL error. */
             resources = bioseq::postgres::support::invoke_pg_as_cpp([] {
                 return static_cast<symbol_count_read_resources*>(
                     palloc0(sizeof(symbol_count_read_resources)));
@@ -197,9 +194,8 @@ export {
                 return static_cast<bool*>(MemoryContextAllocZero(
                     resources->scratch, sizeof(bool) * static_cast<std::size_t>(td->natts)));
             });
-            /* Project every distinct site column and keep the transient List plus
-             * direct read state inside scratch. Catch restores caller_context if an
-             * ereport jumps over this explicit context switch. */
+            /* Read each requested column once. Keep the column list and reader
+             * state in the scratch context. */
             MemoryContext previous_context = bioseq::postgres::support::invoke_pg_as_cpp(
                 [resources] { return MemoryContextSwitchTo(resources->scratch); });
             List* projected = bioseq::postgres::support::invoke_pg_as_cpp([&consts] {
@@ -230,10 +226,8 @@ export {
                     return read_column_row_by_number(
                         resources->row_read_state, static_cast<uint64_t>(rowno), vals, nulls);
                 });
-            /* vals contains by-reference Datums owned by row_read_state's
-             * stripeReadContext.  Keep the reader alive until every symbol-count
-             * site has detoasted/consumed those values; the unified release below
-             * ends it on both success and ERROR. */
+            /* The row reader owns the values in vals. Keep it open until all
+             * symbol-count calls have consumed their sequence values. */
 
             for (auto& site : consts.symbol_count_sites) {
                 if (site.placeholder == nullptr)
@@ -258,7 +252,7 @@ export {
                 if (stub)
                     loc = bioseq::storage::decode_locator_from_stub(hdr);
 
-                /* (2) stored read — the ONLY thing read_sequence_index gates here. */
+                /* The index-read setting controls only this stored-count lookup. */
                 std::optional<std::int64_t> stored;
                 if (read_sequence_index && stub) {
                     auto store =
@@ -292,7 +286,7 @@ export {
                     continue;
                 }
 
-                /* (3) unconditional recompute fallback (never gated by the GUC). */
+                /* Recompute when no stored count is available, even with index reads disabled. */
                 std::int64_t cnt = 0;
                 bioseq::pg_types::seq::dispatch_instance(
                     alpha,
