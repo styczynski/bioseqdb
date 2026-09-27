@@ -1,12 +1,9 @@
-/*-------------------------------------------------------------------------
+/**
+ * @file
+ * @brief Installs cache hooks and saves the previously installed PostgreSQL hooks.
  *
- * PostgreSQL lifecycle-hook ownership for bioseq_cache.
- *
- * The runtime supplies cache callbacks; this module owns hook chaining and
- * the saved predecessor pointers. Keeping those pointers here makes hook
- * lifetime independent from planner and scan implementation details.
- *
- *-------------------------------------------------------------------------
+ * The runtime supplies callbacks. Accessors expose the previous hooks so the
+ * callbacks can continue the existing hook chain.
  */
 module;
 
@@ -50,7 +47,7 @@ struct backend_hook_callbacks {
     ProcessUtility_hook_type process_utility = nullptr;
 };
 
-/** Install the permanently chained planner, executor, and utility hooks. */
+/** Install the backend hooks once, saving the previous callbacks for chaining. */
 void install_backend_hooks(const backend_hook_callbacks& callbacks) noexcept {
     if (detail::g_backend_hooks_installed) {
         return;
@@ -70,7 +67,7 @@ void install_backend_hooks(const backend_hook_callbacks& callbacks) noexcept {
     detail::g_backend_hooks_installed = true;
 }
 
-/** Install the shared-memory hooks during shared-preload processing. */
+/** Install shared memory hooks once. Call this during shared preload. */
 void install_shared_memory_hooks(shmem_request_hook_type request,
                                  shmem_startup_hook_type startup) noexcept {
     if (detail::g_shared_memory_hooks_installed) {

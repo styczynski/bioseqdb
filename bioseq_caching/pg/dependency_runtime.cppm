@@ -1,6 +1,6 @@
 /**
  * @file bioseq_caching/pg/dependency_runtime.cppm
- * @brief PostgreSQL lifecycle adapter for generic dependency capabilities.
+ * @brief Connects cache dependency tracking to PostgreSQL snapshots and transactions.
  */
 module;
 
@@ -64,13 +64,13 @@ enum class dependency_runtime_pause_point : std::uint8_t {
   after_transition_publish = 2,
 };
 
-/** Utility command whose prepared transaction is about to be resolved. */
+/** Prepared-transaction command being processed. */
 enum class external_prepared_resolution_kind : std::uint8_t {
   commit_prepared = 1,
   rollback_prepared = 2,
 };
 
-/** Result known after standard_ProcessUtility returns or throws. */
+/** Outcome of the prepared-transaction command, including an uncertain result. */
 enum class external_prepared_resolution_outcome : std::uint8_t {
   committed = 1,
   rolled_back = 2,
@@ -85,9 +85,10 @@ enum class external_prepared_resolution_state : std::uint8_t {
 };
 
 /**
- * Full ABA-safe ownership token for one externally resolved prepared write.
- * The directory reference is diagnostic only while active; the transition
- * ledger owns and releases the linear capability.
+ * Identifies the cache transition for a prepared-transaction command.
+ * The ledger owns the dependency reference while this token is active.
+ * `database_guard` is a copy for identity checks and diagnostics, so releasing
+ * it separately would release the same reference twice.
  */
 struct external_prepared_resolution_token {
   transition_owner_claim claim{};
@@ -129,7 +130,7 @@ struct dependency_runtime_result {
   }
 };
 
-/** Process-local read capabilities; never copy an active ticket. */
+/** Holds dependency references for one snapshot check. Copying an active ticket would duplicate ownership. */
 struct dependency_snapshot_ticket {
   std::array<dependency_reference,
              k_maximum_snapshot_ticket_dependencies>
@@ -151,10 +152,10 @@ struct dependency_snapshot_ticket {
 };
 
 /**
- * Optional registry-side action executed while every dependency partition in
- * a ticket is locked.  The action may acquire registry locks, but it must not
- * call a dependency-directory API; this preserves dependency -> registry lock
- * order.  A successful action must provide an exact rollback operation.
+ * Optional action run with every ticket dependency partition locked.
+ * It may take registry locks. It must avoid dependency-directory calls, which
+ * would acquire locks in the wrong order. Supply a rollback callback so the
+ * caller can undo a successful action if the final dependency check fails.
  */
 struct dependency_ticket_locked_action {
   void *context = nullptr;
@@ -168,7 +169,7 @@ struct dependency_ticket_locked_action {
   }
 };
 
-/** DSA-owned canonical envelope backed by generation references. */
+/** Serialized dependencies in PostgreSQL shared storage, with references held for a cache generation. */
 struct dependency_generation_vector {
   dependency_vector_entry conservative_guard_entry{};
   dsa_pointer envelope = InvalidDsaPointer;
@@ -184,7 +185,7 @@ struct dependency_generation_vector {
   std::array<std::uint8_t, 5> reserved{};
 };
 
-/** Lock-dropped release outcome; applied prefix remains authoritative on error. */
+/** Records how many references were released, including releases completed before an error. */
 struct dependency_generation_release_batch {
   dependency_runtime_error error = dependency_runtime_error::none;
   std::uint32_t dependency_count = 0;
@@ -229,11 +230,11 @@ struct dependency_runtime_diagnostics {
     dependency_ticket_locked_action action = {}) noexcept;
 
 /**
- * Revalidate a copied canonical vector and optionally apply one atomic action.
- * A nonzero expected completion count binds conservative in-flight work to the
- * producer's snapshot. Zero still performs a fresh snapshot handshake, which
- * lets COMPLETE hits tolerate unrelated rollbacks while their action checks a
- * persisted committed-write epoch/token.
+ * Check serialized dependency versions against the bound snapshot, then run the
+ * optional action while dependency locks are held. A nonzero continuing count
+ * also ties an unfinished build to its original transaction-completion count.
+ * With zero, completed hits use the current snapshot binding and committed
+ * dependency versions, so unrelated rollbacks need not discard them.
  */
 [[nodiscard]] dependency_runtime_result validate_dependency_vector_locked(
     std::span<const std::byte> dependency_vector_envelope,
@@ -249,25 +250,25 @@ struct dependency_runtime_diagnostics {
     dependency_snapshot_ticket *ticket,
     dependency_generation_vector *generation) noexcept;
 
-/** Acquire Generation refs/envelope while retaining the active Ticket refs. */
+/** Create generation references and serialized storage while keeping the snapshot ticket active. */
 [[nodiscard]] dependency_runtime_result
 retain_generation_vector_preserving_ticket(
     const dependency_snapshot_ticket &ticket,
     dependency_generation_vector *generation) noexcept;
 
-/** Borrow the canonical envelope until the wrapper is released/transferred. */
+/** Borrow the validated dependency bytes until the generation is released or transferred. */
 [[nodiscard]] std::span<const std::byte>
 dependency_generation_vector_envelope(
     const dependency_generation_vector &generation) noexcept;
 
-/** Free only temporary DSA bytes after registry ownership is established. */
+/** Free the temporary serialized copy after the registry takes responsibility for its references. */
 [[nodiscard]] dependency_runtime_result transfer_generation_vector_to_registry(
     dependency_generation_vector *generation) noexcept;
 
 [[nodiscard]] dependency_runtime_result release_generation_vector(
     dependency_generation_vector *generation) noexcept;
 
-/** Release a contiguous Generation-reference suffix outside registry locks. */
+/** Release references from `first_reference` onward. The caller must hold no registry locks. */
 [[nodiscard]] dependency_generation_release_batch release_generation_entries(
     std::span<const std::byte> dependency_vector_envelope,
     const dependency_vector_entry *conservative_guard,
@@ -280,17 +281,17 @@ dependency_generation_vector_envelope(
     const dependency_version &dependency,
     const physical_identity &committed_physical_identity) noexcept;
 
-/** Stage one same-key physical identity replacement for commit. */
+/** Record a dependency whose physical identity will change on commit. All other fields must match. */
 [[nodiscard]] dependency_runtime_result observe_dirty_dependency(
     const dependency_version &observed_dependency,
     const dependency_version &committed_dependency) noexcept;
 
-/** Force the root transaction's per-database definition guard. */
+/** Use database-wide invalidation for definition changes in this transaction. */
 [[nodiscard]] dependency_runtime_result
 observe_database_definition_dependency(
     std::uint32_t database_oid) noexcept;
 
-/** Stage one precise object-definition mutation for PRE_COMMIT capture. */
+/** Record an object-definition change for dependency capture before commit. */
 [[nodiscard]] dependency_runtime_result
 observe_object_definition_dependency(
     const object_definition_mutation &mutation) noexcept;
@@ -308,7 +309,7 @@ publish_pre_commit_transitions() noexcept;
 [[nodiscard]] dependency_runtime_result
 finish_post_visibility_transitions(bool committed) noexcept;
 
-/** Acquire and publish the database guard before PostgreSQL visibility. */
+/** Start the database write transition before resolving a prepared transaction. */
 [[nodiscard]] dependency_runtime_result
 begin_external_prepared_resolution(
     external_prepared_resolution_kind kind,
@@ -316,7 +317,7 @@ begin_external_prepared_resolution(
     std::uint64_t resolution_identity,
     external_prepared_resolution_token *token) noexcept;
 
-/** Resolve, drain, generation-publish, wake, and release exactly once. */
+/** Finish the prepared-transaction transition and release its reference. Repeating the same completed outcome is safe. */
 [[nodiscard]] dependency_runtime_result
 finish_external_prepared_resolution(
     external_prepared_resolution_token *token,
@@ -682,7 +683,7 @@ void mark_failed(void *, transition_ledger_error) noexcept {
   return false;
 }
 
-/** Hold the PostgreSQL completion counter stable for fallback vectors. */
+/** Hold ProcArrayLock so the transaction-completion count stays fixed during validation. */
 class completion_count_guard final {
  public:
   completion_count_guard(bool required, std::uint64_t expected) noexcept
@@ -864,7 +865,7 @@ ensure_object_definition_write_guard_reference(
   });
 }
 
-/** Definition mutations invalidate both choices for the reserved DB guard. */
+/** Record definition changes against both database versions, for writes and definitions. */
 [[nodiscard]] dependency_runtime_result
 ensure_object_definition_database_guards(
     std::uint32_t database_oid) noexcept {
@@ -971,7 +972,7 @@ capture_object_definition_dependencies_pre_commit() noexcept {
   return result;
 }
 
-/** Capture requests name identity/observability; the directory supplies epoch. */
+/** Validate the requested identity and write tracking. The directory supplies the current epoch. */
 [[nodiscard]] bool valid_capture_request(
     const dependency_version &request) noexcept {
   dependency_version shape = request;
@@ -1009,7 +1010,7 @@ struct emergency_epoch_snapshot {
   std::uint64_t change_generation = 0;
 };
 
-/** A generation bracket detects begin/finish races around the zero sample. */
+/** Accept a zero-transition sample only if its change counter stayed fixed while reading. */
 [[nodiscard]] bool sample_stable_emergency_epoch(
     emergency_epoch_snapshot *snapshot) noexcept {
   if (snapshot == nullptr) {
