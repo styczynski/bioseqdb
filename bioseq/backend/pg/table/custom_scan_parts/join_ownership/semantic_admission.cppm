@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Validates per-row operands, output semantics, and base-local mmsearch ownership.
+ * @brief Checks whether sequence expressions and match outputs can run in a BioseqScan or PerRow join.
  */
 module;
 #include <bioseq/pg_compat.h>
@@ -39,7 +39,7 @@ export import :custom_scan_join_ownership_semantic_admission_contracts;
 using namespace bioseq::postgres::support;
 
 export {
-    /** @brief Encodes a finite planner Cost as a FLOAT8 plan node. */
+    /** @brief Stores a finite planner cost in a float8 Const for the plan. */
     [[nodiscard]] Const* make_batch_join_cost_const(const Cost value) {
         if (!std::isfinite(value)) {
             ereport(ERROR,
@@ -55,7 +55,7 @@ export {
                          FLOAT8PASSBYVAL);
     }
 
-    /** @brief Decodes a finite planner Cost from the BatchJoin private-data ABI. */
+    /** @brief Reads a finite BatchJoin cost from a float8 Const, reporting malformed values as errors. */
     [[nodiscard]] Cost batch_join_cost_from_node(Node* node, const char* field) {
         Const* value = try_cast_pg_node<Const>(node);
         if (value == nullptr || value->consttype != FLOAT8OID || value->constisnull ||
@@ -76,16 +76,16 @@ export {
         return decoded;
     }
 
-    /** @brief Validates operand Vars against the candidate join relation. */
+    /** @brief Checks that an operand uses columns from this join and collects its sequence columns. */
     struct per_row_operand_source_visitor {
-        /** @brief Records one valid sequence Var or rejects an unsafe planner frontier. */
+        /** @brief Records a sequence column or rejects a node that cannot move into this join. */
         [[nodiscard]] pg_walk_step operator()(pg_expression_walk_cursor,
                                               pg_node_view node,
                                               per_row_operand_source_resolution& resolution) const {
             if (node.try_cast<PlaceHolderVar>() != nullptr) {
-                /* Moving an operand PHV to the post-join recipe can change its
-                 * evaluation/nulling frontier.  No sequence helper requires that
-                 * representation, so decline instead of approximating semantics. */
+                /* Moving a PlaceHolderVar past the join could change when it is
+                 * evaluated or becomes NULL. Reject it because this operand path
+                 * cannot preserve those rules. */
                 resolution.invalid = true;
                 return pg_walk_step::stop;
             }
@@ -113,7 +113,7 @@ export {
         }
     };
 
-    /** @brief Holds the relation and recipe frontier used to validate owner output. */
+    /** @brief The target expression and relation sets used to check PerRow output. */
     struct per_row_output_semantic_validation {
         Index target_relid = 0;
         Relids join_relids = nullptr;
@@ -121,22 +121,19 @@ export {
         bool invalid = false;
     };
 
-    /** @brief Rejects output nodes whose planner frontier cannot move to the per-row owner. */
+    /** @brief Checks that output Vars and match helpers keep their meaning at the PerRow join. */
     struct per_row_output_semantic_visitor {
-        /** @brief Validates one output node against the join relation and target recipe. */
+        /** @brief Checks one output node against the join and its search target. */
         [[nodiscard]] pg_walk_step
         operator()(pg_expression_walk_cursor,
                    pg_node_view node,
                    per_row_output_semantic_validation& validation) const {
             if (PlaceHolderVar* placeholder = node.try_cast<PlaceHolderVar>()) {
-                /* The exact helper PHV is deliberately evaluated by the BatchJoin
-                 * owner after match_result production.  At an intermediate joinrel the
-                 * reltarget can also carry a whole helper PHV for a transformed owner
-                 * that will be constructed at a higher join frontier.  Admit that exact
-                 * sequence-valued identity here; the higher-owner COW normalization
-                 * removes it from every descendant target before PlanCustomPath.  Every
-                 * generic PHV retains a planner-selected frontier which this
-                 * transformation cannot move. */
+                /* Match helpers run after their owner produces a match_result. A
+                 * helper for a sequence expression may belong to a higher join, so
+                 * allow it here until that owner removes it from child outputs before
+                 * PlanCustomPath. Other PlaceHolderVars must keep the evaluation
+                 * level PostgreSQL chose for them. */
                 FuncExpr* helper =
                     batch_join_match_helper_phv_function(placeholder, get_cached_stub_oids());
                 Node* argument = batch_join_match_helper_argument(helper);
@@ -153,9 +150,9 @@ export {
                 return validation.invalid ? pg_walk_step::stop : pg_walk_step::skip_subtree;
             }
             if (Var* var = node.try_cast<Var>()) {
-                /* UPDATE ... FROM EPQ carries exact ctid/tableoid row markers for
-                 * non-target join inputs as well as the target.  They are ordinary
-                 * inner-join passthrough values, not arbitrary system attributes. */
+                /* UPDATE ... FROM needs ctid and tableoid from target and joined
+                 * rows for EvalPlanQual rechecks. Pass these validated row markers
+                 * through the inner join. */
                 if (per_row_is_exact_row_identity_var(var) &&
                     bms_is_member(static_cast<int>(var->varno), validation.join_relids)) {
                     return pg_walk_step::skip_subtree;
@@ -171,7 +168,7 @@ export {
         }
     };
 
-    /** @brief Checks whether a join target preserves semantics when emitted by a per-row owner. */
+    /** @brief Checks that the PerRow join can produce this output with the same Var and helper bindings. */
     [[nodiscard]] bool per_row_output_semantics_are_supported(PathTarget* target,
                                                               const Index target_relid,
                                                               Relids join_relids,
@@ -180,9 +177,9 @@ export {
             join_relids == nullptr || target_recipe == nullptr) {
             return false;
         }
-        /* Volatile final-output expressions stay in the owner PathTarget and are
-         * evaluated once by core ProjectionInfo for each emitted match.  This
-         * validation governs only nodes that would otherwise lose a planner frontier. */
+        /* PostgreSQL evaluates volatile output expressions once for each
+         * emitted match through ProjectionInfo. Check only the nodes whose
+         * evaluation level or NULL behavior could change. */
         per_row_output_semantic_validation validation{
             target_relid, join_relids, target_recipe, false};
         per_row_output_semantic_visitor visitor;
@@ -206,13 +203,12 @@ export {
     }
 
     /**
-     * @brief Rebuilds an owner target at PostgreSQL's authoritative join frontier.
+     * @brief Copies the join's output with PostgreSQL's matching sort and group references.
      *
-     * Keep the public CustomPath target exactly at PostgreSQL's authoritative
-     * joinrel frontier.  Planner-only helper and passthrough columns are appended
-     * by PlanCustomPath after core has finished applying scan/join targets.  This
-     * avoids exposing a widened expr list to apply_scanjoin_target_to_paths(),
-     * which can otherwise install the join target's shorter sortgroupref array.
+     * Keep the expression list at its original size. PlanCustomPath adds helper
+     * and hidden input columns later, after PostgreSQL has finished replacing
+     * scan and join targets. Adding them now could leave a longer expression
+     * list paired with a shorter sortgroupref array.
      */
     [[nodiscard]] PathTarget* per_row_build_owner_target(PlannerInfo* root, PathTarget* original) {
         if (root == nullptr || original == nullptr)
@@ -239,13 +235,11 @@ export {
     }
 
     /**
-     * @brief Collects Plan-only Vars needed to bind a transformed target during setrefs.
+     * @brief Collects hidden input columns needed when PostgreSQL fixes plan references.
      *
-     * Core's upper setrefs pass can descend a plain match-helper FuncExpr before
-     * finalized match_result binding.  It then needs the raw Vars below the exact
-     * transformed target recipe, plus valid base-lineage helper arguments.
-     * These are Plan-only resjunk carriers; they must not widen the visible owner
-     * PathTarget.
+     * setrefs can reach a helper's argument before it is bound to match_result.
+     * Carry the target expression's Vars and validated helper arguments as
+     * resjunk columns in the Plan. Keep them out of the public PathTarget.
      */
     [[nodiscard]] bool per_row_collect_setrefs_carrier_vars(Node* target_recipe,
                                                             List* helper_argument_vars,
@@ -257,7 +251,7 @@ export {
         constexpr int pull_flags =
             PVC_RECURSE_AGGREGATES | PVC_RECURSE_WINDOWFUNCS | PVC_RECURSE_PLACEHOLDERS;
         List* recipe_vars = pull_var_clause(target_recipe, pull_flags);
-        // Appends a valid level-zero join Var to the carrier set.
+        // Adds a validated local join column or row marker to the hidden inputs.
         auto append_valid = [join_relids, &carrier_vars](Node* node) -> bool {
             Var* var = try_cast_pg_node<Var>(node);
             const bool row_identity = per_row_is_exact_row_identity_var(var);
@@ -281,19 +275,15 @@ export {
     }
 
     /**
-     * @brief Collects the narrow support surface required by a per-row owner.
+     * @brief Collects columns and whole match helpers needed by the final output.
      *
-     * Core can defer the SELECT/RETURNING projection until above the join and,
-     * for a projection-capable CustomPath, overwrite plan.targetlist only after
-     * PlanCustomPath has returned.  Collect the narrow support surface up front:
-     * level-zero join Vars are passed through, while exact target-owned match
-     * helpers are carried as whole descriptor identities.  Their validated single
-     * target Var is collected separately for reconstructed scan-leaf and Plan-only
-     * resjunk setrefs edges; it is never substituted for the final whole-helper
-     * output.
+     * PostgreSQL can place SELECT or RETURNING above the join and replace its
+     * targetlist after PlanCustomPath returns. Collect those dependencies now.
+     * Keep each helper intact, and record its source argument separately where
+     * setrefs needs an input column below the owner.
      */
     struct per_row_owner_support_visitor {
-        /** @brief Collects or rejects one support expression at its exact planner frontier. */
+        /** @brief Records a required column or match helper, rejecting unsupported helper bindings. */
         [[nodiscard]] pg_walk_step operator()(pg_expression_walk_cursor,
                                               pg_node_view node,
                                               per_row_owner_support_validation& validation) const {
@@ -315,11 +305,10 @@ export {
                         validation.invalid = true;
                         return pg_walk_step::stop;
                     }
-                    /* PostgreSQL can spell the same helper site as its whole PHV in
-                     * the join reltarget and as the underlying FuncExpr in an upper
-                     * Sort/Result target.  Preserve both exact identities so setrefs
-                     * can bind either spelling to a descriptor-only match_result site;
-                     * never descend into the helper argument Var. */
+                    /* The join can expose the whole PlaceHolderVar while an upper
+                     * Sort or Result contains its FuncExpr. Record both forms so
+                     * setrefs can bind either to the same match result. Treat the
+                     * helper as a whole here. */
                     per_row_append_unique_expression(validation.helper_identities,
                                                      reinterpret_cast<Node*>(placeholder));
                     per_row_append_unique_expression(validation.helper_identities,
@@ -330,10 +319,9 @@ export {
                         per_row_append_unique_expression(validation.foreign_exact_helper_identities,
                                                          reinterpret_cast<Node*>(helper));
                     }
-                    /* Core may retain a Result directly above the target BioseqScan
-                     * while carrying the whole PHV to the final owner.  Preserve the
-                     * exact single target-owned argument at that scan edge so setrefs
-                     * can bind Result's support Var without executing the helper. */
+                    /* A Result above BioseqScan may still need the helper's source
+                     * column while the whole helper travels to its owner. Preserve
+                     * that argument for setrefs without evaluating the helper here. */
                     if (names_lineage) {
                         per_row_append_unique_expression(validation.helper_argument_vars,
                                                          batch_join_match_helper_argument(helper));
@@ -346,7 +334,7 @@ export {
                     validation.invalid = true;
                     return pg_walk_step::stop;
                 }
-                /* A generic PHV owns its planner-selected evaluation frontier. */
+                /* Keep an ordinary PlaceHolderVar at PostgreSQL's chosen evaluation level. */
                 return pg_walk_step::skip_subtree;
             }
             if (FuncExpr* function = node.try_cast<FuncExpr>();
@@ -400,7 +388,7 @@ export {
         }
     };
 
-    /** @brief Collects final-output support expressions for a candidate per-row owner. */
+    /** @brief Collects the final output's input columns and match helpers for this PerRow join. */
     [[nodiscard]] bool per_row_collect_owner_support(PlannerInfo* root,
                                                      RelOptInfo* joinrel,
                                                      const Index target_relid,
@@ -426,7 +414,7 @@ export {
         return true;
     }
 
-    /** @brief Collects nonvolatile sequence sources for a movable join operand. */
+    /** @brief Rejects volatile join operands and collects the sequence columns they use. */
     [[nodiscard]] bool per_row_collect_operand_sources(
         Node* expression, RelOptInfo* joinrel, per_row_operand_source_resolution& resolution) {
         if (expression == nullptr || joinrel == nullptr || contain_volatile_functions(expression))
@@ -437,7 +425,7 @@ export {
         return !resolution.invalid;
     }
 
-    /** @brief Tracks base-relation and type constraints during operand validation. */
+    /** @brief The scan relation, registered functions, and sequence columns found in an operand. */
     struct base_local_mmsearch_operand_walker {
         RelOptInfo* rel = nullptr;
         const bioseq_stub_oids* oids = nullptr;
@@ -445,7 +433,7 @@ export {
         bool invalid = false;
     };
 
-    /** @brief Rejects expression frontiers that cannot remain inside a base scan. */
+    /** @brief Rejects operands that need evaluation outside this base scan. */
     struct base_local_mmsearch_operand_visitor {
         /** @brief Validates one operand node and records distinct sequence Vars. */
         [[nodiscard]] pg_walk_step
@@ -501,7 +489,7 @@ export {
         }
     };
 
-    /** @brief Derives a compatible sequence typmod through supported expression shapes. */
+    /** @brief Finds the sequence alphabet and storage width through casts, branches, and supported sequence operations. */
     [[nodiscard]] base_local_sequence_typmod_resolution
     resolve_base_local_sequence_typmod(Node* expression, const bioseq_stub_oids& oids) {
         check_stack_depth();
@@ -512,7 +500,7 @@ export {
         auto supported_descriptor = [](const int32 typmod) noexcept {
             return typmod >= 0 && batch_join_typmod_is_supported(typmod);
         };
-        // Reconciles a derived child typmod with the enclosing expression descriptor.
+        // Checks the expression's declared sequence type against the type found in its children.
         auto finish = [expression,
                        &supported_descriptor](base_local_sequence_typmod_resolution derived) {
             if (derived.invalid)
@@ -533,16 +521,16 @@ export {
             }
             return derived;
         };
-        // Merges branch typmods while requiring all concrete descriptors to agree.
+        // Requires known CASE or COALESCE result types to agree.
         auto merge_exact = [](base_local_sequence_typmod_resolution& destination,
                               const base_local_sequence_typmod_resolution source) {
             if (source.invalid) {
                 destination.invalid = true;
                 return;
             }
-            /* An opaque, descriptor-erased arm is intentionally neutral.  If it is
-             * selected, capture_target/query_datum validates the actual bound type
-             * before dispatch; an unselected throwing arm is never inspected. */
+            /* An arm with no known typmod contributes no type information. If
+             * selected, its returned Datum is checked before dispatch. Type
+             * analysis must not evaluate an unused arm that could throw. */
             if (source.typmod < 0)
                 return;
             if (destination.typmod < 0) {
@@ -655,8 +643,8 @@ export {
                 if (child.typmod < 0)
                     continue;
                 if (result.typmod < 0) {
-                    /* Registered concat uses the first bound sequence operand's
-                     * storage width; later bound operands need only share alphabet. */
+                    /* Concat takes its storage width from the first sequence operand
+                     * with a known typmod. Later known types must use the same alphabet. */
                     result.typmod = child.typmod;
                     continue;
                 }
@@ -667,17 +655,17 @@ export {
             return finish(result);
         }
 
-        /* Raw Vars/Consts/Params and opaque sequence-producing arms are legal
-         * leaves.  A concrete descriptor identifies their dispatch type.  An erased
-         * opaque leaf is neutral only when an enclosing CASE/COALESCE supplies a
-         * concrete sibling; it cannot be the root of an owned operand. */
+        /* Vars, constants, parameters, and other sequence-producing
+         * expressions can supply a known typmod. An expression without one
+         * needs type information from its surrounding expression before
+         * the scan can accept the complete operand. */
         const int32 descriptor = exprTypmod(expression);
         return descriptor >= 0 && supported_descriptor(descriptor)
                    ? base_local_sequence_typmod_resolution{descriptor, false}
                    : base_local_sequence_typmod_resolution{};
     }
 
-    /** @brief Resolves a base-local sequence expression that may be evaluated by the scan. */
+    /** @brief Checks that this sequence expression can run inside the scan and determines its input columns and type. */
     [[nodiscard]] std::optional<base_local_mmsearch_operand_resolution>
     resolve_base_local_mmsearch_operand(Node* expression,
                                         RelOptInfo* rel,
@@ -710,8 +698,8 @@ export {
     }
 
     /**
-     * @brief Resolves an mmsearch call that a base relation can own without semantic movement.
-     * @throws PostgreSQL ERROR for a supported, non-NULL constant with a different bound alphabet.
+     * @brief Checks whether a BioseqScan can own this mmsearch call at its current evaluation level.
+     * @throws PostgreSQL ERROR when a supported non-NULL query constant has a different alphabet from the target.
      */
     [[nodiscard]] std::optional<base_local_mmsearch_ownership>
     resolve_base_local_mmsearch_ownership(FuncExpr* function,

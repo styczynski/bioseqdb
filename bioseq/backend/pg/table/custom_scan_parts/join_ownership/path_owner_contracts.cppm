@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Decodes exact custom-path owner recipes without importing ownership traversal.
+ * @brief Reads the target expressions owned by Bioseq custom paths.
  */
 module;
 #include <bioseq/pg_compat.h>
@@ -33,7 +33,7 @@ import :custom_scan_planner_method_contracts;
 using namespace bioseq::postgres::support;
 
 export {
-    /** @brief Decodes the target recipe from a known BatchJoin or per-row CustomPath ABI. */
+    /** @brief Reads a BatchJoin or PerRow target expression and checks the stored version, fields, and child count. */
     [[nodiscard]] Node* per_row_known_path_owner_recipe(CustomPath* custom, bool& invalid) {
         if (custom == nullptr)
             return nullptr;
@@ -61,7 +61,7 @@ export {
         return recipe;
     }
 
-    /** @brief Decodes the primary owned target recipe from a base-scan CustomPath ABI. */
+    /** @brief Reads the primary mmsearch target from a BioseqScan and flags malformed or duplicate owner tags. */
     [[nodiscard]] Node* per_row_base_scan_owner_recipe(CustomPath* custom, bool& invalid) {
         if (custom == nullptr || custom->methods != bioseq_column_scan_path_methods()) {
             return nullptr;

@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Declares match-helper presence checks without ownership implementation fanout.
+ * @brief Declares the check for match-result helpers in an expression.
  */
 module;
 struct Node;
