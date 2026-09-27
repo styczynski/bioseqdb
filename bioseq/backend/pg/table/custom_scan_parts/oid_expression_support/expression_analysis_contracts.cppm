@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Declares mmsearch expression analysis without importing tree-walk implementations.
+ * @brief Declares mmsearch detection and the first checks on its options and operands.
  */
 module;
 extern "C" {
@@ -27,12 +27,12 @@ export [[nodiscard]] inline bool is_mmsearch_funcid(Oid funcid, const bioseq_stu
     return funcid == o.mmsearch_oid || funcid == o.mmsearch_with_opts_oid;
 }
 
-/** @brief Count mmsearch calls, including nested occurrences and the root node. */
+/** @brief Counts mmsearch calls at the root and inside the expression tree. */
 export [[nodiscard]] std::size_t count_mmsearch_occurrences(
     Node* node,
     const bioseq_stub_oids& oids);
 
-/** @brief Hold an owned mmsearch restriction and additional clauses extracted with it. */
+/** @brief Holds the selected mmsearch clause and any extra clauses the scan will execute. */
 export struct owned_mmsearch_restriction {
     RestrictInfo* restriction = nullptr;
     FuncExpr* normalized_expr = nullptr;
@@ -40,15 +40,15 @@ export struct owned_mmsearch_restriction {
     List* extra_normalized_exprs = NIL;
 };
 
-/** @brief Reject unsupported raw mmsearch options in one parsed query tree. */
+/** @brief Rejects volatile SQL calls in mmsearch options before planner simplification. */
 export void bioseq_validate_raw_mmsearch_options(Query* query);
 
-/** @brief Report whether an expression tree contains an mmsearch qualifier. */
+/** @brief Checks whether an expression tree contains an mmsearch call. */
 export [[nodiscard]] bool contains_mmsearch_qualifier(
     Node* node,
     const bioseq_stub_oids& oids);
 
-/** @brief Apply the inexpensive base-local operand filter before full validation. */
+/** @brief Checks the operand's type and relation references before full base-scan validation. */
 export [[nodiscard]] bool coarse_base_mmsearch_operand_candidate(
     Node* expression,
     RelOptInfo* rel,
