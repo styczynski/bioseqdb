@@ -1,6 +1,6 @@
 /**
  * @file pipeline/pipe_parts/segmented.cppm
- * @brief Re-exports the segmented execution partitions.
+ * @brief Exports planning and execution for targets processed in segments.
  */
 export module bioseq.pipeline.pipe:segmented;
 

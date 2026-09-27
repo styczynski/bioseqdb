@@ -1,6 +1,6 @@
 /**
  * @file pipeline/pipe_parts/minimizer_request_admission.cppm
- * @brief Defines minimizer requests, admission rules, and segment geometry.
+ * @brief Selects chaining kernels and sizes target segments from the memory budget.
  */
 module;
 
@@ -59,30 +59,15 @@ export {
 
     namespace bioseq::simd::pipe {
 
-    // =============================================================================
-    // Kernel-trait pattern
-    // =============================================================================
-    //
-    // `algorithm_traits<p_algorithm>` maps an algorithm enum value to
-    //   - a `kernel_type` struct exposing the call surface used by the stage,
-    //   - a `static constexpr std::string_view algorithm_label()` for EXPLAIN,
-    //   - a `static std::vector<named_property> computed_properties_default()`
-    //     for the EXPLAIN renderer's `[name: value]` properties.
-    //
-    // Stages take the `kernel_type` as a template argument (via `kernel_t<X>`)
-    // and call `p_kernel::call(...)` once — no `if constexpr` ladders inside the
-    // stage body.  Adding a new algorithm is a single trait specialisation in
-    // the kernel's own module.
+    // algorithm_traits maps an algorithm choice to the kernel interface used
+    // by its stage. Each specialization also supplies names and parameters
+    // for EXPLAIN. kernel_t selects that kernel type at compile time.
 
-    /// Dependent-false helper so the primary template's `static_assert` fires
-    /// only on instantiation (not at point of definition).
+    /// Defer the missing-kernel assertion until an algorithm is instantiated.
     template <auto p_algorithm> inline constexpr bool no_kernel_for_v = false;
 
-    /// Primary template — unspecialised.  Substitution failure here produces a
-    /// readable diagnostic naming the offending enum value.
-    ///
-    /// Specializations below cover the chaining, minimizer, and base-alignment
-    /// algorithm dimensions.
+    /// Reject algorithm choices with no trait specialization. Chaining traits
+    /// are defined here, and sketch and alignment traits live in their modules.
     template <auto p_algorithm> struct algorithm_traits {
         static_assert(no_kernel_for_v<p_algorithm>,
                       "algorithm_traits<X>: no specialisation for this algorithm enum value. "
@@ -90,16 +75,13 @@ export {
                       "minimizer_algorithm blocks.");
     };
 
-    /// Helper alias — `kernel_t<X>` gives the kernel type directly.
+    /// Select the kernel type for one algorithm.
     template <auto p_algorithm>
     using kernel_t = typename algorithm_traits<p_algorithm>::kernel_type;
 
-    // ---------------------------------------------------------------------------
-    // chaining_algorithm kernel traits
-    // ---------------------------------------------------------------------------
+    // Chaining kernels and their EXPLAIN properties.
 
-    /// scalar DP chaining — `chain_anchors_scalar` from
-    /// `bioseq.chaining.scalar`.
+    /// Run scalar dynamic-programming chaining and record completed anchor work.
     template <> struct algorithm_traits<::bioseq::simd::chaining_algorithm::scalar_minimap2> {
         struct kernel_type {
             [[nodiscard]] static constexpr auto storage_requirements(
@@ -143,8 +125,7 @@ export {
         };
     };
 
-    /// simd DP chaining — `chain_anchors_simd` from
-    /// the selected fixed-target chaining table.
+    /// Run SIMD chaining through the Highway table selected for this CPU.
     template <> struct algorithm_traits<::bioseq::simd::chaining_algorithm::simd_minimap2> {
         struct kernel_type {
             [[nodiscard]] static constexpr auto storage_requirements(
@@ -198,16 +179,15 @@ export {
         };
     };
 
-    /// range_minimum_query tree-based chaining — `chain_anchors_rmq` from
-    /// `bioseq.chaining.rmq`.
+    /// Run tree-based range-minimum-query chaining.
     template <> struct algorithm_traits<::bioseq::simd::chaining_algorithm::range_minimum_query> {
         struct kernel_type {
             [[nodiscard]] static constexpr auto storage_requirements(
                 std::size_t anchor_count, const chaining_parameters& params) noexcept {
                 return ::bioseq::chaining::derive_rmq_chaining_storage_plan(anchor_count, params);
             }
-            // RMQ receipts are deliberately compiled only into the dedicated
-            // E2E and test trees: ordinary route construction supplies no stats sink.
+            // Record RMQ counters in benchmark and index-test builds. Ordinary
+            // builds call this kernel without a statistics destination.
 #if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS) || defined(BIOSEQ_TEST_INDEXES)
             static constexpr bool emits_scalar_chaining_execution_stats = true;
 #else
@@ -254,10 +234,9 @@ export {
         };
     };
 
-    /// Vulkan tiled-DP chaining — `chain_anchors_vulkan` from
-    /// `bioseq.chaining.vulkan`. G3SA-style tiled DP score generation on
-    /// Vulkan + bioseq CPU `backtrack_chains`. Selected Vulkan execution is
-    /// mandatory and failures throw `vulkan_runtime_error`.
+    /// Score chain links on Vulkan, then backtrack the returned links on the CPU.
+    /// A selected GPU operation throws if dispatch or validation fails. Empty
+    /// input can finish without a GPU dispatch.
     template <>
     struct algorithm_traits<::bioseq::simd::chaining_algorithm::vulkan_tiled_dynamic_programming> {
         struct kernel_type {
@@ -306,44 +285,35 @@ export {
         };
     };
 
-    // Segment geometry. The minimap_sketch_data position field is 28 bits
-    // (minimizer_representation<28,15>), so a segment's COLLECTED span — core + an overlap on
-    // each side — must stay within that field, or the global position handed back by
-    // `add_position_offset` would be silently masked by the packing ctor
-    // (`pos_v & pos_field_mask`, index.cppm) and corrupt the seed. We cap the core at
-    // 200 Mbp and each overlap at 30 Mbp; the static_assert ties both to the REAL
-    // field width so neither can be bumped past 2^28 without a compile error.
-    inline constexpr sequence_size_t k_segment_core_max_bp = 200'000'000ull; // core ceiling
+    // A segment sketch stores local positions in a 28-bit field. Its core
+    // and both overlaps must fit together, or packing would truncate a seed
+    // position. The assertion below checks the configured CPU limits.
+    inline constexpr sequence_size_t k_segment_core_max_bp = 200'000'000ull; // Maximum core length.
     inline constexpr sequence_size_t k_segment_overlap_max_bp =
-        30'000'000ull; // per-side overlap ceiling
+        30'000'000ull; // Maximum overlap on either side.
     inline constexpr sequence_size_t k_segment_min_bp =
-        32'000'000ull; // floor (keep batches useful)
+        32'000'000ull; // Minimum CPU core length.
     inline constexpr sequence_size_t k_vulkan_segment_min_bp =
-        1'000'000ull; // floor when GPU sketch is selected
-    // The 76M core and 96M collected-span bounds keep each admitted Vulkan sketch
-    // within the fixed position layout while limiting upload-window count.
+        1'000'000ull; // Minimum Vulkan core length.
+    // Limit Vulkan's collected span as well as its core. Larger query
+    // overlaps reduce the core so the whole uploaded segment still fits.
     inline constexpr sequence_size_t k_vulkan_segment_target_bp =
-        76'000'000ull; // target core before query-overlap clamping
+        76'000'000ull; // Preferred core size before allowing for query overlap.
     inline constexpr sequence_size_t k_vulkan_segment_collected_max_bp = 96'000'000ull;
     static_assert(k_segment_core_max_bp + 2 * k_segment_overlap_max_bp <=
                       k_max_minimizer_sequence_length<minimap_sketch_data>,
                   "segment collected span (core + 2*overlap) must fit "
                   "minimap_sketch_data's 28-bit position field");
 
-    // Choose a target-index SEGMENT size (bp) from the live memory budget. A full
-    // minimizer index over an N-bp target costs ~6 bytes/bp at peak (collector vector
-    // 8 bytes + flat_map bucket ~16 bytes/distinct + positions 8 bytes, all × density ~0.19).
-    // On a 16 GB box a 6 Gbp full index (~37 GB) swaps; capping a segment to the
-    // budget keeps the live index ~one segment, clamped to [k_segment_min_bp,
-    // k_segment_core_max_bp].
+    // Estimate a target segment size from the current memory ceiling. The
+    // peak-index bytes-per-base estimate keeps segments manageable, while
+    // later reservations decide whether the actual allocations fit. Clamp
+    // to the configured minimum and maximum core sizes.
     [[nodiscard]] inline sequence_size_t segment_bp_from_budget() noexcept {
-        // Respect both the live process/system ceiling and the explicit index cap.
-        // Use the same effective ceiling as admission so segment geometry and the
-        // maximum legal index cannot disagree.
+        // Use the same process/system ceiling and optional index cap as reservations.
         const std::uint64_t budget =
             bioseq::parallelism::memory_admission_controller::instance().budget_ceiling();
-        // allocatable_bytes() == UINT64_MAX when the mach/POSIX probe is unavailable;
-        // dividing keeps it huge so the clamp yields k_segment_core_max_bp (the default).
+        // An unknown ceiling stays large enough to select the maximum core size.
         const std::uint64_t by_budget =
             budget / bioseq::parallelism::k_minimizer_index_peak_bytes_per_bp;
         const sequence_size_t want = (by_budget > k_segment_core_max_bp)
@@ -400,12 +370,10 @@ export {
                                                                    : k_segment_min_bp;
     }
 
-    // Share `minimap_port_segmented` geometry with `dispatch_buffer`'s
-    // stored-index assembly loop so it reuses the exact recompute
-    // geometry. NOT a pure function of its args: it reads the runtime budget via
-    // `segment_bp_from_budget()` exactly as recompute does. Each entry covers a
-    // segment's overlapped collection range `[cs_u, ce_u)` (in units) and its core
-    // claim band `[core_lo_bp, core_hi_bp)`.
+    // Build the same segment ranges for recomputation and stored-index reads.
+    // Geometry depends on the live memory budget as well as these arguments.
+    // Each entry has an overlapping collection range in packed units and a
+    // non-overlapping core range in bases.
     [[nodiscard]] inline std::vector<::bioseq::indexing::segment_unit_range>
     segment_unit_ranges(sequence_size_t total_bp,
                         sequence_size_t query_len,

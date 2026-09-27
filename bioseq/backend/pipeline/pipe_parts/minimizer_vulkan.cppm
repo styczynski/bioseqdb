@@ -1,6 +1,6 @@
 /**
  * @file pipeline/pipe_parts/minimizer_vulkan.cppm
- * @brief Collects Vulkan minimizers through the strict device route.
+ * @brief Connects Vulkan minimizer extraction to the pipeline.
  */
 module;
 
@@ -59,11 +59,10 @@ export {
 
     namespace bioseq::simd::pipe {
 
-    /// Vulkan minimap-integer minimizer extraction. Reads packed
-    /// `compact_sequence_range` storage directly on the GPU. When this algorithm
-    /// is selected, Vulkan execution is mandatory and failures throw.
-    /// `call_result` exposes the resident device-minimizer buffer so the all-Vulkan
-    /// sketch+seed path reuses it without a second upload (`may_emit_device_minimizers`).
+    /// Extract minimizers on the GPU with the minimap integer hash.
+    /// Selecting this algorithm requires Vulkan, and a declined dispatch throws.
+    /// call_result keeps the device buffer so GPU seeding can reuse the sketch
+    /// without uploading those minimizers again.
     template <>
     struct algorithm_traits<::bioseq::simd::minimizer_algorithm::vulkan_minimap_integer> {
         struct kernel_type {

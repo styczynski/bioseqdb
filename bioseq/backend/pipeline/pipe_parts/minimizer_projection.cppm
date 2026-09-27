@@ -1,6 +1,6 @@
 /**
  * @file pipeline/pipe_parts/minimizer_projection.cppm
- * @brief Projects algorithm choices, receipts, and stage statistics.
+ * @brief Connects alignment algorithms to stages and describes planned sketch work.
  */
 module;
 
@@ -62,14 +62,8 @@ export {
 
     namespace bioseq::simd::pipe {
 
-    // ---------------------------------------------------------------------------
-    // base_alignment_algorithm kernel traits
-    // ---------------------------------------------------------------------------
-    //
-    // The trait pattern is shared across every algorithm dimension.
-    // `align_stage<p_kernel, p_alphabet>` calls `p_kernel::call<p_alphabet>(...)`
-    // once; per-algorithm dispatch lives entirely in
-    // the trait specialisations below.
+    // Each alignment trait supplies the kernel call and its report fields.
+    // align_stage uses that common interface for the selected algorithm.
 
     namespace detail {
 
@@ -104,8 +98,8 @@ export {
                 throw std::logic_error{
                     "selected Highway table has an invalid alignment alphabet entry"};
             }
-            // The generated root reconciles this numeric slot with the concrete
-            // type identity before the erased pointer can be cast.
+            // The generated table has checked that this alphabet entry carries
+            // the matching C++ table type before we cast its pointer.
             resolved = static_cast<const ::bioseq::simd::alignment_kernels<p_alphabet>*>(
                 entry.typed_table);
         }
@@ -115,8 +109,7 @@ export {
         return *resolved;
     }
 
-    /// Shared helper for ksw2 / Block Aligner / ksw2_batched — pushes the
-    /// four affine-scoring parameters that every base aligner consumes.
+    /// Add the match, mismatch, and first affine-gap scores shared by the aligners.
     [[gnu::always_inline]] inline void
     push_base_affine_params(const ::bioseq::simd::minimap2_parameters& p,
                             std::vector<named_property>& out) {
@@ -247,7 +240,7 @@ export {
         };
     };
 
-    // The ksw2_batched kernel is provided by `bioseq.alignment.ksw2_batched`.
+    // The batched driver comes from bioseq.alignment.ksw2_batched.
     template <> struct algorithm_traits<::bioseq::simd::base_alignment_algorithm::ksw2_batched> {
         struct kernel_type {
             static constexpr bool emits_block_execution_stats = false;
@@ -256,9 +249,8 @@ export {
             static constexpr auto highway_kernel_id =
                 ::bioseq::simd_dispatch::highway_kernel::alignment_ksw2_batched;
 
-            /// The batched entry owns inter-region packing, but its long-fill and
-            /// traceback paths execute the target-local ksw2 z2/d2 kernels as part
-            /// of the same stage.  EXPLAIN therefore reports both coarse functions.
+            /// Report both the batched driver and the KSW2 kernel it uses for fills.
+            /// EXPLAIN needs both entries to describe this stage's CPU dispatch.
             [[nodiscard]] static constexpr ::bioseq::simd_dispatch::highway_kernel_mask
             highway_kernel_ids() noexcept {
                 auto kernels = ::bioseq::simd_dispatch::highway_kernel_mask_for(
@@ -298,9 +290,8 @@ export {
 
             static void populate_runtime_params(const ::bioseq::simd::minimap2_parameters& p,
                                                 std::vector<named_property>& out) {
-                // Same runtime knobs as the intra-sequence ksw2 path; the
-                // bucketing/batching is determined by the kernel from
-                // params.max_gap, params.zdrop, and the per-fill geometry.
+                // Batched alignment uses the same scoring and stopping parameters as
+                // KSW2. The driver groups fills by their geometry and orientation.
                 algorithm_traits<::bioseq::simd::base_alignment_algorithm::ksw2>::kernel_type::
                     populate_runtime_params(p, out);
             }
@@ -319,11 +310,10 @@ export {
     };
 
     /**
-     * The describe cascade intentionally pins the executable pipeline at the
-     * prebuilt-minimizer entry point, so its stage chain has no minimizer_stage.
-     * Represent the query sketch as a neutral plan-only stage instead of making
-     * the minimizer enum a describe-template axis. This stage is the canonical
-     * owner of the query-sketch Highway functions whenever a description exists.
+     * Describe query sketching separately because the described pipeline starts
+     * with prebuilt minimizers. This extra stage records the chosen algorithm
+     * and its Highway kernels for EXPLAIN without adding another template
+     * parameter to every pipeline description.
      */
     [[nodiscard]] inline std::optional<stage_description>
     describe_query_sketch_stage(const ::bioseq::simd::minimap2_parameters& params,
@@ -341,13 +331,11 @@ export {
         return stage;
     }
 
-    // =============================================================================
-    // Output size estimates
-    // =============================================================================
+    // Estimates used for initial capacities and pipeline descriptions.
 
     namespace detail {
 
-    /** Exact coarse Highway functions executed by one selected stage kernel. */
+    /** Return the Highway function set declared by the selected stage kernel. */
     template <class p_kernel>
     [[nodiscard]] constexpr ::bioseq::simd_dispatch::highway_kernel_mask
     stage_highway_kernels() noexcept {
@@ -368,12 +356,11 @@ export {
     }
 
     /**
-     * @brief Reserve-time anchor estimate.
+     * @brief Estimate an initial anchor capacity.
      *
-     * Uses today's median heuristic (2× sketch_count) but clamps by the
-     * physical shared-k-mer ceiling so very-short query/target pairs don't
-     * over-allocate.  The slab grows geometrically when the kernel produces
-     * more anchors than estimated.
+     * Scale from the query sketch count and reduce the estimate for short
+     * sequences. Repeated seed matches can exceed this estimate, so the slab
+     * can grow as hits arrive.
      */
     [[nodiscard]] constexpr std::size_t estimated_anchor_count(std::size_t sketch_count,
                                                                std::size_t query_bp,
@@ -400,13 +387,10 @@ export {
     }
 
     /**
-     * @brief Upper-bound estimate of the per-region CIGAR op count.
+     * @brief Estimate CIGAR storage from query and reference extents.
      *
-     * unifies the helper signature so it can model the post-fill
-     * outer extents instead of `region.block_length` (which excludes the
-     * left/right kernel extensions).  Describe-time callers pass
-     * `(block_length, block_length)` as a coarse approximation — the value is
-     * only a render hint, never an actual reservation.
+     * Include any alignment extensions in the supplied extents. This helper
+     * returns a size estimate and does not reserve memory.
      */
     [[nodiscard]] constexpr std::size_t estimated_cigar_op_count(std::int32_t query_extent,
                                                                  std::int32_t ref_extent) noexcept {
@@ -426,9 +410,7 @@ export {
 
     } // namespace detail
 
-    // =============================================================================
-    // Derived helpers
-    // =============================================================================
+    // Score differences and the reusable scoring matrix.
 
     [[nodiscard]] constexpr std::int32_t
     sub_diff(const ::bioseq::simd::minimap2_parameters& params) noexcept {
@@ -441,9 +423,10 @@ export {
     }
 
     /**
-     * @brief Thread-local cached scoring matrix keyed on (match, mismatch, ambi).
+     * @brief Reuse this thread's scoring matrix while its scores stay unchanged.
      *
-     * Shared by the single-query and batch pipeline entry points.
+     * Each alphabet has its own cache. Rebuild when the match, mismatch, or
+     * ambiguous-base score changes after conversion to the matrix's byte type.
      */
     template <sequence_alphabet p_alphabet>
     [[nodiscard, gnu::always_inline]] inline const scoring_matrix<p_alphabet>&
