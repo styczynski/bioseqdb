@@ -1,10 +1,9 @@
 /**
  * @file types.cppm
- * @brief Standard-layout state shared by Bioseq table and index scans.
+ * State shared by Bioseq table scans and index row lookups.
  *
- * These records cross PostgreSQL callback boundaries through pointers to their
- * first PostgreSQL-owned base member. They therefore contain no non-trivial
- * owners and retain compile-time layout checks beside their definitions.
+ * Each descriptor begins with the PostgreSQL state passed to callbacks, so
+ * both pointers have the same address. Layout checks below enforce this.
  */
 module;
 
@@ -24,29 +23,28 @@ import bioseq.postgres.vectorization.types;
 export inline constexpr int k_vectorized_aggregate_private_marker = 1;
 
 /**
- * @brief Standard-layout descriptor returned from PostgreSQL table scan begin callbacks.
- *
- * Read state is created lazily on the first row request. Inputs required for
- * that initialization are retained in the scan memory context.
+ * @brief State returned when PostgreSQL starts a table scan.
+ * The column reader is created on the first row request. The descriptor keeps
+ * its column list and filters in the scan memory context until then.
  */
 export struct column_scan_descriptor {
     /// @brief PostgreSQL table-scan base that must remain the first member.
     TableScanDescData scan_base;
-    /// @brief Lazily initialized column-store reader state.
+    /// @brief Column reader created on the first row request.
     column_read_state* read_state;
-    /// @brief Memory context owning all scan-lifetime allocations.
+    /// @brief Memory context for allocations kept until the scan ends.
     MemoryContext scan_context;
-    /// @brief Zero-based bitmap of physical attributes to materialize.
+    /// @brief Zero-based indexes of columns the scan must read.
     bioseq::postgres::support::postgres_bitmapset attributes_needed;
-    /// @brief Qualifiers used to initialize or rescan the column reader.
+    /// @brief Filters passed to the column reader when starting or rescanning.
     bioseq::postgres::support::postgres_list<Node> scan_qualifiers;
-    /// @brief PostgreSQL parallel-scan coordination record.
+    /// @brief Shared stripe position used by parallel scan workers.
     parallel_column_scan_handle parallel_scan;
     /// @brief Whether the caller expects vectorized output slots.
     bool returns_vectorized_tuple;
-    /// @brief Whether sequence locator stubs remain deferred for bulk hydration.
+    /// @brief Keep sequence locators for the caller to load when needed.
     bool defers_sequence_hydration;
-    /// @brief Opaque pointer to scan-owned `bioseq::storage::seq_caches`.
+    /// @brief Sequence-read caches allocated for this scan.
     void* sequence_cache;
 };
 
@@ -55,12 +53,12 @@ static_assert(std::is_standard_layout_v<column_scan_descriptor>,
 static_assert(offsetof(column_scan_descriptor, scan_base) == 0,
               "column_scan_descriptor::scan_base must remain the first member");
 
-/// @brief PostgreSQL table-scan handle reinterpreted as the Bioseq descriptor.
+/// @brief Pointer to a Bioseq table-scan descriptor.
 export using column_scan_handle = column_scan_descriptor*;
 
-// PG20 owns index iteration through IndexScanDesc instead of an exported
-// IndexFetchTableData base. Retain the column reader's relation/flags record;
-// PG17-19 keep their exact callback ABI and memory layout.
+// PostgreSQL 20 passes index work through IndexScanDesc. Keep the relation
+// and flags needed by the Bioseq reader here. PostgreSQL 17-19 use their
+// IndexFetchTableData base directly.
 #if PG_VERSION_NUM >= 200000
 export struct column_index_fetch_base {
     Relation rel;
@@ -71,30 +69,29 @@ export using column_index_fetch_base = IndexFetchTableData;
 #endif
 
 /**
- * @brief Standard-layout state retained between PostgreSQL index-fetch callbacks.
- *
- * Reader and sequence-cache allocation is deferred until the first tuple fetch,
- * using the memory context captured by the begin callback.
+ * @brief State kept between PostgreSQL index row lookups.
+ * The begin callback allocates sequence caches. The column reader is created
+ * when the first row is fetched.
  */
 export struct index_fetch_state {
-    /// @brief PostgreSQL index-fetch base that must remain the first member.
+    /// @brief Index-fetch base that must remain the first member.
     column_index_fetch_base fetch_base;
-    /// @brief Lazily initialized column-store reader state.
+    /// @brief Column reader created on the first row lookup.
     column_read_state* read_state;
-    /// @brief Zero-based bitmap of physical attributes to materialize.
+    /// @brief Zero-based indexes of columns the lookup must read.
     bioseq::postgres::support::postgres_bitmapset attributes_needed;
     /// @brief Stripe metadata ordered for row-number lookup.
     bioseq::postgres::support::postgres_list<stripe_metadata> stripe_metadata;
     /// @brief Whether the fetch belongs to a SELECT execution path.
     bool is_select_query;
-    /// @brief Memory context owning all fetch-lifetime allocations.
+    /// @brief Memory context for allocations kept until index fetching ends.
     MemoryContext scan_context;
-    /// @brief Whether sequence locator stubs remain deferred for bulk hydration.
+    /// @brief Keep sequence locators for the caller to load when needed.
     bool defers_sequence_hydration;
-    /// @brief Opaque pointer to fetch-owned `bioseq::storage::seq_caches`.
+    /// @brief Sequence-read caches allocated for these index lookups.
     void* sequence_cache;
 #if PG_VERSION_NUM >= 200000
-    /// @brief Relation-shaped slot used only to validate an index-only result.
+    /// @brief Table-row slot used to check visibility for index-only scans.
     TupleTableSlot* visibility_slot;
 #endif
 };

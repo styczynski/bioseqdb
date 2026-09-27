@@ -1,6 +1,6 @@
 /**
  * @file utils.cppm
- * @brief Planner-expression utilities shared by Bioseq table scans.
+ * Find the table columns needed by scan expressions.
  */
 module;
 
@@ -12,11 +12,13 @@ import bioseq.common.logging;
 import bioseq.postgres.support;
 
 /**
- * @brief Collects physical attributes required by a scan's projections and qualifiers.
+ * @brief Find columns read by the scan output, filters, and extra expressions.
+ * A whole-row reference requests every column. ctid and tableoid need no stored
+ * column data, while other system attributes are unsupported.
  * @param executor_scan_state PostgreSQL scan executor state.
- * @param additional_expressions Optional expressions owned by a wrapping custom scan.
- * @return A PostgreSQL-owned zero-based attribute bitmap.
- * @throws PostgreSQL ERROR When an unsupported system attribute is referenced.
+ * @param additional_expressions Optional expressions from a wrapping custom scan.
+ * @return A PostgreSQL-allocated bitmap of zero-based column indexes.
+ * @throws PostgreSQL ERROR for an unsupported system attribute.
  */
 export [[nodiscard]] Bitmapset* collect_needed_column_attributes(ScanState* executor_scan_state,
                                                                  List* additional_expressions) {
