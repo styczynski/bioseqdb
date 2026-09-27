@@ -55,87 +55,156 @@ mandatory fills when an exact edit predicate is requested.
 \label{sec:final-alignment-block}
 
 Block Aligner moves a \(B\times B\) square through the scoring matrix,
-computing strips of width \(s\). Border scores guide its direction.
-If progress stops, it returns to a checkpoint and tries a larger block.
-Later progress near the end of a border can permit shrinking
-(Figure~\ref{fig:block-adaptive-reconstruction}). A finite block limit can
-exclude a better path outside the computed cells.
+computing strips of width \(s=8\). Border scores guide its direction;
+stalled progress triggers a return to a checkpoint and a larger block
+(Figure~\ref{fig:block-adaptive-reconstruction}). The following formulation
+adapts the paper's Algorithm~1 to BioseqDB's sequence-to-sequence port;
+the upstream README also describes these heuristics~\cite{block_aligner_paper,block_aligner_readme}.
+A finite block limit can exclude a better path outside the computed cells.
 
 \begin{figure}[H]
 \centering
-\begin{tikzpicture}[x=0.42cm,y=0.42cm,>=Latex,font=\small]
-  \begin{scope}[xshift=0cm]
-    \draw[step=1,gray!28,very thin] (0,0) grid (6,6);
-    \draw[blue!70!black,very thick] (0,0) rectangle (3,3);
-    \fill[blue!16] (2,0) rectangle (3,3);
-    \draw[->,thick] (3.2,1.4) to (4.5,1.4);
-    \node[align=center,text width=3.7cm] at (3,7.4)
-      {shift toward the stronger outgoing border};
-    \node at (3,-1) {(a) move};
+\begin{tikzpicture}[x=0.43cm,y=-0.43cm,>=Latex,font=\small]
+  \begin{scope}
+    \node at (3,-1) {(a) shift right};
+    \foreach \k in {0,...,6} {
+      \draw[gray!25,very thin] (0,\k) -- (6,\k) (\k,0) -- (\k,6);
+    }
+    \fill[blue!15] (4,0) rectangle (5,4);
+    \draw[gray!70,dashed,thick] (0,0) rectangle (4,4);
+    \draw[blue!70!black,very thick] (1,0) rectangle (5,4);
+    \draw[->,thick] (1,4.8) -- (2,4.8) node[midway,below] {$s$};
+    \node at (3,7) {$(i,j)\mapsto(i,j+s)$};
   \end{scope}
-  \begin{scope}[xshift=5.2cm]
-    \draw[step=1,gray!28,very thin] (0,0) grid (6,6);
-    \draw[blue!70!black,very thick] (1.5,1.5) rectangle (4.5,4.5);
-    \draw[teal!70!black,dashed,very thick] (0,0) rectangle (6,6);
-    \fill[red!65] (2.7,2.7) circle (0.12);
-    \node[align=center,text width=3.7cm] at (3,7.4)
-      {restore a checkpoint and enlarge the block};
-    \node at (3,-1) {(b) grow};
+  \begin{scope}[xshift=5cm]
+    \node at (3,-1) {(b) grow at checkpoint};
+    \foreach \k in {0,...,6} {
+      \draw[gray!25,very thin] (0,\k) -- (6,\k) (\k,0) -- (\k,6);
+    }
+    \fill[teal!15] (0,3) rectangle (3,6);
+    \fill[blue!15] (3,0) rectangle (6,6);
+    \draw[blue!70!black,very thick] (0,0) rectangle (6,6);
+    \draw[gray!70,dashed,thick] (0,0) rectangle (3,3);
+    \node at (1.5,4.5) {$\Omega_1$};
+    \node at (4.5,3) {$\Omega_2$};
+    \node at (3,7) {$B_0\mapsto 2B_0$};
   \end{scope}
-  \begin{scope}[xshift=10.4cm]
-    \draw[step=1,gray!28,very thin] (0,0) grid (6,6);
-    \draw[teal!70!black,very thick] (0,0) rectangle (6,6);
-    \fill[green!22] (4,4) rectangle (6,6);
-    \draw[blue!70!black,dashed,very thick] (3,3) rectangle (6,6);
-    \draw[->,thick] (5.3,5.3) to (6.5,6.1);
-    \node[align=center,text width=3.7cm] at (3,7.4)
-      {shrink after progress reaches a border suffix};
-    \node at (3,-1) {(c) shrink};
+  \begin{scope}[xshift=10cm]
+    \node at (3,-1) {(c) keep bottom-right quarter};
+    \foreach \k in {0,...,6} {
+      \draw[gray!25,very thin] (0,\k) -- (6,\k) (\k,0) -- (\k,6);
+    }
+    \fill[blue!15] (3,3) rectangle (6,6);
+    \draw[gray!70,dashed,thick] (0,0) rectangle (6,6);
+    \draw[blue!70!black,very thick] (3,3) rectangle (6,6);
+    \draw[->,thick] (1.2,1.2) -- (2.8,2.8);
+    \node at (3,7) {$B\mapsto B/2$};
   \end{scope}
 \end{tikzpicture}
-\caption{Block Aligner moves toward the stronger border, returns to a saved
-checkpoint when it needs a larger block, and shrinks when progress permits.
-The coloured outlines show the block before and after each decision.}
+\caption{Block updates in DP coordinates (rows increase downwards).
+Dashed outlines precede the update; blue outlines follow it. Shading marks
+new cells in (a,b) and retained cells in (c). Growth computes the lower
+rectangle \(\Omega_1\) before the right rectangle \(\Omega_2\).}
 \label{fig:block-adaptive-reconstruction}
 \end{figure}
 
+Let \(m=|Q|\), \(n=|T|\), with DP coordinates starting at \((0,0)\).
+For substitution scores \(\sigma\) and gap cost \(q+e\ell\), \(D,C,R\)
+denote the score and horizontal/vertical gap tables. Their boundary values are
+\[
+ D_{0,0}=0,\qquad D_{i,0}=R_{i,0}=-q-ei,\qquad
+ D_{0,j}=C_{0,j}=-q-ej\quad(i,j>0).
+\]
+All other unavailable scores, including cells outside
+\([0,m]\times[0,n]\), are \(-\infty\).
+\(\Call{Rect}{r,c,h,w}\) evaluates the affine recurrence on
+\([r,r+h)\times[c,c+w)\), updates the borders and trace \(\tau\), and
+returns the maximum score and its coordinates; an empty rectangle returns
+\((-\infty,\bot)\). The shared state \(\mathcal S=(\mathcal F,\tau)\)
+contains the four border vectors
+\(\mathcal F=(D_{\rm right},C_{\rm right},D_{\rm bottom},R_{\rm bottom})\).
+Checkpoint assignment copies these vectors and saves the trace-stack position;
+restoration discards the later trace. Scores below are absolute, omitting
+SIMD score offsets.
+
+For the current block \([i,i+B)\times[j,j+B)\), define
+\begin{equation}
+\begin{aligned}
+ r_s&=\max_{0\leq k<s}D_{i+k,j+B-1},&
+ b_s&=\max_{0\leq k<s}D_{i+B-1,j+k},\\
+ h_s&=\max_{B-s/4\leq k<B}
+       \{D_{i+k,j+B-1},D_{i+B-1,j+k}\}.&&
+\end{aligned}
+\label{eq:block-border-decisions}
+\end{equation}
+Thus direction uses border prefixes of length \(s\), while shrinking tests
+suffixes of length \(s/4=2\). Brackets \([P]\) denote the indicator of \(P\).
+
 \begin{algorithm}[H]
-\caption{Main decisions of adaptive Block Aligner}
+\caption{Adaptive Block Aligner: explicit block and boundary updates}
 \label{alg:adaptive-block-alignment}
 \footnotesize
 \begin{algorithmic}[1]
-  \Require sequences \(Q,T\), affine scores, bounds \(B_{\min},B_{\max}\), strip width \(s\)
-  \Require global or extension mode, X-drop threshold \(X\)
-  \Ensure score and optional CIGAR for the selected path
-  \State \(B\gets B_{\min},\quad S^\star\gets-\infty,\quad u\gets0,\quad z\gets0\)
-    \Comment{\(u\): stalled steps, \(z\): X-drop steps}
-  \State place the block at the matrix origin and save a checkpoint
+  \Require $Q,T,\sigma,q,e,B_{\min},B_{\max},X$; $\chi\in\{0,1\}$
+    \Comment{$\chi=1$: X-drop; $\chi=0$: global}
+  \Require $B_{\min},B_{\max}\in\{2^k:k\geq3\}$, $B_{\min}\leq B_{\max}$
+    \Comment{bounds adjusted to the SIMD lane count}
+  \Statex \textbf{Constants:} $(m,n,s)=(|Q|,|T|,8)$
+  \Statex \textbf{Global:} $\mathcal S=(\mathcal F,\tau)$
+    \Comment{per-call state shared with \(\mathrm{Rect}\)}
+  \Statex \textbf{Local:} $i,j,B,B_0,u,z\in\mathbb N_0$;
+    $d\in\{\mathsf R,\mathsf D,\mathsf G\}$; checkpoint $\mathcal K$
+  \Statex \textbf{Local:} $M,M_1,M_2,S^\star\in\mathbb Z\cup\{-\infty\}$;
+    $p,p_1,p_2,p^\star\in\mathbb N_0^2\cup\{\bot\}$; $v\in\{0,1\}$
+  \State $(i,j,B,B_0,u,z)\gets(0,0,B_{\min},0,0,0)$
+    \Comment{$u$: stalled steps; $z$: X-drop steps}
+  \State $(S^\star,p^\star,d)\gets(0,(0,0),\mathsf G)$; $\tau\gets\varnothing$
+  \State $\mathcal F\gets\Call{InitBorders}{\sigma,q,e}$; $\mathcal K\gets(i,j,\mathcal S)$
+    \Comment{boundary values above}
   \While{true}
-    \State compute newly exposed cells by affine-gap SIMD dynamic programming
-    \State \(M\gets\) maximum score in these cells, \(u\gets u+1\)
-    \State \(v\gets[M>S^\star]\) \Comment{new best score}
-    \If{\(v\)}
-      \State \(S^\star\gets M,\quad u\gets0\), save endpoint and checkpoint
-    \EndIf
-    \State \(z\gets z+1\) if \(M<S^\star-X\), otherwise \(z\gets0\)
-    \State \textbf{if} extension mode and \(z=2\) \textbf{then break}
-    \State \textbf{if} both sequence ends have been computed \textbf{then break}
-    \If{\(2B\leq B_{\max}\) and (\(u\geq B/s\) or the last step grew without improving)}
-      \State restore checkpoint, \(B\gets2B,\quad u\gets0\)
+    \If{$d=\mathsf R$}
+      \State $(M,p)\gets\Call{Rect}{i,j+B-s,B,s}$ \Comment{new right strip}
+    \ElsIf{$d=\mathsf D$}
+      \State $(M,p)\gets\Call{Rect}{i+B-s,j,s,B}$ \Comment{new bottom strip}
     \Else
-      \If{\(B>B_{\min}\) and \(v\) and a border-suffix score is at least \(M\)}
-        \State keep the bottom-right half, \(B\gets B/2\), save checkpoint
-      \EndIf
-      \State shift by \(s\) toward the stronger outgoing border
-        \Comment{respect matrix edges}
+      \State $(M_1,p_1)\gets\Call{Rect}{i+B_0,j,B-B_0,B_0}$ \Comment{$\Omega_1$: grow down}
+      \State $(M_2,p_2)\gets\Call{Rect}{i,j+B_0,B,B-B_0}$ \Comment{$\Omega_2$: grow right}
+      \State $(M,p)\gets (M_1>M_2)\ ?\ (M_1,p_1):(M_2,p_2)$
+      \State $\mathcal K\gets(i,j,\mathcal S)$ \Comment{checkpoint at the enlarged size}
     \EndIf
+    \State $u\gets u+1$; $v\gets[M>S^\star]$
+    \If{$v=1$}
+      \State $(S^\star,p^\star,u)\gets(M,p,0)$; $\mathcal K\gets(i,j,\mathcal S)$
+    \EndIf
+    \State $z\gets(z+1)[M<S^\star-X]$
+    \If{$(\chi=1\land z=2)\lor(i+B>m\land j+B>n)$}
+      \State \textbf{break} \Comment{X-drop or both sequence ends}
+    \EndIf
+    \If{$j+B>n$}
+      \State $(i,d)\gets(i+s,\mathsf D)$; \textbf{continue} \Comment{right edge reached}
+    \EndIf
+    \If{$i+B>m$}
+      \State $(j,d)\gets(j+s,\mathsf R)$; \textbf{continue} \Comment{bottom edge reached}
+    \EndIf
+    \If{$2B\leq B_{\max}\land\bigl(u\geq B/s\lor(d=\mathsf G\land v=0)\bigr)$}
+      \State $(B_0,B,d,u)\gets(B,2B,\mathsf G,0)$
+      \State $(i,j,\mathcal S)\gets\mathcal K$; \textbf{continue} \Comment{restore before growing}
+    \EndIf
+    \If{$B>B_{\min}\land v=1\land h_s\geq M$}
+      \State $B\gets B/2$; $(i,j)\gets(i+B,j+B)$
+      \State $\mathcal F\gets\mathcal F[B:2B)$; $\mathcal K\gets(i,j,\mathcal S)$
+        \Comment{suffix of each border vector}
+    \EndIf
+    \State $d\gets(r_s\geq b_s)\ ?\ \mathsf R:\mathsf D$
+      \Comment{evaluate on the current borders}
+    \State $(i,j)\gets(i+s[d=\mathsf D],j+s[d=\mathsf R])$
   \EndWhile
-  \State select the global endpoint, or the saved best endpoint in extension mode
-  \State if CIGAR is requested, trace back from that endpoint
+  \State \Return $(\chi=1)\ ?\ (S^\star,p^\star,\tau):(D_{m,n},(m,n),\tau)$
 \end{algorithmic}
 \end{algorithm}
 
 \noindent\label{sec:final-alignment-fused-work}
+Traceback from the returned endpoint produces the CIGAR when requested.
 One alignment call includes scoring, trace storage, traceback and CIGAR
 construction. BioseqDB can skip Block DP when a score bound proves that an
 equal-length fill's straight diagonal is uniquely optimal. The timer in

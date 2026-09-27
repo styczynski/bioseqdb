@@ -3,28 +3,138 @@
 \label{sec:prefilter-role}
 \label{sec:prefilter-sneakysnake}
 
-A plausible chain can still contain too many edits to satisfy the query.
-A prefilter tries to reject such candidates before spending time on alignment.
-BioseqDB incorporates the existing SneakySnake algorithm as a component of
-this step~\cite{sneakysnake_paper}. The algorithm described here is borrowed
-from that work, rather than a new filtering method developed for this thesis.
+A prefilter rejects candidates with too many edits before base-level alignment.
+BioseqDB uses SneakySnake~\cite{sneakysnake_paper,sneakysnake_readme}, which
+models pairwise character comparisons as a \emph{chip maze} and searches
+for a signal net through it.
 
-For an edit limit \(E\), SneakySnake compares the sequences at shifts from
-\(-E\) to \(E\). At the current position it follows the longest matching
-run across these shifts, crosses one mismatch, and repeats. It counts these
-crossings but does not charge for switching between shifts. Its estimate can
-therefore be lower than the true edit distance. If the estimate exceeds
-\(E\), the candidate can be rejected. Otherwise it still needs alignment.
-The filter can save time because it compares runs of equal symbols without
-computing a full matrix of alignment scores or reconstructing a path.
+For equal-length sequences \(Q,R\in\Sigma^m\) and edit limit \(E\), use the
+paper's row order and columns \(1\leq j\leq m\):
+\[
+ \delta_i=\begin{cases}
+  -i,&1\leq i\leq E,\\
+  0,&i=E+1,\\
+  i-E-1,&E+1<i\leq2E+1.
+ \end{cases}
+ \qquad
+ Z_{i,j}=\begin{cases}
+  0,&1\leq j+\delta_i\leq m\ \land\ Q_{j+\delta_i}=R_j,\\
+  1,&\text{otherwise}.
+ \end{cases}
+\]
+Each row is a horizontal track with zeros for matches and obstacles for
+mismatches or out-of-range comparisons. From each checkpoint the net follows
+the longest zero run across all rows, crosses the next obstacle if present,
+and repeats. Row changes are free, so the obstacle count is a lower bound
+on edit distance. Reject only if it exceeds \(E\).
 
-BioseqDB applies the test to mandatory intervals between anchors. It leaves
-the optional outer extensions to the aligner, which may stop before their
-ends. For unequal-length intervals, the current implementation uses only the
-lower bound \(\bigl||Q|-|T|\bigr|\). Surviving candidates are aligned and
-checked against the original edit predicate, such as
-\(\texttt{bioseq.edit(seq)}<10\). Passing the filter alone does not establish
-that this condition holds.
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[x=1cm,y=-1cm,>=Latex,font=\small,
+  wire/.style={blue!65!black,line width=.45pt},
+  net/.style={red!75!black,line width=1.1pt},
+  obstacle/.style={fill=black!80,draw=white,line width=.3pt}]
+  \node[anchor=west,font=\bfseries\small] at (-.15,-.2) {(a) Construct column 6};
+  \node[anchor=west,font=\bfseries\small] at (6.6,-.2) {(b) Chip maze and signal net};
+
+  % One reference symbol fans out to the seven query symbols Q_3,...,Q_9.
+  \foreach \base [count=\j] in {G,G,T,G,C,A,G,A,G,C,T,C} {
+    \node[font=\scriptsize,text=gray] at ({.75+.37*\j},.27) {\j};
+    \node[font=\ttfamily\small] (ref\j) at ({.75+.37*\j},.68) {\base};
+  }
+  \node[anchor=east] at (.8,.68) {$R$};
+  \draw[blue!65!black,thick,rounded corners=1pt]
+    ($(ref6.center)+(-.17,-.2)$) rectangle ($(ref6.center)+(.17,.2)$);
+  \foreach \base [count=\j] in {G,G,T,G,A,G,A,G,T,T,G,T} {
+    \ifnum\j>2\ifnum\j<10
+      \fill[blue!8] ({.75+.37*\j-.17},1.65) rectangle ({.75+.37*\j+.17},2.05);
+    \fi\fi
+    \node[font=\ttfamily\small] (query\j) at ({.75+.37*\j},1.85) {\base};
+  }
+  \node[anchor=east] at (.8,1.85) {$Q$};
+  \foreach \j/\level in {3/1.06,4/1.18,5/1.30,6/1.42,7/1.30,8/1.18,9/1.06} {
+    \draw[wire] (ref6.south) -- (2.97,\level) -- ({.75+.37*\j},\level) -- (query\j.north);
+  }
+  \node[font=\scriptsize] at (.1,2.28) {$i$};
+  \node[font=\scriptsize] at (.65,2.28) {$Z_{i,6}$};
+  % The first three results are reversed, exactly as in the paper's Eq. (1).
+  \foreach \i/\j/\bit in {1/5/0,2/4/1,3/3/1,4/6/1,5/7/0,6/8/1,7/9/1} {
+    \pgfmathsetmacro{\rowy}{2.72+.47*(\i-1)}
+    \draw[wire,preaction={draw=white,line width=1.6pt}]
+      (query\j.south) -- ({.75+.37*\j},\rowy) -- (.86,\rowy);
+    \node[font=\scriptsize] at (.1,\rowy) {\i};
+    \ifnum\bit=1
+      \node[fill=black!80,text=white,minimum size=.31cm,inner sep=0pt,font=\scriptsize]
+        at (.65,\rowy) {1};
+    \else
+      \node[draw=teal!65!black,fill=teal!8,minimum size=.31cm,inner sep=0pt,font=\scriptsize]
+        at (.65,\rowy) {0};
+    \fi
+  }
+  \node[font=\scriptsize,text=blue!65!black] at (3.25,5.95)
+    {$R_6=\mathtt A,\quad Z_{\cdot,6}=(0,1,1,1,0,1,1)^{\mathsf T}$};
+
+  % Full 7 x 12 maze; bit rows use delta = -1,-2,-3,0,+1,+2,+3.
+  \begin{scope}[shift={(7.05,2.72)},x=.48cm,y=-.47cm]
+    \fill[blue!10] (4.66,-.45) rectangle (5.34,6.45);
+    \foreach \j in {0,...,11} {
+      \draw[gray!40,densely dashed,thin] (\j,-.35) -- (\j,6.35);
+      \node[font=\scriptsize] at (\j,-.8) {\pgfmathparse{int(\j+1)}\pgfmathresult};
+    }
+    \foreach \i in {0,...,6} {
+      \draw[gray!45,line width=1.5pt] (-.4,\i) -- (11.4,\i);
+      \node[font=\scriptsize,anchor=east] at (-.55,\i) {\pgfmathparse{int(\i+1)}\pgfmathresult};
+    }
+    \node[font=\scriptsize] at (-1.1,-.8) {$i\backslash j$};
+    \foreach \row/\bits in {
+      0/{1,0,1,1,1,0,0,0,0,1,0,1},
+      1/{1,1,1,0,1,1,1,1,1,1,0,1},
+      2/{1,1,1,0,1,1,0,0,0,1,1,1},
+      3/{0,0,0,0,1,1,1,1,1,1,1,1},
+      4/{0,1,1,1,1,0,0,1,1,1,0,1},
+      5/{1,0,1,0,1,1,1,1,0,1,1,1},
+      6/{0,1,1,1,1,1,1,1,1,1,1,1}} {
+      \foreach \bit [count=\col from 0] in \bits {
+        \ifnum\bit=1
+          \path[obstacle] (\col-.17,\row-.17) rectangle (\col+.17,\row+.17);
+        \fi
+      }
+    }
+    % Escape segments cross obstacles at (row,column) = (4,5), (1,10), (1,12).
+    \draw[net,->] (-.6,3) -- (4.42,3);
+    \draw[net] (4.42,3) -- (4.42,0);
+    \draw[net,->] (4.42,0) -- (9.42,0);
+    \draw[net,->] (9.42,0) -- (11.55,0);
+    \foreach \col/\row in {4/3,9/0,11/0} {
+      \draw[orange!85!black,line width=.9pt] (\col,\row) circle[radius=.25];
+    }
+    \foreach \col/\label in {-.55/1,4.48/6,9.48/11} {
+      \draw[teal!65!black,densely dashed] (\col,-1.55) -- (\col,6.4);
+      \node[font=\scriptsize,text=teal!65!black,anchor=south] at (\col,-1.65) {$c=\label$};
+    }
+  \end{scope}
+  \draw[net,->] (6.8,6.03) -- (7.5,6.03);
+  \node[anchor=west,font=\scriptsize] at (7.65,6.03) {signal net};
+  \path[obstacle] (9.45,5.94) rectangle (9.63,6.12);
+  \node[anchor=west,font=\scriptsize] at (9.78,6.03) {obstacle};
+  \draw[teal!65!black,densely dashed] (11.55,5.88) -- (11.55,6.18);
+  \node[anchor=west,font=\scriptsize] at (11.7,6.03) {checkpoint};
+\end{tikzpicture}
+\caption{Reconstruction of Fig.~2(a,b) in
+\citeauthor{sneakysnake_paper} (\citeyear{sneakysnake_paper}) for
+\(R=\mathtt{GGTGCAGAGCTC}\), \(Q=\mathtt{GGTGAGAGTTGT}\), and \(E=3\).
+(a) Comparing \(R_6\) with \(Q_3,\ldots,Q_9\) constructs column~6
+(blue in (b)); the first three results follow the paper's reversed order.
+(b) The net crosses three circled obstacles, so the pair passes the filter.
+Only runs up to the first obstacle after each checkpoint need evaluation.}
+\label{fig:prefilter-chip-maze}
+\end{figure}
+
+BioseqDB applies this test to mandatory intervals between anchors;
+optional outer extensions are left to the aligner. For unequal lengths,
+the implementation uses only \(\bigl||Q|-|T|\bigr|\).
+Survivors are aligned and checked against the original edit predicate:
+passing the filter alone does not establish that it holds.
 
 % Existing filter illustrations retained as source material.
 % \begin{figure}[H]
