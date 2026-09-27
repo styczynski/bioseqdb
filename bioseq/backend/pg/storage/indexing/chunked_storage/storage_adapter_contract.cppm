@@ -1,6 +1,6 @@
 /**
  * @file storage_adapter_contract.cppm
- * @brief Public storage-adapter contract assembled from layout-specific partitions.
+ * @brief Export storage adapters for fragment, sequence and table indexes.
  */
 export module bioseq.postgres.storage.indexing.chunked_storage:storage_adapter_contract;
 
