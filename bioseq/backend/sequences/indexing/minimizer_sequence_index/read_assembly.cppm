@@ -1,6 +1,6 @@
 /**
  * @file minimizer_sequence_index/read_assembly.cppm
- * @brief Stable direct minimizer index operations and query assembly.
+ * @brief Exports direct index building and query lookup assembly.
  */
 
 export module bioseq.indexing.minimizer_sequence:read_assembly;

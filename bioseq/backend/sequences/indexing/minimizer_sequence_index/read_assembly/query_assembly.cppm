@@ -1,6 +1,6 @@
 /**
  * @file minimizer_sequence_index/read_assembly/query_assembly.cppm
- * @brief Selective bucket reads and query-local minimizer index assembly.
+ * @brief Loads buckets needed by a query and builds an in-memory minimizer lookup.
  */
 module;
 
@@ -38,7 +38,7 @@ import bioseq.storage.size;
 
 export namespace bioseq::indexing {
 
-/// Load only the persisted buckets referenced by the query minimizers.
+/// Build a lookup for query hashes using positions from the full target range.
 template <class p_storage>
 inline minimizer_hashmap_fragment_index
 direct_minimizer_bucket_index<p_storage>::assemble_for_query(
@@ -51,8 +51,8 @@ direct_minimizer_bucket_index<p_storage>::assemble_for_query(
         storage, query_minimizers, target_len, max_occ, 0, target_len, scratch);
 }
 
-/// Load query-touched buckets and retain positions in one target range.
-/// Occurrence filtering still uses the complete persisted bucket counts.
+/// Load buckets selected by the query and keep matching positions in
+/// [clip_lo_bp, clip_hi_bp). Apply max_occ to full target counts before clipping.
 template <class p_storage>
 inline minimizer_hashmap_fragment_index
 direct_minimizer_bucket_index<p_storage>::assemble_for_query_segment(
@@ -70,14 +70,14 @@ direct_minimizer_bucket_index<p_storage>::assemble_for_query_segment(
     if (clip_lo_bp > clip_hi_bp) {
         clip_lo_bp = clip_hi_bp;
     }
-    // 1. read the directory into an owned buffer (the directory view copies it).
+    // Copy the directory so later bucket reads can reuse the storage buffer.
     const char* dblob = storage.template read_chunk<char>(k_directory_sub_key, 0);
     const std::size_t dbytes = storage.chunk_byte_size(k_directory_sub_key, 0);
     storage.validate_minimizer_directory_or_error(dblob, dbytes);
     direct_minimizer_bucket_directory_view dir{dblob, dbytes};
     const std::uint32_t max_occ_threshold =
         detail::effective_max_occ_threshold(max_occ, dir.is_gpu_built());
-    // 2. collect distinct query kmers + the distinct bucket sub_keys they touch.
+    // Collect unique query hashes and the bucket keys whose ranges contain them.
     auto& qkmers = scratch.query_kmers;
     auto& wanted = scratch.wanted_sub_keys;
     for (const auto& qm : query_minimizers) {
@@ -91,14 +91,14 @@ direct_minimizer_bucket_index<p_storage>::assemble_for_query_segment(
     };
     sort_unique(qkmers);
     sort_unique(wanted);
-    // 3. read only those buckets; deserialise; drop kmers with global count > max_occ.
+    // Read the selected buckets and discard hashes above the occurrence limit.
     auto& pairs = scratch.pairs;
     auto emit_kept = [&qkmers, &max_occ_threshold, &pairs, &clip_lo_bp, &clip_hi_bp](
                          std::uint64_t kmer, std::uint32_t pos_count, const std::uint64_t* gpos) {
         if (!std::binary_search(qkmers.begin(), qkmers.end(), kmer))
-            return; // clip to QUERY kmers
+            return; // This hash is absent from the query.
         if (pos_count > max_occ_threshold)
-            return; // drop over-frequent kmer
+            return; // This hash exceeds the occurrence limit.
         for (std::uint32_t j = 0; j < pos_count; ++j) {
             const sequence_size_t pos_bp = static_cast<sequence_size_t>(gpos[j] >> 1);
             if (pos_bp < clip_lo_bp || pos_bp >= clip_hi_bp) {
@@ -113,7 +113,8 @@ direct_minimizer_bucket_index<p_storage>::assemble_for_query_segment(
             storage.index_error(
                 "minimizers_per_sequence: directory references a bucket with no chunks");
         if (nc > 1) {
-            // A heavy-hitter bucket contains one k-mer; metadata gives its exact count.
+            // A multi-chunk bucket contains one hash. Count its positions from chunk
+            // sizes before deciding whether to load the payloads.
             std::size_t exact = 0;
             for (std::size_t c = 0; c < nc; ++c) {
                 storage.validate_minimizer_chunk_metadata_or_error(
@@ -123,8 +124,8 @@ direct_minimizer_bucket_index<p_storage>::assemble_for_query_segment(
                     (cb - k_encoded_header_bytes - k_encoded_bucket_bytes) / sizeof(std::uint64_t);
             }
             if (exact > static_cast<std::size_t>(max_occ_threshold))
-                continue;                          // drop over-frequent kmer
-            for (std::size_t c = 0; c < nc; ++c) { // materialise EVERY chunk
+                continue;                          // The full count exceeds the occurrence limit.
+            for (std::size_t c = 0; c < nc; ++c) { // Read every chunk of this hash.
                 const std::size_t cb = storage.chunk_byte_size(sk, c);
                 const char* p = storage.template read_chunk<char>(sk, c);
                 const auto h = storage.validate_minimizer_blob_or_error(p, cb, 1);
@@ -140,7 +141,7 @@ direct_minimizer_bucket_index<p_storage>::assemble_for_query_segment(
         storage.validate_minimizer_blob_or_error(p0, cb0);
         wire_for_each_bucket(p0, cb0, scratch.bucket_positions, emit_kept);
     }
-    // 4. build the single pipeline IndexT.
+    // Build the query's in-memory lookup from the selected hash/position pairs.
     minimizer_hashmap_fragment_index idx;
     idx.build_from_pairs(pairs, target_len);
     return idx;

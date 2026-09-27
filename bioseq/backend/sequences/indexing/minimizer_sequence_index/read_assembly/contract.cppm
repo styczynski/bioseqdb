@@ -1,6 +1,6 @@
 /**
  * @file minimizer_sequence_index/read_assembly/contract.cppm
- * @brief Public direct minimizer index contract and spill authority ownership.
+ * @brief Declares direct minimizer index building and query lookup assembly.
  */
 module;
 
@@ -55,7 +55,7 @@ template <class p_storage> struct direct_minimizer_bucket_index {
     static constexpr std::string_view index_name = k_minimizers_per_sequence_index_name;
     using storage_type = p_storage;
 
-    /// Share the sealed producer handle; the facade must not duplicate its receipt fields.
+    /// Use the generation module's checked spill handle and execution record.
     using generation_spill_result = generation_detail::generation_spill_result<
         p_storage, direct_minimizer_bucket_index<p_storage>>;
 
@@ -108,9 +108,8 @@ template <class p_storage> struct direct_minimizer_bucket_index {
             scalar_build_stats);
     }
 
-    /// Prepare external runs serially within the bounded production budget. Each source core is
-    /// collected and spilled before the next is allocated. The returned direct minimizer-bucket
-    /// producer reopens these same external runs for both encoder passes.
+    /// Collect minimizers into checked spill runs within the memory budget.
+    /// The encoder replays these runs for planning and writing the index.
     template <sequence_alphabet p_alphabet>
     [[nodiscard]] static std::expected<generation_spill_result,
                                        minimizer_generation_encoding_error>
@@ -155,8 +154,7 @@ template <class p_storage> struct direct_minimizer_bucket_index {
             storage, target_length, std::move(spill), position_segment_span_bp);
     }
 
-    /// Encode grouped-SoA rows from a sealed direct minimizer-bucket spill. The layout
-    /// consumes the sealed direct minimizer-bucket spill without conversion.
+    /// Consume a checked spill handle to write grouped-SoA index rows.
     template <minimizer_generation_row_sink p_sink>
     [[nodiscard]] static std::expected<encoded_grouped_soa_generation,
                                        minimizer_generation_encoding_error>
@@ -189,7 +187,7 @@ template <class p_storage> struct direct_minimizer_bucket_index {
                       const bioseq::minimizers::minimizer_kernels* kernels,
                       const std::uint8_t alphabet_code);
 
-    // scalar-default overload delegates to the explicit backend.
+    // Use the scalar backend when none is specified.
     template <sequence_alphabet p_alphabet>
     static void build(p_storage& storage,
                       bioseq::storage::lazy_sequence_view<p_alphabet> seq);
@@ -206,7 +204,7 @@ template <class p_storage> struct direct_minimizer_bucket_index {
     static void rebuild(p_storage& storage,
                         bioseq::storage::lazy_sequence_view<p_alphabet> seq);
 
-    /// query-time: load ONLY the buckets containing any query kmer (§10.5).
+    /// Load buckets selected by the query hashes and assemble their matching positions into a lookup.
     static minimizer_hashmap_fragment_index
     assemble_for_query(p_storage& storage,
                        std::span<const minimap_sketch_data> query_minimizers,
@@ -214,8 +212,8 @@ template <class p_storage> struct direct_minimizer_bucket_index {
                        std::int32_t max_occ,
                        minimizer_assembly_scratch& scratch);
 
-    /// query-time: load query-touched buckets but keep only positions in one
-    /// target collection range. Occurrence filtering remains global.
+    /// Assemble matching positions within [clip_lo_bp, clip_hi_bp).
+    /// Apply the occurrence limit to each hash's full target count before clipping.
     static minimizer_hashmap_fragment_index
     assemble_for_query_segment(p_storage& storage,
                                std::span<const minimap_sketch_data> query_minimizers,
@@ -232,7 +230,7 @@ template <> struct index_descriptor<direct_minimizer_bucket_index> {
     static constexpr sequence_index_layout index_type = sequence_index_layout::fragment_chunks;
     static constexpr std::string_view index_name = k_minimizers_per_sequence_index_name;
     static constexpr bool allows_update_on_insert =
-        true; // opt-in external sort; not a fresh-table default
+        true; // Supports insertion updates when this index is explicitly selected.
 };
 static_assert(
     requires { index_descriptor<direct_minimizer_bucket_index>::index_name; },
