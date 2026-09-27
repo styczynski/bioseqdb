@@ -1,6 +1,6 @@
 /**
  * @file pipeline/pipe_parts/execution.cppm
- * @brief Re-exports the execution partitions.
+ * @brief Exports pipeline execution, context and result handling.
  */
 export module bioseq.pipeline.pipe:execution;
 
