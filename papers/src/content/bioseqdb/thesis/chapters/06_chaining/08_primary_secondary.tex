@@ -17,25 +17,18 @@ BioseqDB uses the same classification logic as minimap2. Below, in Algorithm~\re
   \item \(I_c=[q_c^{\mathrm{start}},q_c^{\mathrm{end}})\) is the query interval of chain $c$ (start of first anchor and end of last anchor).
   We will intersect these intervals to calcualte how many positions chain covers in the query.
   \item \(s_c\) is chain score
-  \item The value \(u\) counts symbols (bases) not covered by \emph{any} accepted primary chain.
+  \item The value \(u\) counts symbols (bases) of $c$ not covered by \emph{any} accepted primary chain.
   \item Previously $p$ was specifically parent of an anchor. In this case it represents primary chain.
   \item $\pi(c)$ is the parent chain of $c$ (I defined previously parents for anchors, but this is extended notation to represent parent of first anchor in chain)
-  \item Subtracting this contribution makes a chain with substantial new coverage less likely to become secondary.
-  \item The default overlap threshold is \(\lambda=0.5\).
-  \item The uncovered-length limit is \(L=2^{31}-1\), so it normally adds no restriction.
+  \item We calculate (for current $c$ and all primary chains $p$) $\frac{|I_c\cap I_p|}{\min(|I_c|,|I_p|)}-\frac{\bigl|I_c\setminus\bigcup_{p\in P}I_p\bigr|}{\max(|I_c|,|I_p|)}$, where first part of the expression represents how 
+  much of the $c$ is already covered by $p$ and second part represents how much of original coverage we get. If this coverage factor is greater than overlap threshold $\lambda$, then we classify this chain $c$ as secondary.
+  By default \(\lambda=0.5\).
+  \item There's also technically length limit set to \(L=2^{31}-1\) by default to prevent overflows, but it's also configurable variable.
 \end{itemize}
 
-Let \(I_c=[q_c^{\mathrm{start}},q_c^{\mathrm{end}})\) be the query interval
-of chain \(c\), and \(s_c\) its score. Below, in
-Algorithm~\ref{alg:chaining-primary-secondary}, I show how classification is formally done:\(|I|\) counts query bases.
-The value \(u\) counts bases not covered by \emph{any} accepted primary.
-Subtracting this contribution makes a chain with substantial new coverage
-less likely to become secondary. The default overlap threshold is
-\(\lambda=0.5\). The uncovered-length limit is \(L=2^{31}-1\), so it
-normally adds no restriction.
-
+The algorithm for classification was taken from minimap2 paper and its source code~\autocite{minimap2_paper}:
 \begin{algorithm}[H]
-\caption{Minimap2 primary and secondary chain selection}
+\caption{Primary and secondary chain selection in minimap2}
 \label{alg:chaining-primary-secondary}
 \small
 \begin{algorithmic}[1]
@@ -45,7 +38,7 @@ normally adds no restriction.
   \For{\(c\in C\) in decreasing order of \(s_c\)}
     \State \(u\gets\bigl|I_c\setminus\bigcup_{p\in P}I_p\bigr|,\quad \pi(c)\gets c\)
       \Comment{initially primary}
-    \For{\(p\in P\) in acceptance order}
+    \For{\(p\in P\)} \Comment{in decreasing score order}
       \State \(o\gets|I_c\cap I_p|\)
       \State \(a\gets\min(|I_c|,|I_p|),\quad b\gets\max(|I_c|,|I_p|)\)
       \If{\(o>0\land o/a-u/b>\lambda\land u\leq L\)}
@@ -60,17 +53,8 @@ normally adds no restriction.
 \end{algorithmic}
 \end{algorithm}
 
-A separate filter retains all primaries and limits secondary alternatives.
-With the defaults, a secondary must score at least \(0.8s_{\pi(c)}\) or be
-within \(2k\) of its parent's score, where \(k\) is the seed length.
-Exact duplicates of the parent's coordinates are removed, and at most five
-secondaries survive across the list. BioseqDB follows these selection steps
-and repeats them after base alignment refines the regions
-(Section~\ref{sec:alignment-postprocessing}).
-
-Primary \emph{chains} should not be confused with primary SAM records.
-Minimap2 marks one surviving nonsecondary alignment as the primary SAM record.
-The other nonsecondary parts of a split mapping are \emph{supplementary}.
-Secondary records instead describe alternative mappings of the same query
-region.
-\clearpage
+\info{Second classification}{
+  Similarily to minimap2, BioseqDB also calls the same calsification after base alignment is done (first classification is done after chaining).
+  This is done, because base alignment can provide better scores for chains, so we can then report primary chains first to the user (there's \path{bioseq.is_primary} to check if 
+  the chain was marked as primary - to differentiate between some hits with the same scores, but different coverage)
+}

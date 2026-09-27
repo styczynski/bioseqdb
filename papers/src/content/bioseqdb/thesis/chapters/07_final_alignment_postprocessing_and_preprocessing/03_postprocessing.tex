@@ -48,9 +48,9 @@ The equation is given below. Please note that alignment score is different to sc
   \item \(D_{\mathrm{sec}}\): highest DP score returned by the aligner among
     secondary chains competing with the primary chain for an overlapping
     region of the query.
-  \item \(a\): reward for one matching base.
   \item \(I\): factor of how many bases we matched (matching bases divided by alignment block length)
-  \item \(p\): MAPQ multiplier factor calculated as $p=\operatorname{clip}_{1,\infty}(\frac{s_{\pathrm{pri}}}{100}, \frac{{N}_{\pathrm{pri}}}{10})$, where ${s}_{\pathrm{pri}}$ is the chaining score of primary chain and ${N}_{\pathrm{pri}}$ number of anchors in that chain.
+  \item \(p\): MAPQ multiplier factor calculated as $p=\operatorname{clip}_{1,\infty}(\frac{s_{\mathrm{pri}}}{100}, \frac{N_{\mathrm{pri}}}{10})$,
+  where ${s}_{\mathrm{pri}}$ is the chaining score of primary chain and ${N}_{\mathrm{pri}}$ number of anchors in that chain.
   It's used to penalize short or repetitive chains.
   \item \(\rho=(D_{\mathrm{sec}}/D_{\mathrm{pri}})
     \max(s_{\mathrm{sec}},s_{\min})/s_{\mathrm{orig}}\): ratio combining alignment and chaining scores. 
