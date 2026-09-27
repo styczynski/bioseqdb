@@ -1,6 +1,6 @@
 /**
  * @file sql_entities.cppm
- * @brief SQL entity declarations for chunked generation storage.
+ * @brief SQL sequence used to assign minimizer index generation IDs.
  */
 module;
 
@@ -19,7 +19,9 @@ export namespace bioseq::storage::indexing::sql_entities {
     .from = bioseq::sql::public_role,
 })]]
 /**
- * @brief Noncycling allocator for immutable minimizer generation identifiers.
+ * @brief Assign a new ID when a minimizer index generation is built.
+ *
+ * The sequence stops at its maximum value.
  */
 inline constexpr std::int64_t minimizer_generation_id_seq = 1;
 

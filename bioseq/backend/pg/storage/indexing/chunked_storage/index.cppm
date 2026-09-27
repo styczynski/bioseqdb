@@ -1,13 +1,10 @@
 /**
  * @file index.cppm
- * @brief PostgreSQL chunked-index storage module aggregation interface.
+ * @brief Read and write indexes stored in PostgreSQL chunk tables.
  *
- * The semantic partitions keep catalog and row codecs, transaction-owned file
- * actions, mapped fragment images, read sessions, hash-major persistence, and
- * concrete storage adapters independently owned while preserving one public
- * module for existing consumers.
- * Implementation partitions remain reachable only through their stable
- * facade partitions.
+ * This module exports the catalog helpers, generation readers and writers,
+ * and storage adapters used by the PostgreSQL backend. It also exports the
+ * mapped index image code and its transaction cleanup helpers.
  */
 export module bioseq.postgres.storage.indexing.chunked_storage;
 
