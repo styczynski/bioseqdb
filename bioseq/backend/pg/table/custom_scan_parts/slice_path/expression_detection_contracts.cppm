@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Declares lazy-sequence expression detection without importing IR construction.
+ * @brief Declares the check for sequence expressions handled by SliceProject.
  */
 module;
 #include <bioseq/pg_compat.h>

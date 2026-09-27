@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Aggregates SliceProject codec, lineage, runtime, validation, and plan owners.
+ * @brief Exports SliceProject plan construction, expression tracking, and execution state.
  */
 export module bioseq.postgres.table:custom_scan_slice_path;
 

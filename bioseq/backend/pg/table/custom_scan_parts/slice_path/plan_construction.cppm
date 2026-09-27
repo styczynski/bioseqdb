@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Constructs SliceProject plans, states, and stable method tables.
+ * @brief Builds SliceProject plans and provides their planner and executor callbacks.
  */
 module;
 #include <bioseq/pg_compat.h>
@@ -60,11 +60,9 @@ export {
         scan->methods = &bioseq_slice_project_scan_methods();
         scan->scan.scanrelid = 0;
         scan->scan.plan.targetlist = tlist;
-        /* SliceProject is a projection owner, never a restriction owner.  This is
-         * essential when the lowest valid placement is directly above a base
-         * BioseqScan: create_plan has already given the child the base clauses, and
-         * copying them onto this scanrelid-zero wrapper would both execute them
-         * twice and ask setrefs to resolve base Vars against the projected output. */
+        /* The child already has the base filters. This wrapper only projects values.
+         * Copying those filters here would run them twice and make setrefs resolve
+         * their base-table Vars against the child projection. */
         (void)clauses;
         scan->scan.plan.qual = NIL;
         scan->custom_plans = custom_plans;
@@ -110,4 +108,4 @@ export {
         return methods;
     }
 
-} // export custom-scan partition declarations
+} // export

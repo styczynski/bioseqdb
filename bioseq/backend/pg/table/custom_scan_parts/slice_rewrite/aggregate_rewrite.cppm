@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Builds and installs aggregate-input SliceProject owners.
+ * @brief Places SliceProject below aggregates that can consume lazy sequence values.
  */
 module;
 #include <bioseq/pg_compat.h>
@@ -36,7 +36,7 @@ import :custom_scan_slice_rewrite_owner_admission;
 using namespace bioseq::postgres::support;
 
 export {
-    /* Build the lower SliceProject that materializes aggregate arguments lazily. */
+    /* Build a SliceProject that supplies lazy sequence arguments to the aggregate. */
     [[nodiscard]] inline Path* slice_project_build_aggregate_input_owner(
         PlannerInfo* root,
         AggPath* aggregate,
@@ -51,10 +51,9 @@ export {
             return nullptr;
 
         PathTarget* lower_target = copy_pathtarget(source->pathtarget);
-        /* Aggref arguments remain owned by the parent aggregate PathTarget.  Keep
-         * only structural equality across the setrefs boundary: neither later
-         * child-target processing nor the SliceProject codec may share those exact
-         * mutable Node objects with the parent Aggref. */
+        /* Copy the arguments before adding them to the child plan. PostgreSQL rewrites
+         * expression nodes during setrefs, so sharing those nodes with the parent
+         * Aggref could change the aggregate while processing its child. */
         List* owned_candidates = static_cast<List*>(copyObject(validation.candidates));
         List* owned_inputs = static_cast<List*>(copyObject(validation.input_expressions));
         List* required = NIL;
@@ -63,15 +62,14 @@ export {
         for (Node* input : postgres_list<Node>(owned_inputs)) {
             required = list_concat(required, pull_var_clause(input, pull_flags));
         }
-        /* The copied source target retains ordered carriers (notably the resjunk
-         * id Var) and all existing sortgrouprefs.  Append only any missing raw Vars
-         * on private copies before adding the exact lazy argument expressions. */
+        /* Preserve the source columns and their sortgrouprefs, including hidden
+         * ORDER BY columns. Add missing input Vars before the lazy arguments. */
         add_new_columns_to_pathtarget(lower_target, static_cast<List*>(copyObject(required)));
         add_new_columns_to_pathtarget(lower_target, owned_candidates);
         set_pathtarget_cost_width(root, lower_target);
         slice_project_ir_builder builder{
             .oids = validation.oids,
-            /* Aggregate inputs are internal executor values, not client output. */
+            /* These values feed an aggregate, so skip client-output materialization. */
             .command_type = CMD_UNKNOWN,
         };
         if (!slice_project_discover_target(lower_target, builder) ||
@@ -119,9 +117,9 @@ export {
         owner->path.parallel_safe = child->parallel_safe;
         owner->path.parallel_workers = child->parallel_workers;
         owner->path.rows = child->rows;
-        /* AggPath already charges evaluation of its arguments.  This wrapper only
-         * adds source-owner metadata overhead; charging the argument twice would
-         * distort serial/partial aggregate selection. */
+        /* AggPath already charges for argument evaluation. Add the SliceProject
+         * bookkeeping and sequence-boundary estimates here to avoid counting the
+         * arguments twice when comparing serial and partial aggregates. */
         owner->path.startup_cost = child->startup_cost;
         owner->path.total_cost = child->total_cost + rows * (metadata_per_row + boundary_per_row);
         owner->path.pathkeys = child->pathkeys;
@@ -144,7 +142,7 @@ export {
         bool unsafe = false;
     };
 
-    /* Detect an eager semantic alternative that this AggPath rewrite cannot own. */
+    /* Find sequence work in a grouping path that this aggregate rewrite cannot handle. */
     [[nodiscard]] inline bool
     slice_project_non_aggregate_path_has_recipe(Path* path, const bioseq_stub_oids* oids) {
         if (path == nullptr || oids == nullptr)
@@ -166,7 +164,7 @@ export {
                slice_project_aggregate_expression_has_recipe(reinterpret_cast<Node*>(quals), oids);
     }
 
-    /* Clone one supported raw-input AggPath over its new SliceProject owner. */
+    /* Copy a supported aggregate path and give it a SliceProject input. */
     [[nodiscard]] inline slice_project_aggregate_path_rewrite slice_project_rewrite_aggregate_path(
         PlannerInfo* root, UpperRelationKind stage, Path* path, const bioseq_stub_oids* oids) {
         if (path == nullptr)
@@ -221,7 +219,7 @@ export {
         bool unsafe = false;
     };
 
-    /* Copy-on-write rewrite one complete planner path list or reject it whole. */
+    /* Build a replacement path list. One unsafe alternative rejects the whole list. */
     [[nodiscard]] inline slice_project_aggregate_path_list_rewrite
     slice_project_rewrite_aggregate_path_list(PlannerInfo* root,
                                               UpperRelationKind stage,
@@ -241,7 +239,8 @@ export {
         return result;
     }
 
-    /* Atomically install safe aggregate-input owners and refresh cheapest paths. */
+    /* Install the ordinary and partial replacements only after both lists pass.
+     * Recompute the cheapest ordinary paths after replacing them. */
     inline void slice_project_try_install_aggregate_input_owners(PlannerInfo* root,
                                                                  UpperRelationKind stage,
                                                                  RelOptInfo* output_rel) {
@@ -272,4 +271,4 @@ export {
         }
     }
 
-} // export custom-scan partition declarations
+} // export
