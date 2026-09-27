@@ -137,7 +137,7 @@ Holds only reference to underlying compact sequence range
 This is adapter type that provides zero-cost conversion between different specialisations of compact sequence range. Used for example by SIMD algorithms to have specific vector lane widths\\
 \midrule
 \path{lazy_sequence_view<A>}\par\vspace{2.5pt}
-Type-erased, non-owning facade over every representation listed above. It is templated on the alphabet only, so exactly one type name crosses module and Postgres boundaries. The object itself is two pointers: opaque backend state and a static \path{backend_ops} table that holds \path{bp_size}, four orientation-specific \path{read_at} slots (read forward or backward, write forward or backward), \path{try_resident_packed}, \path{copy_packed_sequence} and \path{worker_shareable}. Specialization here means which callback table is installed. &
+Facade over every representation listed above that is typed-erased i.e it is templated on the alphabet only, so Postgres can directly accept the concrete type instead of template. It consists of two pointers: opaque backend state and a static \path{backend_ops} table that holds \path{bp_size}, four orientation-specific \path{read_at} slots (read forward or backward, write forward or backward), \path{try_resident_packed}, \path{copy_packed_sequence} and \path{worker_shareable}. Specialization here means which callback table is installed. &
 \path{owned_sequence_adapter<R, Scanner>}, created by \path{make_lazy_sequence_view} for a concrete \path{lazy_sequence<R, Scanner>} &
 Complete table over an owning lazy sequence.
 This is the table behind every lazy sequence that pipeline code receives, where Postgres provides pointers to actual functions. \\

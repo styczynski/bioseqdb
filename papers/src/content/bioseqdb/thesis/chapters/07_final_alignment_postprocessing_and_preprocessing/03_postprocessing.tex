@@ -5,8 +5,7 @@ After the alignment is done, BioseqDB computes CIGAR string, extracts all values
 some additional values (if they are requested by the user in query):
 \begin{itemize}
   \item \textbf{Divergence} Matching minimizers give an estimate of the fraction of differing bases
-  \item \textbf{Mapping quality (MAPQ)} This estimates confidence in the
-    mapping locations
+  \item \textbf{Mapping quality (MAPQ)} This estimates how subjectively good are the mapping locations (are we confident enough that this is a match)
 \end{itemize}
 
 Minimap defines diverges exactly as mentioned before in Section~\ref{sec:minimizer-divergence-history}:
@@ -23,51 +22,46 @@ BioseqDB similarily to what minimap2 does, returns
 To obtain \(n\) in BioseqDB I uise cumulative counts of minimizers by position, so subtracting two counts gives the number in an interval without
 sorting the emitted minimizers (this avoids cirtical problem I found earlier, which made this step thousands of time slower - Section~\ref{sec:minimizer-divergence-history}).
 
+For MAPQ, if two reference locations give nearly equal alignment scores, BioseqDB assigns
+low MAPQ, because both alignments may match well and we cannot be confident enough that this location is the correct one.
 
-BioseqDB computes MAPQ with the following heuristic, which again, is the same as used in minimap2~\autocite{minimap2_mapq_implementation}.
-For a primary region, let \(s,s_0\) be its current and original chaining
-scores, \(s_2\) the strongest secondary chaining score, \(c\) its seed count,
-and \(a\) the match reward. Let \(d_1,d_2\) be the region's and its strongest
-alternative's maximum DP scores (\(d_2=0\) if unavailable), and
-\(I=L_{\mathrm{match}}/L_{\mathrm{block}}\) its alignment identity
-(zero when \(L_{\mathrm{block}}=0\)). With primary regions \(\mathcal P\),
-repetitive query span \(R\), and minimum chaining score \(s_{\min}\), define
+The maximum MAPQ in minimap2 is 60 and it's similar to usual phred score scale used in base calling (for example in SAM formats), where $P=10^{-Q/10}$~\autocite{sam_format_specification}
+equal to 60 means 1 in million chance for error.
+
+BioseqDB uses directly ported minimap2's heuristic~\autocite{minimap2_mapq_implementation} (there are some edge cases for example if there's no secondary chain for given primary chain, I assume MAPQ is zero)
 \begin{equation}
   \begin{aligned}
-    u&=\frac{\sum_{r\in\mathcal P}s_r}
-             {\sum_{r\in\mathcal P}s_r+R},
-    &x&=\frac{\max(s_2,s_{\min})}{s_0},\\
-    p&=\min\!\left\{u\min\!\left(1,\frac{s}{100}\right),
-                       \min\!\left(1,\frac{c}{10}\right)\right\}.
+    \mathrm{MAPQ}\approx\operatorname{clip}_{C_{\min},C_{\max}}\Bigl(
+      &\min\!\left\{
+        C_1Ip(1-\rho^{C_{\mathrm{power}}})\ln\frac{D}{a},\,
+        C_2I^{C_{\mathrm{power}}}\frac{D-D_{\mathrm{alt}}}{a}
+      \right\}\\
+      &{}-C_3\ln(N+1)
+    \Bigr).
   \end{aligned}
-  \label{eq:mapq-penalties}
-\end{equation}
-When both DP scores are positive, the score is capped by a second heuristic:
-\begin{equation}
-  q_{\mathrm{DP}}=\min\!\left\{
-    40Ip\left[1-\left(\frac{d_2x}{d_1}\right)^2\right]
-      \ln\frac{d_1}{a},\;
-    6.02I^2\frac{d_1-d_2}{a}+0.499
-  \right\}.
-  \label{eq:mapq-dp}
-\end{equation}
-The available alignment information selects the branch:
-\begin{equation}
-  q=\begin{cases}
-    q_{\mathrm{DP}}, &\text{alignment available and }d_1,d_2>0,\\
-    40Ip(1-x)\ln(d_1/a), &\text{alignment available, otherwise},\\
-    40p(1-x)\ln s, &\text{no base-level alignment}.
-  \end{cases}
-  \label{eq:mapq-branches}
-\end{equation}
-Let \(n_{\mathrm{sub}}\) be the implementation's count of competitive
-secondary mappings and \(T(z)\) truncate towards zero. The reported integer is
-\begin{equation}
-  \mathrm{MAPQ}_0=\min\!\left\{60,\max\!\left\{0,
-    T(q)-T\!\left(4.343\ln(n_{\mathrm{sub}}+1)+0.499\right)
-  \right\}\right\}.
   \label{eq:mapq-final}
 \end{equation}
-A primary region with a base-level alignment and \(d_1>d_2\) receives
-\(\max(1,\mathrm{MAPQ}_0)\); other primary regions receive
-\(\mathrm{MAPQ}_0\), and secondary regions receive zero.
+\begin{itemize}
+  \item \(D,D_{\mathrm{alt}}\): maximum DP scores of the primary mapping and
+    its strongest alternative.
+  \item \(a\): reward for one matching base.
+  \item \(I\): matching bases divided by alignment block length.
+  \item \(p\): support penalty between zero and \(1\), reduced by weak
+    chains, few seeds or repetitive query regions.
+  \item \(\rho=(D_{\mathrm{alt}}/D)
+    \max(s_{\mathrm{alt}},s_{\min})/s_{\mathrm{orig}}\): ratio combining
+    alignment and chaining scores. Here \(s_{\mathrm{alt}}\) is the strongest
+    secondary chaining score, \(s_{\min}\) is the minimum chaining-score
+    threshold, and \(s_{\mathrm{orig}}\) is the primary mapping's original
+    chaining score before later adjustments.
+  \item \(N\): number of competitive secondary mappings.
+  \item \(\ln\): natural logarithm.
+  \item \(\operatorname{clip}_{C_{\min},C_{\max}}\): leaves values inside
+    \([C_{\min},C_{\max}]\) unchanged and replaces values outside this interval
+    with the nearest endpoint.
+  \item \(C_1=40\), \(C_2=6.02\), \(C_3=4.343\),
+    \(C_{\mathrm{power}}=2\), \(C_{\min}=0\), \(C_{\max}=60\).
+\end{itemize}
+BioseqDB applies rounding offsets and converts intermediate values to integers
+by discarding their fractional parts. Primary mappings receive at least \(1\)
+if \(D>D_{\mathrm{alt}}\). Secondary mappings receive zero.

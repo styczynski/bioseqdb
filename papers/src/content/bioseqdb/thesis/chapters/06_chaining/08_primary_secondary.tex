@@ -2,16 +2,32 @@
 \section{Selecting primary and secondary chains}
 \label{sec:chaining-primary-secondary}
 
-Several chains may match the same part of a query at different target positions.
-Minimap2 considers them from highest to lowest chaining score. A chain becomes
-\emph{secondary} when an already accepted \emph{primary} covers enough of the
-same query interval. Otherwise it becomes another primary. This allows
-different parts of a query to map to different places, as in a split
-alignment~\cite{minimap2_paper,minimap2_software}.
+After chains are collected, we must note that several chains can naturally match the same part of a query in differents parts of the target.
+Sometimes there can be significant overlap between better chain and slightly worse one. For this reason minimap2 needs to classify chains 
+into two groups: primary chains and secondary chains and it reports all primary chains but limit reported secondary chains to some set runtime limit~\autocite{mmseqs2_issue_323}.
+Minimap considers chains from the highest score to the lowest:
+\begin{itemize}
+  \item Chains are classified either as \emph{primary} (best one) or \emph{secondary}
+  \item Specific chain becomes \emph{secondary} when there's existing \emph{primary} that covers enough of the same query interval 
+  \item Otherise, chain is classified as \emph{primary}
+\end{itemize}
+BioseqDB uses the same classification logic as minimap2. Below, in Algorithm~\ref{alg:chaining-primary-secondary}, I show how this classification is formally done:
+\begin{itemize}
+  \item $c$ is a chain (iterated by decreasing score)
+  \item \(I_c=[q_c^{\mathrm{start}},q_c^{\mathrm{end}})\) is the query interval of chain $c$ (start of first anchor and end of last anchor).
+  We will intersect these intervals to calcualte how many positions chain covers in the query.
+  \item \(s_c\) is chain score
+  \item The value \(u\) counts symbols (bases) not covered by \emph{any} accepted primary chain.
+  \item Previously $p$ was specifically parent of an anchor. In this case it represents primary chain.
+  \item $\pi(c)$ is the parent chain of $c$ (I defined previously parents for anchors, but this is extended notation to represent parent of first anchor in chain)
+  \item Subtracting this contribution makes a chain with substantial new coverage less likely to become secondary.
+  \item The default overlap threshold is \(\lambda=0.5\).
+  \item The uncovered-length limit is \(L=2^{31}-1\), so it normally adds no restriction.
+\end{itemize}
 
 Let \(I_c=[q_c^{\mathrm{start}},q_c^{\mathrm{end}})\) be the query interval
-of chain \(c\), and \(s_c\) its score. In
-Algorithm~\ref{alg:chaining-primary-secondary}, \(|I|\) counts query bases.
+of chain \(c\), and \(s_c\) its score. Below, in
+Algorithm~\ref{alg:chaining-primary-secondary}, I show how classification is formally done:\(|I|\) counts query bases.
 The value \(u\) counts bases not covered by \emph{any} accepted primary.
 Subtracting this contribution makes a chain with substantial new coverage
 less likely to become secondary. The default overlap threshold is
