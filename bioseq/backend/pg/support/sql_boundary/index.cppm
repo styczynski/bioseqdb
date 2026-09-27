@@ -1,9 +1,9 @@
 /**
  * @file index.cppm
- * @brief Reexports the complete PostgreSQL SQL-boundary API.
+ * @brief SQL argument and result conversion helpers used by Bioseq.
  *
- * Combines the common generated boundary with Bioseq aggregate, GUC-storage,
- * row-codec, and vector facets.
+ * Exports common conversions and support for aggregates, settings, row codecs
+ * and vector arguments.
  */
 export module bioseq.postgres.support.sql_boundary;
 

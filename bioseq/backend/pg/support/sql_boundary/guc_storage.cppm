@@ -1,6 +1,6 @@
 /**
  * @file guc_storage.cppm
- * @brief Bridges typed enum storage to PostgreSQL GUC registration.
+ * @brief Register C++ enum settings with PostgreSQL.
  */
 module;
 
@@ -18,9 +18,8 @@ import bioseq.postgres.support;
 export namespace bioseq::postgres::support {
 
 /**
- * PostgreSQL registration facts for one typed enum setting.
- *
- * Generated owner modules provide instances with static storage duration.
+ * Definition of an enum-valued PostgreSQL setting. Generated modules keep
+ * these definitions in static storage for the backend's lifetime.
  */
 template<class p_enum>
 struct postgres_enum_registration {
@@ -35,7 +34,7 @@ struct postgres_enum_registration {
     GucEnumAssignHook assign_hook = nullptr;
     GucShowHook show_hook = nullptr;
 
-    /** @brief Registers this enum setting against its integer wire cell. */
+    /** Register this setting using the integer storage supplied by its owner. */
     void register_variable(int* wire) const {
         auto const* registration = this;
         auto define_variable = [registration, wire] {

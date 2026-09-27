@@ -1,6 +1,6 @@
 /**
  * @file vector.cppm
- * @brief Provides checked typed views over the private vector-executor fmgr ABI.
+ * @brief Validate and read vector arguments passed through PostgreSQL function calls.
  */
 module;
 
@@ -33,22 +33,22 @@ import bioseq.postgres.vectorization.types;
 
 export namespace bioseq::postgres::support {
 
-/** @brief Maps one generated SQL type and lane to its vector storage contract. */
+/** Map a SQL type and C++ element type to the vector's stored representation. */
 template<auto p_sql_type, class p_lane>
 struct vector_lane_traits;
 
-/** @brief Checked non-owning view of one typed vector column. */
+/** Borrow a typed vector column after its storage has been checked. */
 template<auto p_sql_type, class p_lane>
 class vector_column;
 
-/** @brief Checked view of either a scalar constant or typed vector column. */
+/** Read a vector argument that holds a constant or a column. */
 template<auto p_sql_type, class p_lane>
 class vector_operand;
 
-/** @brief Checked view of a vector argument's null bitmap. */
+/** Borrow the NULL flags from a vector argument. */
 class vector_null_mask;
 
-/** @brief Owning typed result vector returned through fmgr. */
+/** Own a result vector until it is returned to PostgreSQL. */
 template<auto p_sql_type, class p_lane>
 class vector_result;
 
@@ -57,7 +57,9 @@ struct vector_boundary_access;
 }
 
 /**
- * Invocation-scoped, normalized view of one PostgreSQL character datum.
+ * View a PostgreSQL character value with trailing spaces excluded.
+ * Keeps any detoasted copy alive until this view is destroyed. If the
+ * original storage is borrowed, the caller must keep it alive for the view.
  */
 class bpchar_view final {
 public:
@@ -347,13 +349,13 @@ concept registered_vector_lane =
         } -> std::same_as<p_lane>;
     };
 
-/** @brief Discriminates a scalar constant from a column-backed operand. */
+/** Whether a vector argument holds one constant or a column of values. */
 enum class vector_operand_kind : std::uint8_t {
     constant,
     column,
 };
 
-/** @brief Checked non-owning access to a typed PostgreSQL vector column. */
+/** Read a validated vector column without owning its storage. */
 template<auto p_sql_type, class p_lane>
 class vector_column final {
     static_assert(registered_vector_lane<p_sql_type, p_lane>);
@@ -392,10 +394,9 @@ public:
         return traits::decode(values[lane_index], collation_);
     }
 
-    /* Clang reduced-BMI module calls must expose the contiguous comparison
-     * payload as a register-returned pointer. Do not replace this accessor
-     * with a by-value span: the comparison kernel's module boundary is
-     * deliberately pointer + count. */
+    /* Return a pointer for the comparison kernel's pointer-and-count interface.
+     * Keep this signature for Clang builds with reduced module interfaces, where
+     * returning a span by value changes how the value crosses the module boundary. */
     template<class p_contiguous_lane = p_lane>
     [[nodiscard]] const p_contiguous_lane* contiguous_data() const noexcept
         requires vector_lane_traits<
@@ -429,8 +430,8 @@ private:
 };
 
 /**
- * Invocation-scoped view of the NULL bitmap carried by an aggregate vector
- * argument whose SQL pseudo-type does not identify a lane representation.
+ * Borrow an aggregate argument's NULL flags for this function call.
+ * This allows counting non-null rows without knowing the column's element type.
  */
 class vector_null_mask final {
 public:
@@ -461,7 +462,7 @@ private:
     ::vector_column_storage* column_ = nullptr;
 };
 
-/** @brief Checked access to a scalar-or-column vector argument. */
+/** Read a validated vector argument as a constant or a typed column. */
 template<auto p_sql_type, class p_lane>
 class vector_operand final {
     static_assert(registered_vector_lane<p_sql_type, p_lane>);
@@ -520,7 +521,7 @@ private:
     Oid collation_ = InvalidOid;
 };
 
-/** @brief Owns a newly allocated typed vector result until fmgr transfer. */
+/** Own a newly allocated result vector until PostgreSQL takes it as a Datum. */
 template<auto p_sql_type, class p_lane>
 class vector_result final {
     static_assert(registered_vector_lane<p_sql_type, p_lane>);
