@@ -1,6 +1,6 @@
 /**
  * @file safety_runtime_harness_case_support.cppm
- * @brief Provide private-cluster, process, artifact, and case-plan support.
+ * @brief Validates the private test cluster and loads runtime-safety cases.
  */
 
 module;
@@ -86,7 +86,7 @@ export namespace bioseq::tests::integration::safety_runtime_harness {
         && *relative.begin() != "..";
 }
 
-/// Validate the private-cluster authorization marker and permissions.
+/// Check the private-cluster marker contents, location, owner, and permissions.
 void require_private_authorization(
         const fs::path& marker,
         const fs::path& expected_data_directory) {
@@ -109,7 +109,7 @@ void require_private_authorization(
     }
 }
 
-/// Validate every path, identity, and command in a cluster configuration.
+/// Check the private-cluster configuration before installing files or restarting it.
 void validate_cluster_config(
         const json& config,
         std::string_view expected_profile) {
@@ -270,7 +270,7 @@ void validate_cluster_config(
     }
 }
 
-/// Spawn an authorized command and require a normal zero exit status.
+/// Run a previously validated command and require a normal zero exit status.
 void run_command(
         const json& command,
         std::string_view context) {
@@ -320,7 +320,7 @@ void run_command(
     }
 }
 
-/// Atomically install a hash-sealed artifact into the private stage.
+/// Copy an artifact, verify its SHA-256, and rename it into place.
 void install_artifact(
         const fs::path& source,
         const fs::path& destination,
@@ -405,7 +405,7 @@ void install_artifact(
     }
 }
 
-/// Connect to PostgreSQL with the bounded activation retry policy.
+/// Retry PostgreSQL connections while the restarted test server becomes ready.
 [[nodiscard]] std::unique_ptr<pg_connection> connect_with_retry(
         const connection_parameters& parameters) {
     std::string last_error;
@@ -471,7 +471,7 @@ void install_artifact(
         value.begin(), value.end(), pattern);
 }
 
-/// Return whether a fault key conforms to the runtime protocol alphabet.
+/// Check the fault key's length and allowed characters.
 [[nodiscard]] bool valid_fault_key(
         std::string_view value) noexcept {
     if (value.empty() || value.size() >= 129) {
@@ -487,7 +487,7 @@ void install_artifact(
         });
 }
 
-/// Return whether a site ID contains the complete revision-two probe digest.
+/// Check that a site ID is probe: followed by a lowercase SHA-256 digest.
 [[nodiscard]] bool probe_site_id(
         std::string_view value) noexcept {
     constexpr std::string_view prefix = "probe:";
@@ -496,14 +496,14 @@ void install_artifact(
         && lowercase_sha256(value.substr(prefix.size()));
 }
 
-/// Concrete visit, trigger, and ordering expectations for a probe relation.
+/// Expected site visits, fault triggers, and their order.
 struct probe_contract_values final {
     std::uint64_t expected_visit_count;
     std::uint64_t expected_trigger_count;
     std::string_view ordering;
 };
 
-/// Resolve the fixed probe contract associated with a catalog relation.
+/// Get the visit and fault expectations for a named ordering rule.
 [[nodiscard]] probe_contract_values contract_for_relation(
         std::string_view relation,
         std::string_view context) {
@@ -532,7 +532,7 @@ struct probe_contract_values final {
         "injected_after_site_success");
 }
 
-/// Render a relation's probe contract in its receipt JSON representation.
+/// Format the site/fault ordering rule as a probe_contract JSON object.
 [[nodiscard]] json probe_contract_for_relation(
         std::string_view relation,
         std::string_view context) {
@@ -547,7 +547,7 @@ struct probe_contract_values final {
         {"ordering", std::string{values.ordering}}};
 }
 
-/// Require a JSON probe contract to equal the relation-derived contract.
+/// Require probe_contract JSON to match the selected site/fault ordering rule.
 void require_probe_contract(
         const json& value,
         std::string_view relation,
@@ -580,7 +580,7 @@ void require_probe_contract(
     }
 }
 
-/// Validate and normalize one runtime case catalog entry.
+/// Validate a case's metadata and expected outcome, then return a copy.
 [[nodiscard]] json normalized_catalog_entry(
         const json& raw,
         std::string_view context) {
@@ -809,18 +809,19 @@ void require_probe_contract(
     return result;
 }
 
-/// Catalog and execution halves of one sealed runtime case.
+/// Public case metadata and the SQL steps used to run it.
 struct case_definition final {
     json catalog;
     json execution;
 };
 
-/// Case definitions indexed by their artifact-safe identifiers.
+/// Runtime cases indexed by the identifiers used in output filenames.
 struct case_plan final {
     std::map<std::string, case_definition, std::less<>> cases;
 };
 
-/// Load and validate the compiled, hash-sealed runtime case plan.
+/// Load the case plan and require it to match the hash compiled into this harness.
+/// Validate each case, including its SQL steps and expected recovery rows.
 [[nodiscard]] case_plan load_case_plan() {
     const fs::path path{k_case_plan_path};
     if (!path.is_absolute() || !fs::is_regular_file(path)) {
