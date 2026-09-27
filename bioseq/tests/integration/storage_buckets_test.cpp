@@ -1,10 +1,9 @@
 /**
- * @file Integration contracts for length-bucketed sub-table sharding.
+ * @file Tests storing sequences in sub-tables grouped by length and column.
  *
- *   * INSERT routes payloads by length bucket and column attribute number.
- *   * `bioseq.len` and `bioseq.unit_len` return BIGINT.
- *   * The cap=0 sentinel forces one shard per INSERT.
- *   * DROP cascades, TEMP rejection, and UNLOGGED inheritance stay exact.
+ * Checks shard limits, sequence lengths, and reads through mmsearch.
+ * Also checks cleanup on DROP, rejection of TEMP parents, and inheritance
+ * of UNLOGGED storage.
  */
 
 #include <fmt/format.h>
@@ -23,11 +22,7 @@ constexpr std::string_view k_table = "storage_buckets";
 
 TEST_CASE("bioseq.len reports correct payload size after stub hydration",
           "[component:bioseq][layer:integration][feature:storage][resource:postgres]") {
-    // bioseq.len and bioseq.unit_len are BIGINT and locator-aware:
-    // the stub-side path reads `loc.total_bp_size` (uint64) from the locator
-    // payload, the inline path reads `hdr->bp_size`. The widening means
-    // sequences with bp_size > INT32_MAX round-trip their length without
-    // silent truncation.
+    // Check that bioseq.len returns the sequence length as BIGINT.
     auto ctx = fresh_context({k_table});
     create_seq_table(
         ctx,
@@ -98,7 +93,7 @@ TEST_CASE("bioseq.seq_sub_table_summary view + list_seq_storage_shards "
                     k_table))
             >= 1);
 
-    // The list_seq_storage_shards SRF must return the same number of rows.
+    // The shard-listing function must also report a row for this parent.
     REQUIRE(query_scalar_int(
                 ctx,
                 fmt::format("SELECT COUNT(*) FROM "
@@ -170,11 +165,8 @@ TEST_CASE("DROP TABLE cascades to every sub-table",
             == 0);
     REQUIRE(query_scalar_int(
                 ctx,
-                // Per-shard relations are named seq_sub_<db>_<spc>_... (a
-                // digit follows the prefix); the catalog table itself is
-                // bioseq_internal.seq_sub_table, which must NOT be counted
-                // here. Anchor on a digit so the catalog + its indexes are
-                // excluded.
+                // A digit after seq_sub_ identifies shard tables. This excludes the
+                // seq_sub_table catalog and its indexes from the cleanup check.
                 "SELECT count(*) FROM pg_class WHERE "
                 "relnamespace = 'bioseq_internal'::regnamespace "
                 "AND (relname ~ '^seq_sub_[0-9]' OR relname LIKE 'idx_sidecar_%');")
@@ -265,21 +257,15 @@ TEST_CASE("round-trip via USING bioseq table preserves payload bytes",
     REQUIRE(rows[1][1].value() == "8");
 }
 
-// End-to-end coverage verifies that existing queries (mmsearch in particular)
-// keep working transparently while
-// the payload lives in sub-tables. The canonical alignment dataset
-// (sequences spanning multiple length buckets), checks the sub-table catalog
-// has rows under the parent's relfilenode, then runs mmsearch and asserts the
-// match set is non-empty. A non-empty match is the smoking gun that the
-// hydration path actually reaches into the sub-tables and returns real
-// payload bytes; the alignment result must be non-empty.
+// Store the alignment fixture in sub-tables and run mmsearch against it.
+// A returned match checks that the scan can load sequence bytes from this storage.
 TEST_CASE("mmsearch end-to-end exercises hydration from sub-tables",
           "[component:bioseq][layer:integration][feature:storage][resource:postgres]") {
     constexpr std::string_view k_alignment_table = "storage_bucket_alignment";
     auto ctx = fresh_context({k_alignment_table});
     seed_hoe_fixture(ctx, k_alignment_table);
 
-    // Sub-tables exist under the parent's relfilenode triple.
+    // Check that the seeded parent has sequence shards.
     const long long shards = query_scalar_int(
         ctx,
         fmt::format(
@@ -289,10 +275,8 @@ TEST_CASE("mmsearch end-to-end exercises hydration from sub-tables",
             k_alignment_table));
     REQUIRE(shards >= 1);
 
-    // mmsearch returns matching rows. The canonical dataset has five rows that all
-    // contain the canonical probe (or a near-match); the exact result set
-    // depends on the aligner, so we only assert non-empty + that all PKs
-    // are in the seeded range.
+    // The five seeded rows contain the probe or a near match. Accept any
+    // nonempty result whose primary keys belong to this fixture.
     const auto matched_pks = query_int_column(
         ctx,
         fmt::format(

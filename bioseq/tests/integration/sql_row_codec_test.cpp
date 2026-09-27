@@ -1,4 +1,4 @@
-/** @file Integration contracts for SQL metadata row codecs. */
+/** @file Tests SQL metadata row layouts and reads and writes through their codecs. */
 
 #include <catch2/catch_test_macros.hpp>
 
