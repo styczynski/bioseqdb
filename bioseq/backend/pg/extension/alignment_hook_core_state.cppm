@@ -1,6 +1,6 @@
 /**
  * @file alignment_hook_core_state.cppm
- * @brief PostgreSQL executor-hook alignment-frame registry state.
+ * @brief Backend-local lists of active alignment query frames.
  */
 module;
 
