@@ -1,6 +1,6 @@
 /**
  * @file compact_direct/reader/anchor_occurrences.cppm
- * @brief Materialization and hash ordering of query minimizer occurrences.
+ * @brief Collect query minimizers and group their references by hash for lookup.
  */
 
 module;

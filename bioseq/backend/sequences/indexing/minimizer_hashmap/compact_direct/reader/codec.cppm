@@ -1,6 +1,6 @@
 /**
  * @file compact_direct/reader/codec.cppm
- * @brief Compact-direct control, position, matcher, and grouped leaf codecs.
+ * @brief Read grouped-SoA hashes and positions and turn query matches into anchors.
  */
 
 module;
@@ -130,8 +130,8 @@ prepared_minimizer_fragment_reader::with_query_group_occurrences_(
     return minimizer_generation_encoding_error::partition_id;
 }
 
-/// Adds forward and reverse anchor counts for one query occurrence using target strand
-/// posting tallies.
+/// Add forward and reverse anchor counts for a query occurrence by comparing
+/// its strand with the counts of target postings on each strand.
 [[nodiscard]] inline std::optional<minimizer_generation_encoding_error>
 prepared_minimizer_fragment_reader::accumulate_orientation_(
     query_occurrence_reference occurrence, const orientation_occurrence_context& context) noexcept {
@@ -162,8 +162,8 @@ prepared_minimizer_fragment_reader::accumulate_orientation_(
     return std::nullopt;
 }
 
-/// Builds one fragment anchor for a block-bounded reference interval and stores it in
-/// the shard query layout slice.
+/// Write one anchor into its query's forward or reverse block slice.
+/// Reject positions outside the block and writes past the allocated slice.
 [[nodiscard]] inline std::optional<minimizer_generation_encoding_error>
 prepared_minimizer_fragment_reader::emit_fragment_anchor_(
     std::uint64_t packed_target_position,
@@ -245,7 +245,7 @@ prepared_minimizer_fragment_reader::emit_fragment_anchor_(
 [[nodiscard]] inline prepared_minimizer_fragment_reader::packed_occurrence_radix_partition
 prepared_minimizer_fragment_reader::partition_packed_occurrence_top_byte_(
     std::span<packed_query_occurrence> occurrences) noexcept {
-    /// In-place radix bucket with begin/end pointers into packed occurrences.
+    /// Remaining write range for one hash bucket during in-place partitioning.
     struct bucket {
         packed_query_occurrence* begin = nullptr;
         packed_query_occurrence* end = nullptr;
@@ -341,7 +341,8 @@ prepared_minimizer_fragment_reader::visit_control_counts_planned_(
     return {};
 }
 
-/// Authenticates grouped-SoA control bytes and invokes a visitor for each decoded control.
+/// Check grouped-SoA control ordering, offsets, counts, and padding, then visit
+/// each decoded control. A later error can follow earlier visitor calls.
 template <class p_visitor>
 [[nodiscard]] inline std::expected<void, minimizer_generation_encoding_error>
 prepared_minimizer_fragment_reader::visit_controls_(std::span<const std::byte> input,
@@ -419,8 +420,8 @@ prepared_minimizer_fragment_reader::visit_controls_(std::span<const std::byte> i
     return {};
 }
 
-/// Decodes encoded positions for one control span within a reference core and invokes a
-/// visitor with each global encoded position.
+/// Visit a hash's target positions, converting segment-local coordinates to
+/// global coordinates while preserving strand. Check bounds and strict order.
 template <class p_visitor>
 [[nodiscard]] inline std::expected<void, minimizer_generation_encoding_error>
 prepared_minimizer_fragment_reader::visit_position_range_(
@@ -593,7 +594,8 @@ prepared_minimizer_fragment_reader::visit_complete_postings(
     return {};
 }
 
-/// Maps a packed target position and query minimizer sketch into one chaining anchor.
+/// Make a chaining anchor from matching target and query minimizers.
+/// Opposite strands use the query k-mer's end on the reverse complement.
 [[nodiscard]] inline std::expected<bioseq::chaining::anchor, minimizer_generation_encoding_error>
 prepared_minimizer_fragment_reader::make_fragment_anchor_(std::uint64_t packed_target,
                                                           std::uint64_t query_position_strand,
@@ -622,8 +624,8 @@ prepared_minimizer_fragment_reader::make_fragment_anchor_(std::uint64_t packed_t
     };
 }
 
-/// Scans trusted control counts for one block entry range and invokes a visitor for
-/// each matched query group.
+/// Scan a block's hashes and counts and visit those present in the query batch.
+/// Prefix offsets and positions are left for later passes.
 template <bool p_oracle, class p_query_hash_plan, class p_visitor>
 [[nodiscard]] inline std::expected<void, minimizer_generation_encoding_error>
 prepared_minimizer_fragment_reader::visit_matched_control_counts_(
@@ -674,10 +676,11 @@ prepared_minimizer_fragment_reader::visit_matched_control_counts_(
 }
 
 /**
- * Scans matched controls in a block with prefix authentication.
+ * Visit matched controls after checking their position ranges and counts.
  *
- * Optionally accumulates accepted or rejected prefix byte totals and can validate
- * rejected-prefix geometry without walking positions.
+ * Hashes above max_occ can have their prefix offsets checked without reading
+ * positions. Optional counters track prefix bytes for accepted and rejected
+ * hashes. The emission pass skips checks already made for rejected hashes.
  */
 template <bool p_oracle, class p_query_hash_plan, class p_visitor>
 [[nodiscard]] inline std::expected<void, minimizer_generation_encoding_error>
@@ -741,9 +744,8 @@ prepared_minimizer_fragment_reader::visit_matched_controls_(
                     callback_error = minimizer_generation_encoding_error::partition_id;
                     return;
                 }
-                // Pass 3 suppresses a rejected control before either offset
-                // endpoint is read. Rejected endpoints were authenticated
-                // exactly once by Pass 2 (or the rejected-only rescan).
+                // Pass 2, or the rejected-only scan, already checked these
+                // offsets. Pass 3 can skip a rejected hash before reading them.
                 if (global_count > context.max_occ && !validate_rejected_prefixes) {
                     return;
                 }
@@ -779,10 +781,9 @@ prepared_minimizer_fragment_reader::visit_matched_controls_(
                     callback_error = minimizer_generation_encoding_error::control_range;
                     return;
                 }
-                // A globally rejected query hash still names a selected
-                // control. Authenticate its prefix geometry and saturated
-                // count before suppressing the position walk; otherwise a
-                // corrupt heavy control could hide behind max-occ pruning.
+                // Check offsets and the stored count even when max_occ rejects
+                // this hash. A frequent hash must still report corrupt
+                // control data before its positions are skipped.
                 if (global_count > context.max_occ) {
                     return;
                 }
@@ -806,9 +807,12 @@ prepared_minimizer_fragment_reader::visit_matched_controls_(
 }
 
 /**
- * Looks up the query occurrence group for a hash.
+ * Find all query occurrences with this hash.
  *
- * \tparam p_oracle Uses oracle scratch radix plans instead of the production matcher view.
+ * The production matcher tests the membership filter before searching the
+ * hash's bucket. A filter match still needs an exact hash comparison.
+ *
+ * @tparam p_oracle Use the test matcher's query plans and advancing bucket cursor.
  */
 template <bool p_oracle, class p_query_hash_plan>
 [[nodiscard, gnu::always_inline]] inline std::optional<
@@ -922,7 +926,7 @@ prepared_minimizer_fragment_reader::match_query_group_(std::uint64_t hash,
     }
 }
 
-/// Tallies forward and reverse anchor counts for every occurrence in one hash group.
+/// Add forward and reverse anchor counts for every query occurrence of a hash.
 template <bool p_oracle>
 [[nodiscard]] inline std::optional<minimizer_generation_encoding_error>
 prepared_minimizer_fragment_reader::accumulate_orientation_for_group_(
@@ -958,8 +962,8 @@ prepared_minimizer_fragment_reader::accumulate_orientation_for_group_(
         });
 }
 
-/// Counts strand orientations from fixed p16 positions and updates layout counts for one
-/// matched group.
+/// Count target strands from 16-bit positions, then update the forward and
+/// reverse anchor counts for every query occurrence of the matched hash.
 template <bool p_oracle>
 [[nodiscard]] inline std::optional<minimizer_generation_encoding_error>
 prepared_minimizer_fragment_reader::process_fixed_orientation_control_(
@@ -995,8 +999,8 @@ prepared_minimizer_fragment_reader::process_fixed_orientation_control_(
         context, group, target_strand_zero, target_strand_one);
 }
 
-/// Emits fragment anchors from fixed p16 positions for every occurrence in one matched
-/// group.
+/// Read each 16-bit target position and pair it with every query occurrence
+/// of the matched hash, writing the anchors into their final block slices.
 template <bool p_oracle>
 [[nodiscard]] inline std::optional<minimizer_generation_encoding_error>
 prepared_minimizer_fragment_reader::process_fixed_emission_control_(
@@ -1056,7 +1060,8 @@ prepared_minimizer_fragment_reader::process_fixed_emission_control_(
     return std::nullopt;
 }
 
-/// Pass-1 probe that reserves occurrence counters for matched hashes in one H32/C16 entry.
+/// Add matched target counts to the batch counters for an entry with 32-bit
+/// hashes and 16-bit counts. Counts above max_occ mark the hash as rejected.
 template <bool p_oracle>
 [[nodiscard]] inline std::expected<void, minimizer_generation_encoding_error>
 prepared_minimizer_fragment_reader::probe_entry_h32_c16_count_(
@@ -1129,9 +1134,12 @@ prepared_minimizer_fragment_reader::probe_entry_h32_c16_count_(
 }
 
 /**
- * Matched-control probe for fixed H32/C16/P16 entries.
+ * Process matched controls with 32-bit hashes, 16-bit counts and positions.
  *
- * \tparam p_offset_width Prefix offset width for the entry shape.
+ * Read selected prefix offsets to check ranges. The current pass then counts
+ * orientations, writes anchors, or only validates rejected hashes.
+ *
+ * @tparam p_offset_width Width of the entry's prefix offsets.
  */
 template <bool p_oracle, minimizer_scalar_width p_offset_width>
 [[nodiscard]] inline std::expected<void, minimizer_generation_encoding_error>
@@ -1175,9 +1183,9 @@ prepared_minimizer_fragment_reader::probe_entry_h32_c16_p16_matched_(
     std::optional<std::uint64_t> previous_selected_position_end;
     const std::size_t count = static_cast<std::size_t>(entry.control_count);
     for (std::size_t control_ordinal = 0u; control_ordinal < count; ++control_ordinal) {
-        // Pass 1 has already authenticated H ordering/range and every C
-        // value under a joined barrier. Later mandatory passes scan H for
-        // matching, then touch C only for a control they will consume.
+        // Pass 1 checked hash order, hash bounds, and every count before
+        // its workers joined. Later passes scan hashes and read counts
+        // only for selected controls that this pass needs.
         const std::uint32_t hash =
             static_cast<std::uint32_t>(read_fixed_width_le_<minimizer_scalar_width::u32>(
                 mapped_payload_,
