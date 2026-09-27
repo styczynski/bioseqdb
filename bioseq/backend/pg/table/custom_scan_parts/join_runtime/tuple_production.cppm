@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Owns scan fetch support and finalized placeholder population.
+ * @brief Connects base-scan startup and expression placeholders to PostgreSQL execution.
  */
 module;
 #include <bioseq/pg_compat.h>
@@ -47,7 +47,12 @@ import :custom_scan_join_runtime_scan_admission_contracts;
 using namespace bioseq::postgres::support;
 
 export {
-    /** @brief Initializes a base scan and translates all C++ failures to PostgreSQL errors. */
+    /**
+     * @brief Starts a base scan and reports failures through PostgreSQL.
+     *
+     * On failure, abandon the dispatch buffer before raising the error. Preserve
+     * PostgreSQL errors and translate C++ exceptions into internal errors.
+     */
     void
     bioseq_column_scan_begin_custom_scan(CustomScanState* cscanstate, EState* estate, int eflags) {
         ErrorData* exact_error = nullptr;
@@ -90,10 +95,10 @@ export {
     }
 
     /**
-     * @brief Maps a supported match-helper function to its executor placeholder.
+     * @brief Finds the writable Const for a match helper.
      *
-     * bioseq.score aliases bioseq.dp_score, so both identifiers resolve to the
-     * same placeholder.
+     * bioseq.score and bioseq.dp_score share the score placeholder. Return null for
+     * a function that has no match placeholder.
      */
     Const* lookup_bioseq_placeholder_const(Oid funcid, const var_injector_context* ctx) {
         const bioseq_stub_oids* o = ctx->oids;
@@ -141,7 +146,7 @@ export {
         return nullptr;
     }
 
-    /** @brief Checks that a helper has a serialized binding for this base scan. */
+    /** @brief Checks that the planner bound this helper call to the current scan and match ID. */
     [[nodiscard]] bool
     base_match_helper_is_finalized_for_scan(FuncExpr* function,
                                             const var_injector_context& context) {
@@ -175,22 +180,13 @@ export {
     }
 
     /**
-     * @brief Rewrites an eligible symbol-count call to a per-row placeholder.
+     * @brief Replaces a supported symbol_count call with a count supplied for each row.
      *
-     * Rewrite a single `bioseq.symbol_count(Var, 'L')` call site into a
-     * placeholder Const that the executor populates per-row from meta_sidecar.
-     * Returns the replacement Const*, or nullptr when the FuncExpr does not
-     * match the supported shape (in which case the caller must leave the
-     * original FuncExpr in place so the scalar O(n) path runs).
+     * The sequence must be a column with a known alphabet. The letter must be a
+     * non-null, one-byte text constant in that alphabet. Record the column and
+     * letter so the executor can obtain its count for each row.
      *
-     * Matching is deliberately strict: arg0 must be a Var (a column reference
-     * with a concrete bioseq.seq typmod), and arg1 must be a single-byte
-     * non-null text Const whose letter is in the column's alphabet. Any call
-     * outside this shape — e.g. symbol_count('ACGT'::bioseq.seq, 'A') — keeps
-     * its original FuncExpr and runs through the scalar entry point in
-     * mod.cppm, which is cost-inflated by bioseq_symbol_count_support.
-     *
-     * @return The replacement Const, or null when the scalar call must remain.
+     * @return The new BIGINT placeholder, or null to keep the scalar function call.
      */
     Const* try_rewrite_symbol_count(FuncExpr* fe, var_injector_context* ctx) {
         if (ctx == nullptr || fe == nullptr || ctx->consts == nullptr) {
@@ -263,11 +259,8 @@ export {
             return nullptr;
         }
 
-        /*
-         * Build the placeholder Const. INT8 is byval on LP64 (pg_type.typbyval
-         * for bigint is 't'), so constbyval=true + constlen=8 is correct. The
-         * initial value is NULL until the executor populates it per-row.
-         */
+        /* Store the symbol count as a by-value BIGINT. Leave it NULL until
+         * the executor has found the count for this row. */
         Const* placeholder =
             makeConst(INT8OID,
                       -1,
@@ -301,9 +294,9 @@ export {
         return placeholder;
     }
 
-    /** @brief Replaces finalized match helpers and eligible symbol counts with placeholders. */
+    /** @brief Replaces bound match helpers and supported symbol counts with writable Const nodes. */
     struct var_injector_mutator {
-        /** @brief Mutates one expression node while preserving unresolved PHV semantics. */
+        /** @brief Rewrites one expression node and leaves PlaceHolderVar wrappers intact. */
         [[nodiscard]] pg_node_mutation operator()(pg_expression_mutation_cursor,
                                                   pg_node_view node,
                                                   var_injector_context& injector_context) const {
@@ -335,25 +328,14 @@ export {
                     if (symbol_placeholder != nullptr) {
                         return pg_node_mutation::replace_with(to_pg_node(symbol_placeholder));
                     }
-                    /* Call shape not supported (literal arg, non-Const letter,
-                     * letter outside alphabet, …) — let the scalar entry point
-                     * in mod.cppm handle it in place. */
+                    /* Keep unsupported calls here so PostgreSQL evaluates symbol_count
+                     * through its scalar function. */
                 }
-                /* Fall through to recurse into arg subtrees of unrelated FuncExprs. */
+                /* Search other function arguments for helper calls. */
             }
-            /*
-             * PlaceHolderVar handling. By Postgres convention the planner
-             * resolves PHVs to Vars / Params by execution time (pathnodes.h:
-             * "it is not recognized by the parser or executor"), so seeing
-             * one here is a planner bug. We log loudly and pass the node
-             * through — unwrapping would silently drop the PHV's
-             * phnullingrels metadata and could produce wrong results in
-             * outer-join nullable positions (a plain Const has no nulling
-             * semantics). Returning descend() does the right thing because
-             * the cursor recurses into phexpr, giving var_injector_mutator a
-             * chance to rewrite our FuncExpr in place; the PHV node itself is
-             * preserved.
-             */
+            /* PostgreSQL should resolve PlaceHolderVars before execution. Keep any
+             * remaining wrapper while visiting its expression: removing it here
+             * would lose the outer-join information in phnullingrels. */
             if (PlaceHolderVar* phv = node.try_cast<PlaceHolderVar>()) {
                 bioseq_log<logging_level::debug>(
                     "[bioseq] pg: var_injector_mutator() encountered PlaceHolderVar phid={} at "
@@ -365,37 +347,22 @@ export {
         }
     };
 
-    /** @brief Applies execution-time placeholder injection to an expression tree. */
+    /** @brief Walks a scan expression and installs the match and symbol-count placeholders. */
     [[nodiscard]] Node* var_injector(Node* node, var_injector_context* injector_context) {
         var_injector_mutator mutator;
         return mutate_pg_expression(node, *injector_context, mutator);
     }
 
     /**
-     * @brief Updates all installed placeholder Const nodes from one match result.
+     * @brief Fills the installed match placeholders from one alignment result.
      *
-     * Per-tuple update of every placeholder Const* from a match_result's
-     * fields. Fields we don't have a Const for (because the query didn't
-     * project them) are skipped thanks to the nullptr guard. The cigar text
-     * Datum is allocated via CStringGetTextDatum in CurrentMemoryContext.
+     * Skip placeholders that are absent. Allocate CIGAR text in the current
+     * PostgreSQL memory context, where it remains available for row projection.
      */
     void populate_placeholder_consts(placeholder_constants& consts,
                                      const bioseq::simd::match_result& match) {
         using bioseq::simd::format_cigar;
-        // Absolute coordinates and lengths are unsigned 64-bit values. They are projected
-        // through BIGINT (int8) placeholders so positions / lengths in sequences
-        // longer than `INT32_MAX` (~2.15 Gbp) are NOT truncated. `set_bigint`
-        // fills those eight (query_len … block_length) via `Int64GetDatum`. The
-        // remaining match_result fields (dp_score, mapq, chain_score, seed_count,
-        // …) are genuinely `int32_t` in the struct, so they keep INT4 placeholders
-        // and `set_int` — widening them at this boundary cannot recover precision
-        // the source type never held.
-        //
-        // `set_bigint`'s Assert is a debug-time witness that no real coordinate
-        // reaches the int64 sign boundary: the project's pessimistic ceiling is
-        // 1 Tbp (~2^40), ~23 bits below INT64_MAX, so the uint64→int64 reinterpret
-        // is always value-preserving.
-        // Stores a checked match value in an INT4 placeholder when one was installed.
+        // Assert that the value fits in INT4 before filling its placeholder.
         auto set_int = [](Const* node, int64_t value) {
             if (node == nullptr)
                 return;
@@ -405,10 +372,8 @@ export {
                 bioseq::postgres::support::pg_datum::from(static_cast<std::int32_t>(value)).raw();
             node->constisnull = false;
         };
-        // Parameter is the underlying type of `sequence_size_t` (std::uint64_t)
-        // spelled directly — this TU does not import bioseq_storage_size, so the
-        // `sequence_size_t` alias is not in scope here.
-        // Stores an unsigned coordinate in an INT8 placeholder after checking its signed range.
+        // Sequence positions, lengths, and edit distance use BIGINT so values above
+        // INT32_MAX survive projection. Assert that each value fits in signed int64.
         auto set_bigint = [](Const* node, std::uint64_t value) {
             if (node == nullptr)
                 return;
@@ -434,7 +399,7 @@ export {
         };
 
         set_int(consts.dp_score_node, match.dp_score);
-        // The eight sequence_size_t (uint64) coordinates/lengths → BIGINT, no narrow.
+        // Preserve 64-bit sequence coordinates and counts in SQL results.
         set_bigint(consts.query_len_node, match.query_len);
         set_bigint(consts.query_start_node, match.query_start);
         set_bigint(consts.query_end_node, match.query_end);
