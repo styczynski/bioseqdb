@@ -1,6 +1,6 @@
 /**
  * @file seeding.cppm
- * @brief Owns anchor lookup, anchor sort, and seed count/emit compute shader bodies.
+ * @brief Compute shaders for finding seed matches and sorting their anchors.
  */
 module bioseq.gpu.vulkan.shader_compiler:seeding;
 
@@ -9,7 +9,9 @@ import std;
 
 namespace bioseq::gpu::vulkan {
 
-/// @brief Counts and emits anchors from the resident minimizer slot table.
+/// @brief Emit anchors from the minimizer index into ranges assigned by the
+/// prefix counts. Each query minimizer looks up its target positions and writes
+/// the matching strand and coordinates.
 inline constexpr std::string_view k_seed_lookup_anchors_body = R"GLSL(
 layout(local_size_x = compile_time_workgroup_size_x, local_size_y = 1, local_size_z = 1) in;
 
@@ -174,9 +176,9 @@ void main() {
 }
 )GLSL";
 
-/// @brief Per-query bitonic anchor sort. One workgroup sorts up to
-/// compile_time_workgroup_size_x anchors by `ref_bits()` in shared memory. Larger anchor sets
-/// are routed to the stable device radix path. Host sorting is forbidden.
+/// @brief Sort one query's anchors by strand and reference position in shared
+/// memory. Equal keys keep their input order. The range must fit in one
+/// workgroup. The runtime uses GPU radix sorting for larger ranges.
 inline constexpr std::string_view k_sort_anchors_bitonic_body = R"GLSL(
 layout(local_size_x = compile_time_workgroup_size_x, local_size_y = 1, local_size_z = 1) in;
 
@@ -257,11 +259,10 @@ void main() {
     }
 }
 )GLSL";
-/// @brief GPU seed count/emit. One workgroup per query record. Local
-/// invocations stride over that record's minimizers. `emit_mode==0` writes the
-/// per-minimizer anchor count (clamped by `max_occ`) to `counts`. `emit_mode==1`
-/// reads the exclusive `prefix` and emits `gpu_anchor_wire` records plus their
-/// compact `(strand, ref)` sort key.
+/// @brief Count seed matches, then emit anchors into the ranges assigned by
+/// an exclusive prefix sum. Counting rejects hashes with more than max_occ
+/// target positions. Emission also writes strand and reference-position keys
+/// for sorting. Workgroups divide the query minimizers between their lanes.
 inline constexpr std::string_view k_seed_count_emit_body = R"GLSL(
 layout(local_size_x = compile_time_workgroup_size_x, local_size_y = 1, local_size_z = 1) in;
 
@@ -502,13 +503,11 @@ void main() {
 }
 )GLSL";
 
-/// @brief Direct persisted grouped-SoA seed count/emit. One workgroup owns one
-/// query record and its lanes stride over query minimizers.  Each minimizer is
-/// matched against the selected resident partition descriptors, binary-searches
-/// the raw variable-width SoA hash arrays, and sums occurrences across every
-/// position segment before applying `max_occ`.  Emit rereads the authenticated
-/// prefix ranges and variable-width segment-local positions directly. It never
-/// constructs a CPU-decoded slot table or a widened/globalized position array.
+/// @brief Find seed matches directly in a grouped index's packed arrays.
+/// A workgroup handles one query record. Its lanes look up minimizer hashes
+/// and add occurrence counts across target segments before applying max_occ.
+/// The emission pass reads segment positions again and writes anchors into
+/// the prefix-sum ranges. Counts and positions keep their stored widths.
 inline constexpr std::string_view k_grouped_soa_seed_body = R"GLSL(
 layout(local_size_x = compile_time_workgroup_size_x, local_size_y = 1, local_size_z = 1) in;
 
@@ -1557,9 +1556,9 @@ void main() {
 }
 )GLSL";
 
-/// @brief Shared declarations and checked scalar access for the bounded
-/// Format-5 control and position group pipelines. Runtime code concatenates
-/// this piece with exactly one phase body below.
+/// @brief Shared buffer declarations and bounds-checked reads for the
+/// Format-5 grouped index shaders. Combine this text with the control or
+/// position phase below to build a complete shader.
 inline constexpr std::string_view k_grouped_soa_stream_common_body = R"GLSL(
 layout(local_size_x = compile_time_workgroup_size_x, local_size_y = 1, local_size_z = 1) in;
 
@@ -2013,8 +2012,9 @@ uint64_t shape_v5_anchor_key(uint reverse, uint64_t ref_position) {
 }
 )GLSL";
 
-/// @brief Control-phase body: locate query hashes, accumulate target-global
-/// occurrence state, and append authenticated position ranges.
+/// @brief Look up query hashes in a control group and add their occurrence
+/// counts across the target. Save matching position ranges for the later
+/// emission pass. The authorization pass decides which hashes pass max_occ.
 inline constexpr std::string_view k_grouped_soa_stream_controls_body = R"GLSL(
 void main() {
     uint record_index = gl_WorkGroupID.x;
@@ -2091,9 +2091,9 @@ void main() {
 }
 )GLSL";
 
-/// @brief Authorization barrier body. It runs only after all control-group
-/// timeline dependencies complete and publishes exact accepted counts for the
-/// existing prefix-scan stage.
+/// @brief After all control groups finish, reject hashes whose total count
+/// exceeds max_occ. Publish accepted counts for the prefix sum and reset
+/// the cursors used when emitting anchors.
 inline constexpr std::string_view k_grouped_soa_stream_authorization_body = R"GLSL(
 layout(local_size_x = compile_time_workgroup_size_x, local_size_y = 1, local_size_z = 1) in;
 
@@ -2164,8 +2164,9 @@ void main() {
 }
 )GLSL";
 
-/// @brief Position-phase body: consume only ranges authorized by the barrier
-/// and emit bounded segment-local anchors into the existing GPU sort path.
+/// @brief Read accepted position ranges and emit anchors for GPU sorting.
+/// Add the segment base to each stored position to get its reference coordinate.
+/// Check each output range against the space assigned by the prefix sum.
 inline constexpr std::string_view k_grouped_soa_stream_positions_body = R"GLSL(
 shared uint shape_v5_range_output_base;
 shared uint shape_v5_range_is_valid;

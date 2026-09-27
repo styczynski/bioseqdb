@@ -1,6 +1,6 @@
 /**
  * @file shader_layout.cppm
- * @brief Device-free SPIR-V decoration scanner for Vulkan shader ABI checks.
+ * @brief Read SPIR-V buffer layouts so the runtime can check them against C++ types.
  */
 module;
 
@@ -10,19 +10,19 @@ import std;
 
 export namespace bioseq::gpu::vulkan {
 
-/// @brief Sentinel used when a SPIR-V decoration has no resolved unsigned value.
+/// @brief Mark a missing member offset or descriptor-set number.
 inline constexpr std::uint32_t k_spirv_layout_unknown = 0xffffffffu;
 
-/// @brief Member-offset decorations resolved for one SPIR-V structure type.
+/// @brief Byte offsets of the members in one SPIR-V structure.
 struct spirv_struct_layout {
     std::uint32_t id = 0;
     std::vector<std::uint32_t> member_offsets;
 };
 
-/// @brief Layout resolved through one descriptor variable, its pointer/block type,
-/// and the binding's array element type. `member_offsets` are therefore
-/// binding-specific instead of an unsafe global "some struct looked right"
-/// match. Empty offsets mean a scalar/vector array element.
+/// @brief Array layout for a specific descriptor-set binding. Follow the
+/// variable's type to find the element stride and structure-member offsets.
+/// element_struct_id is zero for a scalar or vector element. Missing offset
+/// decorations can also leave member_offsets empty.
 struct spirv_binding_layout {
     std::uint32_t descriptor_set = 0;
     std::uint32_t binding = 0;
@@ -31,9 +31,9 @@ struct spirv_binding_layout {
     std::vector<std::uint32_t> member_offsets;
 };
 
-/// @brief Decoded SPIR-V decorations used to validate storage-buffer and push-constant
-/// ABIs. Aggregate views support broad checks. Binding-specific records support
-/// exact descriptor validation with arbitrary member counts.
+/// @brief Buffer and push-parameter layouts read from SPIR-V. Callers can
+/// check layouts across the module or check a particular descriptor binding
+/// against the C++ structure used to upload its data.
 struct spirv_layout_scan {
     std::vector<std::uint32_t> array_strides;
     std::vector<std::array<std::uint32_t, 4>> structs4;
@@ -42,9 +42,9 @@ struct spirv_layout_scan {
     std::vector<spirv_binding_layout> binding_layouts;
     std::vector<std::uint32_t> push_constant_offsets;
 
-    /// @brief Reports whether any reflected array uses the requested element stride.
-    /// @param[in] stride Element stride in bytes.
-    /// @return `true` when a reflected array has the requested stride.
+    /// @brief Check whether any array has this byte stride between elements.
+    /// @param[in] stride Expected distance between array elements in bytes.
+    /// @return true if a matching stride was found.
     [[nodiscard]] bool has_array_stride(std::uint32_t stride) const noexcept {
         for (const std::uint32_t candidate : array_strides) {
             if (candidate == stride)
@@ -53,9 +53,9 @@ struct spirv_layout_scan {
         return false;
     }
 
-    /// @brief Reports whether any four-member structure has the requested offsets.
-    /// @param[in] offsets Ordered member offsets in bytes.
-    /// @return `true` when a reflected structure has the requested layout.
+    /// @brief Check whether any four-member structure has these byte offsets.
+    /// @param[in] offsets Expected member offsets in declaration order.
+    /// @return true if a matching structure was found.
     [[nodiscard]] bool
     has_struct_offsets(const std::array<std::uint32_t, 4>& offsets) const noexcept {
         for (const auto& candidate : structs4) {
@@ -65,9 +65,9 @@ struct spirv_layout_scan {
         return false;
     }
 
-    /// @brief Reports whether any descriptor variable uses the requested binding.
+    /// @brief Check whether a descriptor uses this binding number in any set.
     /// @param[in] binding Descriptor binding number.
-    /// @return `true` when the binding is present.
+    /// @return true if the binding was found.
     [[nodiscard]] bool has_binding(std::uint32_t binding) const noexcept {
         for (const std::uint32_t candidate : bindings) {
             if (candidate == binding)
@@ -76,10 +76,10 @@ struct spirv_layout_scan {
         return false;
     }
 
-    /// @brief Resolves the layout for one descriptor-set binding.
+    /// @brief Find the array layout for a descriptor-set binding.
     /// @param[in] descriptor_set Descriptor set number.
-    /// @param[in] binding Descriptor binding number.
-    /// @return Borrowed layout, or `nullptr` when the binding is absent.
+    /// @param[in] binding Binding number within that set.
+    /// @return A pointer into this scan, or nullptr if no matching layout was read.
     [[nodiscard]] const spirv_binding_layout* binding_layout(std::uint32_t descriptor_set,
                                                              std::uint32_t binding) const noexcept {
         for (const auto& candidate : binding_layouts) {
@@ -89,11 +89,11 @@ struct spirv_layout_scan {
         return nullptr;
     }
 
-    /// @brief Reports whether one descriptor binding has the requested array stride.
+    /// @brief Check the array element stride at a descriptor-set binding.
     /// @param[in] descriptor_set Descriptor set number.
-    /// @param[in] binding Descriptor binding number.
-    /// @param[in] stride Array element stride in bytes.
-    /// @return `true` when the binding exists with the requested stride.
+    /// @param[in] binding Binding number within that set.
+    /// @param[in] stride Expected distance between elements in bytes.
+    /// @return true if the binding layout has this stride.
     [[nodiscard]] bool has_binding_array_stride(std::uint32_t descriptor_set,
                                                 std::uint32_t binding,
                                                 std::uint32_t stride) const noexcept {
@@ -101,11 +101,11 @@ struct spirv_layout_scan {
         return layout != nullptr && layout->array_stride == stride;
     }
 
-    /// @brief Reports whether one descriptor binding exposes the requested member offsets.
+    /// @brief Check every structure-member offset at a descriptor-set binding.
     /// @param[in] descriptor_set Descriptor set number.
-    /// @param[in] binding Descriptor binding number.
-    /// @param[in] offsets Ordered structure-member offsets in bytes.
-    /// @return `true` when the binding layout matches every offset.
+    /// @param[in] binding Binding number within that set.
+    /// @param[in] offsets Expected byte offsets in declaration order.
+    /// @return true if the member count and all offsets match.
     [[nodiscard]] bool
     has_binding_struct_offsets(std::uint32_t descriptor_set,
                                std::uint32_t binding,
@@ -121,9 +121,9 @@ struct spirv_layout_scan {
         return true;
     }
 
-    /// @brief Reports whether the push-constant block exposes the requested offsets.
-    /// @param[in] offsets Ordered push-constant member offsets in bytes.
-    /// @return `true` when the push-constant layout matches every offset.
+    /// @brief Check the layout of the shader's push parameters.
+    /// @param[in] offsets Expected byte offsets in declaration order.
+    /// @return true if the member count and all offsets match.
     [[nodiscard]] bool
     has_push_constant_offsets(std::span<const std::uint32_t> offsets) const noexcept {
         if (push_constant_offsets.size() != offsets.size())
@@ -136,14 +136,14 @@ struct spirv_layout_scan {
     }
 };
 
-/// @brief Scan a compiled SPIR-V module and resolve descriptor variables through
-/// OpVariable -> OpTypePointer -> block OpTypeStruct -> array element.
+/// @brief Read array strides, member offsets and descriptor bindings from SPIR-V.
+/// Follow variable types to associate each array layout with its binding.
+/// This needs no Vulkan device. Callers compare the result with expected layouts.
 ///
-/// @param[in] spirv Compiled SPIR-V words, including the five-word module header.
-/// @return Reflected descriptor, structure, and push-constant decorations.
-///
-/// The scan is device-free so malformed layouts are rejected before Vulkan or
-/// SPIRV-Cross consumes the module.
+/// @param[in] spirv Compiled SPIR-V words, including the five-word header.
+/// @return Layouts collected before a zero-length or truncated instruction.
+/// A missing header or bad magic gives an empty result. This function does
+/// not fully validate SPIR-V.
 [[nodiscard]] inline spirv_layout_scan scan_spirv_layout(std::span<const std::uint32_t> spirv) {
     spirv_layout_scan scan;
     constexpr std::uint32_t k_spirv_magic = 0x07230203u;
@@ -163,7 +163,7 @@ struct spirv_layout_scan {
     if (spirv.size() < 5 || spirv[0] != k_spirv_magic)
         return scan;
 
-    // Accumulates object-level descriptor and array-stride decorations by SPIR-V id.
+    // Descriptor numbers and array strides attached to a SPIR-V object.
     struct decoration_record {
         std::uint32_t id = 0;
         std::uint32_t binding = k_spirv_layout_unknown;
@@ -173,17 +173,17 @@ struct spirv_layout_scan {
         bool has_descriptor_set = false;
         bool has_array_stride = false;
     };
-    // Accumulates member offsets for one reflected structure type.
+    // Member offsets attached to a structure type.
     struct member_decoration_record {
         std::uint32_t struct_id = 0;
         std::vector<std::uint32_t> offsets;
     };
-    // Retains the member type ids of one OpTypeStruct declaration.
+    // Store the member type ids of one OpTypeStruct declaration.
     struct struct_type_record {
         std::uint32_t id = 0;
         std::vector<std::uint32_t> member_types;
     };
-    // Binds an array type id to its element type for descriptor traversal.
+    // Array type and the type of its elements.
     struct array_type_record {
         std::uint32_t id = 0;
         std::uint32_t element_type = 0;
@@ -208,7 +208,7 @@ struct spirv_layout_scan {
     std::vector<pointer_type_record> pointer_types;
     std::vector<variable_record> variables;
 
-    // Finds or creates the mutable decoration aggregate for an object id.
+    // Find or add the decorations for an object.
     const auto decoration_for = [&decorations](std::uint32_t id) -> decoration_record& {
         for (auto& candidate : decorations) {
             if (candidate.id == id)
@@ -218,7 +218,7 @@ struct spirv_layout_scan {
         decorations.back().id = id;
         return decorations.back();
     };
-    // Finds or creates the mutable member-offset aggregate for a structure id.
+    // Find or add the member offsets for a structure.
     const auto member_decoration_for =
         [&member_decorations](std::uint32_t id) -> member_decoration_record& {
         for (auto& candidate : member_decorations) {
@@ -285,7 +285,7 @@ struct spirv_layout_scan {
         word_index += word_count;
     }
 
-    // Resolves object-level decorations without extending the parsed inventory.
+    // Find the decorations already read for an object.
     const auto find_decoration = [&decorations](std::uint32_t id) -> const decoration_record* {
         for (const auto& candidate : decorations) {
             if (candidate.id == id)
@@ -293,7 +293,7 @@ struct spirv_layout_scan {
         }
         return nullptr;
     };
-    // Resolves the ordered member offsets recorded for a structure id.
+    // Find a structure's member offsets.
     const auto find_member_offsets =
         [&member_decorations](std::uint32_t id) -> const std::vector<std::uint32_t>* {
         for (const auto& candidate : member_decorations) {
@@ -302,7 +302,7 @@ struct spirv_layout_scan {
         }
         return nullptr;
     };
-    // Resolves a parsed structure declaration by id.
+    // Find a structure type by its SPIR-V id.
     const auto find_struct = [&struct_types](std::uint32_t id) -> const struct_type_record* {
         for (const auto& candidate : struct_types) {
             if (candidate.id == id)
@@ -310,7 +310,7 @@ struct spirv_layout_scan {
         }
         return nullptr;
     };
-    // Resolves a parsed array declaration by id.
+    // Find an array type by its SPIR-V id.
     const auto find_array = [&array_types](std::uint32_t id) -> const array_type_record* {
         for (const auto& candidate : array_types) {
             if (candidate.id == id)
@@ -318,7 +318,7 @@ struct spirv_layout_scan {
         }
         return nullptr;
     };
-    // Resolves a parsed pointer declaration by id.
+    // Find a pointer type by its SPIR-V id.
     const auto find_pointer = [&pointer_types](std::uint32_t id) -> const pointer_type_record* {
         for (const auto& candidate : pointer_types) {
             if (candidate.id == id)

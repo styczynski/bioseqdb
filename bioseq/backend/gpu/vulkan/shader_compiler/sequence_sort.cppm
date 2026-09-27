@@ -1,6 +1,6 @@
 /**
  * @file sequence_sort.cppm
- * @brief Owns packed-sequence generation and sequence-sort compute shader bodies.
+ * @brief Compute shaders for generating packed sequences and sorting them.
  */
 module bioseq.gpu.vulkan.shader_compiler:sequence_sort;
 
@@ -9,7 +9,8 @@ import std;
 
 namespace bioseq::gpu::vulkan {
 
-/// @brief Generates packed sequence storage from a deterministic rank stream.
+/// @brief Generate packed sequences from symbol probabilities and a seed.
+/// Each storage chunk has a repeatable random stream, and unused bits are zero.
 inline constexpr std::string_view k_generate_units_body = R"GLSL(
 layout(local_size_x = compile_time_workgroup_size_x, local_size_y = 1, local_size_z = 1) in;
 
@@ -102,19 +103,12 @@ void main() {
 }
 )GLSL";
 
-// ===========================================================================
-// GPU sequence-sort kernels (dna4-optimized and generic)
-//
-// Each kind's body is composed in shader_body_for from k_sequence_sort_push,
-// k_sequence_sort_readers, the selected canonicalizer,
-// k_sequence_sort_key_compare, and one stage main. shader_kind selects the
-// canonicalizer. Storage width is runtime via pc.unit_bits and
-// read_storage_unit64. compile_time_workgroup_size_x comes from the injected
-// prelude.
-// ===========================================================================
+// Sequence-sort shaders share the push parameters, packed-data readers
+// and comparison code. Each shader adds a DNA4 or generic symbol decoder
+// and the main function for its sorting stage. Storage width comes from
+// pc.unit_bits. The compiler supplies the workgroup size.
 
-/// @brief Push-constant block (40 bytes). Identical for
-/// all seq-sort kinds so one struct serves every stage.
+/// @brief The 40-byte push-parameter block shared by all sequence-sort stages.
 inline constexpr std::string_view k_sequence_sort_push = R"GLSL(
 layout(push_constant) uniform sequence_sort_push_constants {
     uint count;              // row_count (key stage) / range_count (tiebreak stage)
@@ -130,11 +124,8 @@ layout(push_constant) uniform sequence_sort_push_constants {
 } pc;
 )GLSL";
 
-/// @brief Descriptor bindings + packed-sequence reader + low_symbol_mask. Declared
-/// BEFORE the canonicalizer so it can call low_symbol_mask, and before the
-/// key/compare snippet which needs sequence_descriptor + read_unit. read_unit() forward-uses
-/// unit_bits() (defined in the canon snippet that follows), which is fine in
-/// GLSL because the canon snippet is concatenated between this and k_sequence_sort_key_compare.
+/// @brief Declare the sequence buffers and helpers for reading packed storage
+/// and masking unused symbol bits. The symbol decoders below use these helpers.
 inline constexpr std::string_view k_sequence_sort_readers = R"GLSL(
 struct sequence_descriptor { uint word_offset; uint unit_count; uint bp_size; uint pad; };  // std430, 16B
 
@@ -174,8 +165,9 @@ uint64_t low_symbol_mask(uint valid_syms, uint bpc) {
 }
 )GLSL";
 
-/// @brief Canonical key + full canonical compare. Uses canon()/lpu()/unit_bits() from
-/// the canonicalizer snippet (concatenated immediately before this).
+/// @brief Build leading sort keys and compare complete sequences. The symbol
+/// decoder puts earlier letters in the high bits so integer comparisons follow
+/// sequence order. Equal prefixes are ordered by sequence length.
 inline constexpr std::string_view k_sequence_sort_key_compare = R"GLSL(
 uint64_t read_unit(sequence_descriptor d, uint j) {
     return read_storage_unit64(j, unit_bits(), d.word_offset);
@@ -228,7 +220,8 @@ int canon_cmp(sequence_descriptor a, sequence_descriptor b) {
 }
 )GLSL";
 
-/// @brief dna4 canonicalizer: compile-time bits_per_char==2, no masking (used_mask==~0).
+/// @brief Reorder two-bit DNA4 symbols for lexicographic comparison and clear
+/// unused bits in the last storage unit.
 inline constexpr std::string_view k_dna4_canonicalizer = R"GLSL(
 uint lpu()       { return pc.unit_bits / 2u; }    // bits_per_char == 2
 uint unit_bits() { return pc.unit_bits; }
@@ -261,7 +254,8 @@ uint64_t canon(uint64_t raw, uint valid) {
 }
 )GLSL";
 
-/// @brief generic canonicalizer: alphabet params from push constants, masks used_mask.
+/// @brief Reorder symbols for lexicographic comparison using the alphabet
+/// parameters in the push block. Clear unused storage and tail bits.
 inline constexpr std::string_view k_generic_canonicalizer = R"GLSL(
 uint lpu()       { return pc.letters_per_unit; }
 uint unit_bits() { return pc.unit_bits; }
@@ -283,7 +277,7 @@ uint64_t canon(uint64_t raw, uint valid) {
 }
 )GLSL";
 
-/// @brief Kernel A main: one invocation per row -> (key:uint64, value:uint64=row index).
+/// @brief Write each row's leading 64-bit sort key and original row index.
 inline constexpr std::string_view k_sequence_sort_key_main = R"GLSL(
 layout(local_size_x = compile_time_workgroup_size_x) in;
 layout(std430, set=0, binding=2) writeonly buffer keys_buffer { uint64_t keys[]; };
@@ -296,7 +290,8 @@ void main() {
 }
 )GLSL";
 
-/// @brief Kernel B main uses one workgroup per equal-key run and bitonic `canon_cmp`.
+/// @brief Sort an equal-key run by complete sequence content in one workgroup.
+/// Equal sequences keep their original row order. The run must fit in shared memory.
 inline constexpr std::string_view k_sequence_sort_tiebreak_main = R"GLSL(
 layout(local_size_x = compile_time_workgroup_size_x) in;
 layout(std430, set=0, binding=2) buffer index_buffer           { uint index[];  };       // radix-sorted row ids (in/out)
@@ -328,9 +323,9 @@ void main() {
 }
 )GLSL";
 
-/// @brief Kernel C main: one global bitonic compare-swap stage over the padded index
-/// buffer. Used only when a 64-bit key collision run is too large for the
-/// per-workgroup tiebreak kernel.
+/// @brief Run one global bitonic compare-and-swap stage over row indices.
+/// Full sequence comparisons resolve key collisions that exceed the
+/// single-workgroup sorter's capacity. Padding indices sort to the end.
 inline constexpr std::string_view k_sequence_sort_global_compare_main = R"GLSL(
 layout(local_size_x = compile_time_workgroup_size_x) in;
 layout(std430, set=0, binding=2) buffer index_buffer { uint index[]; };
@@ -359,10 +354,10 @@ void main() {
 }
 )GLSL";
 
-/// @brief Kernel D main: dense-rank scatter. This is a verified fast path for batches
-/// whose selected 64-bit canonical key is exactly a permutation of [0,count).
-/// For non-zero key offsets the shader also validates on device that all earlier
-/// units match row 0. Otherwise sorting by a later key would not be lexicographic.
+/// @brief Use sort keys as output positions when they contain each value in
+/// [0, count) exactly once. Check for duplicates and out-of-range keys. A key
+/// taken after the first storage unit also requires all earlier units to match
+/// across rows, so the resulting order is still lexicographic.
 inline constexpr std::string_view k_sequence_sort_dense_scatter_main = R"GLSL(
 layout(local_size_x = compile_time_workgroup_size_x) in;
 layout(std430, set=0, binding=2) buffer index_buffer { uint index[]; };
@@ -406,10 +401,9 @@ void main() {
 }
 )GLSL";
 
-/// @brief Kernel E main: parallel common-prefix validation for dense tail keys. One
-/// invocation checks one (row, unit-before-key) pair against row 0 and ORs the
-/// status word on any mismatch. Dense scatter then runs after a command-buffer
-/// barrier with pc.sort_size != 0 to avoid rechecking the prefix serially.
+/// @brief Check that all rows share the prefix before a proposed dense sort key.
+/// Each invocation compares one storage unit with row 0. Record any mismatch
+/// in the status word so dense scattering can skip repeated prefix checks.
 inline constexpr std::string_view k_sequence_sort_prefix_check_main = R"GLSL(
 layout(local_size_x = compile_time_workgroup_size_x) in;
 layout(std430, set=0, binding=2) readonly buffer unused_index_buffer { uint unused_index[]; };
@@ -440,7 +434,7 @@ void main() {
 }
 )GLSL";
 
-/// @brief Internal sequence-sort program stage selected during body composition.
+/// @brief Select the main function used when building a sequence-sort shader.
 enum class sequence_sort_stage : std::uint8_t {
     key,
     tiebreak,
@@ -448,9 +442,8 @@ enum class sequence_sort_stage : std::uint8_t {
     dense_scatter,
     prefix_check,
 };
-/// @brief Compose a seq-sort kind's full body from the shared snippets. Order matters:
-/// push -> readers/low_symbol_mask -> canon (defines lpu/unit_bits/canon) ->
-/// key/compare (uses canon) -> stage main.
+/// @brief Join the shared GLSL helpers and selected stage into a shader body.
+/// Put each helper before the code that calls it.
 [[nodiscard]] std::string seq_sort_body(bool dna4, sequence_sort_stage stage) {
     std::string s;
     s.reserve(k_sequence_sort_push.size() + k_sequence_sort_readers.size() +

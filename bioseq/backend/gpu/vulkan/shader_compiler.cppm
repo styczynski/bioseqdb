@@ -1,6 +1,6 @@
 /**
  * @file shader_compiler.cppm
- * @brief Aggregate module facade for the Vulkan shader registry and compile service.
+ * @brief Export the Vulkan shader registry and compilation API.
  */
 export module bioseq.gpu.vulkan.shader_compiler;
 
