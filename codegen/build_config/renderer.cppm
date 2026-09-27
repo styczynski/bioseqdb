@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Renders the generated build-configuration boundary and contracts.
+ * @brief Generates the configured C++ module, compile checks and JSON manifest.
  */
 module;
 

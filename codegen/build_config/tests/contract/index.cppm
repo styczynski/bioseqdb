@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Exercises build-configuration generator contracts.
+ * @brief Tests generated build settings and rejection of invalid declarations and overrides.
  */
 module;
 

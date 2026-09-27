@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Defines the compiler-neutral build-configuration model.
+ * @brief Stores build settings, allowed values, overrides and generated output.
  */
 module;
 
