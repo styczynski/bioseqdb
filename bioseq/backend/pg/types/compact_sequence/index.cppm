@@ -1,6 +1,6 @@
 /**
  * @file index.cppm
- * @brief Primary module interface for the partitioned PostgreSQL compact-sequence type.
+ * Export the PostgreSQL sequence type and load its SQL operations.
  */
 export module bioseq.postgres.types.compact_sequence;
 

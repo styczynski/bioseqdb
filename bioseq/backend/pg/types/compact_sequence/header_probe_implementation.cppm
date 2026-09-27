@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Connects the narrow sequence header probe to compact-sequence validation.
+ * Implement sequence length inspection through the shared header validator.
  */
 module;
 #include <bioseq/pg_compat.h>
