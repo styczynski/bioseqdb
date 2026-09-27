@@ -1,9 +1,9 @@
 /**
  * @file instrumentation/loop.cppm
- * @brief Scoped loop timing, iteration, work, and hardware-counter metrics.
+ * @brief Measure loop time and count iterations and work.
  *
- * The templated overload follows pipeline dispatch. The non-templated overload
- * uses the separately installed benchmark profiler state.
+ * The template uses the caller's configuration. The overload without a template
+ * argument uses the installed benchmark profiler.
  */
 module;
 
@@ -21,7 +21,7 @@ import bioseq.instrumentation.pmu;
 
 export namespace bioseq::instrumentation {
 
-/** @brief Scoped loop measurement for one compile-time configuration. */
+/** @brief Measure a loop until this scope is destroyed. */
 template<profiling_configuration p_configuration_type>
 struct [[nodiscard]] loop_scope {
     const loop_descriptor* descriptor = nullptr;
@@ -50,7 +50,7 @@ struct [[nodiscard]] loop_scope {
         }
     }
 
-    /** @brief Record elapsed time, work, and available PMU deltas. */
+    /** @brief Record loop time, work counts, and available hardware-counter changes. */
     [[gnu::always_inline]] ~loop_scope() noexcept {
         if constexpr (p_configuration_type::enable_profiling) {
             if (is_skipped) return;
@@ -77,7 +77,7 @@ struct [[nodiscard]] loop_scope {
         }
     }
 
-    /** @brief Add one iteration and its logical work-unit count. */
+    /** @brief Count one iteration and its caller-defined amount of work. */
     [[gnu::always_inline]] void record_iteration(std::uint64_t work_units = 1) noexcept {
         if constexpr (p_configuration_type::enable_profiling) {
             iterations += 1;
@@ -100,9 +100,8 @@ inline loop_scope<p_configuration_type> loop(const loop_descriptor* descriptor) 
     return loop_scope<p_configuration_type>(descriptor);
 }
 
-/// Non-templated convenience overload — see region.cppm for rationale.
-/// Pins to `benchmark_profiling_configuration`, including its current PMU
-/// feature gate and independently installed profiler state.
+/// Measure a loop using the installed benchmark profiler.
+/// Its configuration also selects whether hardware counters are read.
 [[nodiscard, gnu::always_inline]]
 inline loop_scope<benchmark_profiling_configuration>
 loop(const loop_descriptor* descriptor) noexcept {

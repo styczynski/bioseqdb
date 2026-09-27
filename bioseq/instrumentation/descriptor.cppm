@@ -1,9 +1,9 @@
 /**
  * @file instrumentation/descriptor.cppm
- * @brief Stable metadata for named instrumentation sites.
+ * @brief Register names and source locations for profiling measurements.
  *
- * Cold-path registration deduplicates source identities and returns stable
- * pointers from process-lifetime storage.
+ * Registration reuses matching descriptors and stores new ones at stable
+ * addresses for later lookup.
  */
 module;
 
@@ -26,11 +26,11 @@ export namespace bioseq::instrumentation {
 /** @brief Category encoded in a metric descriptor. */
 enum class metric_kind : std::uint8_t { region, loop, counter, gauge, sample };
 
-/** @brief Cache-line-aligned immutable metadata for one profiling site. */
+/** @brief Name and source details for one profiling site, aligned to 64 bytes. */
 struct alignas(64) region_descriptor {
     std::uint32_t  id;              ///< Registration id, with zero reserved as invalid.
     std::uint32_t  name_hash;       ///< FNV-1a hash used during deduplication.
-    const char*    name;            ///< Stable name owned by static data or the registry.
+    const char*    name;            ///< Name stored by the registry.
     const char*    file;
     std::uint32_t  line;
     std::uint16_t  color;           ///< Reserved visualization color.
@@ -45,7 +45,7 @@ struct alignas(64) region_descriptor {
 static_assert(sizeof(region_descriptor) == 64);
 static_assert(alignof(region_descriptor) == 64);
 
-/// Loop descriptor extends region_descriptor with iteration-related metadata.
+/// Region metadata with default loop sampling and work-unit settings.
 struct alignas(64) loop_descriptor : region_descriptor {
     std::uint32_t  default_subsample_rate;
     std::uint16_t  work_unit_kind;
@@ -61,15 +61,15 @@ inline constexpr std::uint32_t descriptor_block_size = 256;
 inline constexpr std::uint32_t maximum_descriptor_blocks = 4096;
 
 /**
- * @brief Storage slot large enough for either public descriptor layout.
+ * @brief Slot size that fits a loop or region descriptor.
  *
- * The slot keeps loop descriptors from overlapping the following region
- * descriptor while retaining the 64-byte and 128-byte public layouts.
+ * Using the larger layout keeps a 128-byte loop descriptor from overlapping
+ * the next slot.
  */
 inline constexpr std::size_t descriptor_slot_size = sizeof(loop_descriptor);
 inline constexpr std::size_t descriptor_slot_alignment = alignof(loop_descriptor);
 
-/** @brief Own process-lifetime descriptor blocks, strings, and deduplication state. */
+/** @brief Storage for descriptors, their names, and duplicate lookup. */
 struct descriptor_registry {
     std::array<std::atomic<std::byte*>, maximum_descriptor_blocks> blocks{};
     std::atomic<std::uint32_t> next_id{0};
@@ -77,7 +77,7 @@ struct descriptor_registry {
     std::vector<region_descriptor*> dedup_table;
     std::deque<std::string> owned_strings;
 
-    /** @brief Reserve the expected cold-path descriptor inventory. */
+    /** @brief Reserve room for the first 256 descriptor entries. */
     descriptor_registry() {
         dedup_table.reserve(256);
     }
@@ -88,8 +88,7 @@ struct descriptor_registry {
     return instance;
 }
 
-/// FNV-1a 32-bit hash. Used for name dedup and as a name_hash field on
-/// the descriptor.
+/// Compute the 32-bit FNV-1a hash used to find matching names.
 [[nodiscard, gnu::always_inline]]
 inline std::uint32_t fnv1a_32(std::string_view value) noexcept {
     std::uint32_t hash = 2166136261u;
@@ -100,9 +99,8 @@ inline std::uint32_t fnv1a_32(std::string_view value) noexcept {
     return hash;
 }
 
-/// Cold-path block allocator. Allocates a fresh 256-descriptor block
-/// (32 KiB) when the current block runs out. Allocation uses operator new
-/// — the descriptor pool is process-wide and never freed.
+/// Allocate a 32 KiB block containing 256 descriptor slots.
+/// Blocks remain allocated for the process lifetime.
 [[nodiscard, gnu::cold]]
 inline std::byte* allocate_block() noexcept {
     return static_cast<std::byte*>(::operator new(
@@ -111,14 +109,13 @@ inline std::byte* allocate_block() noexcept {
 }
 
 /**
- * @brief Register or find one descriptor with stable process-lifetime storage.
- *
- * @param[in] name Metric name copied into registry-owned storage.
- * @param[in] loc Source identity retained by the descriptor.
- * @param[in] kind Metric category and descriptor-layout selector.
- * @param[in] target_name SIMD target name, or empty for a scalar site.
- * @param[in] lanes SIMD lane count, or zero for a scalar site.
- * @return Stable descriptor pointer, or the first descriptor after capacity exhaustion.
+ * @brief Find a matching descriptor or register a new one.
+ * @param[in] name Metric name copied into registry storage.
+ * @param[in] loc Source location to report. Its line participates in matching.
+ * @param[in] kind Metric type and descriptor layout.
+ * @param[in] target_name SIMD target name, or empty for scalar code.
+ * @param[in] lanes SIMD lane count, or zero for scalar code.
+ * @return Stable descriptor, or the first descriptor if capacity is exhausted.
  */
 [[nodiscard, gnu::cold]]
 inline region_descriptor* register_impl(
@@ -133,7 +130,7 @@ inline region_descriptor* register_impl(
 
     const auto hash = fnv1a_32(name);
 
-    // Linear search the dedup table. Typical sizes are ~50 — small enough.
+    // Search registered descriptors for the same name, line, kind, and SIMD settings.
     for (auto* descriptor : descriptor_registry.dedup_table) {
         if (descriptor->name_hash == hash
             && descriptor->line == loc.line()
@@ -149,17 +146,13 @@ inline region_descriptor* register_impl(
         }
     }
 
-    // raw_id is the 0-based slot index across the descriptor table
-    // (next_id starts at 0). The stored desc->id is shifted +1 so that
-    // 0 stays reserved as the "invalid" sentinel for callers that pass
-    // a default-constructed region_measurement.desc.
+    // Store one-based IDs so zero can mark an invalid measurement.
     const auto raw_id = descriptor_registry.next_id.fetch_add(1, std::memory_order_relaxed);
     const auto block_idx = raw_id / descriptor_block_size;
     const auto slot_idx  = raw_id % descriptor_block_size;
     if (block_idx >= maximum_descriptor_blocks) {
-        // Out of descriptor space. Return a sentinel (the first descriptor)
-        // so the caller's static-local stays non-null but loses uniqueness.
-        // Practically unreachable.
+        // Capacity is exhausted. Reuse the first descriptor, merging later
+        // measurements into its identity.
         auto* first_block = descriptor_registry.blocks[0].load(std::memory_order_acquire);
         return reinterpret_cast<region_descriptor*>(first_block);
     }
@@ -202,11 +195,10 @@ inline region_descriptor* register_impl(
 export namespace bioseq::instrumentation {
 
 /**
- * @brief Register or find a region descriptor for one source location.
- *
- * @param[in] name Metric name copied into process-lifetime storage.
- * @param[in] loc Source identity used for deduplication and reporting.
- * @return Stable process-lifetime descriptor.
+ * @brief Find or register a named region at this source line.
+ * @param[in] name Metric name copied into registry storage.
+ * @param[in] loc Source location to report. Its line participates in matching.
+ * @return Stable region descriptor, or the first descriptor when storage is full.
  */
 [[nodiscard, gnu::cold]]
 inline const region_descriptor*
@@ -216,11 +208,10 @@ register_static_region(std::string_view name,
 }
 
 /**
- * @brief Register or find a counter descriptor for one source location.
- *
- * @param[in] name Metric name copied into process-lifetime storage.
- * @param[in] loc Source identity used for deduplication and reporting.
- * @return Stable process-lifetime descriptor.
+ * @brief Find or register a named counter at this source line.
+ * @param[in] name Metric name copied into registry storage.
+ * @param[in] loc Source location to report. Its line participates in matching.
+ * @return Stable counter descriptor, or the first descriptor when storage is full.
  */
 [[nodiscard, gnu::cold]]
 inline const region_descriptor*
@@ -230,11 +221,10 @@ register_static_counter(std::string_view name,
 }
 
 /**
- * @brief Register or find a gauge descriptor for one source location.
- *
- * @param[in] name Metric name copied into process-lifetime storage.
- * @param[in] loc Source identity used for deduplication and reporting.
- * @return Stable process-lifetime descriptor.
+ * @brief Find or register a named gauge at this source line.
+ * @param[in] name Metric name copied into registry storage.
+ * @param[in] loc Source location to report. Its line participates in matching.
+ * @return Stable gauge descriptor, or the first descriptor when storage is full.
  */
 [[nodiscard, gnu::cold]]
 inline const region_descriptor*
@@ -244,11 +234,10 @@ register_static_gauge(std::string_view name,
 }
 
 /**
- * @brief Register or find a scalar loop descriptor.
- *
- * @param[in] name Metric name copied into process-lifetime storage.
- * @param[in] loc Source identity used for deduplication and reporting.
- * @return Stable process-lifetime loop descriptor.
+ * @brief Find or register a scalar loop descriptor.
+ * @param[in] name Metric name copied into registry storage.
+ * @param[in] loc Source location to report. Its line participates in matching.
+ * @return Loop descriptor. Registration capacity must remain available.
  */
 [[nodiscard, gnu::cold]]
 inline const loop_descriptor*
@@ -259,13 +248,12 @@ register_static_loop(std::string_view name,
 }
 
 /**
- * @brief Register or find a loop descriptor for one SIMD target and lane count.
- *
- * @param[in] base_name Metric name copied into process-lifetime storage.
- * @param[in] target_name SIMD target name copied into process-lifetime storage.
- * @param[in] lanes Active SIMD lane count recorded with the descriptor.
- * @param[in] loc Source identity used for deduplication and reporting.
- * @return Stable process-lifetime loop descriptor.
+ * @brief Find or register a loop for a SIMD target and lane count.
+ * @param[in] base_name Metric name copied into registry storage.
+ * @param[in] target_name SIMD target name copied into registry storage.
+ * @param[in] lanes SIMD lane count.
+ * @param[in] loc Source location to report. Its line participates in matching.
+ * @return Loop descriptor. Registration capacity must remain available.
  */
 [[nodiscard, gnu::cold]]
 inline const loop_descriptor*
@@ -278,10 +266,10 @@ register_static_simd_loop(std::string_view base_name,
 }
 
 /**
- * @brief Find a registered descriptor by its one-based identifier.
- *
- * @param[in] id Descriptor identifier, with zero reserved as invalid.
- * @return Stable descriptor pointer, or null for an invalid or unallocated identifier.
+ * @brief Look up the slot for a previously registered descriptor ID.
+ * @param[in] id One-based registered ID. Zero is invalid.
+ * @return Descriptor pointer, or null for zero, an out-of-range block, or an
+ * unallocated block. The caller must supply an ID that was registered.
  */
 [[nodiscard]]
 inline const region_descriptor* find_descriptor(std::uint32_t id) noexcept {
