@@ -1,6 +1,6 @@
 /**
  * @file hash_major_parallel_probe.cppm
- * @brief Defines the authenticated serial and parallel hash-major transport probe.
+ * @brief Measure serial and parallel scans of stored hash-major indexes.
  */
 module;
 #include <bioseq/pg_compat.h>
@@ -69,17 +69,17 @@ import bioseq.postgres.storage.manager; // seq_caches, sequence_locator, format 
 import bioseq.storage.layout;           // sequence_locator
 import bioseq.storage.size;             // sequence_size_t
 import bioseq.indexing.type; // sequence_index_layout, index_sub_key_t, k_max_index_chunk_size_bytes, sentinels
-import bioseq.indexing.storage;           // the concepts
-import bioseq.indexing.minimizer_hashmap; // encoded header/bucket validation
-import bioseq.indexing.minimizer_fragment_image; // explicit fixed-endian minimizer fragment image image ABI
+import bioseq.indexing.storage;           // Storage adapter requirements.
+import bioseq.indexing.minimizer_hashmap; // Minimizer index header and bucket format.
+import bioseq.indexing.minimizer_fragment_image; // Minimizer fragment format with a fixed byte order.
 import bioseq.indexing.compact_hash32_direct_index;
 import bioseq.indexing.minimizer_fragment_compact_hash32_adapter;
 import bioseq.postgres.table.io; // begin_column_read/read_next_column_row/end_column_read/column_read_state
-import bioseq.postgres.storage.scanner;        // PostgreSQL-backed lazy sequence access
+import bioseq.postgres.storage.scanner;        // Read sequence fragments through PostgreSQL.
 import bioseq.storage.lazy_sequence;           // lazy_sequence
 import bioseq.postgres.types.compact_sequence; // bioseq::pg_types::seq, dispatch_instance
 import bioseq.sequences;                       // compact_sequence_range
-import bioseq.sequences.simd;                  // canonical bounded base decoding
+import bioseq.sequences.simd;                  // Decode sequence bases with SIMD.
 import bioseq.parallelism.memory_admission;
 import bioseq.parallelism.mode;
 import bioseq.parallelism.concepts;
@@ -103,7 +103,7 @@ inline constexpr std::uint64_t k_parallel_scan_toc_key = std::uint64_t{0x4236534
 inline constexpr std::uint64_t k_seen_bitset_toc_key = std::uint64_t{0x4236534300000003};
 inline constexpr std::uint32_t k_parallel_header_format_revision = 1u;
 
-/// Pointer-free expected shape for one stream in shared scan state.
+/// Expected row count and byte length for one stream shared by scan workers.
 struct parallel_scan_stream {
     std::int64_t sub_key = 0;
     std::uint64_t logical_bytes = 0;
@@ -111,8 +111,9 @@ struct parallel_scan_stream {
     std::uint64_t global_row_base = 0;
 };
 
-/// Pointer-free DSM state. Workers authenticate rows and publish only
-/// commutative counters plus one exact expected-row bit per accepted tuple.
+/// Shared scan identity and counters for the leader and workers.
+/// Each accepted row sets its own bit so the leader can detect missing or
+/// duplicate rows. Atomic sums allow workers to finish in any order.
 struct parallel_scan_header {
     std::uint64_t magic = 0;
     std::uint32_t format_revision = 0;
@@ -140,7 +141,7 @@ inline constexpr std::uint64_t k_image_magic = std::uint64_t{0x42364636494d4147}
 inline constexpr std::uint32_t k_image_format_revision = 1u;
 inline constexpr std::uint64_t k_image_section_alignment = 4096u;
 
-/// Offset and extent metadata for one stream in the temporary image.
+/// Location and size of one stream in a temporary index image.
 struct parallel_image_stream {
     std::int64_t sub_key = 0;
     std::uint64_t logical_bytes = 0;
@@ -149,7 +150,7 @@ struct parallel_image_stream {
     std::uint64_t payload_offset = 0;
 };
 
-/// Offset-only test image written to a PostgreSQL-owned temporary file.
+/// Temporary index image header using file offsets instead of pointers.
 struct parallel_image_header {
     std::uint64_t magic = 0;
     std::uint32_t format_revision = 0;
@@ -168,13 +169,13 @@ struct parallel_image_header {
 static_assert(std::is_trivially_copyable_v<parallel_image_header>);
 static_assert(std::is_standard_layout_v<parallel_image_header>);
 
-/// Temporary-file destination used while materializing the probe image.
+/// Temporary file and layout used to write a probe image.
 struct parallel_image_write_target {
     File file = -1;
     const parallel_image_header* header = nullptr;
 };
 
-/// Validation counters returned after reading the temporary image.
+/// Counts and timings for checking a temporary index image.
 struct parallel_image_validation {
     std::uint64_t elapsed_ns = 0;
     std::uint64_t rows = 0;
@@ -184,7 +185,7 @@ struct parallel_image_validation {
     bool advice_applied = false;
 };
 
-/// Mix one receipt value into the probe's commutative digest.
+/// Mix a value before adding it to the probe's checksum totals.
 [[nodiscard]] inline std::uint64_t mix64(std::uint64_t value) noexcept {
     value += std::uint64_t{0x9e3779b97f4a7c15};
     value = (value ^ (value >> 30u)) * std::uint64_t{0xbf58476d1ce4e5b9};
@@ -231,7 +232,7 @@ struct parallel_image_validation {
     pg_unreachable();
 }
 
-/// Resolve a persisted sub-key to its shared stream slot.
+/// Find the stream whose stored sub-key matches, or return -1.
 [[nodiscard]] inline int stream_index_for_sub_key(const parallel_scan_header& header,
                                                   std::int64_t sub_key) noexcept {
     for (std::size_t index = 0; index < header.streams.size(); ++index) {
@@ -242,7 +243,7 @@ struct parallel_image_validation {
     return -1;
 }
 
-/// Authenticate every tuple claimed from one serial or parallel table scan.
+/// Check active-generation payload rows from a serial or parallel table scan.
 inline void scan_table_desc_pg_leaf(Relation relation,
                                     TableScanDesc scan,
                                     parallel_scan_header* header,
@@ -273,9 +274,8 @@ inline void scan_table_desc_pg_leaf(Relation relation,
         Datum* values = slot->tts_values;
         bool* nulls = slot->tts_isnull;
 
-        // Filter on the four fixed identity columns before inspecting BYTEA.
-        // Non-active generations and metadata rows are deliberately outside this
-        // probe's corruption authority.
+        // Select the current generation's payload streams before reading the blob.
+        // This probe skips metadata and other generations.
         if (!nulls[k_minimizer_generation_attribute_generation_id - 1] &&
             !nulls[k_minimizer_generation_attribute_query_key - 1] &&
             !nulls[k_minimizer_generation_attribute_position_segment - 1] &&
@@ -382,7 +382,7 @@ inline void scan_table_desc_pg_leaf(Relation relation,
                                   std::bit_cast<std::int64_t>(local_receipt_digest));
 }
 
-/// Run the probe through a backend-local table scan.
+/// Run the probe in this PostgreSQL backend.
 inline void serial_scan_pg_leaf(Relation relation,
                                 Snapshot snapshot,
                                 parallel_scan_header* header,
@@ -396,7 +396,7 @@ inline void serial_scan_pg_leaf(Relation relation,
     table_endscan(scan);
 }
 
-/// Join the shared block allocator as a leader or worker.
+/// Scan blocks assigned by the shared parallel table scan.
 inline void parallel_scan_pg_leaf(Relation relation,
                                   ParallelTableScanDesc parallel_scan,
                                   parallel_scan_header* header,
@@ -410,7 +410,7 @@ inline void parallel_scan_pg_leaf(Relation relation,
     table_endscan(scan);
 }
 
-/// Bind shared scan state to the relation and decoded manifest.
+/// Set the shared scan identity and expected stream sizes from the manifest.
 inline void initialize_header(parallel_scan_header* header,
                               Relation relation,
                               const hash_major_minimizer_manifest& manifest,
@@ -473,7 +473,7 @@ inline void initialize_header(parallel_scan_header* header,
     pg_atomic_init_u64(&header->receipt_digest, 0);
 }
 
-/// Initialize the exact-row receipt bitset.
+/// Clear the bitset that records which rows were read.
 inline void initialize_seen_words(pg_atomic_uint64* words, std::uint64_t word_count) {
     if (words == nullptr || word_count == 0u) {
         minimizer_generation_storage_error_as_cpp(
@@ -604,9 +604,7 @@ run_probe(Relation relation,
         bioseq::postgres::support::invoke_pg_as_cpp([context, parallel_scan_bytes, &manifest] {
             shm_toc_estimate_chunk(&context->estimator, sizeof(parallel_scan_header));
             shm_toc_estimate_chunk(&context->estimator, parallel_scan_bytes);
-            // The exact size becomes known only after the manifest-backed
-            // header is initialized. Its upper bound is one atomic word
-            // per 64 logical rows.
+            // Reserve one atomic bit for each expected row, rounded up to whole words.
             std::uint64_t expected_rows = 0;
             for (const auto& descriptor : manifest.streams) {
                 if (descriptor.row_count >
@@ -662,7 +660,7 @@ run_probe(Relation relation,
         const std::uint32_t launched_workers =
             static_cast<std::uint32_t>(std::max(context->nworkers_launched, 0));
 
-        // The leader is an equal consumer of the shared block allocator.
+        // The leader scans blocks alongside the workers.
         bioseq::postgres::support::invoke_pg_as_cpp(
             [relation, parallel_scan, header, seen_words, context] {
                 parallel_scan_pg_leaf(relation, parallel_scan, header, seen_words);

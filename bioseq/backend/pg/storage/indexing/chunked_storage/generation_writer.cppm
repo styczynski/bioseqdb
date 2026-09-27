@@ -1,6 +1,6 @@
 /**
  * @file generation_writer.cppm
- * @brief Preserves the public grouped-generation writer partition.
+ * @brief Export the writer for stored minimizer generations.
  */
 export module bioseq.postgres.storage.indexing.chunked_storage:generation_writer;
 

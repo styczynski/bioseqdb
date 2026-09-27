@@ -1,6 +1,6 @@
 /**
  * @file generation_session_validation.cppm
- * @brief Defines grouped-generation opening, restart inspection, and compile-time contracts.
+ * @brief Inspect generation identities and check reader APIs at compile time.
  */
 module;
 #include <bioseq/pg_compat.h>
@@ -68,17 +68,17 @@ import bioseq.postgres.storage.manager; // seq_caches, sequence_locator, format 
 import bioseq.storage.layout;           // sequence_locator
 import bioseq.storage.size;             // sequence_size_t
 import bioseq.indexing.type; // sequence_index_layout, index_sub_key_t, k_max_index_chunk_size_bytes, sentinels
-import bioseq.indexing.storage;           // the concepts
-import bioseq.indexing.minimizer_hashmap; // encoded header/bucket validation
-import bioseq.indexing.minimizer_fragment_image; // explicit fixed-endian minimizer fragment image image ABI
+import bioseq.indexing.storage;           // Storage adapter requirements.
+import bioseq.indexing.minimizer_hashmap; // Minimizer index header and bucket format.
+import bioseq.indexing.minimizer_fragment_image; // Minimizer fragment format with a fixed byte order.
 import bioseq.indexing.compact_hash32_direct_index;
 import bioseq.indexing.minimizer_fragment_compact_hash32_adapter;
 import bioseq.postgres.table.io; // begin_column_read/read_next_column_row/end_column_read/column_read_state
-import bioseq.postgres.storage.scanner;        // PostgreSQL-backed lazy sequence access
+import bioseq.postgres.storage.scanner;        // Read sequence fragments through PostgreSQL.
 import bioseq.storage.lazy_sequence;           // lazy_sequence
 import bioseq.postgres.types.compact_sequence; // bioseq::pg_types::seq, dispatch_instance
 import bioseq.sequences;                       // compact_sequence_range
-import bioseq.sequences.simd;                  // canonical bounded base decoding
+import bioseq.sequences.simd;                  // Decode sequence bases with SIMD.
 import bioseq.parallelism.memory_admission;
 import bioseq.parallelism.mode;
 import bioseq.parallelism.concepts;
@@ -102,7 +102,7 @@ export import :generation_session_payload;
 export import :generation_session_completion;
 export namespace bioseq::storage::indexing {
 namespace minimizer_generation_compile_contract_detail {
-/// Minimal sink used to instantiate and validate the exported range-read contract.
+/// Empty sink used to check range-reader template compilation.
 struct qualified_read_sink {
     void operator()(const index_chunk_address&, const char*, std::size_t) const noexcept {}
 };
@@ -115,12 +115,11 @@ index_storage_fragment_generation_read_session::read_chunks_in_range<
     index_chunk_cache_policy,
     minimizer_generation_compile_contract_detail::qualified_read_sink&&);
 
-/// Read-only, PostgreSQL-owned pre-restart audit for one exact relation row,
-/// column and logical minimizer index. It validates the source relfilenode and
-/// attribute, the exact eight-column sidecar/PK, the address-bound row CRCs,
-/// fixed head/manifest wire, every directory chunk, and all cross-object
-/// metadata equations under one registered MVCC snapshot. It intentionally
-/// does not activate ordinal 2 or expose a standalone SQL symbol.
+/// Check a published generation's source and metadata for restart comparisons.
+/// Use the supplied registered snapshot to check the parent row and source
+/// catalog, then read the head, manifest and complete directory. Return the
+/// generation identity and checksums after closing the reader. Payload rows
+/// and sequence fragments are not read by this inspection.
 [[nodiscard]] ready_minimizer_generation_identity inspect_ready_minimizer_generation_identity_pg(
     const minimizer_generation_administration_identity& identity,
     std::uint64_t sequence_rowno,
@@ -222,8 +221,8 @@ index_storage_fragment_generation_read_session::read_chunks_in_range<
         }
         source->session_storage = nullptr;
         source->registered_snapshot = nullptr;
-        // The failed statement owns the MemoryContext. Do not invoke PG
-        // cleanup while propagating either a bridged PG error or a C++ error.
+        // Leave the failed statement's memory context to PostgreSQL cleanup
+        // while propagating the original exception.
         source->work_context = nullptr;
         delete source;
         throw;
