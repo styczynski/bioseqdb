@@ -1212,11 +1212,11 @@ inline void validate_configure_handshake(
     plan.declaration_probes = std::move(probes);
     plan.frontend_actions = frontend_action_counts{
         .dependency_preparation_validations = 1u,
-        // One direct structural extraction plus the canonical-source scan
-        // performed while re-deriving dependency authority in this command.
+        // Count the direct source scan and the scan used to check the prepared
+        // dependency graph.
         .canonical_token_slice_scans = 2u,
-        // Dependency-authority derivation and every declaration probe each
-        // token-scan the signature donor once.
+        // The dependency check and each declaration probe scan the source used
+        // to supply compiler settings once.
         .signature_donor_token_slice_scans = 1u
             + static_cast<std::uint32_t>(plan.declaration_probes.size()),
         .body_free_declaration_probe_scans =
@@ -1281,12 +1281,12 @@ inline void validate_configure_handshake(
 
 }  // namespace detail
 
-/// Executes dependency preparation for the in-module contract partition.
+/// Runs dependency preparation for the in-module contract tests.
 int execute_prepare_contract(prepare_command_line command) {
     return detail::execute_prepare(std::move(command));
 }
 
-/// Runs namespace-materialization contract checks.
+/// Runs namespace-generator tests and reports failures to stderr.
 inline int self_test() {
     try {
         run_namespace_materialization_contract_tests();

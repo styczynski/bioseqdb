@@ -148,13 +148,13 @@ inline void require_regular_file(
     return result;
 }
 
-/// Return whether `character` is whitespace permitted inside C++ spellings.
+/// Checks for a space, tab or line ending in a C++ spelling.
 [[nodiscard]] inline bool ascii_space(const char character) noexcept {
     return character == ' ' || character == '\t' || character == '\r'
         || character == '\n';
 }
 
-/// Remove insignificant ASCII whitespace before validating a slot expression.
+/// Removes spaces, tabs and line endings before checking a slot expression.
 [[nodiscard]] inline std::string compact_cpp_spelling(
     const std::string_view spelling) {
     std::string result;
@@ -172,7 +172,7 @@ inline void require_regular_file(
         || (character >= '0' && character <= '9') || character == '_';
 }
 
-/// Extract a simple terminal identifier while ignoring nested template scopes.
+/// Finds the final identifier, ignoring scope separators inside template arguments.
 [[nodiscard]] inline std::string_view terminal_identifier(
     const std::string_view qualified_name) noexcept {
     std::size_t separator = std::string_view::npos;
@@ -206,7 +206,7 @@ struct parsed_slot_callable final {
     std::string terminal_name;
 };
 
-/// Parse the fail-closed address-of callable form accepted by SLOT_RECORDS.
+/// Reads a SLOT_RECORDS function address and rejects unsupported expression forms.
 [[nodiscard]] inline parsed_slot_callable parse_slot_callable(
     const slot_spec& slot) {
     std::string expression = compact_cpp_spelling(slot.expression);
@@ -512,9 +512,9 @@ load_domain_topology_manifests(
     result.reserve(inputs.size());
     std::vector<std::filesystem::path> physical_paths;
     for (domain_topology_manifest_input& input : inputs) {
-        // Parse the original physical spelling first. The shared topology
-        // authority rejects symlink chains and unknown schemas; canonicalizing
-        // before this call would conceal path aliases.
+        // Check the original path before resolving it. The topology reader rejects
+        // symlinks and unsupported schemas. Resolving the path first would hide
+        // those aliases.
         const auto topology =
             ::bioseq::codegen::namespace_materialization::
                 read_configure_topology_provenance(
@@ -930,8 +930,8 @@ inline void validate_minimizer_registry(
         }
     }
 
-    // Alphabet identity is registry data.  Keep both directions consistent so
-    // validation and generated trait dispatch cannot drift into a second list.
+    // Check that each alphabet ID names exactly one C++ type and each type
+    // has one ID. Generated dispatch uses this same mapping.
     std::map<std::uint16_t, std::string> alphabet_types_by_id;
     std::map<std::string, std::uint16_t, std::less<>> alphabet_ids_by_type;
     for (const auto& profile : registry.runtime_profiles) {
@@ -1707,7 +1707,7 @@ inline void validate_inventories(
     return result;
 }
 
-/// Prove every table slot names a callable extracted from its registered owner.
+/// Checks that every table slot names a callable in its registered source owner.
 inline void validate_slot_callable_ownership(
     const source_manifest& inventory,
     const std::vector<extracted_source>& extracted_sources) {

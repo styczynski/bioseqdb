@@ -12,10 +12,10 @@ export import :cli;
 
 export namespace bioseq::codegen {
 
-/// @brief Public codegen entry point dispatching to the CLI layer.
-/// @param argc Number of process arguments, including the program name.
-/// @param argv Mutable null-terminated process argument array.
-/// @return Process-style status code.
+/// @brief Passes process arguments to the generator command-line handler.
+/// @param argc Number of arguments, including the program name.
+/// @param argv Process argument array.
+/// @return The command-line handler's exit status.
 int run(int argc, char** argv) {
     std::vector<std::string_view> arguments;
     arguments.reserve(static_cast<std::size_t>(argc));

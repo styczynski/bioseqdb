@@ -32,13 +32,13 @@ export namespace bioseq::codegen::namespace_materialization {
 inline constexpr std::string_view template_flatten_policy =
     "template_flatten";
 
-/// The canonical policy-neutral ownership envelope and its self-seal.
+/// Output-ownership manifest and the hash used to identify its contents.
 struct rendered_publication_manifest {
     std::string json;
     std::string manifest_identity;
 };
 
-/// One path whose ownership was authenticated by an artifacts manifest.
+/// A generated-file path and expected content hash from a validated manifest.
 struct owned_publication_artifact {
     std::filesystem::path relative_path;
     std::string content_sha256;
@@ -46,7 +46,7 @@ struct owned_publication_artifact {
         publication_artifact_class::production_cppm};
 };
 
-/// Previous publication state accepted for stale-file authorization.
+/// Verified previous output used to decide which obsolete files may be removed.
 struct previous_publication {
     bool present{};
     std::string policy;
@@ -57,8 +57,8 @@ struct previous_publication {
     std::vector<owned_publication_artifact> artifacts;
 };
 
-/// Authenticated configure-time provenance consumed by structural and Highway
-/// generation. `content_sha256` seals the exact configure snapshot bytes.
+/// Verified CMake topology settings used by namespace and Highway generation.
+/// content_sha256 hashes the exact configure-time manifest bytes.
 struct configure_topology_provenance {
     std::string generator_identity;
     std::string policy;
@@ -74,10 +74,9 @@ struct configure_topology_provenance {
     std::size_t coordinate_count{};
 };
 
-/// Verifies the cross-output binding from the PREPARE completion stamp to the
-/// exact authenticated action-trace bytes. The trace also has its own semantic
-/// self-seal; this digest prevents independently substituting the extra custom
-/// command output before GENERATE validates that seal and its PCM joins.
+/// Checks that the PREPARE stamp names the exact action-trace file being read.
+/// The trace has its own integrity checks. This hash also ties it to the
+/// completed prepare step before GENERATE checks its compiled-module records.
 inline void validate_frontend_action_trace_stamp_binding(
     const std::string_view stamp_content,
     const std::string_view action_trace_content) {
@@ -124,7 +123,7 @@ inline void validate_frontend_action_trace_stamp_binding(
     }
 }
 
-/// Returns the source spelling used for an axis role in manifests.
+/// Returns the axis-role name stored in manifests.
 [[nodiscard]] inline constexpr std::string_view axis_role_name(
     axis_role role) noexcept {
     switch (role) {
@@ -135,7 +134,7 @@ inline void validate_frontend_action_trace_stamp_binding(
     return "unknown";
 }
 
-/// Returns the stable spelling used for an artifact kind in manifests.
+/// Returns the generated-file kind stored in manifests.
 [[nodiscard]] inline constexpr std::string_view artifact_kind_name(
     materialization_artifact::kind kind) noexcept {
     switch (kind) {
@@ -153,7 +152,7 @@ inline void validate_frontend_action_trace_stamp_binding(
     return "unknown";
 }
 
-/// Returns the closed ownership class spelling used by every policy.
+/// Returns the file-class name used by the shared publisher.
 [[nodiscard]] inline constexpr std::string_view publication_class_name(
     publication_artifact_class value) noexcept {
     switch (value) {
@@ -165,7 +164,7 @@ inline void validate_frontend_action_trace_stamp_binding(
     return "unknown";
 }
 
-/// Returns the stable spelling used for a frontend validation class.
+/// Returns the validation-class name stored in manifests.
 [[nodiscard]] inline constexpr std::string_view validation_class_name(
     validation_class value) noexcept {
     switch (value) {
@@ -175,7 +174,7 @@ inline void validate_frontend_action_trace_stamp_binding(
     return "unknown";
 }
 
-/// Returns the compiler-derived linkage spelling recorded for probe entities.
+/// Returns the linkage name recorded for a declaration probe.
 [[nodiscard]] inline constexpr std::string_view linkage_name(
     structural_analysis::entity_linkage value) noexcept {
     switch (value) {
@@ -187,7 +186,7 @@ inline void validate_frontend_action_trace_stamp_binding(
     return "unknown";
 }
 
-/// Returns the named/global-module attachment spelling for probe entities.
+/// Returns whether a probe declaration belongs to a named or global module.
 [[nodiscard]] inline constexpr std::string_view attachment_name(
     structural_analysis::module_attachment value) noexcept {
     switch (value) {
@@ -353,11 +352,9 @@ inline void require_sha256(
     return checked;
 }
 
-/// Returns the stable source-tree identity written to generated metadata.
-///
-/// Runtime paths remain absolute for filesystem authorization. Serialized
-/// source identities are normalized forward-slash paths relative to the
-/// repository source tree.
+/// Returns the source path stored in generated metadata, relative to the repository.
+/// Filesystem checks use absolute paths. Metadata uses normalized paths with
+/// forward slashes so it does not depend on the checkout location.
 [[nodiscard]] inline std::string canonical_source_identity(
     const generation_plan& plan) {
     const fs::path repository_root = checked_absolute_path(
@@ -1098,10 +1095,10 @@ inline void replace_authenticated_identity(
     content.replace(value_begin, value_size, "<authenticated-identity>");
 }
 
-/// Canonical renderers necessarily change the predecessor/self identities on
-/// a repeat publication. Remove only those two authenticated envelope values
-/// so the publisher can recognize an otherwise byte-identical no-op without
-/// weakening any policy evidence or artifact digest.
+/// Ignores the current and previous manifest hashes when comparing two publications.
+/// All other contents must still match. This lets repeated generation keep
+/// unchanged output without dropping file hashes or generator evidence from
+/// the comparison.
 [[nodiscard]] inline std::string publication_noop_projection(
     std::string_view content,
     std::string_view owner) {
@@ -2444,9 +2441,9 @@ inline void validate_physical_root(const fs::path& root) {
     }
 }
 
-/// The publication protocol uses same-directory renames so POSIX rename(2),
-/// as exposed by std::filesystem on macOS and Linux, replaces one regular file
-/// atomically. Never emulate replacement by deleting the live destination.
+/// Replaces a regular file with a same-directory rename. On macOS and Linux,
+/// POSIX rename makes this single-file replacement atomic. Deleting the live
+/// destination first would leave a gap if the process stopped.
 inline void atomic_replace_regular_file(
     const fs::path& source,
     const fs::path& destination,
@@ -2471,11 +2468,10 @@ inline void atomic_replace_regular_file(
     }
 }
 
-/// Writes one protocol-owned staging path. The caller must have authenticated
-/// that the fixed staging name is absent before installing the PREPARING
-/// intent. Closing and rereading before advancing the publication state makes
-/// process-crash recovery deterministic; sudden host power loss is outside
-/// this protocol's durability claim.
+/// Writes and reads back a new staging file before publication can advance.
+/// The caller must check that this staging name is unused before recording
+/// PREPARING. Recovery covers process interruption. Sudden power loss may
+/// still lose these writes.
 inline void write_new_staging_file(
     const fs::path& path,
     std::string_view content,
@@ -2542,7 +2538,7 @@ inline void prune_empty_publication_directories(
 
 }  // namespace detail
 
-/// Renders the complete ordered topology handshake for one materialization.
+/// Writes the source choices, generated-file layout and topology hash to JSON.
 [[nodiscard]] inline std::string render_topology_manifest(
     const generation_plan& plan) {
     detail::validate_plan_identity(plan);
@@ -2811,8 +2807,9 @@ inline void prune_empty_publication_directories(
     return output.str();
 }
 
-/// Renders the one policy-neutral ownership envelope. Policy evidence is
-/// opaque to this layer after the frontend proves that it is a JSON object.
+/// Builds the shared output-ownership manifest and adds its integrity hash.
+/// Generator-specific evidence must be a valid JSON object. This layer records
+/// it without interpreting its fields.
 [[nodiscard]] inline rendered_publication_manifest
 render_publication_manifest(const publication_manifest_request& request) {
     const std::filesystem::path output_root = detail::checked_absolute_path(
@@ -2929,8 +2926,7 @@ render_publication_manifest(const publication_manifest_request& request) {
     };
 }
 
-/// Renders and self-seals template_flatten policy evidence inside the shared
-/// ownership envelope.
+/// Adds template-flatten generation evidence to the shared output-ownership manifest.
 [[nodiscard]] inline rendered_publication_manifest render_artifact_manifest(
     const generation_plan& plan,
     const std::vector<materialization_artifact>& artifacts,
@@ -3137,7 +3133,7 @@ render_publication_manifest(const publication_manifest_request& request) {
     return rendered;
 }
 
-/// Reads and authenticates the canonical configure-time topology snapshot.
+/// Reads and validates the topology manifest written during CMake configuration.
 [[nodiscard]] inline configure_topology_provenance
 read_configure_topology_provenance(
     const std::filesystem::path& path) {
@@ -3157,15 +3153,15 @@ read_configure_topology_provenance(
         content, path.string());
 }
 
-/// Reads only the digest while retaining the strict provenance validation.
+/// Returns the topology hash after validating the full configure-time manifest.
 [[nodiscard]] inline std::string read_configure_topology_digest(
     const std::filesystem::path& path) {
     return read_configure_topology_provenance(path).topology_digest;
 }
 
-/// Authenticates a prior artifacts manifest before it can authorize cleanup.
-/// An empty expected topology accepts any valid self-sealed digest so a
-/// reconfigured axis inventory can remove stale predecessor artifacts.
+/// Helpers for validating previous output and recovering interrupted publication.
+/// An empty expected topology hash allows a valid previous configuration,
+/// so regeneration can remove files that the new configuration no longer needs.
 namespace detail {
 
 struct previous_publication_snapshot {
@@ -3476,8 +3472,8 @@ read_pending_publication(
             throw std::runtime_error(
                 "publication PREPARING scratch aliases an installed state");
         }
-        // Staging never begins until this scratch has been atomically renamed
-        // to PREPARING, so an isolated regular scratch is always abortable.
+        // No files are staged before this scratch file is renamed to PREPARING.
+        // If the scratch file is alone, removing it safely abandons that attempt.
         remove_regular_file(
             protocol.transaction_scratch,
             "publication PREPARING intent scratch");
@@ -3689,10 +3685,10 @@ inline void roll_forward_ready_publication(
 
 }  // namespace detail
 
-/// Resolves a process interruption before callers authenticate the predecessor
-/// used to render their next manifest. PREPARING is abort-only; READY is
-/// roll-forward-only, preserving one exact manifest identity chain even when
-/// the caller's current inputs changed after the interrupted invocation.
+/// Recovers an interrupted publication before the next manifest is built.
+/// PREPARING discards staged files. READY finishes the recorded publication,
+/// even if current inputs have changed, so the next manifest names the
+/// correct predecessor.
 inline void recover_interrupted_publication(
     const std::filesystem::path& output_root,
     const std::filesystem::path& artifact_manifest,
@@ -3735,8 +3731,9 @@ inline void recover_interrupted_publication(
         .publication;
 }
 
-/// Atomically publishes the complete desired set and removes only stale paths
-/// authenticated by the immediately preceding manifest identity.
+/// Publishes generated files with recovery after process interruption.
+/// Each replacement uses an atomic rename. Obsolete files are removed only
+/// when the previous manifest owns them and their contents still match.
 inline void publish_artifacts(const publication_request& request) {
     const detail::publication_protocol_paths protocol =
         detail::publication_protocol(
@@ -3757,9 +3754,9 @@ inline void publish_artifacts(const publication_request& request) {
             desired_manifest.topology_digest);
     }
 
-    // Defense in depth for direct callers. Production generators recover
-    // before reading the predecessor so changed inputs can render from the
-    // manifest identity committed by a pending READY transaction.
+    // Recover here for direct callers too. Generator commands recover before
+    // reading the previous manifest, so a pending READY publication becomes
+    // the predecessor of any output built from changed inputs.
     recover_interrupted_publication(
         request.output_root,
         request.artifact_manifest,
