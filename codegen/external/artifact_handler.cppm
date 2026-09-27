@@ -1,6 +1,6 @@
 /**
  * @file artifact_handler.cppm
- * @brief Deterministic publication and inventory of generated client artifacts.
+ * @brief Writes generated client files and registers them with CMake.
  */
 module;
 
@@ -20,9 +20,9 @@ namespace fs = std::filesystem;
 
 namespace bioseq::codegen::external {
 
-/// @brief Returns the generator-owned root for one client identity.
-/// @param output_root Root of all external-codegen artifacts.
-/// @param client_name Validated client output identity.
+/// @brief Returns the output directory for one client.
+/// @param output_root Root of all external-codegen output.
+/// @param client_name Client name.
 /// @return `<output_root>/api/<client_name>`.
 [[nodiscard]] fs::path client_artifact_root(
     const fs::path& output_root,
@@ -30,18 +30,18 @@ namespace bioseq::codegen::external {
     return output_root / "api" / client_name;
 }
 
-/// @brief Returns the integration-test path for one client identity.
-/// @param client_name Validated client output identity.
-/// @return Path relative to the client's artifact root.
+/// @brief Returns a client's integration-test path.
+/// @param client_name Client name.
+/// @return Path relative to the client's output directory.
 [[nodiscard]] fs::path client_integration_test_path(
     std::string_view client_name) {
     return fs::path("tests") / "integration"
         / (std::string(client_name) + "_client_test.cpp");
 }
 
-/// @brief Renders the standalone CMake graph for one generated client.
-/// @param api Validated API model.
-/// @return Generated CMake source with stable ordering and spelling.
+/// @brief Generates CMake code that registers a client with the build.
+/// @param api Validated API description.
+/// @return CMakeLists.txt contents for the client.
 [[nodiscard]] std::string render_client_cmake(const generated_api& api) {
     std::ostringstream cmake_source;
     cmake_source
@@ -53,11 +53,11 @@ namespace bioseq::codegen::external {
     return cmake_source.str();
 }
 
-/// @brief Publishes the complete artifact set for one generated API.
-/// @param api Validated API model.
-/// @param output_root Generator-owned artifact root.
-/// @param compiler_id Client compiler provenance recorded verbatim.
-/// @details Each file is replaced only when its bytes change, avoiding timestamp churn.
+/// @brief Writes the generated client, tests and build metadata.
+/// @param api Validated API description.
+/// @param output_root Directory for generated output.
+/// @param compiler_id Compiler name recorded in provenance.txt.
+/// @details Files keep their timestamps when their contents have not changed.
 void emit_client_artifacts(
     const generated_api& api,
     const fs::path& output_root,
@@ -87,16 +87,16 @@ void emit_client_artifacts(
     publish_artifact_if_changed(client_root / "provenance.txt", provenance.str());
 }
 
-/// @brief Derives a client output identity from its descriptor filename.
+/// @brief Takes the client name from its descriptor filename.
 /// @param source_path Descriptor path.
-/// @return Descriptor stem without its extension.
+/// @return Filename without its extension.
 [[nodiscard]] std::string derive_client_output_name(
     const fs::path& source_path) {
     return source_path.stem().string();
 }
 
-/// @brief Maps a client identity to its generator-owned relative root.
-/// @param output_name Client output identity.
+/// @brief Returns a client's output directory relative to the generator root.
+/// @param output_name Client name.
 /// @return Relative `api/<name>` path.
 [[nodiscard]] fs::path derive_client_owned_output_path(
     std::string_view output_name) {
@@ -118,9 +118,9 @@ void emit_client_artifacts(
         && fs::exists(client_root / "provenance.txt");
 }
 
-/// @brief Adds one generated client to the deterministic CMake inventory.
-/// @param inventory Inventory stream to extend.
-/// @param output_name Client output identity.
+/// @brief Adds a generated client directory to the CMake build list.
+/// @param inventory Output stream for the list.
+/// @param output_name Client name.
 void append_client_build_inventory(
     std::ostringstream& inventory,
     std::string_view output_name) {
