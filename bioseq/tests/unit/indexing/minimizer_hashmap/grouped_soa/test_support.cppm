@@ -1,6 +1,6 @@
 /**
  * @file test_support.cppm
- * @brief Provides grouped-SoA row fixtures for unit tests.
+ * @brief Helps validate and modify grouped index rows in tests.
  */
 module;
 
@@ -39,7 +39,7 @@ import bioseq.indexing.minimizer_sequence;
 import bioseq.indexing.symbol_counts;
 import bioseq.parallelism.memory_admission;
 import bioseq.indexing.registry;
-import bioseq.common.hashing; //  shared SHA-256
+import bioseq.common.hashing; 
 
 import bioseq.tests.support.indexing_storage_fakes;
 
@@ -53,7 +53,7 @@ using namespace minimizer_hashmap_test_support;
 
 export namespace grouped_soa_test_support {
 
-/// Validate a captured row and return its move-only receipt.
+/// Validate a stored test row and return the checked row handle.
 [[nodiscard]] bioseq::indexing::validated_minimizer_generation_row_receipt
 trusted_row_receipt(const collected_minimizer_row& row) {
     auto validated = bioseq::indexing::validate_minimizer_generation_row_receipt(row_view(row));
@@ -61,7 +61,7 @@ trusted_row_receipt(const collected_minimizer_row& row) {
     return std::move(*validated);
 }
 
-/// Recompute the address-bound checksum after mutating a captured row.
+/// Recompute the checksum from the row address and its current bytes.
 void recompute_row_checksum(collected_minimizer_row& row) noexcept {
     row.row_checksum =
         bioseq::indexing::crc64_index_chunk_row(row.address.generation_id,

@@ -1,9 +1,8 @@
 /**
  * @file generation_test.cpp
- * @brief Tests grouped-SoA wire generation and publication.
+ * @brief Checks minimizer generation bytes, metadata, and storage callbacks.
  *
- * The tests run inside `bioseq::simd::HWY_NAMESPACE` because they call the
- * selected minimizer collectors directly.
+ * Tests call minimizer collectors in the selected Highway SIMD namespace.
  */
 
 #include <hwy/highway.h>
@@ -39,7 +38,7 @@ import bioseq.indexing.minimizer_sequence;
 import bioseq.indexing.symbol_counts;
 import bioseq.parallelism.memory_admission;
 import bioseq.indexing.registry;
-import bioseq.common.hashing; //  shared SHA-256
+import bioseq.common.hashing; 
 
 import bioseq.tests.support.indexing_storage_fakes;
 
@@ -53,7 +52,7 @@ using namespace minimizer_hashmap_test_support;
 
 namespace {
 
-/// Require a wire operation to return one exact value.
+/// Check that a codec operation succeeds with the expected value.
 template <class p_t>
 void require_wire_value(
     const std::expected<p_t, bioseq::indexing::minimizer_generation_encoding_error>& value,
@@ -61,12 +60,11 @@ void require_wire_value(
     REQUIRE(value.has_value());
     REQUIRE(*value == expected);
 }
-/// Row-only sink for the relation callback API without the optional
-/// planned and direct-payload callbacks.
+/// Collect rows through the basic storage callback.
 struct row_only_collecting_minimizer_sink {
     std::vector<collected_minimizer_row> rows;
 
-    /// Copy one checksummed row into the sink.
+    /// Copy a row, its address, and its checksum into test storage.
     [[nodiscard]] std::expected<void, bioseq::indexing::minimizer_generation_encoding_error>
     write(const bioseq::indexing::minimizer_generation_row_view& row) {
         rows.push_back(collected_minimizer_row{
@@ -78,15 +76,15 @@ struct row_only_collecting_minimizer_sink {
     }
 };
 
-/// Classify callback order observed by a planned direct sink.
+/// Callback kinds used to check publication order.
 enum class planned_direct_sink_event : std::uint8_t {
     begin,
     payload,
     row,
 };
 
-/// Record mapped-storage callbacks. Payload callbacks never delegate to
-/// write(), which is the callback that would form ordinary relation tuples.
+/// Record the storage plan and keep direct payload writes separate from
+/// ordinary row writes.
 struct planned_direct_minimizer_sink {
     std::optional<bioseq::indexing::grouped_soa_storage_plan_view> storage_plan;
     std::vector<collected_minimizer_row> payload_rows;
@@ -94,7 +92,7 @@ struct planned_direct_minimizer_sink {
     std::vector<planned_direct_sink_event> events;
     std::uint64_t ordinary_payload_row_callbacks = 0u;
 
-    /// Capture the immutable storage plan before payload publication.
+    /// Save the storage plan, rejecting a second plan or an out-of-order call.
     [[nodiscard]] std::expected<void, bioseq::indexing::minimizer_generation_encoding_error>
     begin_planned_generation(const bioseq::indexing::grouped_soa_storage_plan_view& plan) {
         if (storage_plan.has_value() || !events.empty()) {
@@ -106,7 +104,7 @@ struct planned_direct_minimizer_sink {
         return {};
     }
 
-    /// Capture one ordinary row emitted after the storage plan.
+    /// Copy an ordinary row after the storage plan has been received.
     [[nodiscard]] std::expected<void, bioseq::indexing::minimizer_generation_encoding_error>
     write(const bioseq::indexing::minimizer_generation_row_view& row) {
         if (!storage_plan.has_value()) {
@@ -125,7 +123,7 @@ struct planned_direct_minimizer_sink {
         return {};
     }
 
-    /// Capture one direct payload row and return its checksum receipt.
+    /// Copy a direct payload row and return its computed checksum.
     [[nodiscard]] std::expected<bioseq::indexing::minimizer_generation_row_write_receipt,
                                 bioseq::indexing::minimizer_generation_encoding_error>
     write_grouped_soa_payload(
@@ -596,7 +594,7 @@ TEST_CASE("generation manifest rejects corrupt headers and invalid geometry",
     require_wire_error(decode_minimizer_generation_manifest(corrupted),
                        minimizer_generation_encoding_error::declared_size);
 
-    // Malformed or unknown producer identity namespaces fail closed.
+    // Reject unknown producer backends and revisions.
     corrupted = good;
     corrupted[126] = std::byte{0};
     corrupted[127] = std::byte{0};
@@ -763,10 +761,9 @@ TEST_CASE("standalone manifest codec defers referenced-object consistency",
     using namespace bioseq::indexing;
 
     auto manifest = golden_generation_manifest();
-    // These combinations are intentionally nonsensical without the referenced
-    // objects. The fixed codec preserves them; generation validation must match
-    // byte counts, checksums, extents, storage contract, and head identity against
-    // the actual directory and payload before publication or use.
+    // These fields can round-trip through the manifest codec without
+    // matching any real directory or payload. Generation validation must
+    // check those referenced bytes before the index can be used.
     manifest.payload_bytes = 0;
     manifest.payload_checksum = (std::numeric_limits<std::uint64_t>::max)();
     manifest.directory_bytes = 1;
@@ -1050,7 +1047,7 @@ TEST_CASE("grouped_soa_directory_view owns bytes and rejects unstable directory 
     REQUIRE(view->find(0, 31) == nullptr);
     REQUIRE(view->find(1, 10) == nullptr);
 
-    // Source mutation cannot affect the owning view or its GPU-upload bytes.
+    // The view owns a copy, so changing the source bytes must leave it intact.
     (*bytes)[8] ^= std::byte{0xff};
     REQUIRE(view->entries()[0].lo_hash == 10);
     REQUIRE(view->encoded_bytes()[8] != (*bytes)[8]);

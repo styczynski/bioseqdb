@@ -1,8 +1,8 @@
 /**
  * @file fragment_producer_test.cpp
- * @brief Tests producer identity, canonical streams, storage state, and GPU statistics.
+ * @brief Checks minimizer producer identities, stored results, and GPU execution counts.
  *
- * The tests run inside `bioseq::simd::HWY_NAMESPACE` for fixed-target coverage.
+ * Highway compiles these tests for the selected SIMD target.
  */
 
 #include <hwy/highway.h>
@@ -38,7 +38,7 @@ import bioseq.indexing.minimizer_sequence;
 import bioseq.indexing.symbol_counts;
 import bioseq.parallelism.memory_admission;
 import bioseq.indexing.registry;
-import bioseq.common.hashing; //  shared SHA-256
+import bioseq.common.hashing; 
 
 import bioseq.tests.support.indexing_storage_fakes;
 
@@ -157,9 +157,9 @@ TEST_CASE("independent fragment halo and spill-run merge producers are canonical
     REQUIRE(canonical_event_lookup_map(fragment_events) == oracle_lookup);
     REQUIRE(canonical_event_lookup_map(spill_events) == oracle_lookup);
 
-    // The internal all-SIMD backend must traverse the same fragmented index
-    // cores and external spill runs without scalar sketch fallback. Encoded
-    // bytes are compared after normalising generation identity.
+    // Run the SIMD backend through fragment scans and spill runs. Check its
+    // execution counts for scalar fallback, then compare encoded bytes after
+    // making the generation identities equal.
     lazy_sequence<dna4_u64, chunked> lazy_exact{chunked::from_range(range)};
     const auto lazy_exact_view = bioseq::storage::make_lazy_sequence_view(lazy_exact);
     auto exact_fragment_options = test_generation_options(
@@ -558,8 +558,7 @@ TEST_CASE("spill-run SHA-256 binding matches standard known vectors and split up
     split.update(bytes("c"));
     REQUIRE(split.finalize() == contiguous_digest);
 
-    //  promoted helpers: lowercase-hex rendering and the one-shot convenience
-    // share the same digest and match the canonical "abc" vector.
+    // Check both hexadecimal helpers against known SHA-256 digests.
     REQUIRE(bioseq::common::to_hex(contiguous_digest) == "ba7816bf8f01cfea414140de5dae2223"
                                                          "b00361a396177a9cb410ff61f20015ad");
     REQUIRE(bioseq::common::sha256_hex("abc") == "ba7816bf8f01cfea414140de5dae2223"
@@ -844,8 +843,8 @@ TEST_CASE("inactive spill-run storage incarnation rejects duplicate runs ABA and
 TEST_CASE("inactive spill-run storage incarnation counters fail closed at wrap",
           "[component:bioseq][layer:unit][feature:storage]") {
     using namespace bioseq::indexing;
-    // The uncommon maximum chunk parameter gives this test an isolated static
-    // token namespace, independent of every ordinary fake_fragment_storage<>.
+    // This template instance has its own static token counter, so exhausting
+    // it leaves the usual fake_fragment_storage<> fixtures usable.
     using wrap_storage_type = fake_fragment_storage<123457u>;
 
     wrap_storage_type::set_next_segment_spill_generation_token_for_test(
@@ -945,8 +944,7 @@ TEST_CASE("minimizer index facades preserve biological rejection precedence",
             packed_bounded_nthash_index_status::unsupported_alphabet);
 
     auto mismatched_dna5_encoding = bounded_request;
-    // Registered alphabet geometry is validated by the typed kernel. Supply
-    // that kernel so a missing-state rejection cannot mask this malformed view.
+    // Supply the kernel so the test reaches the DNA5 layout check.
     mismatched_dna5_encoding.kernels = fixed_minimizer_kernels();
     mismatched_dna5_encoding.sequence.alphabet_code = fixed_alphabet_code<::seq::dna5>();
     REQUIRE(collect_packed_bounded_nthash_index_erased(mismatched_dna5_encoding).status ==
@@ -1277,10 +1275,9 @@ TEST_CASE("grouped-SoA Vulkan replay batches adjacent persisted fragments withou
             == decode_generation_events(*single_fragment_encoded,
                                         single_fragment_sink.rows));
 
-    // A persisted segment narrower than the physical fragment can cross a
-    // physical boundary. The buffered producer batches complete adjacent
-    // segments while the zero-buffer producer retains the one-segment route;
-    // both must preserve the identical encoded generation.
+    // Use stored segments whose boundaries differ from the scanner fragments.
+    // Batching adjacent segments and processing one segment at a time must
+    // produce the same encoded generation.
     constexpr std::uint64_t unaligned_persisted_fragment_bp = 21'504u;
     auto unaligned_options = test_generation_options(
         range.bp_size(),

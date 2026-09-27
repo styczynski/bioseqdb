@@ -1,8 +1,8 @@
 /**
  * @file reader_test.cpp
- * @brief Tests grouped-SoA reader admission, authentication, and release.
+ * @brief Checks grouped index reads, row validation, and memory reservations.
  *
- * The tests run inside `bioseq::simd::HWY_NAMESPACE` for fixed-target coverage.
+ * Highway compiles these tests for the selected SIMD target.
  */
 
 #include <hwy/highway.h>
@@ -39,7 +39,7 @@ import bioseq.indexing.minimizer_sequence;
 import bioseq.indexing.symbol_counts;
 import bioseq.parallelism.memory_admission;
 import bioseq.indexing.registry;
-import bioseq.common.hashing; //  shared SHA-256
+import bioseq.common.hashing; 
 
 import bioseq.tests.support.indexing_storage_fakes;
 
@@ -56,9 +56,8 @@ using namespace grouped_soa_test_support;
 TEST_CASE("grouped-SoA cold reader admits retained positions once",
           "[component:bioseq][layer:unit][feature:storage]") {
     using namespace bioseq::indexing;
-    // Model a wide query union whose mostly-unique hashes each retain one
-    // target position. Per-QueryRecord vectors would require two complete
-    // ownership walks and fresh OS memory probes for each first append.
+    // Give each of 2048 query hashes one target position to check that
+    // the reader reserves the final position buffer once.
     constexpr std::uint64_t query_count = 2048u;
     constexpr std::uint64_t segment_span = 8u * 1024u * 1024u;
     constexpr std::uint64_t segment_count = 3u;
@@ -70,10 +69,8 @@ TEST_CASE("grouped-SoA cold reader admits retained positions once",
     minimizers.reserve(query_count);
     queries.reserve(query_count);
     for (std::uint64_t index = 0; index < query_count; ++index) {
-        // Odd multiplication is a permutation modulo 2^30 and spreads this
-        // mostly-unique fixture across the same 30-bit domain as production
-        // ntHash keys. This exercises actual high-bit radix occupancy rather
-        // than putting every synthetic key in bucket zero.
+        // Multiplication by an odd number gives distinct hashes across the
+        // 30-bit domain, spreading this fixture over many radix buckets.
         const std::uint64_t hash = ((index + 1u) * 2'654'435'761ULL) & ((1ULL << 30u) - 1u);
         minimizers.emplace_back(hash, retained_bp(index) << 1u);
         queries.push_back(hash);
@@ -134,10 +131,8 @@ TEST_CASE("grouped-SoA cold reader admits retained positions once",
     REQUIRE(evidence.query_route_hash_probes <= evidence.query_route_control_lookups * 5u);
     REQUIRE(evidence.retained_selected_control_records == query_count);
     REQUIRE(evidence.selected_control_size_bytes == 8u);
-    // The decoded wire record is eight bytes, but this fixture's immutable
-    // segment geometry permits the retained position ends to narrow to u16.
-    // The final SoA therefore owns one u16 end plus one u32 dense route per
-    // selected query; it does not retain the decoded u64 control image.
+    // Stored controls fit in a 16-bit position end and a 32-bit route
+    // per query. The reader can release the decoded control bytes.
     REQUIRE(evidence.retained_selected_control_capacity_bytes ==
             query_count * (sizeof(std::uint16_t) + sizeof(std::uint32_t)));
     REQUIRE(evidence.current_selected_control_capacity_bytes == 0u);
@@ -146,9 +141,7 @@ TEST_CASE("grouped-SoA cold reader admits retained positions once",
     REQUIRE(evidence.control_payload_capacity_bytes == 0u);
     REQUIRE(evidence.retained_layout_equation_holds());
     REQUIRE(evidence.owned_capacity_bytes == reader->admitted_bytes());
-    // Full owner walks are now barrier-only: initialized, controls complete,
-    // exact position image published, and final ready. Extent count no longer
-    // appears in this equation.
+    // Check memory totals at the four reader stage boundaries.
     constexpr std::uint64_t expected_barrier_audits = 4u;
     REQUIRE(evidence.capacity_accounting_passes == expected_barrier_audits);
     REQUIRE_FALSE(evidence.saturated);
@@ -162,10 +155,8 @@ TEST_CASE("grouped-SoA cold reader admits retained positions once",
     REQUIRE(reader->lookup(queries.front()).positions.front() == first_query->second);
     REQUIRE(reader->lookup(queries.back()).positions.front() == last_query->second);
 
-    // Exercise the statement-level aggregate equation with a second reader
-    // that selects only the first of the three control extents. Production
-    // merges these per-reader counters, so the aggregate must retain the same
-    // 7R + E + 4S shape even when readers select different extent counts.
+    // Add a reader with one query to check that combined memory counters
+    // still agree when readers select different sets of extents.
     const std::array<std::uint64_t, 1> sparse_queries{queries.front()};
     const std::uint64_t sparse_selected_extent_count = static_cast<std::uint64_t>(
         std::ranges::count_if(generation->directory.entries(),
@@ -221,8 +212,8 @@ TEST_CASE("grouped-SoA cold reader admits retained positions once",
     REQUIRE(sparse_evidence.capacity_accounting_passes == expected_barrier_audits);
     REQUIRE_FALSE(sparse_evidence.saturated);
 
-    // A selected query absent from the target still crosses the same global
-    // controls/positions boundary, but exact P=0 must remain allocation-free.
+    // An absent hash still passes through control and position processing.
+    // It should allocate no position buffer.
     const std::array<std::uint64_t, 1> absent_queries{queries.front() ^ 1u};
     REQUIRE(std::ranges::find(queries, absent_queries.front()) == queries.end());
     auto empty_reader =
@@ -504,8 +495,8 @@ TEST_CASE("grouped-SoA admission failures name the exact owner substage",
             adversarial_query_count * (64u + 2u * sizeof(std::uint64_t));
         constexpr std::uint64_t exact_query_state_and_hash_bytes =
             adversarial_query_count * (sizeof(std::uint32_t) + sizeof(std::uint8_t));
-        // ceil(Q / 4) needs 25 high radix bits; the remaining five key bits
-        // fit exactly in one bucket-implied suffix byte.
+        // The radix table uses 25 of the 30 hash bits. The remaining five
+        // fit in one byte per query.
         constexpr std::uint64_t exact_query_radix_bytes =
             ((1ULL << 25u) + 1u) * sizeof(std::uint32_t);
         constexpr std::uint64_t exact_query_owned_bytes =
@@ -567,9 +558,8 @@ TEST_CASE("grouped-SoA selects its exact immutable row quantum",
     REQUIRE(sink.max_callback_bytes == 8064u);
     require_complete_generation_rows(*generation, sink.rows);
 
-    // The first unqueried control ends exactly at the first position-row
-    // boundary. Querying only the middle of three controls forces the sparse
-    // route image and exercises its late ordinal on the following row.
+    // The first hash ends at a row boundary. Query only the middle hash
+    // to check that sparse lookup continues in the next position row.
     bioseq::parallelism::memory_admission_controller admission;
     const std::array<std::uint64_t, 1> query{7u};
     auto reader = prepared_grouped_soa_query_reader::begin(
