@@ -1,6 +1,6 @@
 /**
  * @file admin/generation_fixture_read.cppm
- * @brief PostgreSQL grouped-SoA generation fixture read and failure support.
+ * @brief Test stored minimizer reads and their failure handling in PostgreSQL.
  */
 module;
 #include <new>
@@ -43,15 +43,18 @@ static_assert(__cplusplus >= 202302L, "C++23-or-later");
 export namespace bioseq::storage::indexing {
 
 /**
- * @brief Reopen and consume one active fixture generation under an independent MVCC snapshot.
- * @param rel_oid Source Bioseq relation.
- * @param index_name Registered logical index name.
- * @param sequence_rowno Visible source-row ordinal and query key.
- * @param kmer_size Required persisted k-mer size.
- * @param window_size Required persisted minimizer window.
- * @param layout Current generation layout selecting the qualified host reader.
- * @param backend Required producer backend; no fallback is permitted.
- * @return Authenticated fixture metadata and read receipts.
+ * Reopen a grouped-SoA test index under a registered MVCC snapshot.
+ * Check its source and build settings, load the records for one query hash,
+ * and verify the lookup and read counters. Also probe a selective or complete
+ * payload read, depending on the stored directory.
+ * @param rel_oid Source Bioseq table.
+ * @param index_name Registered minimizer index name.
+ * @param sequence_rowno Source row number used as the index query key.
+ * @param kmer_size Required stored k-mer size.
+ * @param window_size Required stored minimizer window size.
+ * @param layout Required grouped-SoA layout.
+ * @param backend Required producer backend.
+ * @return Index metadata, lookup results, and measured read statistics.
  */
 [[nodiscard]] minimizer_generation_integration_fixture_result
 read_minimizer_generation_integration_fixture_impl(
@@ -217,14 +220,10 @@ read_minimizer_generation_integration_fixture_impl(
                 "bioseq minimizer generation fixture reader identity disagrees");
         }
 
-        /* Integration-only cold-read telemetry probe.  A directory entry is
-         * an authenticated control+position pair, so a strict subset exists
-         * only when the generation owns more than one populated entry.  Read
-         * one exact entry in that case.  A one-entry generation is already the
-         * complete payload and must use the full-generation scan; an empty
-         * directory must execute the empty-payload stage protocol. This
-         * keeps route identity, row counts, byte counts, and TID transitions
-         * tied to I/O that actually occurred. */
+        /* Measure reads for one populated directory entry when it is a strict
+         * subset of the payload. Use a complete scan when no such subset exists.
+         * An empty directory follows the empty-read stages, so the counters
+         * still describe the I/O that ran. */
         const auto directory_entries = metadata.directory.entries();
         const bool generation_payload_empty = directory_entries.empty();
         std::uint64_t total_directory_payload_rows = 0;
@@ -717,9 +716,8 @@ read_minimizer_generation_integration_fixture_impl(
     return result;
 }
 
-/// Reopen a READY grouped-SoA generation and stream its complete opaque payload
-/// through the generation-wide single-scan API. This seam deliberately does
-/// not decode either payload and exists only for integration validation.
+/// Test a complete generation read through one payload scan. Count and
+/// checksum the stored bytes without decoding minimizer records.
 [[nodiscard]] minimizer_generation_full_payload_fixture_result
 read_minimizer_generation_full_payload_fixture_impl(
     Oid rel_oid,
@@ -915,11 +913,9 @@ read_minimizer_generation_full_payload_fixture_impl(
     return result;
 }
 
-/// Integration-only source adversary: remove one referenced physical sequence
-/// fragment by its locator ordinal. The public source authorization must subsequently
-/// fail while walking the same locator under its registered snapshot.  Ordinal
-/// zero is deliberately forbidden so this seam validates later-fragment
-/// participation rather than merely checking the first physical row.
+/// Invalidate a source epoch to test rejection of a stale sequence locator.
+/// Require a non-first fragment ordinal in a source with at least three
+/// fragments so tests cover locators spanning multiple stored rows.
 void remove_sequence_fragment_impl(Oid rel_oid,
                                           std::string_view index_name,
                                           std::uint64_t sequence_rowno,
@@ -1007,9 +1003,9 @@ void remove_sequence_fragment_impl(Oid rel_oid,
             ready_minimizer_error_as_cpp(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE,
                                          "bioseq source-fragment row number overflow");
         }
-        // Registered source fragments are immutable. Exercise the supported
-        // mutation path by transactionally invalidating the exact epoch rather
-        // than bypassing the TableAM guard and creating undetectable raw damage.
+        // Invalidate the registered source epoch inside the transaction. Source
+        // fragments are immutable, and the next authorization must reject this
+        // locator once the invalidation becomes visible.
         bioseq::postgres::support::invoke_pg_as_cpp([&source] {
             sequence_source_version_manager::invalidate_epoch(source.locator.source_epoch);
         });
@@ -1029,8 +1025,8 @@ void remove_sequence_fragment_impl(Oid rel_oid,
         state->registered_snapshot = nullptr;
         bioseq::postgres::support::invoke_pg_as_cpp([] {
             CommandCounterIncrement();
-            // There is no reread in this statement. The next command obtains
-            // its own snapshot; do not mutate an active snapshot held by others.
+            // Let the next command read the change through its own snapshot. Keep
+            // this command's borrowed snapshot unchanged.
         });
         delete state;
         state = nullptr;
@@ -1059,8 +1055,9 @@ void remove_sequence_fragment_impl(Oid rel_oid,
     }
 }
 
-/// Exercise read-session failure transitions against the live fixture while
-/// restoring the backend memory cap and registered snapshot on every ERROR.
+/// Trigger a selected read-session error, restoring the memory cap and
+/// releasing the registered snapshot during cleanup. If the operation succeeds
+/// unexpectedly, report that as a test failure.
 void exercise_minimizer_generation_session_failure_impl(Oid rel_oid,
                                                                std::string_view index_name,
                                                                std::uint64_t sequence_rowno,

@@ -1,6 +1,6 @@
 /**
  * @file admin/generation_storage.cppm
- * @brief PostgreSQL generation storage residency and transaction fixtures.
+ * @brief Test index-table replacement, rollback, and cache invalidation.
  */
 module;
 #include <bioseq/pg_compat.h>
@@ -39,13 +39,13 @@ export namespace bioseq::storage::indexing {
 
 namespace minimizer_generation_storage_test_detail {
 
-/// Chunk and assembled-cache keys addressing one fixture generation.
+/// Keys for the test's cached chunk and assembled index.
 struct cache_keys {
     index_chunk_key chunk{};
     assembled_index_key assembled{};
 };
 
-/// Derive fixture cache keys from one physical source identity.
+/// Build cache keys from the table, column, index name, and source locator.
 [[nodiscard]] inline cache_keys make_cache_keys(Oid user_relid,
                                                 const relation_identity& relation_identity,
                                                 std::int16_t column_attno,
@@ -90,7 +90,7 @@ struct cache_keys {
     };
 }
 
-/// Check whether a relation exposes the canonical generation schema.
+/// Check whether the relation has the required minimizer-generation schema.
 [[nodiscard]] inline bool relation_has_generation_schema(Oid relation_oid) {
     if (!OidIsValid(relation_oid))
         return false;
@@ -110,15 +110,11 @@ struct cache_keys {
 } // namespace minimizer_generation_storage_test_detail
 
 /**
- * @brief Exercise storage lifecycle invariants that SQL alone cannot observe.
- * @param rel_oid Source Bioseq relation.
- * @param index_name Registered logical index name.
- * @param sequence_rowno Source-row ordinal used for cache identities.
- * @param operation Exact fixture lifecycle operation.
- * @return OID, schema, handle-rebind, and residency observations.
- *
- * Clear/create rollback must rebind handles; committed changes must evict both residency forms;
- * ensure fails on noncanonical relations; generation clear invalidates its initiating OID.
+ * Test index-table creation, clearing, or rollback and inspect the resulting
+ * handles and caches. Some operations fill or probe caches so separate
+ * backends can check invalidation after a commit.
+ * @param operation Named test operation to perform.
+ * @return Table OIDs, schema checks, and cache-hit results.
  */
 [[nodiscard]] minimizer_generation_storage_state_fixture_result
 exercise_minimizer_generation_storage_state_impl(Oid rel_oid,
@@ -163,8 +159,8 @@ exercise_minimizer_generation_storage_state_impl(Oid rel_oid,
                                      fmt::format("operation={}", operation));
     }
 
-    // The next command normally drains sinval first.  Calling this explicitly
-    // makes the two-backend cache validation independent of scheduler timing.
+    // Process pending invalidation messages before checking caches, so this
+    // test can observe changes committed by another backend.
     if (probe_residency) {
         bioseq::postgres::support::invoke_pg_as_cpp([] { AcceptInvalidationMessages(); });
     }
@@ -302,11 +298,9 @@ exercise_minimizer_generation_storage_state_impl(Oid rel_oid,
         } else if (ensure_generation) {
             if (!minimizer_generation_storage_test_detail::relation_has_generation_schema(
                     result.before_oid)) {
-                // Normalize the fixture's noncanonical relation before the
-                // generation ensure. The production generation clear deliberately
-                // ignores noncanonical same-name relations, so use the
-                // existing broad index reset seam before exercising normal
-                // non-destructive generation ensure.
+                // Remove the test table with the general index reset before creating
+                // generation storage. The generation-only clear leaves tables
+                // with an incompatible schema in place.
                 storage.clear(state->identity.index_name);
                 if (OidIsValid(resolve_table_oid())) {
                     minimizer_generation_storage_error(
@@ -412,18 +406,16 @@ exercise_minimizer_generation_storage_state_impl(Oid rel_oid,
         } else {
             {
                 auto subtransaction = bioseq::postgres::support::subtransaction::begin();
-                // Savepoint rollback starts from a noncanonical relation and
-                // must restore that exact object. The generation-only clear
-                // cannot remove this input.
+                // Remove the incompatible table inside the savepoint. Rolling back must
+                // restore that same table and its original OID.
                 storage.clear(state->identity.index_name);
                 if (OidIsValid(resolve_table_oid())) {
                     minimizer_generation_storage_error(
                         "generation-storage rollback fixture explicit clear failed");
                 }
                 result.operation_oid = storage.ensure_minimizer_generation_storage();
-                // Deliberately seed speculative member state before rollback.
-                // The relation resolver records only the authoritative name/OID;
-                // it does not apply column attributes here.
+                // Cache the newly created OID before rollback, then check that this same
+                // storage handle finds the restored table afterwards.
                 const Oid deliberately_cached = storage.resolve_relid_(false);
                 if (deliberately_cached != result.operation_oid) {
                     minimizer_generation_storage_error(

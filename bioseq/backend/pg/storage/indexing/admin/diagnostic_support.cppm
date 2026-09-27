@@ -1,6 +1,6 @@
 /**
  * @file admin/diagnostic_support.cppm
- * @brief Shared PostgreSQL error and sequence-column helpers for index diagnostics.
+ * @brief Report index inspection errors and find the sequence column to inspect.
  */
 module;
 
@@ -26,7 +26,7 @@ import bioseq.postgres.support;
 
 export namespace bioseq::storage::indexing {
 
-/** Raise a minimizer diagnostic error through the PostgreSQL boundary. */
+/** Raise a PostgreSQL inspection error through the C++ error bridge. */
 [[noreturn]] inline void
 ready_minimizer_error_as_cpp(int sqlstate,
                              std::string_view message,
@@ -46,10 +46,9 @@ ready_minimizer_error_as_cpp(int sqlstate,
 }
 
 /**
- * Resolve the sole live Bioseq sequence column used by inspection helpers.
- *
- * @param rel_oid Relation whose non-dropped sequence attributes are inspected.
- * @return The unique positive sequence attribute number.
+ * Find the table's only live bioseq.seq column.
+ * Raise an error when the table has zero or multiple sequence columns.
+ * @return One-based PostgreSQL column number.
  */
 [[nodiscard]] inline std::int16_t single_seq_attno_for_inspection(Oid rel_oid) {
     const std::string sql = fmt::format("SELECT a.attnum FROM pg_attribute a "
