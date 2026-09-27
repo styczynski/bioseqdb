@@ -1,6 +1,6 @@
 /**
  * @file typed_support_parts/scanner_row.cppm
- * @brief Defines the complete PostgreSQL-backed typed scanner-row algorithm.
+ * @brief Aligns a row whose sequences may be loaded from PostgreSQL fragments.
  */
 module;
 
@@ -15,8 +15,8 @@ extern "C" {
      (PGSIXBIT(ch5) << 24))
 #include "utils/errcodes.h"
 
-// This narrow declaration must match postgres.h for the selected server SDK.
-// The target version avoids a libpq dependency's unrelated pg_config.h.
+// Match Datum in the selected PostgreSQL server headers.
+// Use the server version because libpq can supply a different pg_config.h.
 #if POSTGRESQL_VERSION_MAJOR >= 19
 typedef uint64_t Datum;
 #else
@@ -76,60 +76,14 @@ using std::vector;
 } // namespace scanner_std
 
 /**
- * Aligns one typed scanner batch row through PostgreSQL lazy query and target views.
+ * Aligns one row using the statement's algorithms and index policy. Required
+ * stored indexes need a checked prepared reader. Other paths can build a
+ * temporary index or sketch the target directly.
  *
- * Selects a target access path from locator-backed lazy binding, an optional
- * transformed target recipe, or an inline @p target_hdr header. Index routes
- * include native persisted readers on a CPU prepared target, assembled fragment
- * or minimizer-sequence indexes from stored chunks, opportunistic RAM-first
- * builds, transient minimizer-sequence streaming, resident segment workers, and
- * raw or segmented minimap ports. Route choice follows @p scanner_pg_ctx read,
- * recompute, async-persist, and @c index_read_requirement gates.
- *
- * Query minimizers are sketched per row or taken from @p cached_query_minimizers
- * when @p per_row_query_mode is false. Every route borrows the statement's
- * frozen index and algorithm configuration; host query batches retain real owners.
- *
- * @tparam p_sequence Compact sequence type used for PostgreSQL lazy target binding.
- * @tparam p_scanner_context Scanner batch context owning per-row locators, prepared
- *     targets, index policy flags, and payload allocation observers.
- * @tparam p_fragment_storage_factory Callable that opens the concrete fragment storage handle.
- *
- * @param query_view Lazy query sequence for this row. Payload allocations are
- *     recorded through the query observer on @p scanner_pg_ctx.
- * @param target_recipe_view Optional transformed target view. Mutually exclusive with
- *     locator storage and @p target_hdr. Raises on corruption when combined.
- * @param target_hdr Inline PostgreSQL seq header when the target is not locator-backed.
- *     Unused when @p target_recipe_view or a locator is present.
- * @param row_index Batch row index into @p scanner_pg_ctx per-row arrays.
- * @param target_bp_size Target length in base pairs for segmentation thresholds and
- *     CPU prepared-target identity checks.
- * @param min_bp Legacy caller hint; the immutable statement plan already owns chain thresholds.
- * @param execution_plan Shared immutable statement selection, retained by execution closures.
- * @param per_row_query_mode When true, sketch query minimizers into row-local storage.
- *     When false, share @p cached_query_minimizers across rows in the batch.
- * @param cached_query_minimizers Batch-shared query sketch cache. Populated on the first
- *     persisted-index consumer when @p per_row_query_mode is false.
- * @param cached_query_minimizer_stats Execution stats paired with @p cached_query_minimizers.
- * @param[out] consumed_shared_cached_query_stats Set true when this row applies batch-shared
- *     sketch execution stats to the returned collection so the caller counts them once.
- * @param alphabet_code Column alphabet code for locator-backed target binding.
- * @param storage_unit_byte_width Packed storage byte width for letters-per-unit geometry.
- * @param scanner_pg_ctx Scanner context that must outlive the call. Updated with
- *     @c target_index_sources, persisted generation ids, and source identities on index routes.
- * @param pool Global parallelism pool consulted for resident segment worker eligibility.
- * @param active_read_session Optional PostgreSQL read session passed into locator target
- *     materialization.
- * @param open_fragment_storage_fn Statically bound fragment storage opener.
- *
- * @return Match results and route execution stats for the row. Query sketch host time is
- *     attached when a fresh sketch ran on this row.
- *
- * @note Raises PostgreSQL errors on policy violations, prepared-target identity mismatch,
- *     missing or duplicated persisted readers, absent query stats after sketch consumption,
- *     duplicate query stats on the collection, Vulkan on CPU-prepared paths, query length
- *     outside the selected generated minimizer position domain, invalid packed geometry, and index
- *     admission failure.
+ * The scanner context and sequence owners must outlive this call. Returns
+ * matches with execution statistics and identifies any shared query-sketch
+ * counts so the caller can count that work once.
+ * @param min_bp Unused. The statement plan already fixes the alignment settings.
  */
 // Keep the PG-backed scanner row path as a separate function so GCC does not
 // compile the whole typed scheduler as one very large control-flow graph.
@@ -169,10 +123,9 @@ template <class p_sequence,
     const minimap2_parameters& params = execution_plan->frozen_parameters;
     const bool selected_vulkan_seed = execution_plan->uses_vulkan_seed();
     match_result_collection collection;
-    // Recompute-owned and per-row sketches are independent operations. A
-    // broadcast persisted-query sketch is shared across rows: every consuming
-    // job receives its stats for route acceptance, while the caller accounts
-    // the shared operation only once on the first stats-valid consumer.
+    // Several rows can share a broadcast query sketch. Give each result the
+    // sketch statistics needed for validation, and let the caller count the
+    // shared work once. Per-row sketches have separate counts.
     consumed_shared_cached_query_stats = false;
     bool row_consumed_prepared_query_sketch = false;
     std::uint64_t query_sketch_host_wall_ns = 0;
@@ -195,7 +148,7 @@ template <class p_sequence,
         ::bioseq::pipeline_stats::target_index_source::recomputed;
     std::shared_ptr<const std::vector<minimap_sketch_data>> row_query_minimizers;
     std::optional<pipe::minimizer_range_execution_stats> row_query_minimizer_stats;
-    /** Element type of retained query sketches stored on a CPU prepared-target group. */
+    /** Element type of query sketches saved on a CPU prepared-target group. */
     using cpu_prepared_query_sketch =
         std::remove_cvref_t<decltype(scanner_pg_ctx->cpu_prepared_target->groups.front()
                                          .retained_query_sketches.front())>;
@@ -253,9 +206,8 @@ template <class p_sequence,
                 ? minimap_port_segmented_pg_checked(lazy_query_view, observed_target, execution_plan)
                 : minimap_port_raw_pg_checked(lazy_query_view, observed_target, execution_plan);
     } else if (loc_opt.has_value()) {
-        // Compute last-fragment padding from the canonical facade
-        // geometry. For
-        // total_bp = N, padding = ceil(N/lpu)*lpu - N.
+        // Work out the unused letters in the final packed unit before opening
+        // the locator-backed sequence.
         const std::uint64_t _remainder = loc_opt->logical_length % target_letters_per_unit;
         const std::size_t _padding =
             static_cast<std::size_t>(_remainder == 0u ? 0u : target_letters_per_unit - _remainder);
@@ -294,20 +246,14 @@ template <class p_sequence,
              &query_sketch_host_wall_ns](auto ft_pg_view, pg_sequence_read_session*) {
                 ft_pg_view = ft_pg_view.with_payload_allocation_observer(
                     std::addressof(scanner_pg_ctx->mmsearch_target_payload_observer));
-                // Assemble from the stored
-                // per-fragment minimizer index if present
-                // (deserialise + globalise, no re-collection).
-                // Otherwise fall back to recompute.
+                // Use the selected stored index when available, or build from the target
+                // when the read policy allows it.
                 bool assembled = false;
                 /*
-                 * Persisted-payload reads and opportunistic recompute persistence are
-                 * independent policies.  In particular, require_absent deliberately
-                 * clears read_index_active, but index.recompute_async_persistence.enabled must
-                 * still be able to build and enqueue the default minimizer-fragment index from the
-                 * source sequence. Keep the minimizer-fragment RAM-first path reachable when both
-                 * async write gates are captured for this scan. Every prepared,
-                 * sidecar, and assembled-cache read below remains guarded by
-                 * read_index_active.
+                 * Reading stored indexes and saving newly built indexes have
+                 * separate settings. require_absent disables reads while allowing
+                 * temporary index construction. Any later asynchronous save must
+                 * also pass the persistence settings and index policy checks.
                  */
                 const auto requested_target_backend =
                     target_backend_from_params_for_recompute(params);
@@ -379,9 +325,8 @@ template <class p_sequence,
                         if (selected_query_execution_layout) {
                             legacy_query_destination_selected = true;
                         } else {
-                            /* A canonical registered shape whose record is not
-                             * minimap_sketch_data (for example scalar K20)
-                             * keeps its exact generated physical route. */
+                            /* Use the selected record format when minimap_sketch_data
+                             * cannot hold it, such as scalar minimizers with k=20. */
                             selected_query_execution_layout =
                                 pipe::select_minimizer_execution_layout_prefer_native<
                                     query_alphabet>(
@@ -1035,8 +980,8 @@ template <class p_sequence,
                             return match_collection;
                         };
                         if (prepared_group != nullptr) {
-                            /* One full-target union-filtered index is the
-                             * scan-retained object reused by every wave. */
+                            /* Keep one full-target index filtered by the combined query hashes
+                             * so later query waves can reuse it. */
                             collection = run_with_segment_index(0, total_bp, 0, size_u);
                         } else if (total_bp <= postgres_segmentation_threshold_bp) {
                             collection = run_with_segment_index(0, total_bp, 0, size_u);
@@ -1069,10 +1014,9 @@ template <class p_sequence,
                         }
                         assembled = true;
                     };
-                    // Route by the table's ACTIVE read index.
-                    // (set_active_read_index / resolve_active_read_index, default
-                    // minimizers_per_fragment). Per-row presence still gates: an
-                    // active index not materialised for THIS row recomputes.
+                    // Read the table's active index layout, which defaults to
+                    // minimizers_per_fragment. If this row has no stored index,
+                    // the optional-read path builds a temporary one below.
                     if (legacy_optional_index_read_active && !persisted_required && !assembled) {
                         if (want_seq) {
                             with_fragment_storage(
@@ -1298,8 +1242,8 @@ template <class p_sequence,
                         }
                     }
                     if (assembled) {
-                        // The prepared group owns provenance; only an ordinary
-                        // stored-chunk assembly has no prepared-group owner.
+                        // A prepared group records whether its index was loaded or rebuilt.
+                        // An ordinary chunk assembly here came from stored index data.
                         const auto assembled_source =
                             prepared_group != nullptr
                                 ? prepared_group->target_index_source
@@ -1322,11 +1266,10 @@ template <class p_sequence,
                             "the active persisted minimizer index has no compatible "
                             "directory/chunks for this target row");
                     }
-                    // Missing/forbidden persisted storage is rebuilt from the target through the
-                    // statement-selected generated producer. The synchronous host MPF and MPS
-                    // routes themselves never open or publish a sidecar; explicitly enabled later
-                    // asynchronous staging is separate. A generation failure cannot fall through
-                    // to the raw aligner.
+                    // Build a temporary index from the target if the selected stored index
+                    // was unavailable or reads were disabled. These builds leave
+                    // persistent storage untouched. A separate check may queue an
+                    // asynchronous save afterward. Build failures stop the query.
                     if (!assembled && want_seq) {
                         const auto rowno =
                             static_cast<std::uint64_t>(scanner_pg_ctx->target_rownos[row_index]);
@@ -1537,7 +1480,7 @@ template <class p_sequence,
 #endif
         }
 #if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
-        // Attribute the completed checked bridge, not merely the requested selector.
+        // Record the reference algorithm after its checked execution has completed.
         if (completed_query_stats->checked_reference_simd_bridge_completed) {
             collection.record_completed_minimizer_algorithm_identity(
                 minimizer_algorithm::simd_minimap2_reference);

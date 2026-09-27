@@ -1,6 +1,6 @@
 /**
  * @file typed_support_parts/vulkan_query_route.cppm
- * @brief Owns Vulkan query-source admission and device-only sketch preparation.
+ * @brief Prepares packed query inputs and keeps their GPU minimizer sketches.
  */
 module;
 
@@ -38,9 +38,7 @@ import bioseq.parallelism.memory_admission;
 
 export namespace bioseq::simd::typed_dispatch::typed_support_detail {
 
-/**
- * Associates one generated query row with its device sketch record.
- */
+/** Links a batch row and logical query number to its GPU sketch. */
 struct gpu_batch_query_sidecar {
     std::size_t row_index = 0;
     sequence_size_t query_len = 0;
@@ -48,10 +46,9 @@ struct gpu_batch_query_sidecar {
 };
 
 /**
- * A checked contiguous projection from a physical scanner batch into one
- * Vulkan query submission.  Shared-target batches use `{0, batch_size}`;
- * ordinary scans use one `{row, 1}` partition per row so each MPS submission
- * owns an independently consumable query authorization.
+ * Selects consecutive batch rows for one GPU query submission. Shared-target
+ * batches submit all queries together. Ordinary scans submit each row
+ * separately so each query has its own execution record.
  */
 struct vulkan_query_row_partition {
     std::size_t first_row = 0u;
@@ -62,12 +59,12 @@ struct vulkan_query_row_partition {
         return row_count != 0u && first_row <= capacity && row_count <= capacity - first_row;
     }
 
-    /** @return True when `row` is one of this submission's physical rows. */
+    /** @return True when @p row belongs to this submission. */
     [[nodiscard]] constexpr bool contains(const std::size_t row) const noexcept {
         return row >= first_row && row - first_row < row_count;
     }
 
-    /** @return The dense submission index for `row`, or no value outside the partition. */
+    /** @return The query's position within this submission, or no value if the row is outside it. */
     [[nodiscard]] constexpr std::optional<std::size_t>
     local_index(const std::size_t row) const noexcept {
         return contains(row) ? std::optional<std::size_t>{row - first_row} : std::nullopt;
@@ -81,9 +78,9 @@ static_assert(!vulkan_query_row_partition{.first_row = 7u, .row_count = 2u}.vali
 static_assert(!vulkan_query_row_partition{.first_row = 8u, .row_count = 0u}.valid(8u));
 
 /**
- * Resolve the generated physical minimizer record before any record-dependent
- * query or target owner is instantiated. Runtime k/w remain values in the
- * returned selection; the generated visitor alone binds the concrete record.
+ * Selects a minimizer record format that can hold every query and target in
+ * the batch. Checks sequence lengths, packed storage width, and runtime k/w
+ * before the caller instantiates the matching implementation.
  */
 template <class p_sequence,
           std::size_t p_batch_capacity,
@@ -158,10 +155,8 @@ template <class p_sequence,
         static_cast<std::uint16_t>(execution_plan->frozen_parameters.kmer_size);
     const auto runtime_w =
         static_cast<std::uint16_t>(execution_plan->frozen_parameters.window_size);
-    // The generated registry's storage-width axis describes the minimizer
-    // hash lane, not the compact-sequence input owner. Preserve the canonical
-    // registered-shape choice used by minimap_port: reference/Vulkan K20 uses
-    // the 64-bit lane; the current K15 route uses the 32-bit lane.
+    // The registry width here selects the minimizer hash field. Vulkan k>15
+    // needs 64-bit hashes even when the input sequence uses 32-bit packed units.
     if (algorithm == minimizer_algorithm::vulkan_minimap_integer && runtime_k > 15u) {
         return bioseq::minimizers::select_minimizer_physical_layout<alphabet_type,
                                                                      std::uint64_t>(
@@ -172,7 +167,7 @@ template <class p_sequence,
         algorithm, maximum_sequence_bp, runtime_k, runtime_w);
 }
 
-/** @brief Admits one fresh query-side vector before its only capacity allocation. */
+/** @brief Reserves memory and allocates capacity for a fresh query vector. */
 template <class p_value>
 void prepare_vulkan_query_host_capacity(
     std::vector<p_value>& values,
@@ -198,7 +193,7 @@ void prepare_vulkan_query_host_capacity(
         throw bioseq::gpu::vulkan::vulkan_runtime_error{
             "Vulkan query vector physical admission was rejected"};
     }
-    // Adjacent declaration order also covers allocator/constructor exceptions.
+    // Destroy the temporary vector before its permit, including when allocation throws.
     std::vector<p_value> pending_values;
     auto* const pending_values_owner = std::addressof(pending_values);
     auto* const pending_permit_owner = std::addressof(pending_permit);
@@ -242,8 +237,8 @@ void prepare_vulkan_query_host_capacity(
 }
 
 /**
- * Retains every query-side owner and device authority across the persisted or
- * resident Vulkan route selected by the root coordinator.
+ * Keeps the statement plan, packed query copies, and GPU sketches alive while
+ * the batch runs. Row mappings connect scanner rows to their submitted queries.
  */
 template <class p_sequence, std::size_t p_batch_capacity, class p_minimizer_type>
 struct vulkan_query_batch_state {
@@ -251,7 +246,7 @@ struct vulkan_query_batch_state {
     using sketch_result_type =
         bioseq::gpu::vulkan::vulkan_batch_sketch_result<minimizer_type>;
 
-    // The frozen statement and full query batch outlive all record/view aliases.
+    // Keep the statement and sketch owner alive until their borrowed views are destroyed.
     pipe::statement_execution_plan_owner execution_plan;
     vulkan_query_row_partition submitted_rows{};
     std::shared_ptr<sketch_result_type> query_sketch_owner;
@@ -273,7 +268,7 @@ struct vulkan_query_batch_state {
     std::vector<std::uint32_t> row_to_query_index;
     std::uint64_t gpu_query_sketch_host_ns{};
 
-    /** @return The submitted query index for one physical row, if authenticated. */
+    /** @return The submitted query index for this row, or no value if its mapping is invalid. */
     [[nodiscard]] std::optional<std::size_t>
     query_index_for_row(const std::size_t row) const noexcept {
         const auto local = submitted_rows.local_index(row);
@@ -288,7 +283,7 @@ struct vulkan_query_batch_state {
         return static_cast<std::size_t>(query_index);
     }
 
-    /** @brief Retains the exact downloaded GPU query subrange without copying records. */
+    /** @brief Returns a view of this query's downloaded minimizers, keeping their shared owner alive. */
     [[nodiscard]] pipe::minimizer_batch_view<minimizer_type>
     host_query_minimizers(std::size_t query_index) const {
         if (!execution_plan || !query_sketch_owner ||
@@ -304,8 +299,10 @@ struct vulkan_query_batch_state {
 };
 
 /**
- * Admits recipe/locator query inputs and produces the one device-only query
- * sketch state consumed by either Vulkan target route.
+ * Copies lazy query inputs into their native packed format under the memory
+ * budget, then sketches the selected rows on the GPU. Keeps the device data
+ * and checked host readback for later alignment. Each submitted row must have
+ * exactly one query source.
  */
 template <class p_sequence,
           std::size_t p_batch_capacity,
@@ -408,9 +405,8 @@ void prepare_vulkan_query_route_rows(
     }
     const std::size_t window_size = static_cast<std::size_t>(dispatch_params.window_size);
     const std::size_t kmer_size = static_cast<std::size_t>(dispatch_params.kmer_size);
-    // Preserve the GPU-produced sketch for the ordinary host suffix. The same
-    // authenticated readback supplies the statement-complete hash union for a
-    // persisted or transient MPF target; every matching target occurrence is retained.
+    // Keep the GPU sketch for later CPU alignment. Its checked host copy also
+    // supplies the combined query hashes used to prepare a fragment target index.
     auto& query_records = state.query_records;
     auto& query_minimizer_device_span = state.query_minimizer_device_span;
     auto& query_sketch_authority = state.query_sketch_authority;
@@ -526,9 +522,8 @@ void prepare_vulkan_query_route_rows(
 }
 
 /**
- * Prepare the canonical shared-target query wave.  This compatibility-preserving
- * facade is the only entry used by the existing BatchJoin route; ordinary scans
- * call `prepare_vulkan_query_route_rows` with a checked singleton partition.
+ * Prepares all queries in a shared-target batch. Ordinary scans use
+ * prepare_vulkan_query_route_rows with one row per submission.
  */
 template <class p_sequence,
           std::size_t p_batch_capacity,
