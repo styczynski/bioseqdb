@@ -1,6 +1,6 @@
 /**
  * @file common/durable_file_io/directory_operations.cppm
- * @brief Durable directory creation and conditional removal operations.
+ * @brief Create and sync directories, and manage files through directory handles.
  */
 module;
 
@@ -27,17 +27,15 @@ import :namespace_publish;
 
 export namespace bioseq::common::durable_file_io {
 /**
- * Create and durably publish a relative directory chain below a pinned anchor.
+ * Create the relative directory path below an open anchor directory.
+ * Reject absolute paths and parent traversal through "..".
  *
- * The anchor itself is never reopened by pathname. Every suffix component is
- * opened with O_NOFOLLOW after mkdirat, including an EEXIST result from a
- * concurrent cooperating creator. Descriptors opened by this function are
- * explicitly closed before success; the caller-owned anchor remains open.
- * Absolute paths and `..` traversal are rejected.
+ * Each component is opened with O_NOFOLLOW, even if another caller has just
+ * created it. Sync the component and its parent before continuing. The anchor
+ * stays open, and handles opened here are closed before success.
  *
- * `mode` is the maximum requested permission set only for components created
- * by this call; the process umask may remove bits. Existing components are
- * type/symlink validated and durability-synced but are not chmod'd.
+ * mode applies to new directories, subject to umask. Existing directories
+ * keep their permissions and are still checked and synced.
  */
 [[nodiscard]] inline std::expected<void, file_error>
 durable_create_directories_at(
@@ -138,15 +136,14 @@ durable_create_directories_at(
 }
 
 /**
- * Create a directory chain below its deepest existing, non-symlink leaf.
+ * Create missing directories beneath the deepest existing directory.
+ * Keep that directory open while creating the missing path components, and
+ * reject ".." traversal or a symlink at the boundary or in the new suffix.
  *
- * The anchor pathname may contain trusted intermediate platform aliases (for
- * example Darwin's `/var -> private/var`), but its final component is opened
- * with O_NOFOLLOW and pinned. Only the missing relative suffix is then passed
- * to `durable_create_directories_at`, so an existing symlink at the boundary or
- * a symlink introduced into the suffix is rejected. Every opened suffix
- * component and its parent are fsynced, including EEXIST components; `mode`
- * applies only to components this call creates. `..` traversal is rejected.
+ * Earlier path components may use trusted platform aliases such as Darwin's
+ * /var symlink. Each opened suffix directory and its parent are synced, even
+ * if another caller created the directory first. mode applies only to newly
+ * created directories, subject to umask.
  */
 [[nodiscard]] inline std::expected<void, file_error>
 durable_create_directories(
@@ -255,10 +252,7 @@ durable_create_directories(
         *anchor, hooks, publication_state::durable);
 }
 
-/**
- * Open and pin a no-follow directory for subsequent descriptor-relative
- * operations.
- */
+/** Open a directory for later operations, rejecting a symlink at its final name. */
 [[nodiscard]] inline std::expected<file_descriptor, file_error>
 open_directory_descriptor(
     const std::filesystem::path& directory,
@@ -266,7 +260,7 @@ open_directory_descriptor(
     return detail::open_directory_path(directory, hooks);
 }
 
-/** Fsync an already-open pinned directory descriptor. */
+/** Sync an open directory and report any error. */
 [[nodiscard]] inline std::expected<void, file_error>
 fsync_directory_descriptor(
     int descriptor,
@@ -287,7 +281,7 @@ fsync_directory_descriptor(
         publication);
 }
 
-/** Fsync an already-open file descriptor with typed EINTR handling. */
+/** Sync an open file, retrying if a signal interrupts fsync. */
 [[nodiscard]] inline std::expected<void, file_error>
 fsync_file_descriptor(
     int descriptor,
@@ -303,11 +297,10 @@ fsync_file_descriptor(
 }
 
 /**
- * Atomically add a no-replace hard-link publication.
- *
- * This is the namespace step only. The source must already be fsynced and the
- * caller must unlink its staging name and fsync the containing directory
- * before treating the publication as durable.
+ * Add a hard link at destination, failing if that name already exists.
+ * The source must already be synced. After linking, the caller must remove
+ * its temporary name and sync the affected directories before reporting a
+ * durable publication.
  */
 [[nodiscard]] inline std::expected<publication_state, file_error>
 link_file_no_replace(
@@ -354,7 +347,11 @@ link_file_no_replace(
             hooks);
 }
 
-/** No-replace hard-link publication relative to pinned directory handles. */
+/**
+ * Add a hard link using open directory handles, failing if destination exists.
+ * When expected_source is supplied, check it against the source file first.
+ * The caller still needs to sync the affected directories.
+ */
 [[nodiscard]] inline std::expected<publication_state, file_error>
 link_file_no_replace_at(
     int source_directory,
@@ -372,7 +369,11 @@ link_file_no_replace_at(
         expected_source);
 }
 
-/** Remove a pinned-directory entry only if it still names `expected`. */
+/**
+ * Remove the name if it still identifies expected's inode.
+ * The caller must prevent other writers from replacing it between the check
+ * and removal.
+ */
 [[nodiscard]] inline std::expected<
     conditional_remove_disposition,
     file_error>
@@ -390,7 +391,7 @@ remove_file_if_same_inode_at(
         hooks);
 }
 
-/** Capture one regular entry relative to a pinned directory descriptor. */
+/** Read regular-file metadata for a name in an open directory. */
 [[nodiscard]] inline std::expected<regular_file_identity, file_error>
 capture_regular_file_identity_at(
     int directory_descriptor,
@@ -418,7 +419,7 @@ capture_regular_file_identity_at(
     return *current;
 }
 
-/** Compare one pinned-directory entry with a captured regular identity. */
+/** Compare a file in an open directory with previously captured metadata. */
 [[nodiscard]] inline std::expected<bool, file_error>
 matches_regular_file_identity_at(
     int directory_descriptor,
