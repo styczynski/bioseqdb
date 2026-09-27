@@ -1,8 +1,6 @@
 /**
  * @file nt4_minimizer_parity_test.cpp
- * @brief Scalar nt4 minimizer parity for dna4 and dna5 sequences.
- *
- * A, C, G, and T map to ranks zero through three while N resets rolling state.
+ * @brief Check ACGT minimizers across dna4 and dna5, and exclude k-mers containing N.
  */
 #include <hwy/highway.h>
 #include <fmt/format.h>
@@ -26,7 +24,7 @@ HWY_BEFORE_NAMESPACE();
 namespace bioseq::simd::HWY_NAMESPACE {
 namespace hn = hwy::HWY_NAMESPACE;
 
-// dna5 fixtures (>= k+w bp). dna5 ranks: A=0,C=1,G=2,N=3,T=4. With T's and N's.
+// dna5 inputs with T, and a second input with runs of N.
 std::vector<seq::dna5> nt4_dna5_with_t{
     "ACGTACGTGGCATTACGATCGATCGTAGCTAGCTACGTACGATCGATCGTAGCTAGCATCGATCG"
     "TTACGATCGTAGCTAGCTTACGTACGATCGATCGTAGCTAGCATCGATCGTAGCTAGCTACGTAC"_dna5
@@ -35,7 +33,7 @@ std::vector<seq::dna5> nt4_dna5_with_n{
     "ACGTACGTGGCATTACGNNNNNATCGTAGCTAGCTACGTACGATCGATCGTAGCTAGCATCGATC"
     "GTTACGATNNCGTAGCTAGCTTACGTACGATCGATCGTAGCTAGCATCGATCGTAGCTAGCTACG"_dna5
 };
-// Same ACGT letters in both alphabets (no N) — dna5 must hash identically to dna4.
+// The same ACGT letters must give the same minimizers in both alphabets.
 std::vector<seq::dna4> nt4_dna4_acgt{
     "ACGTACGTGGCATTACGATCGATCGTAGCTAGCTACGTACGATCGATCGTAGCTAGCATCGATCG"
     "TTACGATCGTAGCTAGCTTACGTACGATCGATCGTAGCTAGCATCGATCGTAGCTAGCTACGTAC"_dna4
@@ -78,18 +76,14 @@ TEST_CASE("nt4: dna5 with T == mm_sketch (T is a normal base)",
 
 TEST_CASE("nt4: dna5 with N — no minimizer's k-mer spans an N",
           "[component:bioseq][layer:unit][feature:alphabet]") {
-    // The spec's structural requirement (): N resets the window so NO emitted
-    // minimizer's k-mer [last_pos-k+1, last_pos] may contain an N. (Exact
-    // mm_sketch *count* parity on the reset boundaries differs by the window
-    // tie-breaking of bioseq's circular-buffer slide vs mm_sketch's — both are
-    // valid minimizer sets; the N-free `dna5 with T` case checks exact-hash
-    // parity, while this case checks the N-handling invariant.)
+    // N breaks a valid k-mer. Check every emitted k-mer against all N positions
+    // in this input. The separate ACGT test compares exact minimap2 results.
     constexpr std::size_t k = 15;
     const auto got = scalar_pairs(nt4_dna5_with_n, 10, k);
     ASSERT(!got.empty(), "dna5+N produced no minimizers (flanks too short?)",
            got.size());
 
-    // N positions of the fixture (decode the same range mm_sketch sees).
+    // Locate N in the decoded packed sequence used by the collector.
     using seq_type = sequence_custom_alphabet<seq::dna5, std::uint64_t>;
     const auto decoded =
         compact_sequence_range<seq_type>(nt4_dna5_with_n).to_string();

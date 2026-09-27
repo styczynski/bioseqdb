@@ -1,6 +1,6 @@
 /**
  * @file kmers_test.cpp
- * @brief Scalar and dispatched minimizer parity checks.
+ * @brief Compare scalar and Highway minimizers with the minimap2 reference.
  */
 #include <fmt/format.h>
 #include <catch2/catch_test_macros.hpp>
@@ -24,9 +24,7 @@ using namespace seq::literals;
 
 namespace bioseq::simd {
 
-// =============================================================================
-// Test sequences
-// =============================================================================
+// Input sequences shared by the minimizer tests.
 
 std::vector<seq::dna4> minimizer_test_dna4_sequence{
     "GATCGTAGCCCTAGTCACTGTAGCTGATCGTAGCTAGTCACTGTAGCTGATCGTAGCTAGTCAC"
@@ -48,11 +46,8 @@ std::vector<seq::dna5> minimizer_test_dna5_sequence{
     "CGCAGCACGCAGNGCGAGCCCAGCACGACGCAGCACGACGCAGCACGCAGCGCGAGCCCAGCAC"_dna5
 };
 
-// Worst-case poly-A stressor: every k-mer ties on hash. mm_sketch and the
-// scalar port emit ~N minimizers because the "new minimum" branch fires on
-// every `<=` comparison. The test below requires exact scalar equivalence.
-//
-// 9 lines × 224 chars = 2016 BPs.
+// Every k-mer in this all-A sequence has the same hash. Check that repeated
+// ties produce the same minimizers as the minimap2 reference.
 std::vector<seq::dna4> minimizer_test_dna4_sequence_longer_2{
     "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
     "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
@@ -65,14 +60,8 @@ std::vector<seq::dna4> minimizer_test_dna4_sequence_longer_2{
     "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"_dna4
 };
 
-// =============================================================================
-// scalar collect_minimizers vs mm_sketch baseline
-// -----------------------------------------------------------------------------
-// `collect_minimizers` is documented as "direct scalar port of mm_sketch"
-// (`index.cppm:455-468`). Verify that on a `minimap_int_hasher` pipeline the
-// two produce the exact same (last_pos, kmer) pair set on a battery of
-// inputs — including the worst-case poly-A where every kmer ties on hash.
-// =============================================================================
+// Compare the scalar collector's position/hash pairs with minimap2, including
+// inputs where every k-mer has the same hash.
 template<typename p_alphabet>
 static void check_scalar_matches_mm_sketch(
     std::vector<p_alphabet>& data,
@@ -80,9 +69,7 @@ static void check_scalar_matches_mm_sketch(
     const size_t k,
     const std::string& alphabet_name)
 {
-    // Use uint64_t for both storage and hash_value_type — wide enough for any
-    // p_kmer_size up to 32 (dna4) or 21 (dna5). Matches the post-REPORT_COMPACT_MINIMIZERS
-    // production-width default of the scalar collector.
+    // Use 64-bit words for the packed sequence and its hashes.
     using seq_type = sequence_custom_alphabet<p_alphabet, uint64_t>;
     auto bioseq_seq = compact_sequence_range<seq_type>(data);
     sketch_collector collector;
