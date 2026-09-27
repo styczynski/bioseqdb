@@ -1,6 +1,6 @@
 /**
  * @file index.cppm
- * @brief Reexports the PostgreSQL cache-provider integration.
+ * @brief Export Bioseq's connection to the query cache.
  */
 export module bioseq.postgres.extension.cache_provider;
 

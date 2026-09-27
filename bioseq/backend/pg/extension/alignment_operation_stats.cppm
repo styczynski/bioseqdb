@@ -1,6 +1,6 @@
 /**
  * @file alignment_operation_stats.cppm
- * @brief Alignment reader and persisted-GPU execution statistics.
+ * @brief Expose stored-index reader and GPU-operation statistics as JSON.
  */
 module;
 
@@ -24,7 +24,7 @@ namespace alignment_exec = bioseq::postgres::table::alignment_execution;
 using bioseq::pg::detail::fixed_hex_bytes;
 using bioseq::pg::detail::fixed_hex_u64;
 
-/** Serializes grouped-SoA and native fragment reader counters as JSON. */
+/** Build JSON with memory, I/O and seed-building counters for grouped minimizer readers. */
 [[nodiscard]] std::string
 minimizer_fragment_reader_stats_json(const alignment_exec::alignment_execution_snapshot& snapshot) {
     constexpr std::uint32_t k_revision_number = 6u;
@@ -245,7 +245,7 @@ minimizer_fragment_reader_stats_json(const alignment_exec::alignment_execution_s
     return result;
 }
 
-/** Serializes hash-major persisted-index reader counters as JSON. */
+/** Build JSON for a stored index reader whose records are ordered by minimizer hash. */
 [[nodiscard]] std::string
 hash_major_index_reader_stats_json(const alignment_exec::alignment_execution_snapshot& snapshot) {
     const auto& operational = snapshot.pipeline.operational;
@@ -323,7 +323,10 @@ hash_major_index_reader_stats_json(const alignment_exec::alignment_execution_sna
     return result;
 }
 
-/** Serializes persisted GPU operation and job counters as JSON. */
+/** Build JSON for GPU operations and their individual alignment jobs.
+ * Report whether operation counts agree with the pipeline statistics and
+ * whether every operation used the same verified shader cache.
+ */
 [[nodiscard]] std::string
 persisted_gpu_operation_stats_json(const alignment_exec::alignment_execution_snapshot& snapshot) {
     const auto& ledger = snapshot.persisted_gpu_operations;
@@ -630,7 +633,8 @@ using bioseq::pg::detail::validate_alignment_snapshot_environment;
 
 namespace {
 
-/** Validates and serializes an optional alignment execution snapshot. */
+/** Return no value for an absent snapshot. Otherwise validate its recorded
+ * execution environment and serialize it to JSONB. */
 template <class p_serializer>
 [[nodiscard]] std::optional<bioseq::postgres::support::jsonb_value> serialize_alignment_snapshot(
     const std::optional<alignment_exec::alignment_execution_snapshot>& source,
@@ -645,21 +649,24 @@ template <class p_serializer>
 
 } // namespace
 
-/** @return Statistics from the last minimizer fragment reader execution. */
+/** @return Minimizer-fragment reader statistics from the latest alignment query,
+ * including partial results, or SQL NULL before the first snapshot. */
 std::optional<bioseq::postgres::support::jsonb_value>
 last_alignment_minimizer_fragment_reader_stats() {
     return serialize_alignment_snapshot(bioseq::pg::detail::last_alignment_execution_snapshot_ref(),
                                         minimizer_fragment_reader_stats_json);
 }
 
-/** @return Statistics from the last hash-major index reader execution. */
+/** @return Hash-ordered index-reader statistics from the latest alignment query,
+ * including partial results, or SQL NULL before the first snapshot. */
 std::optional<bioseq::postgres::support::jsonb_value>
 last_alignment_hash_major_index_reader_stats() {
     return serialize_alignment_snapshot(bioseq::pg::detail::last_alignment_execution_snapshot_ref(),
                                         hash_major_index_reader_stats_json);
 }
 
-/** @return Persisted GPU operation statistics from the last completed alignment. */
+/** @return GPU-operation statistics from the last fully consumed alignment query,
+ * or SQL NULL before one completes. CPU alignment queries have an empty operation list. */
 std::optional<bioseq::postgres::support::jsonb_value>
 last_alignment_persisted_gpu_operation_stats() {
     return serialize_alignment_snapshot(

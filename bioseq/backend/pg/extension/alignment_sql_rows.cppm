@@ -1,6 +1,6 @@
 /**
  * @file alignment_sql_rows.cppm
- * @brief Declares the SQL row shape for alignment execution statistics.
+ * @brief SQL columns returned by the alignment statistics function.
  */
 module;
 
@@ -19,7 +19,7 @@ import bioseq.postgres.support.sql_boundary;
 export namespace bioseq::postgres::sql_rows {
 
 
-/** @brief Materializes one immutable alignment execution snapshot as SQL. */
+/** @brief One pipeline stage's statistics, with query totals repeated on each row. */
 struct alignment_execution_stats_row final {
     std::int64_t execution_id;
     std::int32_t backend_pid;
