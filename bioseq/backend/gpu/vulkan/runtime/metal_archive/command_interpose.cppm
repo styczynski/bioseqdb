@@ -1,6 +1,6 @@
 /**
  * @file command_interpose.cppm
- * @brief Owns MoltenVK command-library interposition and Objective-C dispatch state.
+ * @brief Replaces MoltenVK command-library compilation with a precompiled library.
  */
 module;
 
@@ -33,7 +33,7 @@ import std;
 export namespace bioseq::gpu::vulkan {
 
 #if defined(__APPLE__)
-/// @brief Dynamically resolved Objective-C runtime calls used by both interposes.
+/// @brief Objective-C runtime functions shared by the command and pipeline wrappers.
 struct objc_runtime_functions {
     void* msg_send = nullptr;
     void* (*get_class)(const char*) = nullptr;
@@ -45,12 +45,12 @@ struct objc_runtime_functions {
     void* (*method_set_implementation)(void*, void*) = nullptr;
 };
 
-/// @brief Process state for replacing MoltenVK command-library source compilation.
+/// @brief Process-wide state for loading a precompiled MoltenVK command library.
 struct moltenvk_command_library_interpose {
     objc_runtime_functions objc{};
-    std::vector<std::byte> metallib; ///< Legacy nonimmutable path only.
+    std::vector<std::byte> metallib; ///< Library bytes loaded from BIOSEQ_MOLTENVK_COMMAND_METALLIB when no sealed settings are installed.
     std::shared_ptr<const runtime_metal_archive_configuration_image>
-        configuration_image; ///< Immutable exact source/options/metallib authority.
+        configuration_image; ///< Accepted command source, compile options, and precompiled library.
     runtime_vulkan_device_identity bound_vulkan_device{};
     const void* bound_loader_symbol = nullptr;
     const void* bound_moltenvk_symbol = nullptr;
@@ -74,23 +74,23 @@ struct moltenvk_command_library_interpose {
     std::atomic<std::uint64_t> source_fallback_calls{0u};
 };
 
-/// @brief Returns the process-owned command-library interpose state.
-/// @return Singleton retained through process teardown.
+/// @brief Returns the process-wide state for the command-library wrappers.
 moltenvk_command_library_interpose& moltenvk_command_interpose_state() noexcept {
     static moltenvk_command_library_interpose state;
     return state;
 }
 
-/// @brief Casts the dynamically resolved Objective-C message entry point.
-/// @tparam p_function_type Exact ABI-compatible function-pointer type.
-/// @param[in] function Raw Objective-C runtime entry point.
-/// @return Reinterpreted typed function pointer.
+/// @brief Gives an Objective-C entry point the signature required for this call.
+/// @tparam p_function_type Function-pointer type matching the called method.
+/// @param[in] function Raw entry-point address.
+/// @return Typed function pointer.
 template <class p_function_type>
 [[nodiscard]] p_function_type objc_msg_cast(void* function) noexcept {
     return reinterpret_cast<p_function_type>(function);
 }
 
-/// @brief Captures the exact bounded MTLCompileOptions fields sealed by the supervisor.
+/// @brief Reads runtime Metal compile options for comparison with the archive-builder record.
+/// Returns no value if options are absent or outside the accepted settings.
 [[nodiscard]] std::optional<moltenvk_command_compile_options>
 capture_runtime_command_compile_options(const moltenvk_command_library_interpose& state,
                                         void* options) noexcept {
@@ -179,7 +179,8 @@ capture_runtime_command_compile_options(const moltenvk_command_library_interpose
     return captured;
 }
 
-/// @brief Requires exact sealed source/options, receiver, and one-time provenance binding.
+/// @brief Checks that a library request matches the accepted source, options, and Metal device.
+/// The Vulkan loader and MoltenVK library must already have passed their file checks.
 [[nodiscard]] bool immutable_command_request_is_exact(
     moltenvk_command_library_interpose& state,
     void* receiver,
@@ -214,59 +215,56 @@ capture_runtime_command_compile_options(const moltenvk_command_library_interpose
                command.qualification.source_options_sha256;
 }
 
-/// @brief Marks one rejected immutable source request without invoking source compilation.
+/// @brief Counts a rejected source request and records a failure for later Metal checks.
 void reject_immutable_command_request(moltenvk_command_library_interpose& state) noexcept {
     state.recognized_source_requests.fetch_add(1u, std::memory_order_relaxed);
     state.sticky_failure.store(true, std::memory_order_release);
 }
 
-/// @brief Releases one retained Objective-C object unless ownership is transferred.
+/// @brief Owns an Objective-C object and releases it on destruction unless ownership is transferred.
 class scoped_objc_release {
   public:
-    /// @brief Creates an empty Objective-C release guard.
+    /// @brief Creates an empty Objective-C object owner.
     scoped_objc_release() = default;
 
-    /// @brief Adopts one retained Objective-C object.
-    /// @param[in] objc Resolved Objective-C runtime functions.
-    /// @param[in] release_selector Objective-C `release` selector.
-    /// @param[in] object Retained object to release unless transferred.
+    /// @brief Takes responsibility for releasing an Objective-C object.
+    /// @param[in] objc Objective-C functions that outlive this owner.
+    /// @param[in] release_selector Registered release selector.
+    /// @param[in] object Object the caller owns and transfers here.
     scoped_objc_release(objc_runtime_functions* objc, void* release_selector, void* object) noexcept
         : objc_(objc), release_selector_(release_selector), object_(object) {}
 
-    /// @brief Prevents copying retained-object ownership.
+    /// @brief Prevents copying ownership of the Objective-C object.
     scoped_objc_release(const scoped_objc_release&) = delete;
 
-    /// @brief Prevents copy assignment of retained-object ownership.
+    /// @brief Prevents copy assignment of Objective-C object ownership.
     scoped_objc_release& operator=(const scoped_objc_release&) = delete;
 
-    /// @brief Transfers the retained object and runtime dispatch state.
-    /// @param[in,out] other Guard whose ownership is consumed.
+    /// @brief Moves the object and release information, leaving the source empty.
     scoped_objc_release(scoped_objc_release&& other) noexcept
         : objc_(std::exchange(other.objc_, nullptr)),
           release_selector_(std::exchange(other.release_selector_, nullptr)),
           object_(std::exchange(other.object_, nullptr)) {}
 
-    /// @brief Prevents replacing an established release guard by assignment.
+    /// @brief Prevents replacing this object owner through move assignment.
     scoped_objc_release& operator=(scoped_objc_release&&) = delete;
 
-    /// @brief Releases the retained object if ownership remains.
+    /// @brief Releases the Objective-C object if ownership remains.
     ~scoped_objc_release() {
         reset();
     }
 
-    /// @brief Returns the retained object without transferring ownership.
-    /// @return Borrowed Objective-C object pointer.
+    /// @brief Returns the Objective-C pointer while keeping ownership.
     [[nodiscard]] void* get() const noexcept {
         return object_;
     }
 
-    /// @brief Transfers the retained object out of this guard.
-    /// @return Owned Objective-C object pointer.
+    /// @brief Returns the object and gives the caller responsibility for releasing it.
     [[nodiscard]] void* release() noexcept {
         return std::exchange(object_, nullptr);
     }
 
-    /// @brief Releases the retained object through the resolved Objective-C runtime.
+    /// @brief Releases the object and clears the saved pointer.
     void reset() noexcept {
         if (objc_ != nullptr && objc_->msg_send != nullptr && release_selector_ != nullptr &&
             object_ != nullptr) {
@@ -282,13 +280,12 @@ class scoped_objc_release {
     void* object_ = nullptr;
 };
 
-/// @brief Intercepts synchronous MoltenVK source-library creation.
-/// @param[in] self Objective-C receiver.
-/// @param[in] cmd Objective-C selector.
-/// @param[in] source Metal source string.
-/// @param[in] options Metal compile options.
-/// @param[out] error Receives the original Metal error object.
-/// @return Original or sealed replacement Metal library object.
+/// @brief Loads a precompiled library for a synchronous MoltenVK source request.
+/// Sealed settings require matching source, options, and device. Failure records
+/// a failed check and returns null. Without sealed settings, the original method
+/// may compile the source. self and cmd identify the Objective-C receiver and
+/// method. error receives any error from Metal loading or compilation.
+/// @return Loaded library, or null on failure.
 extern "C" void* bioseq_moltenvk_new_library_with_source(
     void* self, void* cmd, void* source, void* options, void** error) {
     auto& state = moltenvk_command_interpose_state();
@@ -365,10 +362,10 @@ struct objc_block_literal {
     void* descriptor = nullptr;
 };
 
-/// @brief Completes a wrapped Metal library callback through the original block.
-/// @param[in] completion Borrowed Objective-C completion block.
-/// @param[in] library Borrowed library result forwarded to the block.
-/// @param[in] error Borrowed error result forwarded to the block.
+/// @brief Calls the supplied Metal library completion block if it has an invoke function.
+/// @param[in] completion Completion block, or null.
+/// @param[in] library Library result to pass through.
+/// @param[in] error Error result to pass through.
 void invoke_metal_library_completion(void* completion, void* library, void* error) noexcept {
     if (completion == nullptr) {
         return;
@@ -381,11 +378,11 @@ void invoke_metal_library_completion(void* completion, void* library, void* erro
     objc_msg_cast<invoke_function>(block->invoke)(completion, library, error);
 }
 
-/// @brief Completes a wrapped Metal pipeline callback through the original block.
-/// @param[in] completion Borrowed Objective-C completion block.
-/// @param[in] pipeline Borrowed pipeline result forwarded to the block.
-/// @param[in] reflection Borrowed reflection result forwarded to the block.
-/// @param[in] error Borrowed error result forwarded to the block.
+/// @brief Calls the supplied Metal pipeline completion block if it has an invoke function.
+/// @param[in] completion Completion block, or null.
+/// @param[in] pipeline Pipeline result to pass through.
+/// @param[in] reflection Reflection result to pass through.
+/// @param[in] error Error result to pass through.
 void invoke_metal_pipeline_completion(void* completion,
                                       void* pipeline,
                                       void* reflection,
@@ -399,12 +396,11 @@ void invoke_metal_pipeline_completion(void* completion,
     objc_msg_cast<invoke_function>(block->invoke)(completion, pipeline, reflection, error);
 }
 
-/// @brief Intercepts asynchronous MoltenVK source-library creation.
-/// @param[in] self Objective-C receiver.
-/// @param[in] cmd Objective-C selector.
-/// @param[in] source Metal source string.
-/// @param[in] options Metal compile options.
-/// @param[in] completion Original completion block.
+/// @brief Handles an asynchronous source request with the precompiled command library.
+/// Sealed settings require matching source, options, and device. Calls completion
+/// with the library or a null result on failure. Without sealed settings, the
+/// original method may compile the source. self and cmd identify the Objective-C
+/// receiver and method.
 extern "C" void bioseq_moltenvk_new_library_with_source_async(
     void* self, void* cmd, void* source, void* options, void* completion) {
     auto& state = moltenvk_command_interpose_state();
@@ -479,10 +475,10 @@ extern "C" void bioseq_moltenvk_new_library_with_source_async(
         self, cmd, source, options, completion);
 }
 
-/// @brief Reads one metallib candidate into an owned byte vector.
-/// @param[in] path Null-terminated candidate path.
-/// @param[out] out Vector replaced with the complete nonempty file contents.
-/// @return `true` when the full file was read.
+/// @brief Reads a nonempty metallib file into a byte vector.
+/// @param[in] path Null-terminated file path.
+/// @param[out] out Vector to resize and fill. A failed read may leave partial contents.
+/// @return Whether the whole file was read.
 [[nodiscard]] bool read_file_bytes(const char* path, std::vector<std::byte>* out) {
     std::ifstream input(path, std::ios::binary);
     if (!input) {
@@ -499,12 +495,14 @@ extern "C" void bioseq_moltenvk_new_library_with_source_async(
     return static_cast<bool>(input);
 }
 
-/// @brief Installs fail-closed command-library wrappers before MoltenVK device setup.
+/// @brief Installs command-library wrappers before MoltenVK device creation.
+/// Sealed settings require both wrappers and record installation failures.
+/// Without those settings, an optional library path comes from the environment.
 void install_moltenvk_command_library_interpose() noexcept {
     auto& state = moltenvk_command_interpose_state();
     void* installed_method = nullptr;
     void* installed_method_async = nullptr;
-    // Restores any methods replaced during this partial installation attempt.
+    // Restore replaced methods and clear the partially installed library state.
     const auto rollback_swizzles = [&state, &installed_method, &installed_method_async]() noexcept {
         if (state.objc.method_set_implementation != nullptr) {
             if (installed_method != nullptr && state.original_new_library_with_source != nullptr) {
@@ -541,7 +539,7 @@ void install_moltenvk_command_library_interpose() noexcept {
     try {
         const bool immutable_fail_closed = is_runtime_metal_archive_configuration_installed();
         const bool previously_immutable_fail_closed = state.immutable_fail_closed;
-        // Latches immutable-mode installation failures without throwing.
+        // Keep installation failures recorded when sealed settings are required.
         const auto reject_immutable_install = [&state, immutable_fail_closed]() noexcept {
             if (immutable_fail_closed) {
                 state.sticky_failure.store(true, std::memory_order_release);
@@ -744,11 +742,13 @@ void install_moltenvk_command_library_interpose() noexcept {
     }
 }
 
-/// @brief Binds the retained command library to the selected device and live images.
-/// @param[in] selected_vulkan_device Exact physical-device identity selected for vkCreateDevice.
-/// @param[in] loader_symbol Address owned by the live Vulkan loader image.
-/// @param[in] moltenvk_symbol Address owned by the live MoltenVK image.
-/// @return Whether all immutable command-library provenance matches exactly.
+/// @brief Checks the selected device and loaded Vulkan libraries against the command-library record.
+/// Hashes the files containing the supplied symbols, then keeps their identities
+/// for later checks. Repeated calls must match the first accepted binding.
+/// @param[in] selected_vulkan_device Device selected for vkCreateDevice.
+/// @param[in] loader_symbol Address within the loaded Vulkan loader.
+/// @param[in] moltenvk_symbol Address within the loaded MoltenVK library.
+/// @return Whether device, library files, and installed wrappers match the accepted settings.
 [[nodiscard]] bool bind_moltenvk_command_library_provenance(
     runtime_vulkan_device_identity selected_vulkan_device,
     const void* loader_symbol,
@@ -838,18 +838,17 @@ void install_moltenvk_command_library_interpose() noexcept {
     }
 }
 
-/// @brief Cached registry identity and wrapper coverage for one Metal device.
+/// @brief Metal device registry ID and counts of present and wrapped source-loading methods.
 struct command_interpose_device_binding {
     std::uint64_t registry_id = 0u;
     std::uint64_t methods_present = 0u;
     std::uint64_t wrapper_methods = 0u;
 };
 
-/// @brief Rare PSO-creation receipt: bind the receipt to the exact intercepted device
-/// and its live method table. Submit/wait gates consume cached scalar facts.
-/// This two-selector reflection runs only while creating a pipeline receipt.
-/// @param[in] device Objective-C Metal device to inspect.
-/// @return Intercepted device registry identity and available method mask.
+/// @brief Checks that a Metal device still uses both installed source-loading wrappers.
+/// Called during pipeline creation. Later submission checks use the saved counts.
+/// @param[in] device Metal device to inspect.
+/// @return Registry ID and counts of methods found and wrappers still installed.
 [[nodiscard]] command_interpose_device_binding
 capture_command_interpose_device_binding(void* device) noexcept {
     auto& state = moltenvk_command_interpose_state();
