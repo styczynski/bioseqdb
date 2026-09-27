@@ -1,6 +1,6 @@
 /**
  * @file highway_ksw_target_test_support.cppm
- * @brief Exposes test-only SQL receipts for KSW2 Highway target parity.
+ * @brief SQL tests for comparing KSW2 results across Highway CPU targets.
  */
 module;
 
@@ -42,7 +42,7 @@ inline constexpr std::array<std::size_t, 9> k_boundary_lengths{
     63u, 64u, 65u,
 };
 
-/** @return The complete DNA4 KSW2 table for the forced Highway target. */
+/** @return DNA4 KSW2 kernels after checking that one Highway target is selected. */
 [[nodiscard]] auto selected_alignment_table() -> const alignment_table_t& {
     const auto dispatch_plan =
         bioseq::simd_dispatch::registered_highway_dispatch_plan();
@@ -115,7 +115,7 @@ inline constexpr std::array<std::size_t, 9> k_boundary_lengths{
     return query_sequence;
 }
 
-/** @return A deterministic mutated target for one query. */
+/** @return A copy of the test query with four base substitutions applied. */
 [[nodiscard]] auto make_target(const std::vector<seq::dna4>& query_sequence)
     -> std::vector<seq::dna4> {
     std::vector<seq::dna4> target_sequence = query_sequence;
@@ -133,19 +133,22 @@ inline constexpr std::array<std::size_t, 9> k_boundary_lengths{
     return target_sequence;
 }
 
-/** @brief Appends one signed receipt field. */
+/** @brief Append a signed integer and a comma to the test result string. */
 void append_signed(std::string& receipt, const std::int64_t signed_value) {
     receipt.append(std::to_string(signed_value));
     receipt.push_back(',');
 }
 
-/** @brief Appends one unsigned receipt field. */
+/** @brief Append an unsigned integer and a comma to the test result string. */
 void append_unsigned(std::string& receipt, const std::uint64_t unsigned_value) {
     receipt.append(std::to_string(unsigned_value));
     receipt.push_back(',');
 }
 
-/** @brief Appends one validated alignment result to the parity receipt. */
+/**
+ * @brief Record the alignment scores and CIGAR for comparison across CPU targets.
+ * Fail the test if the alignment has no score or CIGAR.
+ */
 void append_result(
     std::string& receipt,
     const char alignment_mode,
@@ -185,7 +188,11 @@ void append_result(
     receipt.push_back(';');
 }
 
-/** @return The deterministic KSW2 boundary-parity receipt. */
+/**
+ * @return Single- and dual-affine KSW2 results for lengths near SIMD boundaries.
+ * Each length is tested in both directions so results can be compared across
+ * Highway CPU targets.
+ */
 [[nodiscard]] auto make_boundary_receipt() -> std::string {
     const alignment_table_t& alignment_table = selected_alignment_table();
     const auto scoring_matrix =

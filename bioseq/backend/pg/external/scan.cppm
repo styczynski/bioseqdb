@@ -1,6 +1,6 @@
 /**
  * @file scan.cppm
- * @brief Executes PostgreSQL custom scans for external-provider relations.
+ * @brief Reads external provider rows through a PostgreSQL custom scan.
  */
 module;
 #include <bioseq/pg_compat.h>
@@ -66,14 +66,12 @@ namespace external_io = bioseq::external::io;
 
 namespace {
 
-/* Forward declarations of the callbacks referenced by the method tables, so the
- * tables can be defined before the callback bodies (which in turn reference the
- * tables). Everything here has internal linkage. */
+/* Declare callbacks before the method tables that refer to them. */
 /** @brief Allocates the executor state for an external custom scan. */
 Node *create_scan_state(CustomScan *custom_scan);
-/** @brief Initializes provider-query state at the PostgreSQL BeginCustomScan boundary. */
+/** @brief Builds the provider query when PostgreSQL starts the custom scan. */
 void begin_scan(CustomScanState *node, EState *executor_state, int flags);
-/** @brief Produces the next tuple through PostgreSQL's generic scan machinery. */
+/** @brief Returns the next provider row that passes PostgreSQL filters. */
 TupleTableSlot *execute_scan(CustomScanState *node);
 /** @brief Clears tuple slots when an external custom scan ends. */
 void end_scan(CustomScanState *node);
@@ -87,7 +85,7 @@ Plan *plan_custom_path(PlannerInfo *root, RelOptInfo *relation_info,
 					   CustomPath *best_path, List *target_list,
 					   List *clauses, List *custom_plans);
 
-/* Method tables (internal linkage; stable storage — safe to register). */
+/* These method tables remain valid for the lifetime of the process. */
 const CustomPathMethods scan_path_methods = {
     .CustomName = "BioseqExternalScan",
     .PlanCustomPath = plan_custom_path,
@@ -115,16 +113,17 @@ const CustomExecMethods execution_methods = {
     .ExplainCustomScan = explain_scan,
 };
 
-/* ---- C++ runtime state (heap; freed by the es_query_cxt reset callback) ---- */
+/* C++ scan state is freed when the PostgreSQL query context is reset. */
 
 /**
- * @brief Owns provider-query and streaming state for one executor scan.
+ * @brief Holds the provider query and returned messages for one scan.
  *
- * Instances live on the C++ heap and are released by a reset callback on the
- * query memory context. The producer thread never calls PostgreSQL APIs.
+ * A query-context reset callback deletes this C++ object. The producer thread
+ * calls provider code and sends messages through the channel. PostgreSQL API
+ * calls stay on the backend thread.
  */
 struct scan_runtime {
-    /** Bounded channel carrying owned messages from the producer thread. */
+    /** Channel with byte and item limits for messages from the producer thread. */
     using stream_channel =
 		provider::bounded_channel<provider::owning_provider_message>;
 
@@ -138,11 +137,12 @@ struct scan_runtime {
     std::size_t row_index{0};
     bool has_started{false};
 
-    /* Streaming sequence path (NCBI): a producer task fills a bounded channel
-     * that scan_next drains with backpressure, so a multi-megabase record never
-     * materializes in full. `channel` is declared before `producer` so on
-     * destruction the jthread joins BEFORE the channel it drains is freed; the
-     * destructor cancels the channel first to wake a producer blocked in push. */
+    /* NCBI sends messages through this queue while PostgreSQL consumes them.
+     * Chunk requests can process a large record in pieces. Whole-sequence
+     * requests still assemble each record before sending it.
+     *
+     * Keep channel before producer so destruction joins the thread before
+     * freeing the queue. Cancel first to wake a producer blocked on a full queue. */
     bool is_streaming{false};
     std::unique_ptr<stream_channel> channel;
     std::jthread producer;
@@ -154,7 +154,7 @@ struct scan_runtime {
             channel->cancel();
     }
 
-    /** @brief Cancels active streaming and restores the pre-execution state. */
+    /** @brief Stops the producer and clears results so the query can run again. */
     void reset_execution()
     {
         if (channel != nullptr)
@@ -172,8 +172,8 @@ struct scan_runtime {
 };
 
 /**
- * @brief Copies the selected provider names into PostgreSQL-managed storage.
- * @return A comma-separated label owned by the current PostgreSQL memory context.
+ * @brief Joins provider names into a label for PostgreSQL messages.
+ * @return A comma-separated string in the current PostgreSQL memory context.
  */
 char *
 copy_provider_label(const scan_runtime &runtime)
@@ -191,8 +191,8 @@ copy_provider_label(const scan_runtime &runtime)
 }
 
 /**
- * @brief Measures the deep storage charged to one streamed provider message.
- * @return Message size in bytes for bounded-channel accounting.
+ * @brief Counts a message and its owned data against the channel byte limit.
+ * @return The message size in bytes.
  */
 std::size_t
 message_stream_bytes(const provider::owning_provider_message &message) noexcept
@@ -200,13 +200,13 @@ message_stream_bytes(const provider::owning_provider_message &message) noexcept
     return provider::measure_deep_size_bytes(message);
 }
 
-/** @brief Adapts a provider message sink to the bounded producer channel. */
+/** @brief Sends provider output into the scan queue. */
 struct channel_producer_sink {
     scan_runtime::stream_channel *channel;
     std::stop_token stop_token;
 
     /**
-     * @brief Transfers one owned message into the channel with byte accounting.
+     * @brief Adds a message to the queue, waiting if its limits are reached.
      * @return Success, or the channel error that stopped the producer.
      */
     static std::expected<void, provider::external_error>
@@ -220,8 +220,8 @@ struct channel_producer_sink {
 };
 
 /**
- * @brief Selects the NCBI accession eligible for incremental sequence streaming.
- * @return The accession for the supported single-provider route, otherwise empty.
+ * @brief Finds an accession that this scan can read through the NCBI stream.
+ * @return An accession for a sequence or chunk query using only ncbi, or empty.
  */
 std::optional<std::string>
 streaming_accession(const scan_runtime &runtime)
@@ -239,9 +239,12 @@ constexpr std::size_t k_stream_channel_byte_limit = 8u * 1024u * 1024u;
 constexpr std::size_t k_stream_channel_item_limit = 4;
 
 /**
- * @brief Starts a cancellable NCBI producer for an external sequence scan.
- * @param[in,out] runtime Scan state that owns the channel and producer thread.
- * @param[in] accession Accession transferred into the producer thread.
+ * @brief Starts an NCBI worker that sends sequence rows through the scan queue.
+ *
+ * Dataset accessions use archive streaming. Other accessions use the sequence
+ * stream. The worker closes the queue on completion or reports its error there.
+ * @param[in,out] runtime Scan state that owns the queue and worker.
+ * @param[in] accession Accession moved into the worker.
  */
 void
 start_streaming_query(scan_runtime &runtime, std::string accession)
@@ -254,7 +257,7 @@ start_streaming_query(scan_runtime &runtime, std::string accession)
     runtime.channel = std::make_unique<scan_runtime::stream_channel>(
         k_stream_channel_byte_limit, k_stream_channel_item_limit);
     scan_runtime::stream_channel *channel = runtime.channel.get();
-    /* Stream provider messages on a worker that communicates only through the channel. */
+    /* The worker communicates with PostgreSQL through the queue. */
     runtime.producer = std::jthread(
         [channel, accession = std::move(accession),
          target](std::stop_token stop) {
@@ -292,10 +295,10 @@ start_streaming_query(scan_runtime &runtime, std::string accession)
 }
 
 /**
- * @brief Extends CustomScanState with the C++ runtime owned by query cleanup.
+ * @brief PostgreSQL scan state with a pointer to the C++ runtime.
  *
- * The PostgreSQL prefix must remain first so Node and CustomScanState pointer
- * conversions preserve address identity.
+ * Keep CustomScanState first so casts from PostgreSQL Node and CustomScanState
+ * pointers reach the same address.
  */
 struct scan_state {
     CustomScanState custom_scan_state;
@@ -309,7 +312,7 @@ destroy_scan_runtime(void *arg)
     delete static_cast<scan_runtime *>(arg);
 }
 
-/** @brief Maps an external relation entity to its query target and default provider. */
+/** @brief Provider query target and default provider for a table entity. */
 struct query_profile
 {
 	provider::query_target target;
@@ -317,8 +320,10 @@ struct query_profile
 };
 
 /**
- * @brief Resolves provider defaults for an external relation entity.
- * @return Query target and backend-local default provider name.
+ * @brief Chooses the query target and default provider for a table entity.
+ *
+ * Gene rows come from catalog requests. The other entities use their
+ * corresponding provider query targets.
  */
 query_profile
 query_profile_for(relation_entity entity) noexcept
@@ -344,8 +349,8 @@ query_profile_for(relation_entity entity) noexcept
 }
 
 /**
- * @brief Resolves a SQL column through the inverse provider field map.
- * @return The provider field, or empty when the column cannot be pushed down.
+ * @brief Finds the provider field with this SQL column name.
+ * @return The matching field, or empty if no provider field maps to the column.
  */
 std::optional<provider::external_field>
 provider_field_from_sql_column(std::string_view column)
@@ -364,8 +369,8 @@ provider_field_from_sql_column(std::string_view column)
 }
 
 /**
- * @brief Converts a supported non-null PostgreSQL constant to a provider scalar.
- * @return The typed scalar, or empty when PostgreSQL must retain the predicate.
+ * @brief Converts SQL text, integers, or booleans to a provider query value.
+ * @return Empty for NULL, unsupported types, or text beyond the provider limit.
  */
 std::optional<provider::external_scalar>
 provider_scalar_from_datum(Oid type, Datum value, bool isnull)
@@ -417,7 +422,7 @@ is_equality_operator(Oid opno)
     return eq;
 }
 
-/** @brief Borrows one typed PostgreSQL constant while building a pushed predicate. */
+/** @brief A PostgreSQL value and type borrowed while building a provider filter. */
 struct scalar_datum
 {
 	Oid type;
@@ -425,7 +430,7 @@ struct scalar_datum
 	bool is_null;
 };
 
-/** @brief Holds one normalized column predicate before provider scalar conversion. */
+/** @brief A column filter and its SQL values before provider conversion. */
 struct pushdown_clause
 {
 	Var *column;
@@ -444,7 +449,7 @@ scalar_from_constant(const Const &constant) noexcept
 			static_cast<bool>(constant.constisnull)};
 }
 
-/** @brief Appends constants from a PostgreSQL array node to a scalar list. */
+/** @brief Collects constant array elements for a provider IN filter. */
 void
 append_array_values(Node *array_node, std::vector<scalar_datum> &values)
 {
@@ -493,8 +498,10 @@ append_array_values(Node *array_node, std::vector<scalar_datum> &values)
 }
 
 /**
- * @brief Recognizes equality and `= ANY` clauses eligible for provider pushdown.
- * @return A normalized clause, or empty when PostgreSQL must evaluate it locally.
+ * @brief Extracts column equality and = ANY filters for provider requests.
+ *
+ * The values must be constants. Returns empty for clauses this helper cannot
+ * use. PostgreSQL still evaluates the original clause on returned rows.
  */
 std::optional<pushdown_clause>
 extract_pushdown_clause(Node *clause)
@@ -561,7 +568,11 @@ is_text_type(Oid type) noexcept
 }
 
 /**
- * @brief Adds one supported predicate to a provider query without removing its residual qual.
+ * @brief Copies a supported SQL filter into the provider query.
+ *
+ * A provider filter selects which providers to call. Other columns become
+ * provider predicates when their names and values are supported. PostgreSQL
+ * keeps the original filter and checks returned rows itself.
  */
 void
 add_pushdown_clause(Node *clause, TupleDesc tuple_descriptor,
@@ -615,7 +626,10 @@ add_pushdown_clause(Node *clause, TupleDesc tuple_descriptor,
 }
 
 /**
- * @brief Builds the provider set, target, limit, and pushed predicates for one scan.
+ * @brief Builds the provider query from the scan filters and table entity.
+ *
+ * Uses the entity default when no provider is named. Each provider request
+ * starts with a limit of 1000 rows.
  */
 void
 initialize_query(CustomScanState *node, scan_runtime &runtime)
@@ -636,11 +650,14 @@ initialize_query(CustomScanState *node, scan_runtime &runtime)
 	runtime.query.limit = std::uint64_t{1000};
 }
 
-/* ---- provider execution --------------------------------------------------- */
+/* Provider requests and result collection. */
 
 /**
- * @brief Expands IN predicates into a bounded set of equality-only provider queries.
- * @return At most 64 normalized queries covering the retained value combinations.
+ * @brief Splits IN filters into requests with one equality value per field.
+ *
+ * Multiple IN filters form combinations. Keeps at most 64 queries at each
+ * expansion step and warns when that limit is reached. Some combinations
+ * can therefore be left unqueried.
  */
 std::vector<provider::normalized_external_query>
 expand_in_predicates(const provider::normalized_external_query &base)
@@ -709,8 +726,10 @@ append_identity_part(std::string &key, std::string_view value)
 }
 
 /**
- * @brief Builds a collision-resistant identity key for a provider message.
- * @return A length-prefixed key, or an empty string for messages without row identity.
+ * @brief Builds the key used to remove duplicate provider messages.
+ *
+ * Keys include the provider and selected record identifiers. Sequence keys
+ * also include the chunk index. Returns empty for messages without a row key.
  */
 std::string
 message_identity_key(const provider::owning_provider_message &message)
@@ -747,7 +766,7 @@ message_identity_key(const provider::owning_provider_message &message)
 	return {};
 }
 
-/** @brief Runs every provider/query combination and unions distinct result messages. */
+/** @brief Collects results from each provider and removes messages with duplicate row keys. */
 void
 collect_provider_results(scan_runtime &scan)
 {
@@ -755,12 +774,9 @@ collect_provider_results(scan_runtime &scan)
     auto &pool = bioseq::parallelism::global_pool::instance();
     provider::external_runtime_services services{};
 
-    /* Fan out over the resolved provider set (one entry for a `provider = '...'`
-     * qual, several for `provider IN (...)`, or the per-entity default) crossed
-     * with the per-value expansion of any `field = ANY(array)` predicate. Each
-     * (provider, single-value query) pair drives its own plan(); messages from
-     * every pair are unioned. A single pair's failure must not mask another's
-     * rows, so an error is surfaced only when the whole union is empty. */
+    /* Run every selected provider with each expanded query. Keep messages from
+     * successful requests even if another request fails. Report the first error
+     * only when the combined result contains no messages. */
     const std::vector<provider::normalized_external_query> queries =
         expand_in_predicates(scan.query);
     std::optional<provider::external_error> first_error;
@@ -795,11 +811,12 @@ collect_provider_results(scan_runtime &scan)
 		scan.query_result.error = std::move(first_error);
 }
 
-/* ---- CustomExec callbacks ------------------------------------------------- */
+/* PostgreSQL custom scan callbacks. */
 
 /**
- * @brief Allocates an external scan state with the PostgreSQL prefix initialized.
- * @return A PostgreSQL-owned node whose runtime is initialized by BeginCustomScan.
+ * @brief Allocates the PostgreSQL scan node and installs its executor callbacks.
+ *
+ * BeginCustomScan creates the C++ runtime later.
  */
 Node *
 create_scan_state(CustomScan *custom_scan)
@@ -813,24 +830,22 @@ create_scan_state(CustomScan *custom_scan)
     return reinterpret_cast<Node *>(state);
 }
 
-/** @brief Allocates query-lifetime runtime state and builds the normalized provider query. */
+/** @brief Creates the C++ scan state and builds its provider query. */
 void
 begin_scan(CustomScanState *node, EState *executor_state, int flags)
 {
     scan_state *state = reinterpret_cast<scan_state *>(node);
 
-    /* Like scan_next, this is a C callback boundary: a C++ exception (e.g.
-     * std::bad_alloc from the runtime allocation or the STL-backed query build)
-     * must never escape into the executor. Convert any escaping exception into a
-     * clean ereport. The reset callback is registered before the throwy query
-     * build, so a throw after it still frees the runtime heap on context reset. */
+    /* PostgreSQL calls this through a C callback. Convert C++ exceptions to
+     * PostgreSQL errors before returning to the executor. Register cleanup
+     * before building the query so a later failure still releases the runtime. */
     try
     {
         scan_runtime *runtime = new scan_runtime();
         state->runtime = runtime;
 
-        /* Free the C++ heap when the per-query context is reset (covers the
-         * normal end-of-query path and error longjmp/abort). */
+        /* Delete the C++ runtime when the query context is reset, including after
+         * a PostgreSQL error. */
         MemoryContextCallback *cleanup_callback =
             static_cast<MemoryContextCallback *>(MemoryContextAlloc(
                 executor_state->es_query_cxt, sizeof(MemoryContextCallback)));
@@ -841,9 +856,8 @@ begin_scan(CustomScanState *node, EState *executor_state, int flags)
 
 		runtime->entity = entity_from_options(node->ss.ss_currentRelation);
 		initialize_query(node, *runtime);
-        /* Provider request is deferred to the first tuple fetch so EXPLAIN (no
-         * ANALYZE), which never calls the access method, issues no remote
-         * request. */
+        /* Wait until the first row request before contacting a provider.
+         * EXPLAIN without ANALYZE therefore makes no provider request. */
         static_cast<void>(flags);
     }
     catch (const std::exception &error)
@@ -863,7 +877,7 @@ begin_scan(CustomScanState *node, EState *executor_state, int flags)
     }
 }
 
-/** @brief Converts a provider failure into the corresponding PostgreSQL error. */
+/** @brief Copies provider error details into PostgreSQL memory and raises a SQL error. */
 [[noreturn]] void
 raise_scan_provider_error(const scan_runtime &runtime,
 						  const provider::external_error *error,
@@ -887,8 +901,12 @@ raise_scan_provider_error(const scan_runtime &runtime,
 }
 
 /**
- * @brief Materializes the next streamed or collected provider row.
- * @return The populated scan slot, or a cleared slot at end of input.
+ * @brief Fetches provider messages and converts the next row into a tuple slot.
+ *
+ * Starts the request on the first call. Streaming reads check for PostgreSQL
+ * interrupts while waiting for messages. Collected catalog messages may supply
+ * several gene or location rows.
+ * @return A populated slot, or a cleared slot at end of input.
  */
 TupleTableSlot *
 next_scan_tuple(CustomScanState *node)
@@ -1025,7 +1043,7 @@ next_scan_tuple(CustomScanState *node)
 }
 
 /**
- * @brief Confirms a tuple because all pushed clauses remain PostgreSQL residual quals.
+ * @brief Accepts the row here because ExecScan checks all original SQL filters.
  * @return Always true.
  */
 bool
@@ -1037,8 +1055,8 @@ recheck_scan_tuple(CustomScanState *node, TupleTableSlot *slot)
 }
 
 /**
- * @brief Runs the generic PostgreSQL scan loop with external access callbacks.
- * @return The next qualifying tuple slot, or a cleared slot at end of input.
+ * @brief Lets PostgreSQL filter and project the external rows.
+ * @return The next matching tuple slot, or a cleared slot at end of input.
  */
 TupleTableSlot *
 execute_scan(CustomScanState *node)
@@ -1057,10 +1075,10 @@ end_scan(CustomScanState *node)
         ExecClearTuple(node->ss.ps.ps_ResultTupleSlot);
     if (node->ss.ss_ScanTupleSlot != nullptr)
         ExecClearTuple(node->ss.ss_ScanTupleSlot);
-    /* The runtime heap is released by the es_query_cxt reset callback. */
+    /* The query-context reset callback deletes the C++ runtime. */
 }
 
-/** @brief Cancels any producer and restores the runtime for another scan pass. */
+/** @brief Stops provider execution and clears results for a fresh scan. */
 void
 rescan(CustomScanState *node)
 {
@@ -1110,11 +1128,11 @@ explain_scan(CustomScanState *node, List *ancestors,
     }
 }
 
-/* ---- Plan callback -------------------------------------------------------- */
+/* Build and register the external scan plan. */
 
 /**
- * @brief Converts the winning external path into a CustomScan plan node.
- * @return The embedded PostgreSQL Plan owned by the planner context.
+ * @brief Builds the external CustomScan plan and keeps its SQL filters.
+ * @return The Plan inside the new CustomScan node.
  */
 Plan *
 plan_custom_path(PlannerInfo *root, RelOptInfo *relation_info,
@@ -1148,8 +1166,11 @@ constexpr Cost k_external_path_startup_cost = 0.0;
 constexpr Cost k_external_path_total_cost = 1.0;
 
 /**
- * @brief Replaces ordinary paths for a relation using the external table access method.
- * @return True when an external custom path was installed.
+ * @brief Makes the custom scan the only path for an external table.
+ *
+ * External tables have no physical rows for ordinary scans to read. Clear
+ * those paths and disable parallel scans before adding BioseqExternalScan.
+ * @return True if the relation uses the external table access method.
  */
 bool
 add_scan_paths(PlannerInfo *root, RelOptInfo *relation_info,
@@ -1198,7 +1219,7 @@ initialize_scan_boundary()
 
 } // namespace bioseq::postgres::external
 
-/** @brief Initializes the external custom-scan boundary from extension startup. */
+/** @brief Registers external scans during extension startup. */
 extern "C" void
 bioseq_external_scan_init(void)
 {
