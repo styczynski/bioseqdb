@@ -1,10 +1,10 @@
 /**
  * @file
- * @brief Installs planner hooks and constructs raw two-child BatchJoin paths.
+ * @brief Choose Bioseq execution plans for joins containing mmsearch.
  */
 module;
-// Anchor Highway in this global module fragment so target-specific definitions
-// imported through multiple module graphs share one translation-unit context.
+// Include Highway here so imported target-specific types share one
+// translation-unit definition.
 #include <bioseq/pg_compat.h>
 #include <hwy/highway.h>
 
@@ -58,11 +58,12 @@ using namespace bioseq::postgres::support;
 export {
 
     /**
-     * @brief Extends join path generation for one eligible mmsearch inner join.
+     * @brief Plan an inner join with one mmsearch condition.
      *
-     * Invokes the chained hook first. For one securely promotable mmsearch restriction
-     * on supported inputs, retains existing custom-owner paths, admits transformed
-     * per-row paths, or appends a raw two-child BatchJoin CustomPath to @p joinrel.
+     * Run the previous hook first. Depending on the operands and child plans,
+     * keep an existing Bioseq scan, use per-row alignment for transformed
+     * sequences, or add a two-child batch join. Remove plans that would leave
+     * mmsearch to its SQL stub, which cannot perform the alignment.
      */
     void bioseq_batch_join_set_join_pathlist_hook(PlannerInfo* root,
                                                   RelOptInfo* joinrel,
@@ -78,7 +79,7 @@ export {
             return;
         }
         // shared_preload_libraries installs this hook cluster-wide. Databases that
-        // have not installed Bioseq must retain ordinary PostgreSQL join planning.
+        // have not installed Bioseq must keep ordinary PostgreSQL join planning.
         if (!OidIsValid(get_extension_oid("bioseq", /*missing_ok=*/true))) {
             return;
         }
@@ -123,8 +124,8 @@ export {
         for (RestrictInfo* sibling : postgres_list<RestrictInfo>(extra->restrictlist)) {
             if (sibling != restriction &&
                 contain_volatile_functions(reinterpret_cast<Node*>(sibling->clause))) {
-                /* The first release does not claim an evaluation-order-preserving
-                 * split around an effectful sibling. */
+                /* Moving alignment around a volatile sibling could change when that
+                 * sibling runs. Keep this query shape out of the batch join. */
                 return;
             }
         }
@@ -137,8 +138,8 @@ export {
         postgres_list<Node> arguments(mmsearch->args);
         Var* target_var = try_cast_pg_node<Var>(arguments.get_first());
         Var* query_var = try_cast_pg_node<Var>(arguments.get_second());
-        /* Eligibility is non-throwing: fold only the option expression on a
-         * private copy. A typed NULL Const means default options. */
+        /* Fold options on a private copy. A typed null constant requests the
+         * defaults. Other operands keep their original expressions. */
         auto* batch_mmsearch = static_cast<FuncExpr*>(copyObject(mmsearch));
         if (list_length(mmsearch->args) == 3) {
             Node* folded_options = eval_const_expressions(
@@ -149,8 +150,7 @@ export {
             }
             lfirst(list_nth_cell(batch_mmsearch->args, 2)) = folded_options;
         }
-        /* Decode options before choosing the raw two-child or transformed
-         * one-child ownership shape. */
+        /* Read aligner options before choosing batched or per-row execution. */
         bioseq::simd::minimap2_parameters planned_params = build_params_from_gucs();
         bioseq::indexing::index_read_requirement planned_requirement =
             bioseq::indexing::index_read_requirement::allow;
@@ -160,22 +160,21 @@ export {
         const bool transformed_operands =
             bioseq_expr_uses_lazy_sequence_projection(arguments.get_first()) ||
             bioseq_expr_uses_lazy_sequence_projection(arguments.get_second());
-        /** @brief Reports whether @p input is a base or other-member planner relation. */
+        /** Check for a base relation or a member of an inherited relation. */
         auto is_base_input = [](RelOptInfo const* input) noexcept {
             return input != nullptr && (input->reloptkind == RELOPT_BASEREL ||
                                         input->reloptkind == RELOPT_OTHER_MEMBER_REL);
         };
-        /** @brief Reports whether @p input is a join planner relation. */
+        /** Check for a join relation. */
         auto is_join_input = [](RelOptInfo const* input) noexcept {
             return input != nullptr && input->reloptkind == RELOPT_JOINREL;
         };
         const bool two_base_inputs = is_base_input(outerrel) && is_base_input(innerrel);
         const bool one_join_one_base = (is_join_input(outerrel) && is_base_input(innerrel)) ||
                                        (is_base_input(outerrel) && is_join_input(innerrel));
-        /* Raw nested joins retain the established parameterized BioseqScan owner.
-         * Core also offers join paths that leave the same rendezvous RestrictInfo as
-         * an executable Join Filter; costs cannot choose between semantic ownership
-         * and the forbidden SQL stub, so discard those paths structurally. */
+        /* For nested joins, keep paths with a parameterized BioseqScan that
+         * performs this mmsearch. Remove ordinary join filters containing the
+         * call, since choosing them by cost would execute the SQL stub. */
         if (one_join_one_base && !transformed_operands) {
             exact_parameterized_bmo_retainer_audit owner_audit{};
             if (retain_join_paths_with_custom_restriction_owner(
@@ -294,12 +293,9 @@ export {
                          owner_audit.foreign_owner_rejection_mask)));
         }
         if (transformed_operands) {
-            /* A transformed owner may sit above one already-owned join frontier.
-             * This is the bounded same-PlannerInfo form used when two matches share
-             * one SQL-visible base.  Raw BatchJoin remains strictly two-baserel
-             * below.  Reject wider/partition-derived join kinds and validate that this
-             * hook invocation describes exactly the output relids before reconstructing
-             * an incumbent path. */
+            /* Transformed sequences can be aligned above two base inputs or one
+             * existing join plus a base input. Require those inputs to cover exactly
+             * this join's relations before rebuilding a per-row plan. */
             if (!two_base_inputs && !one_join_one_base)
                 return;
             Relids input_relids = bms_union(outerrel->relids, innerrel->relids);
@@ -415,21 +411,18 @@ export {
             detect_restrictinfo_feature_flags(target_rel->baserestrictinfo, oids);
         const auto query_qual_features =
             detect_restrictinfo_feature_flags(query_rel->baserestrictinfo, oids);
-        /* The BatchJoin locator child deliberately does not execute its target
-         * BioseqScan's alignment runtime.  A target-side base mmsearch therefore
-         * has no safe owner after locator conversion; leave this shape to the
-         * ordinary parameterized scan, which can consume both the join Param and
-         * its base qual.  Query-side base mmsearch remains child-owned. */
+        /* The target child returns locators and skips its alignment runtime.
+         * A separate mmsearch on that target therefore needs a parameterized
+         * scan that executes both conditions. The query child can still perform
+         * its own mmsearch before its rows reach this join. */
         if (!target_qual_features.has_value() || !query_qual_features.has_value() ||
             target_qual_features->any_match_projection ||
             query_qual_features->any_match_projection) {
             return;
         }
         if (target_qual_features->has_mmsearch) {
-            /* The locator path is ineligible, but a narrowly admitted ordinary
-             * relation/require-absent fallback has a parameterized BioseqScan that
-             * owns both calls.  Retain only join paths reaching that real owner;
-             * leaving an ordinary Join Filter would execute the SQL rendezvous stub. */
+            /* Keep only fallback paths whose parameterized BioseqScan executes both
+             * mmsearch calls. An ordinary Join Filter would reach the SQL stub. */
             exact_parameterized_bmo_retainer_audit owner_audit{};
             if (retain_join_paths_with_custom_restriction_owner(
                     root, joinrel, outerrel, innerrel, extra, restriction, mmsearch, &owner_audit))
@@ -565,15 +558,13 @@ export {
 
         auto* locator_path = makeNode(CustomPath);
         *locator_path = *target_path;
-        /* Preserve the wrapper's conservative projection cost when a helper-only
-         * ProjectionPath was unwrapped. The locator child does not execute those
-         * helpers, but underpricing the custom join is worse than retaining their
-         * planner estimate. */
+        /* Keep the original projection cost when removing its wrapper. This
+         * avoids discounting the join for work that moves to its parent. */
         locator_path->path.startup_cost = target_candidate.cost_owner->startup_cost;
         locator_path->path.total_cost = target_candidate.cost_owner->total_cost;
         locator_path->path.rows = target_candidate.cost_owner->rows;
         locator_path->path.pathtarget = create_empty_pathtarget();
-        /** @brief Copies eligible expressions from @p source into the locator pathtarget. */
+        /** Copy output expressions that do not require match results. */
         auto append_locator_target = [locator_path](const PathTarget* source) {
             if (source == nullptr)
                 return;
@@ -588,17 +579,14 @@ export {
                                          0);
             }
         };
-        /* Preserve the scan's ordinary expressions and safe plain expressions
-         * introduced by the wrapper projection. Helper-bearing expressions are
-         * parent-owned and handled by the recursive Var pass below. */
+        /* Keep ordinary scan outputs and added base columns. Match-result
+         * expressions are evaluated by the parent after alignment. */
         append_locator_target(target_path->path.pathtarget);
         append_locator_target(target_candidate.locator_target);
         add_new_columns_to_pathtarget(locator_path->path.pathtarget, target_residual_vars);
-        /* A helper-bearing expression is intentionally not evaluated by the
-         * locator child, but PostgreSQL setrefs still requires its underlying base
-         * Vars to exist in the child/combined tlist.  The wrapper PathTarget is the
-         * usual owner; joinrel->reltarget is the authoritative fallback for an
-         * upper compound projection. */
+        /* Expressions containing match helpers still need their base columns
+         * in the child output for PostgreSQL to resolve references. Collect them
+         * from both the removed projection and the join's output expressions. */
         if (!batch_join_append_underlying_target_vars(locator_path->path.pathtarget,
                                                       target_candidate.locator_target,
                                                       target_rel->relid,
@@ -622,11 +610,10 @@ export {
             locator_path->path.pathtarget, reinterpret_cast<Expr*>(hidden_rowno), 0);
         const int locator_rowno_resno = list_length(locator_path->path.pathtarget->exprs);
         set_pathtarget_cost_width(root, locator_path->path.pathtarget);
-        /* A lower BatchJoin may publish an otherwise-unused target sequence as the
-         * PARAM_EXEC query of an upper BatchJoin.  The locator child must therefore
-         * carry BSS3's exact projected-resno -> physical-varattno route for every
-         * sequence it can publish.  Do not infer a physical column for an expression
-         * recipe (or silently keep an older, differently-shaped source tag). */
+        /* An upper join may use any sequence column returned here as a query.
+         * Record the physical table-column number for each sequence output so
+         * its locator can be read later. Reject computed sequence expressions
+         * and pre-existing source tags whose layout may differ. */
         for (Node* private_node : postgres_list<Node>(locator_path->custom_private)) {
             if (private_node == nullptr || !IsA(private_node, List))
                 continue;
@@ -697,9 +684,9 @@ export {
         join_path->path.parallel_workers = 0;
         join_path->path.pathkeys = NIL;
         join_path->path.rows = std::max(1.0, joinrel->rows);
-        /* The query child is fully materialized before the first output, so its
-         * complete cost is startup.  The target child is read exactly once; never
-         * underprice this as startup-only and force an unadmittable custom join. */
+        /* Buffering the whole query child delays the first result, so charge
+         * its full cost at startup. Include a complete target scan in total cost
+         * because every target is read once. */
         const double planned_query_rows = std::max(1.0, query_path->rows);
         const double planned_query_width =
             std::max(1, query_path->pathtarget == nullptr ? 1 : query_path->pathtarget->width);
@@ -749,8 +736,9 @@ export {
             return;
         }
 
-        /* Retain the best incumbent as EXPLAIN diagnostic context only.  Path selection is
-         * structural once ownership is established, never a negative sentinel. */
+        /* Save the cheapest existing cost for EXPLAIN. Eligible paths are
+         * selected by which scan executes mmsearch, using ordinary nonnegative
+         * costs for the work itself. */
         Cost incumbent_cost_floor = honest_total_cost;
         for (Path* incumbent : postgres_list<Path>(joinrel->pathlist)) {
             if (incumbent == nullptr)
@@ -786,7 +774,7 @@ export {
             lappend(join_path->custom_private, make_batch_join_cost_const(incumbent_cost_floor));
         Assert(list_length(join_path->custom_private) == k_bioseq_batch_join_path_private_fields);
         join_path->methods = bioseq_batch_join_path_methods();
-        /** @brief Keeps CustomPath entries that already own the mmsearch restriction. */
+        /** Keep custom paths that already execute this mmsearch restriction. */
         auto retain_existing_owner = [restriction](List* paths) {
             postgres_list<Path> survivors;
             for (Path* incumbent : postgres_list<Path>(paths)) {
