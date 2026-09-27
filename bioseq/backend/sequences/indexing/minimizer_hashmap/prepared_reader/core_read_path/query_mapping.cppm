@@ -1,6 +1,6 @@
 /**
  * @file query_mapping.cppm
- * @brief Implements query routing, physical cursors, and admitted index assembly.
+ * @brief Prepares query-hash lookups and the order for reading index extents.
  */
 export module bioseq.indexing.minimizer_hashmap:prepared_reader_core_read_path_query_mapping;
 
@@ -122,7 +122,7 @@ trait_driven_prepared_query_core<p_traits>::query_index_for_hash_impl_(
             return no_route;
         }
         const std::uint64_t wanted = query_radix_suffix_(narrowed, protocol_query_suffix_bits_);
-        /// Binary-search the selected width's suffix array within one radix bucket.
+        /// Search the stored hash suffixes within this radix bucket.
         const auto search = [&first, &end, &wanted, &hash_probes](const auto* suffixes) noexcept {
             std::size_t lower = first;
             std::size_t upper = end;
@@ -407,10 +407,9 @@ trait_driven_prepared_query_core<p_traits>::initialize_query_protocol(
                 protocol_query_hashes_.end());
         }
         if constexpr (p_traits::global_controls_then_positions) {
-            // The caller may provide duplicate hashes. Canonicalize into
-            // a right-sized temporary image used to build suffixes and
-            // select extents. The 2x reservation covers both vectors at
-            // this peak, and the full image is released before payload.
+            // After deduplication, shrink the temporary full-hash vector to the unique
+            // query count. The reservation covers both vectors while copying.
+            // Release the full hashes after building suffixes and selecting extents.
             if (!query_hashes_are_sorted_unique) {
                 std::vector<hash_type> canonical;
                 canonical.reserve(protocol_query_hashes_.size());
@@ -451,8 +450,7 @@ trait_driven_prepared_query_core<p_traits>::initialize_query_protocol(
         return protocol_poison<void>(minimizer_generation_encoding_error::admission);
     }
     if constexpr (p_traits::global_controls_then_positions) {
-        // UINT32_MAX remains the dense no-route sentinel.  A grouped-SoA
-        // query image must therefore leave it unavailable as an index.
+        // Reserve UINT32_MAX to mean that a control has no matching query.
         if (protocol_query_hashes_.size() >= no_narrow_route) {
             return protocol_poison<void>(minimizer_generation_encoding_error::arithmetic_overflow);
         }

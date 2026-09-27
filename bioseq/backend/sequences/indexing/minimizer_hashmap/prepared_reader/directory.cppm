@@ -1,6 +1,6 @@
 /**
  * @file directory.cppm
- * @brief Admitted grouped-SoA directory ownership and decoding.
+ * @brief Loads grouped index directories within a memory budget and decodes their records.
  */
 module;
 
@@ -38,13 +38,13 @@ import bioseq.storage.size;
 
 export namespace bioseq::indexing {
 
-/// Decoded grouped-SoA control with its half-open position interval.
+/// One hash and its range [position_begin, position_end) in an extent's position array.
 struct grouped_soa_decoded_control {
     /// Minimizer hash represented by this control.
     std::uint64_t hash = 0;
-    /// Inclusive ordinal into the extent's decoded position array.
+    /// First position-array index for this hash.
     std::uint64_t position_begin = 0;
-    /// Exclusive ordinal into the extent's decoded position array.
+    /// Position-array index just past this hash's last position.
     std::uint64_t position_end = 0;
     /// Occurrence count capped at the persisted profile limit plus one.
     std::uint64_t saturated_count = 0;
@@ -52,9 +52,8 @@ struct grouped_soa_decoded_control {
     [[nodiscard]] bool operator==(const grouped_soa_decoded_control&) const = default;
 };
 
-/// Exact failure site retained alongside the stable wire error
-/// `minimizer_generation_encoding_error::admission`.  The numeric wire-error ABI does
-/// not change. These stats explain which owner or allocation was refused.
+/// Identifies the step that failed while reserving or allocating reader memory.
+/// It adds detail to minimizer_generation_encoding_error::admission.
 enum class grouped_soa_query_admission_stage : std::uint8_t {
     none,
     identity_and_directory_reservation,
@@ -75,7 +74,7 @@ enum class grouped_soa_query_admission_stage : std::uint8_t {
     position_image_reconcile,
 };
 
-/// Return the stable diagnostic name for an admission substage.
+/// Return the diagnostic name of a memory-allocation stage.
 [[nodiscard]] constexpr std::string_view
 grouped_soa_query_admission_substage_name(grouped_soa_query_admission_stage substage) noexcept {
     switch (substage) {
@@ -117,10 +116,9 @@ grouped_soa_query_admission_substage_name(grouped_soa_query_admission_stage subs
     return "unknown";
 }
 
-/// Frozen stats copied out before a failed reader releases its admitted
-/// storage. Capacity fields describe actual live owners at the failure site.
-/// the controller fields come from the exact rejection snapshot when one
-/// exists, otherwise from a read-only post-failure diagnostic snapshot.
+/// Memory statistics saved before a failed reader frees its buffers. Capacity
+/// fields describe allocations at the failure. Controller fields use its
+/// rejection snapshot when available, or a diagnostic snapshot taken afterward.
 struct grouped_soa_query_admission_stats {
     grouped_soa_query_admission_stage substage = grouped_soa_query_admission_stage::none;
     bioseq::parallelism::memory_admission_failure_reason controller_reason =
@@ -153,57 +151,55 @@ struct grouped_soa_query_admission_stats {
     bool injected_failure = false;
 };
 
-/// Deterministic portable allocation-failure hook.  Production callers leave
-/// this at `none`. Tests select one exact substage without attempting a huge
-/// allocation or depending on an operating-system overcommit policy.
+/// Lets tests force one memory failure at a chosen step. Production callers
+/// leave fail_admission_substage at none.
 struct grouped_soa_query_reader_options {
-    /// Admission substage at which tests request a deterministic failure.
+    /// Step at which a test should force a memory failure.
     grouped_soa_query_admission_stage fail_admission_substage =
         grouped_soa_query_admission_stage::none;
 };
 
-/// Exact reservation and ownership plan for the retained position image.
+/// Memory required for the final array of query positions.
 struct grouped_soa_position_image_plan {
-    /// Number of decoded positions to retain.
+    /// Number of decoded positions to store.
     std::uint64_t retained_position_count = 0;
     /// Exact bytes required by the final position array.
     std::uint64_t retained_position_bytes = 0;
-    /// Temporary allocation headroom beyond the exact array bytes.
+    /// Extra memory reserved during allocation, beyond the final array bytes.
     std::uint64_t allocation_headroom_bytes = 0;
-    /// Bytes already owned before allocating the position image.
+    /// Bytes already allocated before creating the position array.
     std::uint64_t owned_capacity_bytes = 0;
-    /// Permit size required after the final allocation.
+    /// Reservation required for the existing buffers and new position array.
     std::uint64_t projected_bytes = 0;
 };
 
-/// Cached byte totals for the trait-driven prepared reader. These fields
-/// account for the active `memory_permit`. Every field names one live
-/// allocation owner, and `total_bytes` is updated in constant time whenever
-/// that owner changes.
+/// Tracks the reader's allocated buffers and their total byte count.
+/// Each allocation change updates the total directly, so memory reservations
+/// do not need to scan every buffer.
 struct protocol_owned_bytes_ledger {
     /// Encoded and decoded directory bytes.
     std::uint64_t directory_bytes = 0;
-    /// Compact query-hash image bytes.
+    /// Bytes used by full query hashes or compact hash suffixes.
     std::uint64_t query_hash_bytes = 0;
-    /// Compact per-query state bytes.
+    /// Bytes used by query counts, position offsets and write counts.
     std::uint64_t query_record_bytes = 0;
-    /// High-bit radix-offset bytes.
+    /// Bytes used by the offsets into hash-prefix buckets.
     std::uint64_t radix_offset_bytes = 0;
-    /// Final decoded global-position bytes.
+    /// Bytes in the final array of global positions.
     std::uint64_t global_position_bytes = 0;
-    /// Directory-ordinal routing map bytes.
+    /// Bytes used to map directory entries to selected extents.
     std::uint64_t ordinal_map_bytes = 0;
     /// Selected-extent vector bytes.
     std::uint64_t selected_extent_vector_bytes = 0;
-    /// Selected-control owner bytes.
+    /// Bytes used by control boundaries and query routes inside selected extents.
     std::uint64_t selected_extent_owner_bytes = 0;
-    /// Per-query position-offset bytes.
+    /// Bytes in positions stored separately for individual queries.
     std::uint64_t query_record_position_bytes = 0;
-    /// Active control-payload scratch bytes.
+    /// Bytes reserved in the temporary control decode buffer.
     std::uint64_t control_scratch_bytes = 0;
-    /// Bytes retained by an in-progress row session.
+    /// Bytes recorded for an in-progress row session.
     std::uint64_t active_session_bytes = 0;
-    /// Cached sum of every named owner.
+    /// Cached sum of the allocation sizes above.
     std::uint64_t total_bytes = 0;
 
     protocol_owned_bytes_ledger() = default;
@@ -225,8 +221,8 @@ struct protocol_owned_bytes_ledger {
         return *this;
     }
 
-    /// Replace one already-accounted owner. The caller publishes its named
-    /// field only after this checked total update succeeds.
+    /// Replace an allocation's contribution to the total, checking for overflow.
+    /// The caller updates the corresponding field after this succeeds.
     [[nodiscard]] bool replace_checked(std::uint64_t old_bytes, std::uint64_t new_bytes) noexcept {
         if (old_bytes > total_bytes)
             return false;
@@ -238,13 +234,12 @@ struct protocol_owned_bytes_ledger {
         return true;
     }
 
-    /// Check a temporary coexistence peak before asking the active permit
-    /// to grow. No ownership is published by this helper.
+    /// Check whether temporary extra bytes can be added to the total without overflow.
     [[nodiscard]] bool add_temporary_peak_checked(std::uint64_t peak_bytes) const noexcept {
         return peak_bytes <= (std::numeric_limits<std::uint64_t>::max)() - total_bytes;
     }
 
-    /// Check that named owners sum exactly to the cached total.
+    /// Check that all allocation sizes add up to the cached total without overflow.
     [[nodiscard]] bool field_sum_holds() const noexcept {
         using bioseq::common::saturating_add;
         std::uint64_t sum = directory_bytes;
@@ -261,7 +256,7 @@ struct protocol_owned_bytes_ledger {
         return sum != (std::numeric_limits<std::uint64_t>::max)() && sum == total_bytes;
     }
 
-    /// Clear every named owner and the cached total.
+    /// Clear all recorded byte counts. This does not free the buffers they describe.
     void reset() noexcept {
         directory_bytes = 0;
         query_hash_bytes = 0;
@@ -278,19 +273,16 @@ struct protocol_owned_bytes_ledger {
     }
 };
 
-/// Pure checked byte plan used before any position-image reservation or
-/// allocation.  Tests can exercise adversarial counts without relying on
-/// virtual-memory overcommit or constructing a correspondingly huge payload.
+/// Calculate the memory needed for query positions without allocating it.
+/// Reject size calculations that overflow.
 [[nodiscard]] inline std::expected<grouped_soa_position_image_plan,
                                    minimizer_generation_encoding_error>
 plan_grouped_soa_position_image(std::uint64_t retained_position_count,
                                 std::uint64_t owned_capacity_bytes) noexcept {
     const std::uint64_t retained_position_bytes =
         bioseq::common::saturating_mul(retained_position_count, sizeof(std::uint64_t));
-    // The grouped-SoA image is one exact owned array: unlike a vector reserve,
-    // its requested element count and admitted ownership are both exactly P.
-    // Keep headroom explicit at zero so SQL stats can distinguish this
-    // path from conservative vector preallocation.
+    // The final position count is known, so this array needs no growth allowance.
+    // Report zero extra bytes in the allocation statistics.
     constexpr std::uint64_t allocation_headroom_bytes = 0u;
     const std::uint64_t projected_bytes =
         bioseq::common::saturating_add(owned_capacity_bytes, retained_position_bytes);
@@ -308,11 +300,11 @@ plan_grouped_soa_position_image(std::uint64_t retained_position_count,
 }
 namespace minimizer_prepared_reader_detail {
 
-/// Defines persisted scalar and ordering properties for one storage layout.
-/// @tparam p_layout Persisted generation layout represented by the traits.
+/// Selects decoded types and read order for a saved storage layout.
+/// @tparam p_layout Saved index layout.
 template <minimizer_generation_layout p_layout> struct codec_traits;
 
-/// Traits for the segment-local grouped-SoA image.
+/// Grouped-SoA reads every control extent before reading positions.
 template <> struct codec_traits<minimizer_generation_layout::grouped_soa_segment_local> {
     static constexpr minimizer_generation_layout layout =
         minimizer_generation_layout::grouped_soa_segment_local;
@@ -322,10 +314,9 @@ template <> struct codec_traits<minimizer_generation_layout::grouped_soa_segment
     static constexpr bool global_controls_then_positions = true;
 };
 
-/// Shared move-only admitted identity/directory owner used by both prepared
-/// grouped readers. codec_traits is the storage-layout authority. Callers
-/// cannot decode a directory under a different layout and relabel the facade.
-/// @tparam p_traits Layout traits controlling admission and validation.
+/// Owns checked generation metadata, a copied directory and its memory reservation.
+/// Every supplied record must use the layout selected by p_traits.
+/// @tparam p_traits Layout traits used for validation and reading.
 template <class p_traits> class admitted_prepared_reader_core {
   protected:
     bioseq::parallelism::memory_permit permit_{};
@@ -343,10 +334,9 @@ template <class p_traits> class admitted_prepared_reader_core {
     admitted_prepared_reader_core(const admitted_prepared_reader_core&) = delete;
     admitted_prepared_reader_core& operator=(const admitted_prepared_reader_core&) = delete;
 
-    /// Validate identity and metadata, reserve ownership, and install a copied directory.
-    ///
-    /// The destination must be fresh. Failure leaves it uninitialized and releases
-    /// every temporary permit and allocation.
+    /// Check the metadata and copy the directory after reserving its memory.
+    /// The destination must be fresh. Any failure leaves it unchanged and frees
+    /// temporary storage before releasing the reservation.
     [[nodiscard]] static std::expected<void, minimizer_generation_encoding_error>
     begin_admitted_core(
         admitted_prepared_reader_core& destination,
@@ -402,10 +392,8 @@ template <class p_traits> class admitted_prepared_reader_core {
             !valid) {
             return std::unexpected(valid.error());
         }
-        // Commit only after every fallible validation has completed. Until
-        // this point the local directory is destroyed before the local permit
-        // releases, and on success ownership moves exactly once into the
-        // already-constructed reader base subobject.
+        // Install the directory only after every check succeeds. On failure, the
+        // local directory is freed before its memory reservation is released.
         destination.permit_ = std::move(*permit);
         destination.directory_ = std::move(*directory);
         destination.head_ = head;
@@ -429,8 +417,8 @@ template <class p_traits> class admitted_prepared_reader_core {
 
 } // namespace minimizer_prepared_reader_detail
 
-/// Decode and validate one complete grouped-SoA control extent. Padding bytes are
-/// part of the corruption contract and must remain zero.
+/// Decode a complete control extent and check hash order, position ranges and
+/// saturated counts against the directory. Alignment padding must be zero.
 [[nodiscard]] inline std::expected<std::vector<grouped_soa_decoded_control>,
                                    minimizer_generation_encoding_error>
 decode_grouped_soa_controls(std::span<const std::byte> input,
@@ -512,8 +500,9 @@ decode_grouped_soa_controls(std::span<const std::byte> input,
     return controls;
 }
 
-/// Decode every grouped-SoA position to the ordinary global `(bp<<1)|strand`
-/// query ABI and validate strict order independently inside every hash range.
+/// Decode segment-local positions as global `(bp << 1) | strand` values.
+/// Check that encoded positions increase strictly within each hash's range.
+/// The caller supplies validated controls and a valid position width.
 [[nodiscard]] inline std::expected<std::vector<std::uint64_t>, minimizer_generation_encoding_error>
 decode_grouped_soa_positions(std::span<const std::byte> input,
                              std::span<const grouped_soa_decoded_control> controls,

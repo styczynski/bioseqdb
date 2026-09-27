@@ -1,6 +1,6 @@
 /**
  * @file read_execution.cppm
- * @brief Implements row validation, read sequencing, finalization, and lookup.
+ * @brief Checks index rows in storage order and makes completed query results available.
  */
 export module bioseq.indexing.minimizer_hashmap:prepared_reader_core_read_path_read_execution;
 
@@ -121,10 +121,8 @@ trait_driven_prepared_query_core<p_traits>::accept_protocol_row_impl(
                                                   row.bytes)) {
         return protocol_poison<void>(minimizer_generation_encoding_error::checksum);
     }
-    // Raw callers reached this point only after their mandatory row CRC
-    // traversal above. Receipt callers carry the same authenticated
-    // address-bound checksum. Compose the extent CRC algebraically in
-    // both cases and never reread the payload solely for another CRC.
+    // The row checksum has already been checked here or by the receipt issuer.
+    // Combine it into the extent checksum without scanning the payload again.
     session.crc.value =
         crc64_append_validated_index_chunk_payload(session.crc.checksum(),
                                                    row.address,

@@ -1,6 +1,6 @@
 /**
  * @file core_read_path.cppm
- * @brief Trait-driven admitted grouped-SoA query read path.
+ * @brief Exports the query reader's memory, routing, decoding and row-processing modules.
  */
 export module bioseq.indexing.minimizer_hashmap:prepared_reader_core_read_path;
 
