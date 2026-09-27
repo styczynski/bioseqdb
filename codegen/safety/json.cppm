@@ -20,11 +20,11 @@ export module bioseq.codegen.safety:json;
 
 export namespace bioseq::codegen::safety {
 
-/// Minimal deterministic JSON value used by safety wire formats.
+/// JSON value used by safety reports.
 ///
-/// Objects use ordered keys so rendering is byte-stable. Integers are limited
-/// to the signed 64-bit range accepted by the parser, and non-finite floating
-/// values are rejected before they can produce invalid JSON.
+/// Object keys are sorted so the same value produces the same bytes.
+/// Integers must fit in a signed 64-bit value, and floating-point values
+/// must be finite.
 struct json_value {
     using array = std::vector<json_value>;
     using object =
@@ -479,12 +479,12 @@ inline void render_into(
 
 }  // namespace json_detail
 
-/// Parses one complete RFC 8259 JSON value.
+/// Parses one JSON value and rejects trailing input.
 [[nodiscard]] inline json_value parse_json(std::string_view input) {
     return json_detail::parser{input}.parse();
 }
 
-/// Renders canonical, ordered, newline-terminated JSON bytes.
+/// Renders JSON with sorted object keys and a final newline.
 [[nodiscard]] inline std::string render_json(
     const json_value& input,
     std::size_t indentation = 2) {
@@ -494,7 +494,7 @@ inline void render_into(
     return result;
 }
 
-/// Returns an object value or throws a context-rich type error.
+/// Returns the object, or reports a type error using the supplied context.
 [[nodiscard]] inline const json_value::object& json_object(
     const json_value& input,
     std::string_view context) {
@@ -506,7 +506,7 @@ inline void render_into(
         std::string{context} + " must be a JSON object");
 }
 
-/// Returns an array value or throws a context-rich type error.
+/// Returns the array, or reports a type error using the supplied context.
 [[nodiscard]] inline const json_value::array& json_array(
     const json_value& input,
     std::string_view context) {
@@ -532,7 +532,7 @@ inline void render_into(
     return found->second;
 }
 
-/// Returns a string value or throws a context-rich type error.
+/// Returns a view of the string, or reports a type error using the supplied context.
 [[nodiscard]] inline std::string_view json_string(
     const json_value& input,
     std::string_view context) {
@@ -544,7 +544,7 @@ inline void render_into(
         std::string{context} + " must be a JSON string");
 }
 
-/// Returns a Boolean value or throws a context-rich type error.
+/// Returns the Boolean, or reports a type error using the supplied context.
 [[nodiscard]] inline bool json_boolean(
     const json_value& input,
     std::string_view context) {
@@ -555,7 +555,7 @@ inline void render_into(
         std::string{context} + " must be a JSON boolean");
 }
 
-/// Returns a signed integer value or throws a context-rich type error.
+/// Returns the signed integer, or reports a type error using the supplied context.
 [[nodiscard]] inline std::int64_t json_integer(
     const json_value& input,
     std::string_view context) {
