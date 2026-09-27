@@ -1,6 +1,6 @@
 /**
  * @file pipeline/pipeline_stats.cppm
- * @brief Public facade for pipeline execution statistics.
+ * @brief Exports pipeline execution statistics and their aggregation helpers.
  */
 export module bioseq.pipeline.stats;
 

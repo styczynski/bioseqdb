@@ -1,6 +1,6 @@
 /**
  * @file pipeline/pipeline_stats_parts/identities.cppm
- * @brief Stable pipeline identities, stage coverage, and timing contracts.
+ * @brief Names, stage counters and timing fields used in pipeline reports.
  */
 export module bioseq.pipeline.stats:identities;
 
@@ -9,7 +9,7 @@ import bioseq.common.checked_arithmetic;
 
 export namespace bioseq::pipeline_stats {
 
-/// Requested or actually executed biological compute backend.
+/// Requested backend or the backend recorded during execution.
 enum class executed_backend : std::uint8_t {
     none,
     scalar_cpu,
@@ -18,12 +18,12 @@ enum class executed_backend : std::uint8_t {
     mixed_invalid,
 #if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS) || defined(BIOSEQ_TEST_INDEXES)
     mixed_cpu = 5,
-    /// Selected Vulkan seed/chain prefix with the required host suffix.
+    /// Vulkan seed lookup or chaining, with CPU backtracking and alignment.
     hybrid_cpu_vulkan = 6,
 #endif
 };
 
-/// Proven origin of the target minimizer index consumed by a job.
+/// How the job obtained its target minimizer index.
 enum class target_index_source : std::uint8_t {
     none,
     recomputed,
@@ -31,10 +31,8 @@ enum class target_index_source : std::uint8_t {
     mixed_invalid,
 };
 
-/// Statement-stable identity for the requested and operation-observed SIMD
-/// chaining policy. This deliberately has its own none/mixed sentinels rather
-/// than overloading the algorithm enum: pipeline aggregation must distinguish
-/// "no SIMD policy applies" from "two concrete policy identities were mixed".
+/// SIMD chaining policy recorded for a statement. none means no policy was
+/// recorded. mixed_invalid means the observations disagree.
 enum class simd_chaining_policy_identity : std::uint8_t {
     none,
     exact_visited,
@@ -42,10 +40,8 @@ enum class simd_chaining_policy_identity : std::uint8_t {
     mixed_invalid,
 };
 
-/// Statement-stable identity for the SIMD base-alignment algorithm.  This is
-/// intentionally narrower than base_alignment_algorithm: the SIMD stats
-/// object only needs to distinguish an authentic Block Aligner execution from
-/// absence or a mixed/forbidden alignment route.
+/// SIMD alignment algorithm recorded for a statement. Block Aligner is the
+/// supported value, with separate states for missing or conflicting records.
 enum class simd_alignment_algorithm_identity : std::uint8_t {
     none,
     block_aligner,
@@ -53,7 +49,7 @@ enum class simd_alignment_algorithm_identity : std::uint8_t {
 };
 
 #if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS) || defined(BIOSEQ_TEST_INDEXES)
-/// Statement-stable requested/operation-observed minimizer identity.
+/// Minimizer algorithm requested or recorded during execution.
 enum class minimizer_algorithm_identity : std::uint8_t {
     none,
     scalar,
@@ -64,7 +60,7 @@ enum class minimizer_algorithm_identity : std::uint8_t {
     mixed_invalid,
 };
 
-/// Statement-stable requested/operation-observed chaining identity.
+/// Chaining algorithm requested or recorded during execution.
 enum class chaining_algorithm_identity : std::uint8_t {
     none,
     scalar_minimap2,
@@ -74,9 +70,9 @@ enum class chaining_algorithm_identity : std::uint8_t {
     mixed_invalid,
 };
 
-/// Statement-stable requested/operation-observed base-alignment identity.
-/// Vulkan simple-CIGAR is a distinct completed operation, not a Block Aligner
-/// execution merely because the public selector uses the block-alignment slot.
+/// Alignment algorithm requested or recorded during execution. Vulkan
+/// simple-CIGAR has its own value even when selected through the public
+/// Block Aligner option.
 enum class base_alignment_algorithm_identity : std::uint8_t {
     none,
     ksw2,
@@ -85,7 +81,7 @@ enum class base_alignment_algorithm_identity : std::uint8_t {
     mixed_invalid,
 };
 
-/// Return the stable public spelling of a minimizer identity.
+/// Return the minimizer algorithm name used in reports.
 [[nodiscard]] constexpr std::string_view
 minimizer_algorithm_identity_name(minimizer_algorithm_identity algorithm) noexcept {
     switch (algorithm) {
@@ -107,7 +103,7 @@ minimizer_algorithm_identity_name(minimizer_algorithm_identity algorithm) noexce
     return "mixed_invalid";
 }
 
-/// Return the stable public spelling of a chaining identity.
+/// Return the chaining algorithm name used in reports.
 [[nodiscard]] constexpr std::string_view
 chaining_algorithm_identity_name(chaining_algorithm_identity algorithm) noexcept {
     switch (algorithm) {
@@ -127,7 +123,7 @@ chaining_algorithm_identity_name(chaining_algorithm_identity algorithm) noexcept
     return "mixed_invalid";
 }
 
-/// Return the stable public spelling of a base-alignment identity.
+/// Return the alignment algorithm name used in reports.
 [[nodiscard]] constexpr std::string_view
 base_alignment_algorithm_identity_name(base_alignment_algorithm_identity algorithm) noexcept {
     switch (algorithm) {
@@ -145,7 +141,7 @@ base_alignment_algorithm_identity_name(base_alignment_algorithm_identity algorit
     return "mixed_invalid";
 }
 
-/// Merge repeated observations, retaining concrete disagreement explicitly.
+/// Combine minimizer observations. Different recorded algorithms give mixed_invalid.
 [[nodiscard]] constexpr minimizer_algorithm_identity
 merge_minimizer_algorithm_identity(minimizer_algorithm_identity lhs,
                                    minimizer_algorithm_identity rhs) noexcept {
@@ -158,7 +154,7 @@ merge_minimizer_algorithm_identity(minimizer_algorithm_identity lhs,
     return minimizer_algorithm_identity::mixed_invalid;
 }
 
-/// Merge repeated observations, retaining concrete disagreement explicitly.
+/// Combine chaining observations. Different recorded algorithms give mixed_invalid.
 [[nodiscard]] constexpr chaining_algorithm_identity
 merge_chaining_algorithm_identity(chaining_algorithm_identity lhs,
                                   chaining_algorithm_identity rhs) noexcept {
@@ -171,7 +167,7 @@ merge_chaining_algorithm_identity(chaining_algorithm_identity lhs,
     return chaining_algorithm_identity::mixed_invalid;
 }
 
-/// Merge repeated base-alignment observations without concealing disagreement.
+/// Combine alignment observations. Different recorded algorithms give mixed_invalid.
 [[nodiscard]] constexpr base_alignment_algorithm_identity
 merge_base_alignment_algorithm_identity(base_alignment_algorithm_identity lhs,
                                         base_alignment_algorithm_identity rhs) noexcept {
@@ -184,13 +180,8 @@ merge_base_alignment_algorithm_identity(base_alignment_algorithm_identity lhs,
     return base_alignment_algorithm_identity::mixed_invalid;
 }
 #endif
-/// @brief Return the stable public spelling used by PostgreSQL and reporting.
-///
-/// Keep this on the aggregate identity rather than translating through the algorithm-local enum:
-/// `none` and `mixed_invalid` are statement-level states that the local policy
-/// type deliberately cannot represent.
-/// @param[in] policy Aggregate SIMD chaining-policy identity.
-/// @return Stable report spelling for `policy`.
+/// Return the SIMD chaining policy name used in SQL and reports.
+/// This includes none and mixed_invalid for aggregate statistics.
 [[nodiscard]] constexpr std::string_view
 simd_chaining_policy_identity_name(simd_chaining_policy_identity policy) noexcept {
     switch (policy) {
@@ -206,9 +197,7 @@ simd_chaining_policy_identity_name(simd_chaining_policy_identity policy) noexcep
     return "mixed_invalid";
 }
 
-/// @brief Return the stable report name of a SIMD alignment identity.
-/// @param[in] algorithm Aggregate SIMD alignment identity.
-/// @return Stable report spelling for `algorithm`.
+/// Return the SIMD alignment name used in reports.
 [[nodiscard]] constexpr std::string_view
 simd_alignment_algorithm_identity_name(simd_alignment_algorithm_identity algorithm) noexcept {
     switch (algorithm) {
@@ -222,7 +211,7 @@ simd_alignment_algorithm_identity_name(simd_alignment_algorithm_identity algorit
     return "mixed_invalid";
 }
 
-/// Mutually exclusive engine credited with executing one pipeline stage.
+/// Engine recorded as executing a pipeline stage.
 enum class execution_engine : std::uint8_t {
     host_io,
     scalar_cpu,
@@ -231,7 +220,7 @@ enum class execution_engine : std::uint8_t {
     count,
 };
 
-/// Stable SQL/report ordinal for every attested pipeline stage.
+/// Fixed pipeline-stage numbers used in SQL and reports.
 enum class pipeline_stage : std::uint8_t {
     query_sketch = 0,
     target_sketch = 1,
@@ -259,10 +248,10 @@ enum class pipeline_stage : std::uint8_t {
 /// Number of real execution engines, excluding the count sentinel.
 inline constexpr std::size_t k_execution_engine_count =
     static_cast<std::size_t>(execution_engine::count);
-/// Number of stable pipeline-stage ordinals, excluding the count sentinel.
+/// Number of pipeline stages, excluding the count sentinel.
 inline constexpr std::size_t k_pipeline_stage_count =
     static_cast<std::size_t>(pipeline_stage::count);
-/// Sentinel used when no failing target/query ordinal has been recorded.
+/// Sentinel used when no target/query ordinal has been recorded.
 inline constexpr std::uint64_t k_unset_job_ordinal = (std::numeric_limits<std::uint64_t>::max)();
 /// Largest value representable by SQL bigint without lossy conversion.
 inline constexpr std::uint64_t k_sql_bigint_value_max =
@@ -271,9 +260,7 @@ inline constexpr std::uint64_t k_sql_bigint_value_max =
 inline constexpr std::uint32_t k_sql_integer_value_max =
     static_cast<std::uint32_t>((std::numeric_limits<std::int32_t>::max)());
 
-/// @brief Return the stable report name for a biological backend value.
-/// @param[in] backend Backend identity to format.
-/// @return Stable report spelling for `backend`.
+/// Return the backend name used in reports, or unknown for an invalid value.
 [[nodiscard]] constexpr std::string_view executed_backend_name(executed_backend backend) noexcept {
     switch (backend) {
     case executed_backend::none:
@@ -296,9 +283,7 @@ inline constexpr std::uint32_t k_sql_integer_value_max =
     return "unknown";
 }
 
-/// @brief Return the stable report name for a target-index source value.
-/// @param[in] source Target-index source identity to format.
-/// @return Stable report spelling for `source`.
+/// Return the target-index source name, or unknown for an invalid value.
 [[nodiscard]] constexpr std::string_view
 target_index_source_name(target_index_source source) noexcept {
     switch (source) {
@@ -314,9 +299,7 @@ target_index_source_name(target_index_source source) noexcept {
     return "unknown";
 }
 
-/// @brief Return the stable report name for an execution engine value.
-/// @param[in] engine Execution-engine identity to format.
-/// @return Stable report spelling for `engine`.
+/// Return the execution-engine name, or unknown for an invalid value.
 [[nodiscard]] constexpr std::string_view execution_engine_name(execution_engine engine) noexcept {
     switch (engine) {
     case execution_engine::host_io:
@@ -333,9 +316,7 @@ target_index_source_name(target_index_source source) noexcept {
     return "unknown";
 }
 
-/// @brief Return the stable report/SRF name for a pipeline-stage ordinal.
-/// @param[in] stage Pipeline-stage identity to format.
-/// @return Stable report spelling for `stage`.
+/// Return the pipeline-stage name used in SQL and reports.
 [[nodiscard]] constexpr std::string_view pipeline_stage_name(pipeline_stage stage) noexcept {
     switch (stage) {
     case pipeline_stage::query_sketch:
@@ -384,27 +365,18 @@ target_index_source_name(target_index_source source) noexcept {
     return "unknown";
 }
 
-/// @brief Convert a validated engine enum to its coverage-array index.
-/// @param[in] engine Validated execution-engine identity.
-/// @return Array index corresponding to `engine`.
+/// Convert a valid engine value to an array index. The caller checks the value.
 [[nodiscard]] constexpr std::size_t engine_index(execution_engine engine) noexcept {
     return static_cast<std::size_t>(engine);
 }
 
-/// @brief Convert a validated stage enum to its coverage-array index.
-/// @param[in] stage Validated pipeline-stage identity.
-/// @return Array index corresponding to `stage`.
+/// Convert a valid stage value to an array index. The caller checks the value.
 [[nodiscard]] constexpr std::size_t stage_index(pipeline_stage stage) noexcept {
     return static_cast<std::size_t>(stage);
 }
 
-/// @brief Merge a SQL-bound count/time/byte value with shared saturating arithmetic.
-///
-/// PostgreSQL bigint is signed, so values clamp at
-/// INT64_MAX. An exact sum of INT64_MAX is representable and is not saturation.
-/// @param[in,out] destination SQL-bound accumulator to update.
-/// @param[in] increment Value to add before clamping.
-/// @return `true` when the destination had to be clamped.
+/// Add a counter, clamping values above the SQL bigint limit.
+/// Return true if clamping was needed. An exact INT64_MAX result still fits.
 [[nodiscard]] inline bool merge_counter(std::uint64_t& destination,
                                         std::uint64_t increment) noexcept {
     if (destination > k_sql_bigint_value_max) {
@@ -419,10 +391,8 @@ target_index_source_name(target_index_source source) noexcept {
     return false;
 }
 
-/// Target-independent projection of the operation-local Block Aligner stats.
-/// Every field is copied at the dispatch boundary from
-/// block_aligner_execution_stats. Stage coverage and generic SIMD counters are
-/// never used to manufacture these statistics.
+/// Block Aligner counters copied from one operation for pipeline reporting.
+/// These fields record the kernel's work independently of general stage counts.
 struct block_aligner_stage_stats {
     bool is_available = false;
     bool is_accepted = false;
@@ -438,11 +408,9 @@ struct block_aligner_stage_stats {
     [[nodiscard]] constexpr bool
     operator==(const block_aligner_stage_stats&) const noexcept = default;
 
-    /// @brief Merge independently captured operation statistics.
-    ///
-    /// Every available operand must be accepted and SQL-bound counter overflow revokes it.
-    /// @param[in] rhs Operation-local statistics to merge.
-    /// @return `true` when either operand or the merged result is saturated.
+    /// Add Block Aligner counters and require every available record to be accepted.
+    /// Overflow or nonempty records marked unavailable make the result unaccepted.
+    /// Return true if the combined record is saturated.
     [[nodiscard]] bool merge(const block_aligner_stage_stats& rhs) noexcept {
         if (!rhs.is_available) {
             const bool malformed_absence =
@@ -482,13 +450,8 @@ struct block_aligner_stage_stats {
     }
 };
 
-/// @brief Count distinct logical target-row identities in-place.
-///
-/// Physical payload coalescing is deliberately irrelevant: two relation rows with identical
-/// sequence bytes remain two logical targets, while repeated observations of
-/// the same row identity collapse to one target outcome.
-/// @param[in,out] logical_rows Row identities reordered in-place for deduplication.
-/// @return Number of distinct row identities after in-place ordering.
+/// Count distinct target row IDs, sorting the supplied span in place.
+/// Rows with equal sequence bytes still count separately when their IDs differ.
 [[nodiscard]] inline std::uint64_t
 count_unique_logical_target_rows(std::span<std::uint64_t> logical_rows) {
     std::sort(logical_rows.begin(), logical_rows.end());
@@ -496,7 +459,8 @@ count_unique_logical_target_rows(std::span<std::uint64_t> logical_rows) {
     return static_cast<std::uint64_t>(unique_end - logical_rows.begin());
 }
 
-/// Binary per-job coverage or its saturating statement aggregate.
+/// Jobs eligible for a stage, split by execution engine and fallback use.
+/// A single job contributes binary values. Statement totals add those values.
 struct stage_coverage {
     std::uint64_t eligible_jobs = 0;
     std::array<std::uint64_t, k_execution_engine_count> executed_jobs{};
@@ -504,9 +468,7 @@ struct stage_coverage {
 
     [[nodiscard]] constexpr bool operator==(const stage_coverage&) const noexcept = default;
 
-    /// @brief Saturating merge of one stage coverage value.
-    /// @param[in] rhs Stage coverage to merge.
-    /// @return `true` when at least one merged counter saturated.
+    /// Add stage counts and return true if a counter exceeds the SQL bigint limit.
     [[nodiscard]] bool merge(const stage_coverage& rhs) noexcept {
         bool is_saturated = merge_counter(eligible_jobs, rhs.eligible_jobs);
         for (std::size_t i = 0; i < executed_jobs.size(); ++i) {
@@ -517,16 +479,14 @@ struct stage_coverage {
     }
 };
 
-/// Coverage for every stable pipeline-stage ordinal.
+/// Per-stage job counts for the pipeline.
 struct pipeline_job_stage_coverage {
     std::array<stage_coverage, k_pipeline_stage_count> coverage{};
 
     [[nodiscard]] constexpr bool
     operator==(const pipeline_job_stage_coverage&) const noexcept = default;
 
-    /// @brief Merge all stage coverages and report whether any count is saturated.
-    /// @param[in] rhs Per-stage coverage to merge.
-    /// @return `true` when at least one stage counter saturated.
+    /// Add all stage counts and report whether any counter was clamped.
     [[nodiscard]] bool merge(const pipeline_job_stage_coverage& rhs) noexcept {
         bool is_saturated = false;
         for (std::size_t i = 0; i < coverage.size(); ++i) {
@@ -544,12 +504,8 @@ struct pipeline_stage_timing {
     [[nodiscard]] constexpr bool operator==(const pipeline_stage_timing&) const noexcept = default;
 };
 
-/// @brief Merge a lossless u64 identity that may be published exactly once.
-/// @param[in,out] destination Retained identity value.
-/// @param[in,out] destination_available Presence bit for `destination`.
-/// @param[in] incoming Incoming identity value.
-/// @param[in] incoming_available Presence bit for `incoming`.
-/// @param[in,out] has_identity_conflict Retained fail-closed conflict flag.
+/// Keep an identity that may be reported once. A second present value is a
+/// conflict, even if equal. Nonzero data marked absent also sets the conflict flag.
 inline void merge_report_once_identity(std::uint64_t& destination,
                                        bool& destination_available,
                                        std::uint64_t incoming,

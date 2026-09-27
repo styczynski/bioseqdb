@@ -1,6 +1,6 @@
 /**
  * @file pipeline/pipeline_stats_parts/aggregation.cppm
- * @brief Operational and statement-level pipeline statistics aggregation.
+ * @brief Combine pipeline work counters and validate statement statistics.
  */
 export module bioseq.pipeline.stats:aggregation;
 
@@ -16,7 +16,7 @@ export import bioseq.pipeline.minimap_parameters_contract;
 
 export namespace bioseq::pipeline_stats {
 
-/// Once-per-buffer operational counters and report-once identities.
+/// Work counters recorded once per buffer, plus identities reported once.
 struct pipeline_operational_stats {
     std::array<pipeline_stage_timing, k_pipeline_stage_count> timing{};
     std::uint64_t gpu_runtime_init_ns = 0;
@@ -35,9 +35,8 @@ struct pipeline_operational_stats {
     std::uint64_t cpu_prepared_index_reuses = 0;
     std::uint64_t cpu_prepared_unique_keys = 0;
     std::uint64_t cpu_prepared_duplicate_build_attempts = 0;
-    // Arbitrary u64 CRC identities, not additive SQL bigint counters. Future
-    // serializers emit NULL when *_available is false and lossless u64 text when
-    // true (CRC zero is valid and is distinguished by the availability bit).
+    // Keep the full 64-bit checksum. Zero is valid, so a separate flag
+    // records presence. These values are reported once and never added.
     std::uint64_t cpu_prepared_key_set_checksum = 0;
     bool cpu_prepared_key_set_checksum_available = false;
     std::uint64_t cpu_prepared_build_set_checksum = 0;
@@ -105,10 +104,8 @@ struct pipeline_operational_stats {
     grouped_soa_provider_stats grouped_soa_provider{};
     bioseq::indexing::prepared_fragment_anchor_batch_stats fragment_native_query_stats{};
     hash_major_index_reader_stats hash_major_index_reader{};
-    // Continuation-kernel vector batches and resident vector_stream calls are
-    // distinct execution units. Keep both truthful; callers that only need an
-    // authenticity witness use has_nthash_vector_activity() instead of
-    // relabelling one resident kernel call as one continuation batch.
+    // Count continuation vector batches and resident vector_stream calls
+    // separately. has_nthash_vector_activity() accepts work from either kernel.
     std::uint64_t nthash_vector_batches = 0;
     std::uint64_t nthash_resident_vector_stream_kernel_calls = 0;
     std::uint64_t nthash_scalar_backend_branches = 0;
@@ -162,8 +159,8 @@ struct pipeline_operational_stats {
     std::uint64_t gpu_seed_dispatches = 0;
     std::uint64_t gpu_chain_dispatches = 0;
     std::uint64_t gpu_chain_backtrack_dispatches = 0;
-    // Distinct algorithm identity: coordinate vote is not tiled-DP chaining
-    // or predecessor backtracking and must never satisfy either stats counter.
+    // Coordinate voting has its own counter because it does not run
+    // tiled-DP chaining or predecessor backtracking.
     std::uint64_t gpu_coordinate_vote_dispatches = 0;
     std::uint64_t gpu_extend_dispatches = 0;
     std::uint64_t gpu_target_window_request_dispatches = 0;
@@ -189,9 +186,8 @@ struct pipeline_operational_stats {
     std::uint64_t full_segment_hydrations = 0;
     std::uint64_t backend_declines = 0;
     std::uint64_t backend_fallbacks = 0;
-    // Cold grouped-SoA source/route stats. The conversion counters name only
-    // pair-index transformation work while segment-local direct-reader
-    // validation is tracked independently.
+    // Count persisted-source reads and pair-index conversions here.
+    // Direct grouped-SoA validation has its own counter below.
     std::uint64_t persisted_source_parent_rows_read = 0;
     std::uint64_t persisted_source_catalog_rows_read = 0;
     std::uint64_t persisted_source_catalog_index_scans = 0;
@@ -199,14 +195,11 @@ struct pipeline_operational_stats {
     std::uint64_t persisted_source_decoded_bp = 0;
     std::uint64_t persisted_pair_index_conversion_calls = 0;
     std::uint64_t persisted_segment_rebase_calls = 0;
-    // Runtime-only stats recording that the selected fixed-target grouped-SoA
-    // validator executes. Plan construction cannot know the persisted wire
-    // format selected for a row, so this counter is populated only from the
-    // completed prepared grouped-SoA query-reader route stats.
+    // Count completed grouped-SoA reader validation. Planning cannot
+    // determine the stored format of a particular target row.
     std::uint64_t indexing_grouped_soa_validate_calls = 0;
-    // PostgreSQL cold persisted-index preparation. These are execution
-    // diagnostics only; backend/fallback acceptance remains owned by the
-    // existing requested/actual stage stats above.
+    // Measure PostgreSQL work while opening and preparing persisted indexes.
+    // Backend acceptance still depends on the requested and recorded stages.
     std::uint64_t cold_index_target_relation_reuses = 0;
     std::uint64_t cold_index_target_relation_extra_opens = 0;
     std::uint64_t cold_index_parent_random_reads = 0;
@@ -265,34 +258,23 @@ struct pipeline_operational_stats {
     std::uint64_t cold_index_close_ns = 0;
     std::uint64_t cold_index_shared_blks_hit = 0;
     std::uint64_t cold_index_shared_blks_read = 0;
-    // Dedicated fail-closed identity signal; independent from numeric
-    // saturation because arbitrary u64 identities are never clamped.
+    // Keep identity conflicts separate from counter overflow. Full 64-bit
+    // identities must remain unchanged when counters reach their SQL limit.
     bool has_operational_identity_conflict = false;
     bool are_stats_saturated = false;
 
-    // Defaulted comparison is deliberately member-wise. It includes every
-    // timing, counter, identity value/presence bit, and failure flag without
-    // observing object padding (memcmp is forbidden for stats values).
+    // Compare fields, including presence and failure flags. Object padding
+    // must not affect equality of statistics.
     [[nodiscard]] constexpr bool
     operator==(const pipeline_operational_stats&) const noexcept = default;
 
-    /// @brief Report authentic vector activity from either permitted nthash kernel.
-    ///
-    /// Activity may originate from the continuation kernel
-    /// or the whole-range resident vector_stream kernel. The two counts remain
-    /// separately interpretable above.
-    /// @return `true` when either authentic vector execution counter is nonzero.
+    /// Check whether either nthash kernel recorded vector work.
     [[nodiscard]] constexpr bool has_nthash_vector_activity() const noexcept {
         return nthash_vector_batches != 0 || nthash_resident_vector_stream_kernel_calls != 0;
     }
 
-    /// @brief Merge one completed operation-local prefilter stats.
-    ///
-    /// The authoritative
-    /// stats type owns all counter arithmetic and invariants. The statement
-    /// aggregate only retains its presence and propagates invalidity into the
-    /// existing fail-closed operational saturation signal.
-    /// @param[in] stats Completed operation-local prefilter statistics.
+    /// Add completed prefilter statistics and mark them present. Invalid combined
+    /// counters set both the prefilter and operational saturation flags.
     void record_prefilter_execution_stats(
         const ::bioseq::prefilter::prefilter_execution_stats& stats) noexcept {
         prefilter_stats.merge(stats);
@@ -304,10 +286,9 @@ struct pipeline_operational_stats {
     }
 
 #if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
-    /// @brief Merge requested and operation-observed algorithm identities.
-    ///
-    /// Requested/observed disagreement is deliberately retained as a fallback
-    /// observation; only disagreement within either channel is a conflict.
+    /// Combine requested and recorded algorithms separately. Differences between
+    /// them preserve fallback information. Conflicting repeated selections or
+    /// missing required identities set the conflict flag.
     void record_algorithm_identities(
         const minimizer_algorithm_identity requested_minimizer,
         const minimizer_algorithm_identity observed_minimizer,
@@ -345,7 +326,7 @@ struct pipeline_operational_stats {
     }
 #endif
 
-    /// @brief Record one exact invocation-level downstream interval union.
+    /// Add a call's downstream active time, or record that its timing was unavailable.
     void record_downstream_active_wall(const std::uint64_t elapsed_ns,
                                        const bool available) noexcept {
         are_stats_saturated =
@@ -361,7 +342,7 @@ struct pipeline_operational_stats {
     }
 
 #if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
-    /** Publish the sole finalized statement-owned excluded-interval receipt. */
+    /** Store the finalized statement interval union. A second report invalidates it. */
     void record_benchmark_e2e_interval_union(
         ::bioseq::simd::benchmark_e2e_interval_union_receipt receipt) noexcept {
         if (benchmark_e2e_interval_union_invocations != 0u) {
@@ -376,7 +357,7 @@ struct pipeline_operational_stats {
 #endif
 
 #if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
-    /// @brief Merge a completed MAPQ execution observation.
+    /// Record whether MAPQ ran and flag disagreement between observations.
     void record_mapq_execution(const bool executed) noexcept {
         if (!mapq_execution_available) {
             mapq_execution_available = true;
@@ -388,8 +369,8 @@ struct pipeline_operational_stats {
     }
 #endif
 
-    /// @brief Merge one operational delta without multiplying it by logical jobs.
-    /// @param[in] rhs Operation-local delta to merge.
+    /// Add one buffer's work counters once, regardless of its number of jobs.
+    /// Preserve identity conflicts and overflow when combining nested records.
     void merge(const pipeline_operational_stats& rhs) noexcept {
         using prefilter_stats_type = ::bioseq::prefilter::prefilter_execution_stats;
         const prefilter_stats_type empty_prefilter_stats{};
@@ -714,7 +695,8 @@ struct pipeline_operational_stats {
 static_assert(std::is_trivially_copyable_v<pipeline_operational_stats>);
 static_assert(std::is_standard_layout_v<pipeline_operational_stats>);
 
-/// Saturating statement/node aggregate of job and operational stats.
+/// Combined job and work statistics for a statement or execution node.
+/// Counters clamp at SQL limits and keep a failure flag.
 struct pipeline_execution_stats {
     executed_backend requested_backend = executed_backend::none;
     executed_backend actual_backend = executed_backend::none;
@@ -734,9 +716,8 @@ struct pipeline_execution_stats {
     std::uint64_t attempted_alignment_jobs = 0;
     std::uint64_t fully_attested_alignment_jobs = 0;
     std::uint64_t unattested_alignment_jobs = 0;
-    // Internal merge provenance. These are intentionally not part of the SQL
-    // ABI: they let an aggregate-level identity/environment failure name the
-    // first attempted job that must be reclassified.
+    // Remember the first attempted job so an aggregate failure can identify
+    // the earliest affected job. These fields are internal to merging.
     std::uint64_t first_attempted_target_row = k_unset_job_ordinal;
     std::uint64_t first_attempted_query_ordinal = k_unset_job_ordinal;
     std::uint64_t first_unattested_target_row = k_unset_job_ordinal;
@@ -745,25 +726,20 @@ struct pipeline_execution_stats {
     pipeline_job_stage_coverage stages{};
     pipeline_operational_stats operational{};
 
-    /// @brief Reclassify every attempted job after aggregate stats become lossy.
-    ///
-    /// Once aggregate arithmetic or a report-once identity becomes lossy, no
-    /// subset may continue to appear fully attested. Preserve the first
-    /// attempted coordinates so the fail-closed transition remains diagnosable.
+    /// Mark every attempted job as unvalidated after an aggregate failure.
+    /// Keep the first job's coordinates for the failure report.
     void reclassify_all_attempted_jobs() noexcept {
         if (attempted_alignment_jobs == 0)
             return;
         fully_attested_alignment_jobs = 0;
         unattested_alignment_jobs = attempted_alignment_jobs;
-        // A global downgrade includes every earlier job, so its first failure
-        // is necessarily the first attempt, not the later job that exposed the
-        // drift or malformed stats.
+        // The failure now affects all jobs, including the first attempt.
         first_unattested_target_row = first_attempted_target_row;
         first_unattested_query_ordinal = first_attempted_query_ordinal;
     }
 
-    /// @brief Validate and merge one logical target-query stats exactly once.
-    /// @param[in] job Complete job-level attestation to merge.
+    /// Validate and add one target-query job. The caller must submit each job once.
+    /// Conflicts, rejected execution or overflow remove validation from all jobs.
     void merge_job(const pipeline_job_execution_stats& job
 #if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
                    , const bool authenticated_query_empty_recomputed_bypass = false
@@ -859,8 +835,7 @@ struct pipeline_execution_stats {
         }
     }
 
-    /// @brief Merge a once-per-buffer operational delta.
-    /// @param[in] batch Once-per-buffer operational delta.
+    /// Add a buffer's work statistics once and invalidate job validation on failure.
     void merge_operational(const pipeline_operational_stats& batch) noexcept {
         operational.merge(batch);
         if (operational.are_stats_saturated || operational.has_operational_identity_conflict ||
@@ -871,11 +846,7 @@ struct pipeline_execution_stats {
         }
     }
 
-    /// @brief Detect actual Vulkan work before interpreting a mixed diagnostic.
-    ///
-    /// Selection labels alone are intentionally insufficient.
-    /// @param[in] stats Aggregate statistics to inspect.
-    /// @return `true` when stage timing or operational counters prove Vulkan execution.
+    /// Check for recorded GPU activity, including setup, dispatch or timing.
     [[nodiscard]] static constexpr bool
     has_gpu_execution_stats(const pipeline_execution_stats& stats) noexcept {
         const auto& operational = stats.operational;
@@ -915,9 +886,8 @@ struct pipeline_execution_stats {
                operational.gpu_pipeline_creates != 0;
     }
 
-    /// @brief Validate an all-unattested diagnostic without promoting it to stats.
-    /// @param[in] stats Aggregate diagnostic to validate.
-    /// @return `true` when the mixed diagnostic retains a valid concrete environment.
+    /// Check the environment of a mixed-backend diagnostic whose jobs are all
+    /// unvalidated. This keeps diagnostic details available after route validation fails.
     [[nodiscard]] static constexpr bool
     is_diagnostic_environment_valid(const pipeline_execution_stats& stats) noexcept {
         if (stats.actual_backend != executed_backend::mixed_invalid ||
@@ -937,9 +907,8 @@ struct pipeline_execution_stats {
         return is_environment_valid_for_backend(stats.environment, environment_backend);
     }
 
-    /// @brief Validate environment presence before aggregate stats adoption.
-    /// @param[in] stats Aggregate operand to validate.
-    /// @return `true` when environment presence matches the operand's job/backend state.
+    /// Check the environment before combining aggregates. Empty job totals need
+    /// an unset environment. Completed work needs a valid route or diagnostic record.
     [[nodiscard]] static constexpr bool
     is_aggregate_environment_operand_valid(const pipeline_execution_stats& stats) noexcept {
         if (stats.attempted_alignment_jobs == 0) {
@@ -948,21 +917,14 @@ struct pipeline_execution_stats {
         if (is_concrete_backend(stats.actual_backend)) {
             return is_environment_valid_for_backend(stats.environment, stats.actual_backend);
         }
-        // During incremental attestation wiring, or for an intentionally
-        // mixed algorithm tuple, execution may publish actual=mixed_invalid.
-        // Preserve a truthful environment only when every job is explicitly
-        // unattested. This can never satisfy backend acceptance, but it keeps
-        // partial-statement diagnostics readable without laundering stats.
+        // Mixed-backend diagnostics may keep a valid environment when every
+        // job is marked unvalidated. That preserves useful failure details.
         return is_diagnostic_environment_valid(stats);
     }
 
-    /// @brief Validate per-stage aggregation for a concrete backend, source, and job count.
-    ///
-    /// Optional, data-dependent stages may cover any subset. Unconditional front-end
-    /// stages must cover every job. No forbidden engine or fallback lane may
-    /// carry work.
-    /// @param[in] stats Aggregate statistics to validate.
-    /// @return `true` when every stage aggregate matches its required engine and eligibility.
+    /// Check that stage counts match the route and job total. Required preparation
+    /// stages cover all jobs, except allowed empty-query bypasses. Later stages
+    /// may cover a subset. Unexpected engines and fallbacks fail validation.
     [[nodiscard]] static constexpr bool
     is_aggregate_stage_coverage_valid(const pipeline_execution_stats& stats) noexcept {
         if (!is_concrete_backend(stats.actual_backend) ||
@@ -1074,13 +1036,9 @@ struct pipeline_execution_stats {
         return true;
     }
 
-    /// @brief Identify the canonical identity element for stats aggregation.
-    ///
-    /// A zero-job value with
-    /// selected backend/source labels or a captured environment is not empty.
-    /// Allowing it to behave as the identity would erase malformed input.
-    /// @param[in] stats Aggregate operand to inspect.
-    /// @return `true` only for the exact value-initialized aggregation identity.
+    /// Recognize an untouched aggregate that can be merged without changing a result.
+    /// Zero jobs alone is insufficient: labels, environment, counters and flags
+    /// must also have their initial values.
     [[nodiscard]] static constexpr bool
     is_exact_empty_stats_operand(const pipeline_execution_stats& stats) noexcept {
         return stats.attempted_alignment_jobs == 0 && stats.fully_attested_alignment_jobs == 0 &&
@@ -1105,13 +1063,9 @@ struct pipeline_execution_stats {
                stats.operational == pipeline_operational_stats{};
     }
 
-    /// @brief Decide whether an operand may retain full attestation during merging.
-    ///
-    /// Only a canonical empty value or an internally complete concrete stats
-    /// may retain fully-attested counts across an aggregate merge. Mixed
-    /// diagnostics remain readable, but can never promote a clean sibling.
-    /// @param[in] stats Aggregate operand to validate.
-    /// @return `true` when the operand may preserve full attestation during merging.
+    /// Check whether merging may preserve all jobs' validated status.
+    /// Accept an untouched empty record or a complete valid aggregate with no
+    /// fallback, overflow or identity conflict.
     [[nodiscard]] static constexpr bool
     can_retain_full_attestation(const pipeline_execution_stats& stats) noexcept {
         if (is_exact_empty_stats_operand(stats))
@@ -1154,12 +1108,11 @@ struct pipeline_execution_stats {
         return stats.persisted_generation_id == 0 && stats.persisted_source_identity == 0;
     }
 
-    /// @brief Merge one completed buffer/node aggregate without laundering stats gaps.
-    /// @param[in] rhs Completed aggregate to merge.
+    /// Combine completed buffer or node statistics. Validate both inputs before
+    /// merging so missing or conflicting records cannot become accepted totals.
     void merge(const pipeline_execution_stats& rhs) noexcept {
-        // Validate both operands before first-stats adoption. In particular, a
-        // missing environment on a nonempty left accumulator must not disappear
-        // merely because the right operand has a is_valid stats.
+        // Check both inputs before copying fields. A valid incoming environment
+        // cannot repair a missing environment in an earlier nonempty record.
         const bool lhs_environment_valid = is_aggregate_environment_operand_valid(*this);
         const bool rhs_environment_valid = is_aggregate_environment_operand_valid(rhs);
         const bool environment_drift =
@@ -1189,11 +1142,8 @@ struct pipeline_execution_stats {
             (persisted_generation_id == rhs.persisted_generation_id &&
              persisted_source_identity == rhs.persisted_source_identity &&
              has_mixed_persisted_identity == rhs.has_mixed_persisted_identity);
-        // The exact empty operand is a two-sided identity, but two completed
-        // statistics that name different nonzero Highway bindings are not
-        // compatible stats shards. execution_environment_snapshot::merge()
-        // truthfully records that case as mixed; revoke full attestation in
-        // this same two-operand merge instead of waiting for a later operand.
+        // Different executed Highway targets invalidate the combined result
+        // immediately. A truly empty record remains safe to merge.
         const bool highway_binding_identity_compatible =
             lhs_empty || rhs_empty ||
             (environment.highway_executed_target == rhs.environment.highway_executed_target &&
