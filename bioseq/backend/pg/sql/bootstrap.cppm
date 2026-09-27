@@ -14,7 +14,7 @@ export namespace bioseq::sql_entities {
 inline constexpr auto logging_off = ::bioseq::sql::set_after_guard(
     ::bioseq::settings::diagnostics::logging::enabled, false);
 
-/** @brief Declares the private schema for extension-owned SQL objects. */
+/** Private schema for Bioseq storage and metadata objects. */
 [[bioseq_sql::schema]]
 [[bioseq_sql::revoke({
     .privileges = bioseq::sql::privileges::all,
@@ -32,7 +32,7 @@ inline constexpr ::bioseq::sql::schema_entity bioseq_internal{};
     .privileges = bioseq::sql::privileges::usage,
     .to = bioseq::sql::public_role,
 })]]
-/** @brief Declares the public schema for user-facing Bioseq SQL objects. */
+/** Public schema for Bioseq SQL functions and views. */
 inline constexpr ::bioseq::sql::schema_entity bioseq{};
 
 static_assert(
