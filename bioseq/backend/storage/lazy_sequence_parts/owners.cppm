@@ -1,6 +1,6 @@
 /**
  * @file storage/lazy_sequence_parts/owners.cppm
- * @brief Resident and fragmented lazy-sequence owners.
+ * @brief Lazy readers for resident ranges and fragmented sequence storage.
  */
 export module bioseq.storage.lazy_sequence:owners;
 
@@ -17,7 +17,7 @@ export namespace bioseq::storage {
 
 template <class p_sequence_range, class p_scanner> struct lazy_sequence;
 
-/** Pointer-sized owner adapter for an already-resident compact range. */
+/** Pointer-sized adapter borrowing an existing resident compact range. */
 
 template <class p_sequence_range, class p_scanner>
     requires(!p_scanner::is_fragmented())
@@ -36,15 +36,13 @@ struct lazy_sequence<p_sequence_range, p_scanner> {
     explicit constexpr lazy_sequence(const compact_sequence_range<p_sequence_range>& range) noexcept
         : range_(&range) {}
 
-    /// The underlying range. Algorithm code that has an all-in-RAM fast path
-    /// (e.g. the SIMD minimizer kernel) calls this under
-    /// `if constexpr (!p_scanner::is_fragmented())`.
+    /// Returns the borrowed compact range for algorithms that read resident storage directly.
     [[nodiscard]] [[gnu::always_inline]]
     const compact_sequence_range<p_sequence_range>& underlying() const noexcept {
         return *range_;
     }
 
-    // ---- size / shape forwarders --------------------------------------
+    // Sequence sizes and packed layout.
     [[nodiscard]] [[gnu::always_inline]]
     sequence_size_t bp_size() const noexcept {
         return static_cast<sequence_size_t>(range_->bp_size());
@@ -66,7 +64,7 @@ struct lazy_sequence<p_sequence_range, p_scanner> {
         return 1;
     }
 
-    // ---- iterator (the underlying range's iterator) -------------------
+    // Iterators from the underlying compact range.
     using iterator_impl = typename compact_sequence_range<p_sequence_range>::iterator;
     [[nodiscard]] [[gnu::always_inline]] iterator_impl cbegin() const noexcept {
         return range_->cbegin();
@@ -96,13 +94,13 @@ struct lazy_sequence<p_sequence_range, p_scanner> {
         return range_->to_string(begin, end, split_units);
     }
 
-    // ---- bit-cast view (exposed on the no-fragment side only) ---------
+    // Packed views with another storage-unit type, for resident storage only.
     template <class p_storage_unit>
     [[nodiscard]] [[gnu::always_inline]] auto bit_cast_to_storage_unit() const noexcept {
         return range_->template bit_cast_to_storage_unit<p_storage_unit>();
     }
 
-    // ---- encode forwarders (the aligner-facing API) -------------------
+    // Rank copies used by alignment code.
     template <bool p_is_reversed, bool p_write_reversed = false>
     [[gnu::always_inline]]
     void copy_ranks(std::span<std::uint8_t> destination, std::size_t from, std::size_t to) const {
@@ -155,7 +153,7 @@ struct lazy_sequence<p_sequence_range, p_scanner> {
                                   p_max_loaded_slots>(this);
     }
 
-    // ---- read_cptr — both overloads forward to the resident bytes -----
+    // Both read_cptr overloads borrow the existing resident words.
     [[nodiscard]] [[gnu::always_inline]]
     const storage_unit* read_cptr(const iterator_impl& it) const noexcept {
         return compact_sequence_range<p_sequence_range>::read_cptr(it);
@@ -167,7 +165,7 @@ struct lazy_sequence<p_sequence_range, p_scanner> {
         return compact_sequence_range<p_sequence_range>::read_cptr(it);
     }
 };
-/** Bounded-cache owner adapter for a fragmented scanner. */
+/** Owns a fragmented scanner and a bounded cache of its loaded fragments. */
 
 template <class p_sequence_range, class p_scanner>
     requires(p_scanner::is_fragmented())
@@ -192,7 +190,7 @@ struct lazy_sequence<p_sequence_range, p_scanner> {
     static constexpr std::size_t k_fragment_logical_capacity =
         k_fragment_storage_units * k_letters_per_unit;
 
-    // Iterators and rank readers may retain cache-slot references, so the
+    // Iterators and rank readers may hold cache-slot references, so the
     // scanner owner has a stable address for its complete lifetime.
     lazy_sequence(const lazy_sequence&) = delete;
     lazy_sequence& operator=(const lazy_sequence&) = delete;
@@ -202,7 +200,7 @@ struct lazy_sequence<p_sequence_range, p_scanner> {
     explicit lazy_sequence(p_scanner&& scanner) noexcept : scanner_(std::move(scanner)) {}
     ~lazy_sequence() = default;
 
-    // ---- size / shape -------------------------------------------------
+    // Sequence sizes and packed layout.
     [[nodiscard]] [[gnu::always_inline]]
     sequence_size_t bp_size() const noexcept {
         return scanner_.bp_size();
@@ -227,7 +225,7 @@ struct lazy_sequence<p_sequence_range, p_scanner> {
         return scanner_;
     }
 
-    /** Packed-unit iterator carrying an owner-qualified global unit index. */
+    /** Packed-word iterator holding its owner and global word index. */
     struct iterator_impl {
         const lazy_sequence* parent_ = nullptr;
         sequence_size_t global_unit_ = 0;
@@ -284,7 +282,7 @@ struct lazy_sequence<p_sequence_range, p_scanner> {
         return cend();
     }
 
-    // ---- fragment management ------------------------------------------
+    // Loading and releasing cached fragments.
     [[nodiscard]] const fragment_type& ensure_fragment(std::size_t fragment_number) const {
         if (fragment_number >= scanner_.fragment_count()) {
             abort_lazy_sequence_access("fragment index is out of range");
@@ -311,7 +309,13 @@ struct lazy_sequence<p_sequence_range, p_scanner> {
         }
     }
 
-    /** Read contiguous packed units, stitching across fragments when needed. */
+    /**
+     * Reads packed words starting at it.
+     *
+     * A read within one fragment borrows its data until a later read evicts it.
+     * A read crossing fragments copies into scratch. The scratch span must hold
+     * required_length words even when the returned pointer borrows a fragment.
+     */
     [[nodiscard]] [[gnu::always_inline]]
     const storage_unit* read_cptr(const iterator_impl& it,
                                   std::span<storage_unit> scratch,
@@ -336,12 +340,12 @@ struct lazy_sequence<p_sequence_range, p_scanner> {
             static_cast<std::size_t>(it.global_unit_ % k_fragment_storage_units);
 
         const fragment_type& starting_fragment = ensure_fragment(starting_fragment_number);
-        // FAST PATH — request fits inside the current fragment. One compare.
+        // Borrow directly when the requested words fit in this fragment.
         if (in_frag_offset <= starting_fragment.data.size() &&
             required_length <= starting_fragment.data.size() - in_frag_offset) {
             return starting_fragment.data.data() + in_frag_offset;
         }
-        // SLOW PATH — stitch into the caller's scratch span.
+        // Copy across fragment boundaries into caller scratch.
         std::size_t copied = 0;
         std::size_t current_unit_offset = in_frag_offset;
         std::size_t current_fragment_number = starting_fragment_number;
@@ -363,7 +367,7 @@ struct lazy_sequence<p_sequence_range, p_scanner> {
         return scratch.data();
     }
 
-    // Single-arg read_cptr — points into the current fragment (no stitch).
+    // Borrow a pointer into one fragment, valid until that fragment is evicted.
     [[nodiscard]] [[gnu::always_inline]]
     const storage_unit* read_cptr(const iterator_impl& it) const {
         if (it.parent_ != this || it.global_unit_ >= size()) {
@@ -381,11 +385,8 @@ struct lazy_sequence<p_sequence_range, p_scanner> {
         return fragment.data.data() + in_frag_offset;
     }
 
-    // ---- forward iterator_mode::logical_rank iterator (drives the scalar minimizer kernel) -----
-    // Processes letters across fragments in global order; iterates exactly
-    // bp_size() letters, matching the compact range's logical-rank end, which
-    // excludes trailing padding — sequences.cppm:1034). letter 0 sits at the
-    // LSB of each storage unit (LSB-first, matching bp_scalar_iter).
+    // Forward rank iterator across fragment boundaries. Stops at bp_size(),
+    // excluding final padding. The first rank occupies each word's low bits.
     struct logical_rank_iterator_impl {
         const lazy_sequence* parent_ = nullptr;
         sequence_size_t global_rank_ = 0;
@@ -430,8 +431,8 @@ struct lazy_sequence<p_sequence_range, p_scanner> {
         return logical_rank_iterator_impl{this, bp_size()};
     }
 
-    // Mirror the compact range's logical-rank iteration surface so
-    // the scalar minimizer kernel can run over the fragmented wrapper unchanged.
+    // Match the compact range's rank-iteration interface so the scalar
+    // minimizer kernel can also read fragmented sequences.
     template <iterator_mode p_mode, class p_iterator>
     [[nodiscard]] logical_rank_iterator_impl iter(const p_iterator& iterator) const noexcept {
         static_assert(p_mode == iterator_mode::logical_rank,
@@ -466,7 +467,13 @@ struct lazy_sequence<p_sequence_range, p_scanner> {
         return logical_rank_range_view{rank_begin(), rank_end()};
     }
 
-    /** Copy a logical rank interval without materializing the full sequence. */
+    /**
+     * Copies the logical rank interval [from, to) into destination.
+     *
+     * With p_is_reversed, coordinates refer to the full reverse complement.
+     * p_write_reversed reverses the chosen output interval again. The destination
+     * must have room for to - from ranks.
+     */
     template <bool p_is_reversed, bool p_write_reversed = false>
     void copy_ranks(std::span<std::uint8_t> destination, std::size_t from, std::size_t to) const {
         if (from > to || to > bp_size() || destination.size() < to - from) {
@@ -484,7 +491,7 @@ struct lazy_sequence<p_sequence_range, p_scanner> {
         }
     }
 
-    /** Reject lane reinterpretation because lanes may span fragments. */
+    /** Rejects packed reinterpretation because a word can cross fragment boundaries. */
     template <class p_storage_unit> auto bit_cast_to_storage_unit() const noexcept {
         static_assert(sizeof(p_storage_unit) == 0,
                       "lazy_sequence::bit_cast_to_storage_unit is unavailable on the "
@@ -494,10 +501,11 @@ struct lazy_sequence<p_sequence_range, p_scanner> {
     }
 
     /**
-     * Per-fragment forward-rank cache with a compile-time resident-slot bound.
-     * Plain forward reads fitting one slot borrow it directly. Oriented and
-     * cross-fragment reads stream into caller scratch and never allocate in
-     * proportion to the complete logical sequence.
+     * Caches decoded forward ranks for a bounded number of fragments.
+     *
+     * Plain forward reads within one cached fragment borrow that slot. Other reads
+     * copy to caller scratch and apply the requested orientation. Borrowed slots
+     * can be evicted by later reads and are freed when the reader is destroyed.
      */
     template <bool p_is_reversed,
               bool p_write_reversed,
@@ -506,7 +514,7 @@ struct lazy_sequence<p_sequence_range, p_scanner> {
     struct rank_window_reader {
         static_assert(p_max_loaded_slots >= 1u);
         struct encoded_slot {
-            p_stored_type* bytes = nullptr; // malloc'd: raw forward ranks
+            p_stored_type* bytes = nullptr; // malloc-allocated forward ranks
             std::size_t fragment_no = std::numeric_limits<std::size_t>::max();
             std::size_t bp_count = 0;
         };
@@ -529,9 +537,8 @@ struct lazy_sequence<p_sequence_range, p_scanner> {
             }
         }
 
-        // Encode fragment `frag` as RAW FORWARD ranks (no complement, no
-        // reorder) so a resident slot is reusable across (is_reversed,
-        // write_reversed); the orientation transform is applied by read_at.
+        // Cache forward ranks without complementing them. read_at applies the
+        // requested orientation while copying, so cached data stays reusable.
         encoded_slot& ensure_rank_slot(std::size_t frag) const {
             auto key_of = [](const encoded_slot& slot) noexcept { return slot.fragment_no; };
             if (auto found = slots_.find(frag, key_of); found.has_value()) {
@@ -562,7 +569,7 @@ struct lazy_sequence<p_sequence_range, p_scanner> {
                                                             evicted.bytes = nullptr;
                                                         });
             (void)generation;
-            // Aggressive eviction: keep at most p_max_loaded_slots resident.
+            // Keep at most p_max_loaded_slots decoded fragments after insertion.
             while (slots_.valid_count() > p_max_loaded_slots) {
                 slots_.evict_oldest([](encoded_slot& evicted) noexcept {
                     std::free(evicted.bytes);
@@ -572,11 +579,9 @@ struct lazy_sequence<p_sequence_range, p_scanner> {
             return slots_.slot_at(slot_index);
         }
 
-        // read_at(bp_from, len, scratch): `bp_from` is in the SAME coordinate
-        // convention as compact_sequence_range::to_encoded_into — region
-        // coordinates of the (possibly reversed) OUTPUT sequence. Returns a
-        // pointer to `len` encoded bytes: a resident slot (zero-copy) for the
-        // plain-forward fast path, else `scratch.data()`.
+        // bp_from uses reverse-complement coordinates when p_is_reversed is set.
+        // A plain forward read within one slot borrows that slot. Other reads return
+        // scratch.data(), with p_write_reversed controlling the final output order.
         [[nodiscard]]
         const p_stored_type* read_at(sequence_size_t bp_from,
                                      std::size_t required_length,
@@ -593,16 +598,14 @@ struct lazy_sequence<p_sequence_range, p_scanner> {
                 abort_lazy_sequence_access("rank-window coordinates exceed size_t");
             }
             const std::size_t total = static_cast<std::size_t>(parent_->bp_size());
-            // Reverse strand: output region [bp_from, bp_from+len) maps to the
-            // FORWARD source coords [total-(bp_from+len), total-bp_from)
-            // (sequences.cppm:1341). Forward strand reads in place.
+            // Convert reverse-complement coordinates to the forward source interval.
             const std::size_t forward_from =
                 p_is_reversed ? (total - (static_cast<std::size_t>(bp_from) + required_length))
                               : static_cast<std::size_t>(bp_from);
             constexpr bool k_is_descending_write =
                 (p_is_reversed && !p_write_reversed) || (!p_is_reversed && p_write_reversed);
 
-            // §5 zero-copy fast path: plain-forward encode fitting one slot.
+            // Borrow a decoded slot when a plain forward read fits inside it.
             if constexpr (!p_is_reversed && !p_write_reversed) {
                 const std::size_t fragment_bp =
                     static_cast<std::size_t>(parent_->k_fragment_logical_capacity);
@@ -613,9 +616,8 @@ struct lazy_sequence<p_sequence_range, p_scanner> {
                     return slot.bytes + in_frag_bp;
                 }
             }
-            // Forward-sequential per-fragment gather of raw ranks for
-            // [forward_from, forward_from+len); complement and output order
-            // follow the two orientation template parameters.
+            // Gather forward ranks a fragment at a time, applying complement and
+            // output order while copying into scratch.
             const std::size_t fragment_bp =
                 static_cast<std::size_t>(parent_->k_fragment_logical_capacity);
             std::size_t gathered = 0;
@@ -703,9 +705,9 @@ struct lazy_sequence<p_sequence_range, p_scanner> {
     }
 };
 
-/** Factory and callback dispatch helpers for stable-address lazy owners. */
+/** Helpers that construct lazy readers for a caller or callback. */
 
-/// Wrap an in-memory range in the zero-overhead no-fragment lazy wrapper.
+/// Returns a small lazy adapter borrowing an in-memory compact range.
 template <class p_sequence_range>
 [[nodiscard]] [[gnu::always_inline]]
 inline lazy_sequence<p_sequence_range,
@@ -717,8 +719,8 @@ make_resident_lazy_sequence(const compact_sequence_range<p_sequence_range>& rang
                              p_sequence_range>::traits::storage_unit>>{range};
 }
 
-/// Construct an in-memory lazy wrapper around `range` and invoke `fn(lazy)`.
-/// Zero-cost: the wrapper is a thin reference.
+/// Calls callback with a temporary lazy adapter borrowing range.
+/// The adapter is valid only during the callback.
 template <class p_sequence_range, class p_callback>
 [[gnu::always_inline]]
 inline void with_resident_lazy_sequence(const compact_sequence_range<p_sequence_range>& range,
@@ -730,7 +732,13 @@ inline void with_resident_lazy_sequence(const compact_sequence_range<p_sequence_
     std::forward<p_callback>(callback)(lazy_sequence_owner);
 }
 
-/** @brief Return whether an owner has complete resident bytes for a fast path. */
+/**
+ * Reports the scanner's in-memory mode when it exposes that query.
+ *
+ * Returns true for resident ranges and for scanners without is_in_memory_mode().
+ * This is a source hint. It does not prove that a fragmented sequence can be
+ * borrowed as one contiguous packed span.
+ */
 template <class p_sequence_range, class p_scanner>
 [[nodiscard]] inline bool
 has_resident_sequence_bytes(const lazy_sequence<p_sequence_range, p_scanner>& sequence) noexcept {
@@ -747,14 +755,14 @@ has_resident_sequence_bytes(const lazy_sequence<p_sequence_range, p_scanner>& se
     }
 }
 
-/** @brief Return whether an owner can safely outlive asynchronous worker use. */
+/** Returns true for resident adapters. Callers must keep their borrowed range alive during worker use. */
 template <class p_sequence_range, class p_scanner>
 [[nodiscard]] inline bool
 is_worker_shareable(const lazy_sequence<p_sequence_range, p_scanner>&) noexcept {
     return !p_scanner::is_fragmented();
 }
 
-/// Construct a fragmented owner at a stable address for one callback.
+/// Constructs a fragmented scanner owner at a fixed address for one callback.
 template <class p_sequence_range, class p_scanner_factory, class p_callback>
 inline void with_fragmented_lazy_sequence(p_scanner_factory&& scanner_factory,
                                           p_callback&& callback) {
