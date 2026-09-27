@@ -1,12 +1,12 @@
 /**
  * @file metadata_age_log_test_support.cppm
- * @brief Narrow diagnostic boundary for metadata-age catalog stress checks.
+ * @brief Test repeated writes to the index metadata-age catalog.
  */
 export module bioseq.postgres.storage.indexing.metadata_age_log_test_support;
 
 export namespace bioseq::storage::indexing {
 
-/// Exercise repeated metadata-age upserts and the matching catalog delete.
+/// Repeatedly update one metadata-age row, then check that deleting it removes one row.
 void exercise_metadata_age_log_context_stress();
 
 } // namespace bioseq::storage::indexing

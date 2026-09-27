@@ -1,6 +1,6 @@
 /**
  * @file minimizer_fragment_mapping_lease.cppm
- * @brief Owns the PostgreSQL resource lease behind a mapped minimizer image.
+ * @brief Keep a mapped minimizer index registered for PostgreSQL error cleanup.
  */
 module;
 
@@ -31,7 +31,7 @@ export namespace bioseq::storage::indexing {
 
 namespace minimizer_fragment_image_pg_detail {
 
-/// PostgreSQL ResourceOwner record for one mapped file and descriptor.
+/// A mapped file and its descriptor registered with a PostgreSQL ResourceOwner.
 struct mapping_lease {
     ResourceOwner owner = nullptr;
     int fd = -1;
@@ -42,7 +42,7 @@ struct mapping_lease {
     bool remembered = false;
 };
 
-/// Releases the operating-system resources without forgetting PostgreSQL ownership.
+/// Unmap the file and close its descriptor, leaving the ResourceOwner entry in place.
 inline void release_mapping_lease_raw(mapping_lease& lease) noexcept {
     if (lease.mapping != MAP_FAILED) {
         (void)munmap(lease.mapping, lease.mapping_bytes);
@@ -55,7 +55,7 @@ inline void release_mapping_lease_raw(mapping_lease& lease) noexcept {
     }
 }
 
-/// ResourceOwner callback used when PostgreSQL unwinds past C++ destructors.
+/// Release the mapping during PostgreSQL resource cleanup.
 inline void release_mapping_lease_resource(const Datum value) noexcept {
     auto* const lease = reinterpret_cast<mapping_lease*>(DatumGetPointer(value));
     if (lease == nullptr)
@@ -67,7 +67,7 @@ inline void release_mapping_lease_resource(const Datum value) noexcept {
 inline constexpr ResourceReleasePriority k_mapping_lease_release_priority = 10u;
 static_assert(k_mapping_lease_release_priority >= RELEASE_PRIO_FIRST);
 
-/// Descriptor used to remember mapped image leases in the current ResourceOwner.
+/// Tell ResourceOwner how and when to release a mapped index file.
 inline const ResourceOwnerDesc k_mapping_lease_resource_owner_descriptor{
     .name = "bioseq minimizer fragment image mapping lease",
     .release_phase = RESOURCE_RELEASE_AFTER_LOCKS,
@@ -76,7 +76,7 @@ inline const ResourceOwnerDesc k_mapping_lease_resource_owner_descriptor{
     .DebugPrint = nullptr,
 };
 
-/// Forgets and destroys one mapping lease during ordinary C++ unwinding.
+/// Remove the ResourceOwner entry, release the mapping and free its record.
 inline void destroy_mapping_lease(mapping_lease*& lease) noexcept {
     if (lease == nullptr)
         return;
@@ -92,8 +92,11 @@ inline void destroy_mapping_lease(mapping_lease*& lease) noexcept {
 }
 
 /**
- * @brief Forms a non-owning token for PostgreSQL-free mapped-index readers.
- * @return An aliasing token, or an empty token when the lease is incomplete.
+ * @brief Borrow the mapped address for readers that use no PostgreSQL calls.
+ * @return An aliasing shared_ptr, or an empty pointer if the mapping is incomplete.
+ *
+ * The pointer owns no memory. Use it only while the guard owns the mapping
+ * and PostgreSQL's ResourceOwner has not released it.
  */
 [[nodiscard]] inline std::shared_ptr<const void>
 borrow_mapping_token(mapping_lease* const lease) noexcept {
@@ -108,11 +111,11 @@ borrow_mapping_token(mapping_lease* const lease) noexcept {
 } // namespace minimizer_fragment_image_pg_detail
 
 /**
- * @brief Owns one registered minimizer-fragment mmap and file-descriptor lease.
+ * @brief Own a mapped index file and its PostgreSQL cleanup record.
  *
- * Borrowed reader tokens do not extend the lifetime. Store this guard before
- * every reader that borrows its mapping so reverse destruction releases the
- * readers first.
+ * Readers borrow the mapping without extending its lifetime. Declare this guard
+ * before those readers so they are destroyed before the guard unmaps the file.
+ * PostgreSQL can also release the mapping during resource cleanup.
  */
 class mapped_minimizer_fragment_lease_guard {
   private:
@@ -145,9 +148,9 @@ class mapped_minimizer_fragment_lease_guard {
     }
 
     /**
-     * @brief Adopts a registered mapping lease produced by the image opener.
-     * @param[in] lease Lease transferred to the guard.
-     * @return Owning guard for the supplied lease.
+     * @brief Take ownership of a mapping record created by the image opener.
+     * @param[in] lease Registered mapping record to own.
+     * @return A guard that releases the record and mapping on destruction.
      */
     [[nodiscard]] static mapped_minimizer_fragment_lease_guard
     adopt(minimizer_fragment_image_pg_detail::mapping_lease* lease) noexcept {
@@ -160,8 +163,11 @@ class mapped_minimizer_fragment_lease_guard {
     }
 
     /**
-     * @brief Borrows a token that becomes invalid when this guard is released.
-     * @return Non-owning aliasing token for the mapped bytes.
+     * @brief Borrow the mapped address without extending its lifetime.
+     * @return A shared_ptr that points to the bytes but does not own them.
+     *
+     * The address is valid until this guard releases the mapping or PostgreSQL
+     * releases its ResourceOwner resources.
      */
     [[nodiscard]] std::shared_ptr<const void> borrow_mapping_token() const noexcept {
         return minimizer_fragment_image_pg_detail::borrow_mapping_token(lease_);
