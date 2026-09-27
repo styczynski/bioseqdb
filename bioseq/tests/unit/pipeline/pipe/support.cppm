@@ -1,17 +1,8 @@
 /**
  * @file support.cppm
- * @brief Provides shared fixtures for pipeline tests.
+ * @brief Shared fixtures for pipeline execution, dispatch, and statistics tests.
  */
-// Tests for the templated pipeline API.
-//
-// Static-assert-only cases exercise the emit_token/emitted_token trait surface
-// for single-emission invariants and sink concepts. The runtime
-// cases drive a probe sink through a canonical pipeline to verify that every
-// process*<Cep> body emits exactly once.
-//
-// These tests are compile-only in the static-assert sections (compile fails ⇒
-// test fails); the runtime SECTIONs use Catch2 REQUIRE assertions and run as
-// part of the bioseq unit-test target.
+
 
 module;
 
@@ -259,9 +250,7 @@ using namespace bioseq::tests::pipeline::pipe_support;
 
 export namespace bioseq::simd::pipe {
 
-// ============================================================================
-// Probe sink that counts on_batch invocations.
-// ============================================================================
+// Count batch and completion callbacks from a pipeline stage.
 
 struct probe_batch_sink {
     int* on_batch_count;
@@ -300,25 +289,11 @@ struct prefilter_probe_sink {
     void on_completed() noexcept {}
 };
 
-// `SingleEmissionInvariant`.
-//
-// Drives N=8 invocations through the bound mapq_stage with a probe sink
-// and asserts the probe records exactly 8 on_batch invocations.  This
-// mirrors the spec's intent of "every process*<Cep> emits exactly one
-// on_batch* per upstream on_batch*" — the bound stage is the unit of
-// stage-shape composition, so verifying the contract on one bound
-// stage exercises the contract shared by every stage in the pipeline (every
-// `process*<Cep>` body uses the same emit_token/emitted_token machinery).
 
-// `KSW2BatchedParity` checks whether the trait surface for
-// `BAA = KSW2` and `BAA = KSW2_BATCHED` agrees on the algorithm-label
-// and runtime-parameter row count.  A full end-to-end parity check
-// against `minimap2_port_with_index_batch` would require live
-// sequences; the trait surface check verifies the structural contract.
 
-// =============================================================================
-// Chain primitive, registry, and leaf tests.
-// =============================================================================
+
+
+// Dispatch test helpers.
 
 namespace dispatch_test_support {
 
@@ -326,9 +301,7 @@ using base_alignment_algorithm_type = ::bioseq::simd::base_alignment_algorithm;
 using chaining_algorithm_type  = ::bioseq::simd::chaining_algorithm;
 using minimizer_algorithm_type  = ::bioseq::simd::minimizer_algorithm;
 
-/// Probe callable for `dispatch_exact_value_or_default` tests. Stateless POD with a
-/// templated `operator()` whose body forwards the matched IC<T, V> into a
-/// caller-provided reference slot.
+/// Store and return the compile-time value selected by dispatch.
 template <class p_t>
 struct value_capture_callable {
     p_t* sink;
@@ -345,9 +318,7 @@ struct value_capture_callable {
 
 namespace dispatch_test_support {
 
-/// Probe leaf for the BAA × CA × MA chain order test.  Three NTTPs are
-/// pinned. The leaf's `call` writes the (BAA, CA, MA) triple into a
-/// caller-provided slot reachable through the trailing args.
+/// Record the selected alignment, chaining, and minimizer algorithms in dispatch order.
 template <auto p_baa_pin, auto p_ca_pin, auto p_ma_pin>
 struct bca_probe_leaf {
     [[gnu::always_inline]] static int call(
@@ -366,7 +337,7 @@ struct bca_probe_traits {
     using leaf = bca_probe_leaf<p_baa_pin, p_ca_pin, p_ma_pin>;
 };
 
-/// Probe leaf for the heterogeneous (size_t L, size_t K, BAA) chain test.
+/// Record the selected length bucket, k-mer size, and alignment algorithm.
 template <auto p_l_pin, auto p_k_pin, auto p_baa_pin>
 struct lkb_probe_leaf {
     [[gnu::always_inline]] static int call(
@@ -387,7 +358,7 @@ struct lkb_probe_traits {
     using leaf = lkb_probe_leaf<p_l_pin, p_k_pin, p_baa_pin>;
 };
 
-/// Void-returning probe leaf for the MA-only chain test.
+/// Record the selected minimizer algorithm from a dispatch call that returns void.
 template <auto p_ma_pin>
 struct void_probe_leaf {
     [[gnu::always_inline]] static void call(
@@ -407,7 +378,7 @@ struct void_probe_traits {
 
 namespace dispatch_test_support {
 
-/// Records which Cep branch was selected inside `pipeline_run_leaf::call`.
+/// Unused thread-local slots for window and k-mer values.
 inline thread_local int g_last_recorded_w = 0;
 inline thread_local int g_last_recorded_k = 0;
 
@@ -429,14 +400,8 @@ constexpr bool chain_accepts_v = requires {
 
 }  // namespace dispatch_test_support
 
-// ============================================================================
-// vulkan_minimap_integer end-to-end biological parity.
-// ============================================================================
-//
-// The full Vulkan front-end (GPU minimizers + GPU seed-hit lookup) must produce
-// the same complete ordered match_result/CIGAR stream as the CPU path. When a
-// Vulkan algorithm is selected, disabling Vulkan is an error; fallback
-// selection must happen before entering the pipe.
+// Helpers for comparing complete CPU and Vulkan alignment results,
+// including result order and CIGAR operations.
 namespace vulkan_pipeline_test_support {
 
 using dna4_u64 = sequence_custom_alphabet<seq::dna4, std::uint64_t>;
@@ -730,10 +695,8 @@ void check_fragmented_bounded_nthash_range_materialization() {
                 minimizer_sketch_backend::bounded_nthash_simd,
                 fragmented_stats,
                 /*require_nonempty_vector_work=*/true));
-            /* Bounded consumes canonical, genuinely typed u32 storage. A u64
-             * source is admission-materialized rather than reinterpreted, so
-             * the execution stats records the kernel input width—not the
-             * facade's original resident width. */
+            /* The fragmented input is copied into reserved 32-bit packed storage.
+             * Statistics record this width because it is what the kernel reads. */
             REQUIRE(fragmented_stats.bounded_nthash.source_storage_unit_bytes
                     == sizeof(std::uint32_t));
             REQUIRE(fragmented_stats.bounded_nthash
@@ -774,8 +737,8 @@ void check_fragmented_bounded_nthash_range_materialization() {
         }
     };
 
-    // Exercise both an interior slice (zero local padding) and a tail slice
-    // that must inherit the source range's final packed-unit padding.
+    // Check an interior slice ending on a packed-word boundary and a tail
+    // slice containing the source's final padding.
     check_slice(3u, static_cast<sequence_size_type>(range.size() - 5u));
     check_slice(5u, static_cast<sequence_size_type>(range.size()));
 }
@@ -847,8 +810,7 @@ void check_bounded_nthash_dna5_coordinate() {
                 sizeof(std::uint32_t));
     }
     REQUIRE_FALSE(fragmented_collector.extract_sketches_data().empty());
-    // Both routes execute bounded ntHash. Check valid biological coordinates,
-    // not equality with another minimizer algorithm or packing topology.
+    // Check that both bounded ntHash results use positions within the input sequence.
     for (const auto* collector : {&resident_collector, &fragmented_collector}) {
         for (const auto& minimizer : collector->extract_sketches_data()) {
             REQUIRE(minimizer.last_pos() < data.size());

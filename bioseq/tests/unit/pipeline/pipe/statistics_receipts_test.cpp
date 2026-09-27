@@ -1,6 +1,6 @@
 /**
  * @file statistics_receipts_test.cpp
- * @brief Exercises pipeline statistics and receipts.
+ * @brief Check pipeline statistics validation and publication of completed GPU work.
  */
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers.hpp>
@@ -171,8 +171,8 @@ TEST_CASE("persisted grouped-SoA publication rejects burned fully-consumed stats
     static_assert(is_persisted_grouped_soa_coordinate_publication_consistent(accepted));
     REQUIRE(is_persisted_grouped_soa_coordinate_publication_consistent(accepted));
 
-    /* This fail-open fixture has consume() mark both records
-     * consumed even though the second expectation mismatched and burned. */
+    /* Both records were consumed, but one failed validation. Publication must
+     * reject the incomplete set of accepted records. */
     constexpr counts_type burned_but_fully_consumed{
         .expected_jobs = 2,
         .validated_jobs = 2,
@@ -698,8 +698,8 @@ TEST_CASE("persisted GPU SQL accumulation is admitted, causal, and immutable acr
         publish_final_cache(*first);
         state.commit_append(std::move(first_append), std::move(first));
 
-        /* A fully drained rescan may repeat the logical rows in a new
-         * structured operation domain. */
+        /* A completed rescan can include the same rows again when it has new
+         * operation identities. */
         auto second = make_chunk(0x1001u, 0x2001u, 30u);
         REQUIRE(second != nullptr);
         REQUIRE(second->seal());

@@ -1,6 +1,6 @@
 /**
  * @file execution_receipts_test.cpp
- * @brief Exercises per-job pipeline execution receipts.
+ * @brief Check that each job records the algorithms and CPU or GPU work it used.
  */
 #include <catch2/matchers/catch_matchers.hpp>
 #include <catch2/catch_test_macros.hpp>
@@ -38,7 +38,7 @@ TEST_CASE("selected component validation keeps Vulkan chaining separate from CPU
     };
     auto valid = make_fixture();
     REQUIRE(accepts(valid));
-    // The old CPU-only contract remains CPU-only; GPU statistics are never cleared.
+    // The CPU-only check must reject this result and preserve its GPU counters.
     REQUIRE_FALSE(valid.is_selected_scalar_sketch_execution_consistent(false, true));
     REQUIRE(valid.partial_vulkan_stats.chain_score_dispatches == 1u);
     auto missing_gpu = make_fixture();
@@ -168,7 +168,7 @@ TEST_CASE("hybrid CPU Vulkan stage proof preserves selected engines and the host
     REQUIRE(merge_backend_identity(executed_backend::hybrid_cpu_vulkan,
                                   executed_backend::hybrid_cpu_vulkan) ==
             executed_backend::hybrid_cpu_vulkan);
-    // Different whole-job backends must not be laundered into a hybrid job.
+    // Combining CPU-only and GPU-only jobs must report incompatible backends.
     REQUIRE(merge_backend_identity(executed_backend::scalar_cpu, executed_backend::vulkan_gpu) ==
             executed_backend::mixed_invalid);
     REQUIRE(merge_backend_identity(executed_backend::hybrid_cpu_vulkan,

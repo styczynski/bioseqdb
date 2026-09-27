@@ -1,6 +1,6 @@
 /**
  * @file aggregation_test.cpp
- * @brief Exercises pipeline statistics aggregation.
+ * @brief Check statistics merging, overflow, and changes in the recorded execution environment.
  */
 #include <catch2/matchers/catch_matchers.hpp>
 #include <catch2/catch_test_macros.hpp>
@@ -1149,14 +1149,14 @@ TEST_CASE("logical target identity survives payload coalescing",
           "[component:bioseq][layer:unit][feature:pipeline]") {
     using bioseq::pipeline_stats::count_unique_logical_target_rows;
 
-    // The GPU resident-target layer may coalesce identical sequence bytes,
-    // but two distinct relation row identities must still count twice.
+    // Distinct table rows count separately even when their sequence data is
+    // identical and shares GPU storage.
     std::array<std::uint64_t, 2> identical_payload_distinct_rows{41, 42};
     REQUIRE(count_unique_logical_target_rows(
                 std::span<std::uint64_t>{identical_payload_distinct_rows})
             == 2);
 
-    // Re-observing the same logical row is the only case that collapses.
+    // Count repeated observations of the same row once.
     std::array<std::uint64_t, 2> repeated_logical_row{41, 41};
     REQUIRE(count_unique_logical_target_rows(
                 std::span<std::uint64_t>{repeated_logical_row})
