@@ -1,6 +1,6 @@
 /**
  * @file test_support.cppm
- * @brief Provides shader-cache file and callback fixtures for unit tests.
+ * @brief Creates shader-cache test files and captures Vulkan module callbacks.
  */
 module;
 
@@ -37,7 +37,7 @@ std::vector<std::byte> expected_shader_module_metallib;
 std::filesystem::path seal_identity_mutation_path;
 bool seal_identity_mutation_succeeded = false;
 
-/** @brief Mutates the staged seal artifact without changing its byte length. */
+/** Flips the first byte of the staged file without changing its size. */
 void mutate_seal_artifact_same_size() noexcept {
     seal_identity_mutation_succeeded = false;
     const int fd = ::open(
@@ -52,7 +52,7 @@ void mutate_seal_artifact_same_size() noexcept {
     (void)::close(fd);
 }
 
-/** @brief Records that the Vulkan shader-module callback was invoked. */
+/** Records a shader-module creation call and returns success. */
 VKAPI_ATTR VkResult VKAPI_CALL record_shader_module_create(
     VkDevice,
     const VkShaderModuleCreateInfo*,
@@ -63,7 +63,7 @@ VKAPI_ATTR VkResult VKAPI_CALL record_shader_module_create(
     return VK_SUCCESS;
 }
 
-/** @brief Validates the exact retained metallib payload passed to Vulkan. */
+/** Records whether Vulkan received the expected metallib bytes after its module header. */
 VKAPI_ATTR VkResult VKAPI_CALL record_exact_shader_module_create(
     VkDevice,
     const VkShaderModuleCreateInfo* create_info,
@@ -96,7 +96,7 @@ struct no_publish_compile_service {
     }
 };
 
-/** @brief Owns an isolated shader-cache test directory. */
+/** Creates a temporary cache directory and removes it on scope exit. */
 struct temporary_directory {
     std::filesystem::path path;
 
@@ -140,7 +140,7 @@ struct scoped_environment_variable {
     }
 };
 
-/** @brief Resets the process-local archive-helper store around one test scope. */
+/** Clears the process archive-helper cache before and after the test. */
 struct scoped_archive_helper_store_reset {
     scoped_archive_helper_store_reset() {
         REQUIRE(gv::qualified_metal_archive_helper_process_store_instance()
@@ -152,12 +152,7 @@ struct scoped_archive_helper_store_reset {
     }
 };
 
-/**
- * @brief Reports whether a shader key occurs in a key vector.
- * @param[in] keys Shader keys to inspect.
- * @param[in] needle Shader key to find.
- * @return `true` when `needle` is present.
- */
+/** Returns whether keys contains needle. */
 [[nodiscard]] bool contains_key(
     const std::vector<gv::shader_variant_key>& keys,
     gv::shader_variant_key needle)
@@ -165,11 +160,7 @@ struct scoped_archive_helper_store_reset {
     return std::find(keys.begin(), keys.end(), needle) != keys.end();
 }
 
-/**
- * @brief Validates the canonical lowercase shader-cache digest form.
- * @param[in] digest Candidate digest text.
- * @return `true` for a sixteen-character lowercase hexadecimal digest.
- */
+/** Returns whether digest is exactly 16 lowercase hexadecimal characters. */
 [[nodiscard]] bool is_hex_digest(std::string_view digest)
 {
     return digest.size() == 16 && std::all_of(digest.begin(), digest.end(), [](char character) {
@@ -178,11 +169,7 @@ struct scoped_archive_helper_store_reset {
            });
 }
 
-/**
- * @brief Copies string bytes into a byte vector.
- * @param[in] text Source bytes.
- * @return Owned byte vector.
- */
+/** Copies the string bytes into an owned byte vector. */
 [[nodiscard]] std::vector<std::byte> bytes_of(std::string_view text)
 {
     std::vector<std::byte> bytes(text.size());
@@ -190,11 +177,7 @@ struct scoped_archive_helper_store_reset {
     return bytes;
 }
 
-/**
- * @brief Reads an entire fixture file as bytes.
- * @param[in] path Fixture path.
- * @return Complete file contents.
- */
+/** Reads the entire file into a byte vector, failing the test on a read error. */
 [[nodiscard]] std::vector<std::byte> read_file_bytes(
     const std::filesystem::path& path)
 {
@@ -211,13 +194,8 @@ struct scoped_archive_helper_store_reset {
 }
 
 /**
- * @brief Writes a matching qualification receipt for a synthetic archive.
- * @param[in] archive Archive path.
- * @param[in] archive_bytes Archive payload.
- * @param[in] key Shader cache key.
- * @param[in] metallib_bytes Metallib payload bound by the receipt.
- * @param[in] entry_name Metal entrypoint name.
- * @param[in] max_threads Maximum pipeline threads per threadgroup.
+ * Writes a test validation record tying an archive to its shader and metallib bytes.
+ * The record includes the entry name, thread limit and helper identity.
  */
 void write_fake_archive_qualification(
     const std::filesystem::path& archive,
@@ -275,7 +253,7 @@ void write_fake_archive_qualification(
         *qualification_bytes));
 }
 
-/** @brief Builds one internally consistent exact command-library fixture. */
+/** Builds fake MoltenVK command-library files with matching hashes and validation metadata. */
 [[nodiscard]] gv::moltenvk_command_library_bundle
 fake_moltenvk_command_library_bundle()
 {
@@ -362,11 +340,7 @@ fake_moltenvk_command_library_bundle()
     return bundle;
 }
 
-/**
- * @brief Writes a complete synthetic sealed-cache artifact set.
- * @param[in] cache_dir Destination cache directory.
- * @param[in] keys Shader variants to materialize.
- */
+/** Writes fake shader libraries, metadata and archive records for the requested variants. */
 void write_fake_sealed_shader_artifacts(
     const std::filesystem::path& cache_dir,
     std::span<const gv::shader_variant_key> keys)
@@ -413,10 +387,8 @@ void write_fake_sealed_shader_artifacts(
 }
 
 /**
- * @brief Counts one SPIR-V opcode in a structurally valid module.
- * @param[in] words SPIR-V words.
- * @param[in] opcode Opcode to count.
- * @return Occurrence count, or zero for malformed input.
+ * Counts the requested SPIR-V opcode.
+ * Returns zero for a short header, a wrong magic word or invalid instruction lengths.
  */
 [[nodiscard]] std::size_t spirv_opcode_count(
     std::span<const std::uint32_t> words,

@@ -1,6 +1,6 @@
 /**
  * @file archive_cache_test.cpp
- * @brief Tests archive-helper qualification and cache materialization.
+ * @brief Checks archive-builder results, cache files and shader loading.
  */
 
 #include <cstdlib>
@@ -187,9 +187,8 @@ TEST_CASE("failed archive helper output is never promoted",
         gv::cache_binary_archive_path(temp.path, key);
     REQUIRE(std::filesystem::exists(final));
 
-    // A merely nonempty preexisting archive is not reusable while building a
-    // replacement seed. Qualification removes it first. Failure leaves nothing
-    // that a later manifest publication could accidentally bless.
+    // Rebuilding must remove the old archive before checking its replacement.
+    // If the helper fails, sealing the cache must fail too.
     const auto result = gv::ensure_compiled_for_sealed_seed(
         temp.path, key, gv::msl_version{});
     REQUIRE_FALSE(result);
@@ -341,7 +340,7 @@ TEST_CASE("shader cache metadata and MoltenVK header payload are exact",
         std::span<const std::byte>(metallib.data(), metallib.size()));
     REQUIRE(metallib_write);
 
-    // cache_entry_complete also requires a non-empty .metalar binary archive on Apple.
+    // Add the archive and its validation record to make the test cache entry complete.
     const std::vector<std::byte> fake_archive = bytes_of("not-a-real-metalar");
     auto archive_write = gv::durable_write_file(
         gv::cache_binary_archive_path(temp.path, key),
@@ -360,9 +359,8 @@ TEST_CASE("shader cache metadata and MoltenVK header payload are exact",
     CHECK(decoded_meta->wg_x == 256u);
     CHECK(decoded_entry == entry);
 
-    // A cache entry with the right key but a different compiled workgroup ABI
-    // is not reusable. This checks the metadata contract alongside the
-    // digest-level resource-binding ABI revision.
+    // The shader key alone is insufficient. Reject metadata whose workgroup size
+    // differs from the compiled variant.
     gv::shader_cache_metadata mismatched_meta = meta;
     mismatched_meta.wg_x = 128u;
     const std::vector<std::byte> mismatched_meta_bytes =
@@ -463,9 +461,8 @@ TEST_CASE("fixed radix cache accepts reflected workgroup and exact archive",
         gv::cache_binary_archive_path(temp.path, key), archive,
         key, metallib, entry);
 
-    // Publication uses reflected threads, so a 256-thread shader needs only
-    // the exact base archive; completeness must not invent a duplicate
-    // `.max_threads_256.metalar` from the key's sentinel local_size.
+    // This radix shader compiles to 256 threads even though its key stores local_size=1.
+    // The base archive is enough, so no extra max_threads_256 archive should be required.
     CHECK(gv::cache_binary_archive_paths(temp.path, key).size() == 1u);
     REQUIRE(gv::cache_entry_status(temp.path, key));
     REQUIRE(gv::cache_entry_complete(temp.path, key));
