@@ -1,6 +1,6 @@
 /**
  * @file common/postgres/support/spi.cppm
- * @brief Scoped PostgreSQL Server Programming Interface connection owner.
+ * @brief Keep an SPI connection open for a C++ scope and close it on exit.
  */
 module;
 
@@ -20,15 +20,14 @@ import :error_boundary;
 export namespace bioseq::postgres::support {
 
 /**
- * Owns one nested PostgreSQL SPI connection.
- *
- * Every SPI call is contained by invoke_pg_as_cpp so PostgreSQL longjmp does
- * not cross this non-trivial C++ owner. Explicit finish reports SPI status;
- * destruction performs the same cleanup best-effort and never throws.
+ * Own one nested SPI connection.
+ * These methods turn PostgreSQL errors into C++ exceptions so the owner can
+ * be destroyed normally. Call finish to check the SPI status yourself. The
+ * destructor attempts cleanup and discards any failure.
  */
 class scoped_spi_connection final {
   public:
-    /** Opens one SPI connection or surfaces PostgreSQL's error as C++. */
+    /** Open SPI, converting a PostgreSQL connection error into a C++ exception. */
     scoped_spi_connection() {
         invoke_pg_as_cpp([] {
             const int status = SPI_connect();
@@ -41,7 +40,7 @@ class scoped_spi_connection final {
         is_connected_ = true;
     }
 
-    /** Closes an open connection without allowing cleanup failure to escape. */
+    /** Attempt to finish an open connection and discard cleanup errors. */
     ~scoped_spi_connection() noexcept {
         if (!is_connected_) {
             return;
@@ -49,7 +48,7 @@ class scoped_spi_connection final {
         try {
             static_cast<void>(finish());
         } catch (...) {
-            // Destruction cannot surface cleanup failure across a C boundary.
+            // Keep the destructor noexcept by discarding the cleanup exception.
         }
     }
 
@@ -64,9 +63,10 @@ class scoped_spi_connection final {
     }
 
     /**
-     * Executes one parameterized statement inside the PostgreSQL boundary.
+     * Run a parameterized SQL statement through this SPI connection.
+     * PostgreSQL errors become C++ exceptions.
      *
-     * @return The unmodified status from SPI_execute_with_args.
+     * @return The status from SPI_execute_with_args.
      */
     [[nodiscard]] int execute_with_args(const char* command,
                                         int argument_count,
@@ -100,8 +100,8 @@ class scoped_spi_connection final {
     }
 
     /**
-     * Closes this connection and returns PostgreSQL's SPI_finish status.
-     * Repeated calls are harmless and return SPI_OK_FINISH.
+     * Finish this SPI connection and return its status.
+     * Calling finish again after it returns yields SPI_OK_FINISH.
      */
     [[nodiscard]] int finish() {
         if (!is_connected_) {
