@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Implements scan, exact-row fetch, and parallel-scan TableAM callbacks.
+ * @brief Read Bioseq rows through table and index scans.
  */
 module;
 
@@ -69,8 +69,8 @@ import :access_hooks;
 
 static_assert(!std::is_trivially_destructible_v<bioseq::postgres::support::memory_context_scope>);
 
-/** Begin a table scan with explicit projection and executor modes. */
-/** @brief Begin a column scan with explicit projection, qualifier, and vectorization state. */
+
+/** Begin a scan with selected columns, pushed-down predicates, and optional vector results. */
 export TableScanDesc bioseq_beginscan_extended(Relation relation,
                                                Snapshot snapshot,
                                                int key_count,
@@ -82,7 +82,7 @@ export TableScanDesc bioseq_beginscan_extended(Relation relation,
                                                parallel_column_scan_handle parallel_column_scan,
                                                bool returns_vectorized_tuples);
 
-/** Begin a scan with an explicit sequence-hydration policy. */
+/** Begin a scan and choose whether to read full sequence values immediately. */
 TableScanDesc bioseq_beginscan_with_options(Relation relation,
                                             Snapshot snapshot,
                                             int key_count,
@@ -149,15 +149,10 @@ export TableScanDesc bioseq_beginscan_extended(Relation relation,
                                          /*defer_sequence_hydration=*/false);
 }
 
-/**
- * Begin a custom scan that defers sequence locator hydration.
+/** Begin a scan that returns sequence locators for the caller to read.
  *
- * This has the same
- * signature as bioseq_beginscan_extended but turns the deferred-hydration
- * flag on, so bioseq_getnextslot returns locator stubs verbatim and the
- * dispatch buffer hydrates them in per-bucket bulk. `export`ed
- * so :custom_scan reaches it via `import :access_method` instead of an
- * `extern "C++"` forward decl.
+ * Custom scans use this to group sequence reads and avoid loading values that
+ * the query never needs. The column reader still applies its predicates.
  */
 export TableScanDesc bioseq_beginscan_deferred(Relation relation,
                                                Snapshot snapshot,
@@ -182,7 +177,7 @@ export TableScanDesc bioseq_beginscan_deferred(Relation relation,
                                          /*defer_sequence_hydration=*/true);
 }
 
-/** C ABI entry point for a fully hydrated projected scan. */
+/** C entry point for a scan that loads full sequences when returning individual rows. */
 export extern "C" TableScanDesc
 bioseq_beginscan_extended_c(Relation relation,
                             Snapshot snapshot,
@@ -207,7 +202,7 @@ bioseq_beginscan_extended_c(Relation relation,
                                          /*defer_sequence_hydration=*/false);
 }
 
-/** C ABI entry point for a projected scan with deferred hydration. */
+/** C entry point for a scan that leaves sequence locators for the caller to read. */
 export extern "C" TableScanDesc
 bioseq_beginscan_deferred_c(Relation relation,
                             Snapshot snapshot,
@@ -246,11 +241,8 @@ TableScanDesc bioseq_beginscan_with_options(Relation relation,
                                             bool defer_sequence_hydration) {
     previous_cache_enabled_state = bioseq::settings::column_cache::enabled;
     Oid relfilelocator = relation->rd_locator.relNumber;
-    /*
-     * A memory context to use for scan-wide data, including the lazily
-     * initialized read state. We assume that beginscan is called in a
-     * context that will last until end of scan.
-     */
+    /* This context owns the scan and its reader. The caller's current context
+     * must survive until the scan ends. */
     MemoryContext scan_context = create_column_scan_memory_context();
     column_scan_handle scan;
     {
@@ -264,10 +256,8 @@ TableScanDesc bioseq_beginscan_with_options(Relation relation,
         scan->scan_base.rs_flags = flags;
         scan->scan_base.rs_parallel = parallel_table_scan;
 
-        /**
-         * Defers reader initialization until the executor slot supplies the descriptor
-         * that matches storage during ALTER COLUMN rewrites.
-         */
+        /* Wait for the first tuple slot before choosing the row descriptor.
+         * ALTER COLUMN rewrites can require a descriptor different from the table's. */
         scan->read_state = nullptr;
         scan->attributes_needed =
             bioseq::postgres::support::postgres_bitmapset{attributes_needed}.clone();
@@ -275,13 +265,13 @@ TableScanDesc bioseq_beginscan_with_options(Relation relation,
             bioseq::postgres::support::postgres_list<Node>{copyObject(scan_qualifiers)};
         scan->scan_context = scan_context;
 
-        /* Parallel execution scan data */;
+        ;
         scan->parallel_scan = parallel_column_scan;
 
-        /* Vectorized result */
+        
         scan->returns_vectorized_tuple = returns_vectorized_tuples;
 
-        /* per-scan storage cache and deferred-hydration flag. */
+        /* Keep fragment readers and the sequence-loading policy for this scan. */
         scan->defers_sequence_hydration = defer_sequence_hydration;
         auto* caches = bioseq::storage::alloc_seq_caches(scan_context);
         caches->side = bioseq::storage::seq_caches::access_side::read;
@@ -305,8 +295,7 @@ TableScanDesc bioseq_beginscan_with_options(Relation relation,
 void bioseq_endscan(TableScanDesc sscan) {
     column_scan_handle scan = reinterpret_cast<column_scan_handle>(sscan);
 
-    /* close per-scan seq_cache (releases relation pins,
-     * tears down any cached BioseqColumnReadStates on sub-tables). */
+    /* Close fragment readers and release their relation references. */
     if (scan->sequence_cache != nullptr) {
         auto* caches = static_cast<bioseq::storage::seq_caches*>(scan->sequence_cache);
         caches->close_all(/*commit=*/true);
@@ -323,7 +312,7 @@ void bioseq_endscan(TableScanDesc sscan) {
         UnregisterSnapshot(scan->scan_base.rs_snapshot);
     }
 
-    /* clean up any caches. */
+    /* Clear the shared column-page cache when it is enabled. */
     if (bioseq::settings::column_cache::enabled == true) {
         reset_column_cache();
     }
@@ -333,7 +322,7 @@ void bioseq_endscan(TableScanDesc sscan) {
     bioseq::settings::column_cache::enabled = previous_cache_enabled_state;
 }
 
-/** Reinitialize a table scan with new keys and visibility parameters. */
+/** Restart an initialized reader with a new qualifier list. */
 void bioseq_rescan(TableScanDesc sscan,
                    ScanKey key,
                    bool set_params,
@@ -342,7 +331,7 @@ void bioseq_rescan(TableScanDesc sscan,
                    bool allow_pagemode) {
     column_scan_handle scan = reinterpret_cast<column_scan_handle>(sscan);
 
-    /* Adapts the scan-key pointer to the column reader's qualifier list. */
+    /* This caller passes the qualifier List through the ScanKey argument. */
     List* scan_qual = reinterpret_cast<List*>(key);
 
     if (scan->read_state != nullptr) {
@@ -350,20 +339,17 @@ void bioseq_rescan(TableScanDesc sscan,
     }
 }
 
-/** Read the next visible row and hydrate sequence values unless explicitly deferred. */
+/** Read the next row or vector. Individual rows load full sequences unless deferred. */
 static bool
 bioseq_getnextslot_impl(TableScanDesc sscan, ScanDirection direction, TupleTableSlot* slot) {
     column_scan_handle scan = reinterpret_cast<column_scan_handle>(sscan);
 
-    /*
-     * if this is the first row, initialize read state.
-     */
+    
     if (scan->read_state == nullptr) {
         bool random_access = false;
-        // Vector slots own a structural TupleDesc copy that deliberately drops
-        // column defaults. Physical stripes written before ADD COLUMN still
-        // need those defaults, so decode with the scan relation's descriptor.
-        // The relation remains locked/open for this reader's whole lifetime.
+        // Old stripes need column defaults added by ALTER TABLE. Vector-slot
+        // descriptors omit those defaults, so use the open relation's descriptor
+        // when decoding vector results.
         TupleDesc read_descriptor = scan->returns_vectorized_tuple
                                         ? RelationGetDescr(scan->scan_base.rs_rd)
                                         : slot->tts_tupleDescriptor;
@@ -411,11 +397,7 @@ bioseq_getnextslot_impl(TableScanDesc sscan, ScanDirection direction, TupleTable
         ExecStoreVirtualTuple(slot);
         slot->tts_tid = row_number_to_tid(row_number);
 
-        /*
-         * hydrate every SEQ column unless the caller
-         * asked for deferred hydration (custom scan / dispatch buffer
-         * path, which performs per-bucket bulk hydration later).
-         */
+        /* Load full sequence values unless the caller will read the locators. */
         if (!scan->defers_sequence_hydration) {
             const auto& amc = bioseq::storage::get_table_access_cache(scan->scan_base.rs_rd);
             auto* caches = static_cast<bioseq::storage::seq_caches*>(scan->sequence_cache);
@@ -431,25 +413,25 @@ bioseq_getnextslot_impl(TableScanDesc sscan, ScanDirection direction, TupleTable
     return true;
 }
 
-/** Reject unsupported core parallel-scan estimation through PostgreSQL ERROR. */
+/** Reject the unsupported parallel table-scan size request. */
 Size bioseq_parallelscan_estimate(Relation rel) {
     bioseq_log<logging_level::error, logging_target::postgres>(
         "bioseq_parallelscan_estimate not implemented");
 }
 
-/** Reject unsupported core parallel-scan initialization through PostgreSQL ERROR. */
+/** Reject unsupported parallel table-scan initialization. */
 Size bioseq_parallelscan_initialize(Relation rel, ParallelTableScanDesc pscan) {
     bioseq_log<logging_level::error, logging_target::postgres>(
         "bioseq_parallelscan_initialize not implemented");
 }
 
-/** Reject unsupported core parallel-scan reinitialization through PostgreSQL ERROR. */
+/** Reject unsupported parallel table-scan reset. */
 void bioseq_parallelscan_reinitialize(Relation rel, ParallelTableScanDesc pscan) {
     bioseq_log<logging_level::error, logging_target::postgres>(
         "bioseq_parallelscan_reinitialize not implemented");
 }
 
-/** Allocate exact-row sequence caches in the fetch memory context. */
+/** Allocate the fragment cache used to read sequences from index-selected rows. */
 [[gnu::always_inline]]
 static inline void
 init_index_fetch_seq_cache(index_fetch_state* scan, Relation rel, MemoryContext scan_context) {
@@ -464,7 +446,7 @@ init_index_fetch_seq_cache(index_fetch_state* scan, Relation rel, MemoryContext 
     scan->defers_sequence_hydration = false;
 }
 
-/** Begin an index fetch before the executor supplies projected attributes. */
+/** Create index-fetch state, choosing columns when the first row is requested. */
 column_index_fetch_base* bioseq_index_fetch_begin(Relation rel
 #if PG_VERSION_NUM >= 190000
                                              , std::uint32_t flags
@@ -472,7 +454,7 @@ column_index_fetch_base* bioseq_index_fetch_begin(Relation rel
 ) {
     Oid relfilelocator = rel->rd_locator.relNumber;
     if (writes_pending_in_parent_transactions(relfilelocator, GetCurrentSubTransactionId())) {
-        /* Rejects index fetches while a parent transaction has pending writes. */
+        /* A subtransaction cannot read unflushed writes from its parent. */
         bioseq_log<logging_level::error, logging_target::postgres>(
             "cannot read from index when there is unflushed data in "
             "upper transactions");
@@ -498,12 +480,12 @@ column_index_fetch_base* bioseq_index_fetch_begin(Relation rel
     return &scan->fetch_base;
 }
 
-/** Begin an index fetch with an explicit projected-attribute bitmap. */
+/** Create index-fetch state for the selected columns. */
 export column_index_fetch_base* bioseq_index_fetch_begin_extended(Relation rel,
                                                               Bitmapset* attr_needed) {
     Oid relfilenode = rel->rd_locator.relNumber;
     if (writes_pending_in_parent_transactions(relfilenode, GetCurrentSubTransactionId())) {
-        /* Rejects index fetches while a parent transaction has pending writes. */
+        /* A subtransaction cannot read unflushed writes from its parent. */
         bioseq_log<logging_level::error, logging_target::postgres>(
             "cannot read from index when there is unflushed data in "
             "upper transactions");
@@ -529,7 +511,7 @@ export column_index_fetch_base* bioseq_index_fetch_begin_extended(Relation rel,
     return &scan->fetch_base;
 }
 
-/** Reset an index fetch whose state is recreated lazily on the next tuple. */
+/** Keep the reader and caches for reuse. Index-fetch reset needs no work. */
 void bioseq_index_fetch_reset(column_index_fetch_base* sscan) {
     /* no-op */
 }
@@ -547,7 +529,7 @@ void bioseq_index_fetch_end(column_index_fetch_base* sscan) {
     }
 #endif
 
-    /* close per-fetch seq_cache. */
+    /* Close the fragment readers held by this index fetch. */
     if (scan->sequence_cache != nullptr) {
         auto* caches = static_cast<bioseq::storage::seq_caches*>(scan->sequence_cache);
         caches->close_all(/*commit=*/true);
@@ -562,7 +544,7 @@ void bioseq_index_fetch_end(column_index_fetch_base* sscan) {
 
     scan->attributes_needed.clear();
 
-    /* clean up any caches. */
+    /* Clear the shared column-page cache when it is enabled. */
     if (bioseq::settings::column_cache::enabled == true) {
         reset_column_cache();
     }
@@ -600,19 +582,21 @@ static stripe_metadata* find_stripe_metadata_by_row_number(index_fetch_state* sc
     return nullptr;
 }
 
-/** Fetch an index-selected row after MVCC and row-mask validation. */
+/** Fetch a row selected by an index under the supplied snapshot.
+ *
+ * Flushed rows are checked by the column reader. Dirty-snapshot constraint
+ * checks can also find unfinished writes and wait for their transaction.
+ */
 bool bioseq_index_fetch_tuple(column_index_fetch_base* sscan,
                               ItemPointer tid,
                               Snapshot snapshot,
                               TupleTableSlot* slot,
                               bool* call_again,
                               bool* all_dead) {
-    /* no HOT chains are possible in columnar, directly set it to false */
+    /* Each TID identifies one row. There is no HOT chain to follow. */
     *call_again = false;
 
-    /**
-     * Never reports all_dead until simple virtual-TID index deletion is implemented.
-     */
+    /* Keep all_dead false because simple index-entry deletion is unsupported. */
     if (all_dead) {
         *all_dead = false;
     }
@@ -622,13 +606,13 @@ bool bioseq_index_fetch_tuple(column_index_fetch_base* sscan,
     index_fetch_state* scan = reinterpret_cast<index_fetch_state*>(sscan);
     Relation bioseq_column_relation = scan->fetch_base.rel;
 
-    /* initialize read state for the first row */
+    
     if (scan->read_state == nullptr) {
-        /* no quals for index scan */
+        /* The index scan evaluates its own predicates. */
         List* scan_qual = NIL;
 
         if (scan->attributes_needed.is_empty()) {
-            /* we need all columns */
+            /* A scan without a projection reads all columns. */
             int natts = bioseq_column_relation->rd_att->natts;
             scan->attributes_needed.clear();
             scan->attributes_needed =
@@ -661,7 +645,7 @@ bool bioseq_index_fetch_tuple(column_index_fetch_base* sscan,
             find_stripe_by_first_row_number(bioseq_column_relation, row_number, snapshot);
 
     if (!stripe_metadata_entry) {
-        /* it is certain that tuple with row_number doesn't exist */
+        /* No candidate stripe covers this row number. */
         return false;
     }
 
@@ -670,51 +654,33 @@ bool bioseq_index_fetch_tuple(column_index_fetch_base* sscan,
     if (stripe_write_state_value == stripe_write_state::flushed &&
         !read_column_row_by_number(
             scan->read_state, row_number, slot->tts_values, slot->tts_isnull)) {
-        /*
-         * find_stripe_by_first_row_number doesn't verify upper row
-         * number boundary of found stripe. For this reason, we didn't
-         * certainly know if given row number belongs to one of the stripes.
-         */
+        /* A candidate stripe may end before this row number, or its row mask
+         * may hide the row. The column reader performs those checks. */
         return false;
     } else if (stripe_write_state_value == stripe_write_state::aborted) {
-        /*
-         * We only expect to see un-flushed stripes when checking against
-         * constraint violation. In that case, indexAM provides dirty
-         * snapshot to index_fetch_tuple callback.
-         */
+        /* Dirty-snapshot constraint checks can see an aborted, unflushed
+         * stripe. It contributes no conflicting row. */
         pfree(stripe_metadata_entry);
         Assert(snapshot->snapshot_type == SNAPSHOT_DIRTY);
         return false;
     } else if (stripe_write_state_value == stripe_write_state::in_progress) {
         if (stripe_metadata_entry->inserted_by_current_transaction) {
-            /**
-             * Flushes a current-transaction stripe before retrying the row lookup.
-             */
+            /* Flush our own pending writes before reading this row. */
             flush_pending_writes_for_read(scan->read_state);
 
-            /*
-             * Fill the tupleslot and fall through to return true, it
-             * certainly exists.
-             */
+            /* The row must be readable after flushing our write. */
             read_column_row_by_number_or_error(
                 scan->read_state, row_number, slot->tts_values, slot->tts_isnull);
         } else {
-            /* similar to aborted writes, it should be dirty snapshot */
+            /* An unfinished write from another transaction requires a dirty snapshot. */
             Assert(snapshot->snapshot_type == SNAPSHOT_DIRTY);
 
-            /**
-             * Returns an all-null slot for an unflushed foreign-transaction stripe.
-             *
-             * Unique btree checks only need the row identity while they wait for the writer
-             * transaction. Other supported constraints receive flushed single-row stripes.
-             */
+            /* A uniqueness check can use this row identity to wait for the writer
+             * before retrying. Its unflushed column values are unavailable here. */
             memset(slot->tts_isnull, true, slot->tts_nvalid * sizeof(bool));
         }
     } else {
-        /*
-         * At this point, we certainly know that stripe is flushed and
-         * read_column_row_by_number successfully filled the tupleslot.
-         */
+        /* The flushed row was read successfully above. */
         Assert(stripe_write_state_value == stripe_write_state::flushed);
     }
 
@@ -724,9 +690,7 @@ bool bioseq_index_fetch_tuple(column_index_fetch_base* sscan,
     slot->tts_tid = *tid;
     ExecStoreVirtualTuple(slot);
 
-    /**
-     * Hydrates sequence locators unless a bulk custom scan explicitly deferred it.
-     */
+    /* Read full sequences unless the custom scan will resolve the locators. */
     if (!scan->defers_sequence_hydration) {
         const auto& amc = bioseq::storage::get_table_access_cache(bioseq_column_relation);
         auto* caches = static_cast<bioseq::storage::seq_caches*>(scan->sequence_cache);
@@ -742,7 +706,7 @@ bool bioseq_index_fetch_tuple(column_index_fetch_base* sscan,
 }
 
 #if PG_VERSION_NUM >= 200000
-/** Advance the index AM, preserving column-store visibility and hydration. */
+/** Read index TIDs until a visible table row is found, then fill the result slot. */
 template <bool p_index_only>
 static bool bioseq_index_next_slot(IndexScanDesc descriptor,
                                    ScanDirection direction,
@@ -762,8 +726,8 @@ static bool bioseq_index_next_slot(IndexScanDesc descriptor,
                                        descriptor->xs_snapshot, row_slot,
                                        &call_again, &all_dead))
             continue;
-        // Column rows have no HOT chains. The existing reader deliberately
-        // never marks an invisible row globally dead, so do not kill its TID.
+        // Rows have no HOT chains. An invisible row may still be visible to
+        // another snapshot, so this reader never marks its index TID as dead.
         Assert(!call_again);
         pgstat_count_heap_fetch(descriptor->indexRelation);
         if constexpr (p_index_only)
@@ -774,7 +738,7 @@ static bool bioseq_index_next_slot(IndexScanDesc descriptor,
     return false;
 }
 
-/** Attach an optional projected reader without changing index iteration. */
+/** Create the index reader and choose regular or index-only tuple output. */
 export void bioseq_index_scan_begin_projected(IndexScanDesc descriptor,
                                              std::uint32_t flags,
                                              Bitmapset* attributes_needed) {
@@ -793,25 +757,25 @@ export void bioseq_index_scan_begin_projected(IndexScanDesc descriptor,
     }
 }
 
-/** Standard PostgreSQL index entry point, with no projected-column override. */
+/** Begin a PostgreSQL index scan that reads all columns. */
 void bioseq_index_scan_begin(IndexScanDesc descriptor, std::uint32_t flags) {
     bioseq_index_scan_begin_projected(descriptor, flags, nullptr);
 }
 
-/** Preserve the existing reader's rescan policy and snapshot ownership. */
+/** Keep the index reader and caches for reuse. */
 void bioseq_index_scan_reset(IndexScanDesc descriptor) {
     auto* scan = static_cast<index_fetch_state*>(descriptor->xs_table_opaque);
     bioseq_index_fetch_reset(&scan->fetch_base);
 }
 
-/** Close the same caches and read state used by the pre-PG20 callback. */
+/** Close the index reader and release its caches and memory context. */
 void bioseq_index_scan_end(IndexScanDesc descriptor) {
     auto* scan = static_cast<index_fetch_state*>(descriptor->xs_table_opaque);
     bioseq_index_fetch_end(&scan->fetch_base);
     descriptor->xs_table_opaque = nullptr;
 }
 
-/** Preserve dirty-snapshot constraint checks through the existing TID reader. */
+/** Check a single index TID under the supplied snapshot, including dirty-snapshot checks. */
 bool bioseq_fetch_tid(Relation relation, ItemPointer tuple_id,
                       Snapshot snapshot, bool* all_dead) {
     column_index_fetch_base* base = bioseq_index_fetch_begin(relation, SO_NONE);
@@ -829,7 +793,7 @@ bool bioseq_fetch_tid(Relation relation, ItemPointer tuple_id,
 }
 #endif
 
-/** Fetch an exact visible row version into a caller-provided slot. */
+/** Read a row version and its sequence values into the caller's slot. */
 bool bioseq_fetch_row_version(Relation relation,
                               ItemPointer tid,
                               Snapshot snapshot,
@@ -871,9 +835,8 @@ bool bioseq_fetch_row_version(Relation relation,
     if (TTS_EMPTY(slot))
         ExecStoreVirtualTuple(slot);
 
-    /* hydrate any SEQ stubs in the slot. We do NOT
-     * cache a per-fetch seq_caches here because the row-version fetch
-     * is one-shot; allocate, use, destroy. */
+    /* Open a temporary fragment cache for this fetch and close it after
+     * loading the sequence values. The row reader itself is reused. */
     {
         const auto& amc = bioseq::storage::get_table_access_cache(relation);
         if (!amc.sequence_attribute_numbers.empty()) {
@@ -898,50 +861,45 @@ bool bioseq_fetch_row_version(Relation relation,
     return true;
 }
 
-/** Reject unsupported HOT-chain traversal for stable virtual TIDs. */
+/** Reject the unsupported request to follow a row to its latest TID. */
 void bioseq_get_latest_tid(TableScanDesc sscan, ItemPointer tid) {
     bioseq_log<logging_level::error, logging_target::postgres>(
         "bioseq_get_latest_tid not implemented");
 }
 
-/** Reject the unimplemented generic virtual-TID validity callback. */
+/** Reject the unsupported tuple-identifier validity check. */
 bool bioseq_tuple_tid_valid(TableScanDesc scan, ItemPointer tid) {
     bioseq_log<logging_level::error, logging_target::postgres>(
         "bioseq_tuple_tid_valid not implemented");
 }
 
-/** Test row-mask visibility for the slot's virtual TID under a snapshot. */
+/** Check whether the row number belongs to a stripe visible under the snapshot. */
 bool bioseq_tuple_satisfies_snapshot(Relation rel, TupleTableSlot* slot, Snapshot snapshot) {
     uint64_t row_number = tid_to_row_number(slot->tts_tid);
     stripe_metadata* stripe_metadata_entry = find_stripe_by_row_number(rel, row_number, snapshot);
     return stripe_metadata_entry != nullptr;
 }
 
-/** Apply bottom-up index deletion semantics for virtual row identities. */
+/** Report no removable rows for bottom-up index cleanup and reject simple deletion. */
 TransactionId bioseq_index_delete_tuples(Relation rel, TM_IndexDeleteOp* delstate) {
     previous_cache_enabled_state = bioseq::settings::column_cache::enabled;
     bioseq::settings::column_cache::enabled = false;
 
-    /**
-     * Supports bottom-up deletion suppression but rejects simple index deletion.
-     */
+    
 
     if (delstate->bottomup) {
-        /**
-         * Reports no deletable TIDs for PostgreSQL bottom-up btree cleanup.
-         */
+        /* Keep all index entries during bottom-up btree cleanup. */
         delstate->ndeltids = 0;
         return InvalidTransactionId;
     } else {
-        /**
-         * Rejects simple deletion because index fetch never marks virtual rows all-dead.
-         */
+        /* Index fetches never set all_dead, so simple deletion should not reach
+         * this callback. */
         bioseq_log<logging_level::error, logging_target::postgres>(
             "bioseq_index_delete_tuples not implemented for simple deletion");
     }
 }
 
-/** Enter the next-row implementation through the table-AM exception boundary. */
+/** Read the next result and convert C++ exceptions into PostgreSQL errors. */
 bool bioseq_getnextslot(TableScanDesc scan, ScanDirection direction, TupleTableSlot* slot) {
     return run_tableam_cpp_checked("bioseq getnextslot", [scan, direction, slot] {
         return bioseq_getnextslot_impl(scan, direction, slot);

@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Implements relation maintenance, analyze, sizing, and transaction adapters.
+ * @brief Table maintenance, planner statistics, and transaction cleanup.
  */
 module;
 #include <algorithm>
@@ -47,7 +47,7 @@ import :access_identity;
 import :access_common;
 import :access_hooks;
 
-/** @brief Repeatedly acquire or release a relation lock until the bounded deadline expires. */
+/** Retry a relation lock, with an optional timeout. */
 static bool try_lock_relation_until_timeout(
     Relation rel, LOCKMODE lock_mode, int timeout, int retry_interval, bool acquire);
 /** @brief Emit relation storage statistics at the requested PostgreSQL log level. */
@@ -73,16 +73,13 @@ void bioseq_relation_set_new_filenode(Relation rel,
             "bioseq tables cannot be TEMPORARY; use UNLOGGED or permanent");
     }
 
-    /**
-     * Cleans old metadata and state only when the physical storage identity changes.
-     */
+    /* Remove old metadata when the physical file number changes. */
     if (rel->rd_locator.relNumber != newrnode->relNumber) {
         mark_write_state_relation_dropped(rel->rd_locator.relNumber, GetCurrentSubTransactionId());
 
         delete_metadata_rows(rel->rd_locator);
 
-        /* cascade-drop sub-tables under the OLD
-         * relfilenode triple. */
+        /* Drop sequence tables belonging to the old physical file. */
         bioseq::storage::bioseq_default_storage_manager::drop_sub_tables_for_main(
             rel->rd_locator.dbOid, rel->rd_locator.spcOid, rel->rd_locator.relNumber);
     }
@@ -99,7 +96,7 @@ void bioseq_relation_set_new_filenode(Relation rel,
 
     smgrclose(srel);
 
-    /* we will lazily initialize metadata in first stripe reservation */
+    /* The first stripe reservation creates the remaining metadata. */
 }
 
 /** Reinitialize storage for a relation truncated outside transactional rewrite. */
@@ -111,13 +108,11 @@ void bioseq_relation_nontransactional_truncate(Relation rel) {
     RelFileLocator relfilelocator = rel->rd_locator;
 
     drop_write_state_outside_transaction(relfilelocator.relNumber);
-    /* Delete old relfilelocator metadata */
+    
     delete_metadata_rows(relfilelocator);
 
-    /**
-     * Reuses the current locator because a transaction-local relation is not visible
-     * to other transactions.
-     */
+    /* PostgreSQL uses this path for storage that is private to the current
+     * transaction, so it can truncate the existing file in place. */
     RelationTruncate(rel, 0);
 
     bioseq_log<logging_level::debug>(
@@ -127,18 +122,16 @@ void bioseq_relation_nontransactional_truncate(Relation rel) {
     initialize_column_storage(RelationGetSmgr(rel), storage_id);
 }
 
-/** Copy every physical fork into a newly allocated relation locator. */
+/** Copy physical storage to a newly allocated relation locator. */
 void bioseq_relation_copy_data(Relation rel, const RelFileLocator* newrnode) {
     char persistence = rel->rd_rel->relpersistence;
 
-    /**
-     * Flushes source buffers before copying relation forks under the exclusive lock.
-     */
+    /* Flush dirty buffers so the disk copy includes recent writes. */
     FlushRelationBuffers(rel);
 
     SMgrRelation srel = RelationCreateStorage(*newrnode, persistence, true);
 
-    /* copy main fork */
+    
     RelationCopyStorage(RelationGetSmgr(rel), srel, MAIN_FORKNUM, persistence);
 
     for (ForkNumber fork_num = static_cast<ForkNumber>(MAIN_FORKNUM + 1); fork_num <= MAX_FORKNUM;
@@ -146,10 +139,7 @@ void bioseq_relation_copy_data(Relation rel, const RelFileLocator* newrnode) {
         if (smgrexists(srel, fork_num)) {
             smgrcreate(srel, fork_num, false);
 
-            /*
-             * WAL log creation if the relation is persistent, or
-             * this is the init fork of an unlogged relation.
-             */
+            /* Log fork creation for permanent tables and unlogged-table init forks. */
             if (RelationIsPermanent(rel) ||
                 (persistence == RELPERSISTENCE_UNLOGGED && fork_num == INIT_FORKNUM))
                 log_smgrcreate(newrnode, fork_num);
@@ -159,14 +149,11 @@ void bioseq_relation_copy_data(Relation rel, const RelFileLocator* newrnode) {
     }
 }
 
-/**
- * Copy visible rows and metadata during a `VACUUM FULL` rewrite.
+/** Copy visible rows and their sequences for VACUUM FULL.
  *
- * This callback is used by `VACUUM FULL`, at which
- * we should copy data from OldHeap to NewHeap.
- *
- * In general TableAM case this can also be called for the CLUSTER command
- * which is not applicable for columnar since it doesn't support indexes.
+ * PostgreSQL also uses this callback for CLUSTER, but ordering a Bioseq table
+ * by an index is unsupported. Each copied sequence gets storage in the new
+ * table before the old table's sequence fragments are removed.
  */
 void bioseq_relation_copy_for_cluster(Relation old_heap,
                                       Relation new_heap,
@@ -190,42 +177,34 @@ void bioseq_relation_copy_for_cluster(Relation old_heap,
             .with_message("clustering columnar tables using indexes is not supported");
     }
 
-    /*
-     * copy_table_data in cluster.c assumes tuple descriptors are exactly
-     * the same. Even dropped columns exist and are marked as attisdropped
-     * in the target relation.
-     */
+    /* PostgreSQL preserves dropped-column positions during a rewrite, so
+     * both tuple descriptors must have the same number of attributes. */
     Assert(source_desc->natts == target_desc->natts);
 
-    /* read settings from old heap, relfilelocator will be swapped at the end */
+    /* Read options using the old table identity before PostgreSQL swaps files. */
     column_options bioseq_column_options =
         read_column_options(old_heap->rd_id).value_or(column_options{});
 
-    /**
-     * Copies CLUSTER rows through deferred source hydration so old locator stubs
-     * resolve against the source storage and are rewritten for the destination.
-     */
+    /* Write through the new table's state so its sequence fragments receive
+     * the destination storage identity. */
     column_write_state* write_state = initialize_column_write_state(
         new_heap, target_desc, RelationGetRelid(new_heap), GetCurrentSubTransactionId());
     auto* write_caches = ensure_write_side_seq_caches(new_heap, write_state);
     const auto cap_bytes = write_caches->cap_bytes_snapshot;
 
-    /* we need all columns */
+    /* Copy every column. */
     int natts = old_heap->rd_att->natts;
     bioseq::postgres::support::postgres_bitmapset attr_needed =
         bioseq::postgres::support::postgres_bitmapset::make_member_range(natts);
 
-    /* no quals for table rewrite */
+    /* Copy all visible rows without additional predicates. */
     List* scan_qual = NIL;
 
-    /* Unlike heap tuples, columnar dead-row state lives in an MVCC row-mask
-     * relation. SnapshotAny would see both the superseded and current mask and
-     * can therefore copy an UPDATE's dead version into the rewritten table.
-     * Keep one registered transaction snapshot authoritative for the main row,
-     * row mask, and sequence-source fragments throughout the rewrite. */
+    /* Row masks have MVCC versions. SnapshotAny could select an old mask and
+     * copy a deleted row into the new table. Use one registered snapshot for
+     * rows, row masks, and sequence fragments throughout the rewrite. */
 #if PG_VERSION_NUM >= 190000
-    // PG19 supplies the MVCC horizon for concurrent relation rewrites. Keep
-    // that same horizon for rows, row masks and sequence fragments.
+    // Use PostgreSQL 19's supplied rewrite snapshot when available.
     Snapshot snapshot = RegisterSnapshot(
         rewrite_snapshot != nullptr ? rewrite_snapshot : GetTransactionSnapshot());
 #else
@@ -243,7 +222,7 @@ void bioseq_relation_copy_for_cluster(Relation old_heap,
                                                            random_access,
                                                            nullptr);
 
-    /* Read-side seq cache: hydrates OldHeap's stubs to real payloads. */
+    /* Cache fragment reads from the old table. */
     auto* read_caches = bioseq::storage::alloc_seq_caches(scan_context);
     read_caches->side = bioseq::storage::seq_caches::access_side::read;
     read_caches->lock_mode = AccessShareLock;
@@ -262,7 +241,7 @@ void bioseq_relation_copy_for_cluster(Relation old_heap,
 
     while (read_next_column_row(read_state, values, nulls, nullptr)) {
         std::vector<bioseq::storage::pending_sequence_source> pending_sources;
-        /* Hydrate any SEQ stub columns from OldHeap's sub-tables. */
+        /* Read full sequences from the old table's fragments. */
         for (std::int16_t attno : source_amc.sequence_attribute_numbers) {
             const int idx = attno - 1;
             if (idx < 0 || idx >= source_desc->natts)
@@ -288,8 +267,8 @@ void bioseq_relation_copy_for_cluster(Relation old_heap,
             values[idx] = PointerGetDatum(real);
         }
 
-        /* Rewrite SEQ columns into stubs targeting NewHeap's sub-tables.
-         * The write-side cache shares the destination write state's lifetime. */
+        /* Store sequences in the new table and replace their values with its
+         * locators. The destination write state owns the cache. */
         for (std::int16_t attno : source_amc.sequence_attribute_numbers) {
             const int idx = attno - 1;
             if (idx < 0 || idx >= source_desc->natts)
@@ -340,22 +319,18 @@ void bioseq_relation_copy_for_cluster(Relation old_heap,
     UnregisterSnapshot(snapshot);
     MemoryContextDelete(scan_context);
 
-    /* cascade-drop OldHeap's sub-tables before the
-     * finish_heap_swap. After the swap the relfilenodes are swapped and
-     * OldHeap's sub-tables become orphans under the (now-defunct) old
-     * triple. The reaper is the long-tail safety net; this call makes
-     * the cleanup deterministic. */
+    /* Remove old sequence tables before PostgreSQL swaps the physical files.
+     * After the swap, their original parent storage identity would be gone. */
     bioseq::storage::bioseq_default_storage_manager::drop_sub_tables_for_main(
         old_heap->rd_locator.dbOid, old_heap->rd_locator.spcOid, old_heap->rd_locator.relNumber);
 }
 
-/**
- * Compact eligible tail stripes without changing PostgreSQL visibility semantics.
+/** Merge small stripes at the end of the table and remove deleted rows.
  *
- * Combines the last eligible stripes so they can fit the
- * maximum number of rows per stripe. Stripes that are going to be combined are deleted
- * and new stripe will be written at the end of untouched last stripe. We also include
- * information about deleted rows for this implementation.
+ * Select a tail that fits the row and memory limits, read its visible rows,
+ * and write them after the last untouched stripe. Rewritten rows receive new
+ * row numbers. A single candidate is rewritten only when enough rows were
+ * deleted to make the work worthwhile.
  */
 static bool truncate_and_compact_column_stripes(Relation rel, int elevel) {
     uint64_t total_row_number_count = 0;
@@ -370,13 +345,13 @@ static bool truncate_and_compact_column_stripes(Relation rel, int elevel) {
         return false;
     }
 
-    /* Get current columnar options */
+    
     column_options bioseq_column_options =
         read_column_options(rel->rd_id).value_or(column_options{});
 
-    /* Get all stripes in reverse order */
+    /* Consider the newest stripes first. */
     List* stripe_metadata_list = list_stripes_for_relation(rel->rd_locator, BackwardScanDirection);
-    /* Empty table nothing to do */
+    
     if (stripe_metadata_list == NIL) {
         bioseq_log_pg(
             elevel, "\"{}\": stopping vacuum due to empty table", RelationGetRelationName(rel));
@@ -408,21 +383,14 @@ static bool truncate_and_compact_column_stripes(Relation rel, int elevel) {
         starting_stripe_list_position++;
     }
 
-    /*
-     * One stripe that is "full" so do nothing.
-     */
+    /* No tail stripe fits within the compaction limits. */
     if (starting_stripe_list_position == 0) {
         return false;
     }
 
-    /*
-     * There is only one stripe that is candidate. Maybe we should vacuum
-     * it if condition is met.
-     */
+    /* Rewriting a single stripe only saves space if enough rows were deleted. */
     else if (starting_stripe_list_position == 1) {
-        /* Maybe we should vacuum only one stripe if count of
-         * deleted rows is higher than 20 percent.
-         */
+        
         float percentage_of_delete_rows =
             static_cast<float>(last_stripe_deleted_rows) /
             static_cast<float>(total_row_number_count + last_stripe_deleted_rows);
@@ -434,10 +402,8 @@ static bool truncate_and_compact_column_stripes(Relation rel, int elevel) {
         }
     }
 
-    /**
-     * Clears PROC_IN_VACUUM while writing metadata so concurrent xmin calculation
-     * does not classify the new catalog tuples as dead.
-     */
+    /* Clear the vacuum status before writing catalog rows so other backends
+     * include this transaction when computing the oldest active transaction. */
 
     LWLockAcquire(ProcArrayLock, LW_EXCLUSIVE);
     MyProc->statusFlags = 0;
@@ -445,24 +411,23 @@ static bool truncate_and_compact_column_stripes(Relation rel, int elevel) {
 
     LWLockRelease(ProcArrayLock);
 
-    /* We need to re-assing RecentXmin here */
+    /* Take a transaction snapshot after clearing the vacuum status. */
     PushActiveSnapshot(GetTransactionSnapshot());
     column_write_state* write_state =
         begin_column_write(rel->rd_locator, bioseq_column_options, tuple_desc);
 
-    /* we need all columns */
+    /* Preserve every column while rewriting the tail. */
     int natts = rel->rd_att->natts;
     bioseq::postgres::support::postgres_bitmapset attr_needed =
         bioseq::postgres::support::postgres_bitmapset::make_member_range(natts);
 
-    /* no quals for table rewrite */
+    /* Copy all visible rows without additional predicates. */
     List* scan_qual = NIL;
 
     MemoryContext scan_context = create_column_scan_memory_context();
     bool random_access = true;
-    // Row-mask metadata is MVCC: SnapshotAny can pick a superseded mask and
-    // resurrect deleted/updated rows during compaction. The active snapshot
-    // was pushed above and remains owned until this reader is closed.
+    // Use the active snapshot to read current row masks. SnapshotAny could
+    // pick an old mask and copy deleted rows back into the table.
     column_read_state* read_state = init_bioseq_read_state(
         rel, tuple_desc, attr_needed, scan_qual, scan_context,
         GetActiveSnapshot(), random_access, nullptr);
@@ -474,7 +439,7 @@ static bool truncate_and_compact_column_stripes(Relation rel, int elevel) {
     Datum* values = bioseq::postgres::support::allocate_zeroed_array<Datum>(tuple_desc->natts);
     bool* nulls = bioseq::postgres::support::allocate_zeroed_array<bool>(tuple_desc->natts);
 
-    /* we don't need to know row_number here */
+    /* Compacted rows receive new row numbers. */
     while (read_next_column_row(read_state, values, nulls, nullptr)) {
         write_column_row(write_state, values, nulls);
     }
@@ -484,8 +449,8 @@ static bool truncate_and_compact_column_stripes(Relation rel, int elevel) {
     if (list_length(stripe_metadata_list) > starting_stripe_list_position) {
         stripe_metadata* boundary_stripe = static_cast<stripe_metadata*>(
             list_nth(stripe_metadata_list, starting_stripe_list_position));
-        // Reservations are exclusive ends: retain every byte of the last
-        // untouched stripe before rewriting the compacted tail.
+        // Keep the whole last untouched stripe. The reservation points just
+        // past its final byte.
         new_data_reservation = boundary_stripe->file_offset + boundary_stripe->data_length;
     } else {
         stripe_metadata* boundary_stripe = static_cast<stripe_metadata*>(
@@ -522,7 +487,7 @@ static uint64_t column_table_tuple_count(Relation relation) {
     return tuple_count;
 }
 
-/** Run Bioseq's non-FULL VACUUM bookkeeping and optional tail truncation. */
+/** Run VACUUM storage cleanup and update PostgreSQL's table statistics. */
 void bioseq_vacuum_rel(Relation rel,
 #if PG_VERSION_NUM >= 190000
                        const VacuumParams* params,
@@ -537,34 +502,28 @@ void bioseq_vacuum_rel(Relation rel,
         bioseq::postgres::support::invoke_pg_as_cpp([rel, params] {
             pgstat_progress_start_command(PROGRESS_COMMAND_VACUUM, RelationGetRelid(rel));
 
-            /*
-             * If metapage version of relation is older, then we hint users to VACUUM
-             * the relation in validate_column_metapage_version. So if needed, upgrade
-             * the metapage before doing anything.
-             */
+            /* VACUUM is also the recovery path for an older storage format. Upgrade
+             * its metapage before reading storage metadata. */
             const bool upgrades_storage = true;
             ensure_current_column_storage_format(rel, upgrades_storage);
 
             int elevel = (params->options & VACOPT_VERBOSE) ? INFO : DEBUG2;
 
-            /* this should have been resolved by vacuum.c until now */
+            /* PostgreSQL resolves the truncate option before calling the table AM. */
             Assert(params->truncate != VACOPTVALUE_UNSPECIFIED);
 
             if (params->options & VACOPT_VERBOSE) {
                 log_relation_statistics(rel, elevel);
             }
 
-            /*
-             * We don't have updates, deletes, or concurrent updates, so all we
-             * care for now is truncating the unused space at the end of storage.
-             */
+            /* Compact eligible tail stripes and release unused space when requested. */
             if (params->truncate == VACOPTVALUE_ENABLED) {
                 truncate_column_storage_tail(rel, elevel);
             }
 
             BlockNumber new_rel_pages = smgrnblocks(RelationGetSmgr(rel), MAIN_FORKNUM);
 
-            /* get the number of indexes */
+            
             List* index_list = RelationGetIndexList(rel);
             int nindexes = list_length(index_list);
 
@@ -574,23 +533,19 @@ void bioseq_vacuum_rel(Relation rel,
             Assert(MultiXactIdPrecedesOrEquals(cutoffs.MultiXactCutoff, cutoffs.OldestMxact));
             Assert(TransactionIdPrecedesOrEquals(cutoffs.FreezeLimit, cutoffs.OldestXmin));
 
-            /*
-             * BioseqColumn storage doesn't hold any transaction IDs, so we can always
-             * just advance to the most aggressive value.
-             */
+            /* Transaction IDs live in metadata tables, so the main column file needs
+             * no tuple freezing. Advance its freeze limits to the current cutoffs. */
             TransactionId new_rel_frozen_xid = cutoffs.OldestXmin;
             MultiXactId new_relmin_mxid = cutoffs.OldestMxact;
             double new_live_tuples = column_table_tuple_count(rel);
 
-            /* all visible pages are always 0 */
+            /* Column storage has no heap visibility-map pages. */
             BlockNumber new_rel_allvisible = 0;
 
             bool frozenxid_updated;
             bool minmulti_updated;
 
-            /**
-             * PostgreSQL 18 requires a frozen-page count, which column storage reports as zero.
-             */
+            /* PostgreSQL 18 also requests a frozen-page count. Column storage has none. */
 #if PG_VERSION_NUM >= PG_VERSION_18
             BlockNumber new_rel_allfrozen = 0;
             vac_update_relstats(rel,
@@ -611,10 +566,8 @@ void bioseq_vacuum_rel(Relation rel,
 						&frozenxid_updated, &minmulti_updated, false);
 #endif
 
-            /**
-             * PostgreSQL 18 requires a start time (zero means unknown); PG19
-             * takes the open relation rather than its OID/shared flag.
-             */
+            /* PostgreSQL 18 adds a start time, with zero meaning unknown. PostgreSQL
+             * 19 takes the open Relation instead of its OID and shared-table flag. */
 #if PG_VERSION_NUM >= 190000
             pgstat_report_vacuum(rel,
                                  std::max<int64_t>(new_live_tuples, 0),
@@ -673,7 +626,8 @@ static void log_relation_statistics(Relation rel, int elevel) {
                 for (uint32_t chunk = 0; chunk < skiplist->chunk_count; chunk++) {
                     chunk_skip_node* skipnode = &skiplist->chunk_skip_nodes[column][chunk];
 
-                    /* ignore zero length chunks for dropped attributes */
+                    /* Count only chunks with stored values, including dropped columns that
+                     * still occupy space. */
                     if (skipnode->value_stream_length > 0) {
                         compression_stats[static_cast<int>(
                             skipnode->value_compression_algorithm)]++;
@@ -684,10 +638,8 @@ static void log_relation_statistics(Relation rel, int elevel) {
                         }
                     }
 
-                    /*
-                     * We don't compress exists buffer, so its compressed & decompressed
-                     * lengths are the same.
-                     */
+                    /* The null bitmap is stored uncompressed, so its byte count is already
+                     * the uncompressed size. */
                     total_decompressed_length += skipnode->exists_stream_length;
                     total_decompressed_length += skipnode->value_decompressed_length;
                 }
@@ -732,12 +684,12 @@ static void log_relation_statistics(Relation rel, int elevel) {
         const char* compression_name = compression_algorithm_name(
             static_cast<bioseq::compression_algorithm>(compression_algorithm));
 
-        /* skip if this compression algorithm has not been compiled */
+        /* Omit compression algorithms unavailable in this build. */
         if (compression_name == nullptr) {
             continue;
         }
 
-        /* skip if no chunks use this compression type */
+        
         if (compression_stats[compression_algorithm] == 0) {
             continue;
         }
@@ -753,36 +705,29 @@ static void log_relation_statistics(Relation rel, int elevel) {
         elevel, "statistics for \"{}\":\n{}", RelationGetRelationName(rel), info_buf->data);
 }
 
-/**
- * Truncate unused space at the end of a Bioseq main fork.
+/** Release unused space at the end of a Bioseq table.
  *
- * Unused space can be created by aborted transactions. The lock policy avoids
- * blocking or deadlocking against callers that already hold weaker locks.
- *
- * The implementation keeps the row identities of every retained stripe.
+ * Try the exclusive lock without joining its wait queue, then compact eligible
+ * tail stripes or truncate unused bytes. Sequence-fragment tables only allow
+ * truncation because their locators must keep the same row numbers.
  */
 static void truncate_column_storage_tail(Relation rel, int elevel) {
     PGRUsage ru0;
 
     pg_rusage_init(&ru0);
 
-    /* Report that we are now truncating */
+    
     pgstat_progress_update_param(PROGRESS_VACUUM_PHASE, PROGRESS_VACUUM_PHASE_TRUNCATE);
 
-    /**
-     * Acquires AccessExclusiveLock conditionally so truncation cannot block or
-     * deadlock behind the weaker lock already held by the caller.
-     */
+    /* Avoid waiting in the lock queue while holding a weaker relation lock.
+     * Conditional retries let VACUUM give up if another transaction conflicts. */
     if (!try_lock_relation_until_timeout(
             rel,
             AccessExclusiveLock,
             bioseq::build_config::bioseq_vacuum_truncate_lock_timeout_milliseconds,
             bioseq::build_config::bioseq_vacuum_truncate_lock_wait_interval_milliseconds,
             false)) {
-        /*
-         * We failed to establish the lock in the specified number of
-         * retries. This means we give up truncating.
-         */
+        /* Leave the tail in place when the lock retry limit is reached. */
         bioseq_log_pg(elevel,
                       "\"{}\": stopping truncate due to conflicting lock request",
                       RelationGetRelationName(rel));
@@ -791,11 +736,9 @@ static void truncate_column_storage_tail(Relation rel, int elevel) {
 
     const bool locator_pinned_fragment =
         bioseq::storage::is_registered_sequence_fragment_relation(RelationGetRelid(rel));
-    // Sequence locators persist exact physical row numbers.  The ordinary
-    // columnar compactor rewrites surviving tuples at fresh row numbers, so it
-    // is never legal for a registered fragment relation.  Physical tail
-    // truncation below remains allowed because it preserves every live stripe,
-    // row number, and reserved-row-number watermark.
+    // Sequence locators contain physical row numbers. Compaction changes
+    // those numbers, so registered fragment tables can only truncate unused
+    // tail space. Their live stripes and row-number reservations must stay put.
     bool stripes_truncated =
         locator_pinned_fragment ? false : truncate_and_compact_column_stripes(rel, elevel);
     if (locator_pinned_fragment) {
@@ -805,17 +748,11 @@ static void truncate_column_storage_tail(Relation rel, int elevel) {
             RelationGetRelationName(rel));
     }
 
-    /*
-     * If we didn't truncate and combine tail stripes we could have
-     * stituation where we need to truncate storage at the end.
-     */
+    /* A tail can contain unused bytes even when no stripes were compacted. */
     if (!stripes_truncated) {
 
-        /*
-         * Due to the AccessExclusive lock there's no danger that
-         * new stripes be added beyond highestPhysicalAddress while
-         * we're truncating.
-         */
+        /* The exclusive lock prevents new stripes from appearing while we
+         * calculate and truncate the unused tail. */
         uint64_t new_data_reservation = std::max<uint64_t>(
             find_highest_used_address(rel->rd_locator) + 1, first_logical_offset);
 
@@ -838,19 +775,14 @@ static void truncate_column_storage_tail(Relation rel, int elevel) {
         });
     }
 
-    /**
-     * Releases the exclusive lock after smgr truncation has published invalidation.
-     */
+    /* Release the lock after truncation has notified other backends. */
     UnlockRelation(rel, AccessExclusiveLock);
 }
 
-/**
- * Acquire a relation lock with bounded conditional retries.
+/** Acquire a relation lock with repeated nonblocking attempts.
  *
- * Tries until
- * it either succeeds or timesout. It doesn't enter wait queue and instead it
- * sleeps between lock tries.
- *
+ * Sleep between attempts and check interrupts. A false acquire argument
+ * enables the timeout. When acquire is true, retry until the lock is obtained.
  */
 static bool try_lock_relation_until_timeout(
     Relation rel, LOCKMODE lock_mode, int timeout, int retry_interval, bool acquire) {
@@ -861,9 +793,7 @@ static bool try_lock_relation_until_timeout(
             break;
         }
 
-        /*
-         * Check for interrupts while trying to (re-)acquire the lock
-         */
+        
         CHECK_FOR_INTERRUPTS();
 
         if (!acquire && (++lock_retry > (timeout / retry_interval))) {
@@ -876,13 +806,10 @@ static bool try_lock_relation_until_timeout(
     return true;
 }
 
-/** Present the page-independent relation as one logical ANALYZE block. */
+/** Present the whole table to ANALYZE as one logical block. */
 bool bioseq_scan_analyze_next_block(TableScanDesc scan, ReadStream* stream) {
-    /*
-     * Our access method is not pages based, i.e. tuples are not confined
-     * to page boundaries. Present the relation as one logical block so
-     * acquire_sample_rows() scans it once, then terminates.
-     */
+    /* Column rows can cross page boundaries. Treat the table as one block
+     * so ANALYZE scans its rows once and samples from that stream. */
     const auto bioseq_scan = reinterpret_cast<column_scan_handle>(scan);
     return bioseq_scan->read_state == nullptr;
 }
@@ -899,10 +826,8 @@ bool bioseq_scan_analyze_next_tuple(TableScanDesc scan,
     bioseq::postgres::support::page_cache_disable_scope cache_guard{
         bioseq::settings::column_cache::enabled};
 
-    /**
-     * Streams every visible row because the page-oriented sampler cannot select
-     * representative pages for column storage.
-     */
+    /* Supply every visible row because page sampling does not fit column
+     * storage. PostgreSQL chooses the sample from these rows. */
     if (bioseq_getnextslot(scan, ForwardScanDirection, slot)) {
         (*liverows)++;
         return true;
@@ -911,11 +836,11 @@ bool bioseq_scan_analyze_next_tuple(TableScanDesc scan,
     return false;
 }
 
-/** Return bytes used by one relation fork or all forks. */
+/** Return the stored byte count for a requested fork or combined forks. */
 uint64 bioseq_relation_size(Relation rel, ForkNumber fork_number) {
     uint64 nblocks = 0;
 
-    /* InvalidForkNumber indicates returning the size for all forks */
+    /* InvalidForkNumber requests the combined fork size. */
     if (fork_number == InvalidForkNumber) {
         for (int fork_index = 0; fork_index < MAX_FORKNUM; fork_index++) {
             nblocks += smgrnblocks(RelationGetSmgr(rel), static_cast<ForkNumber>(fork_index));
@@ -927,7 +852,7 @@ uint64 bioseq_relation_size(Relation rel, ForkNumber fork_number) {
     return nblocks * BLCKSZ;
 }
 
-/** Report that Bioseq relations store variable-width values outside heap TOAST. */
+/** Return false because Bioseq tables do not use a heap TOAST table. */
 bool bioseq_relation_needs_toast_table(Relation rel) {
     return false;
 }
@@ -938,10 +863,8 @@ void bioseq_estimate_rel_size(
     *pages = smgrnblocks(RelationGetSmgr(rel), MAIN_FORKNUM);
     *tuples = column_table_row_count(rel);
 
-    /*
-     * Append-only, so everything is visible except in-progress or rolled-back
-     * transactions.
-     */
+    /* Use a fixed all-visible estimate for the planner. Row reads still
+     * check the snapshot and row mask. */
     *allvisfrac = 1.0;
 
     get_rel_data_width(rel, attr_widths);
@@ -961,16 +884,15 @@ bool bioseq_scan_sample_next_tuple(TableScanDesc scan,
         "bioseq_scan_sample_next_tuple not implemented");
 }
 
-/** Flush, discard, or quarantine table state at PostgreSQL transaction boundaries. */
+/** Flush writes before commit, discard them on abort, and release readers. */
 void column_transaction_callback(XactEvent event, void* arg) {
     switch (event) {
     case XACT_EVENT_COMMIT:
     case XACT_EVENT_PARALLEL_COMMIT:
     case XACT_EVENT_PREPARE: {
-        // PRE_COMMIT/PRE_PREPARE below must have proved this empty. A
-        // surviving move-only authority here is an internal invariant breach;
-        // quarantine it without a PostgreSQL jump or destructor-bearing
-        // callback frame after the terminal transaction boundary.
+        // Pending speculative writes should have been rejected before commit.
+        // Save any remaining objects without running their cleanup. Transaction
+        // completion is too late to raise an error or call cleanup that could throw.
         handle_pending_speculative_xact_event(event);
         break;
     }
@@ -994,7 +916,7 @@ void column_transaction_callback(XactEvent event, void* arg) {
     }
 }
 
-/** Reparent, flush, or discard table state at subtransaction boundaries. */
+/** Flush or discard subtransaction writes and update pending speculative inserts. */
 void column_subtransaction_callback(SubXactEvent event,
                                     SubTransactionId my_subid,
                                     SubTransactionId parent_subid,
@@ -1021,7 +943,7 @@ void column_subtransaction_callback(SubXactEvent event,
     }
 }
 
-/** Flush parent-column writes and every cached sequence-fragment shard. */
+/** Flush table rows and all cached sequence-fragment writes. */
 void bioseq_flush_pending_writes_adapter(column_write_state* write_state) {
     flush_pending_column_writes(write_state);
     if (write_state->seq_caches != nullptr) {
@@ -1031,17 +953,17 @@ void bioseq_flush_pending_writes_adapter(column_write_state* write_state) {
     }
 }
 
-/** Close and destroy an opaque sequence-cache owner at a storage boundary. */
+/** Close and destroy a sequence cache passed through the storage hook. */
 void bioseq_seq_caches_close_adapter(void* p, bool commit) {
     bioseq::storage::close_and_destroy_seq_caches(static_cast<bioseq::storage::seq_caches*>(p),
                                                   commit);
 }
 
-/** Return the number of chunk groups pruned by an initialized scan. */
+/** Return the number of skipped chunk groups, or zero before the reader starts. */
 export int64_t filtered_chunk_group_count(column_scan_handle bioseq_column_scan_desc) {
     column_read_state* read_state = bioseq_column_scan_desc->read_state;
 
-    /* read_state is initialized lazily */
+    /* The first row read creates read_state. */
     if (read_state != nullptr) {
         return read_chunk_groups_filtered(read_state);
     } else {

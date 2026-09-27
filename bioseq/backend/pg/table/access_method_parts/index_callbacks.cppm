@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Implements index build, validation, source promotion, and virtual-TID ordering.
+ * @brief Build and validate PostgreSQL indexes on Bioseq tables.
  */
 module;
 
@@ -71,14 +71,14 @@ import :access_common;
 import :access_hooks;
 import :access_method_scan_callbacks;
 
-/** @brief Publish the relation's virtual block count to PostgreSQL index-build progress. */
+/** Report the table's virtual block count as index-build progress. */
 static void
 report_total_virtual_blocks(Relation relation, Snapshot snapshot, int progress_arr_index);
-/** @brief Count virtual blocks visible through the supplied snapshot. */
+/** Count virtual blocks covered by visible stripe metadata. */
 static BlockNumber column_virtual_block_count(Relation relation, Snapshot snapshot);
-/** @brief Return the greatest visible virtual tuple identifier for progress accounting. */
+/** Return the highest row TID recorded by visible stripe metadata. */
 static ItemPointerData highest_column_item_pointer(Relation relation, Snapshot snapshot);
-/** @brief Scan visible column rows and pass each admitted index tuple to the index callback. */
+/** Pass rows that satisfy the index predicate to the index-build callback. */
 static double
 build_index_from_column_rows(TableScanDesc scan,
                              Relation index_relation,
@@ -102,7 +102,7 @@ validate_missing_index_rows(TableScanDesc scan,
 static ItemPointerData skip_item_pointers_before(Tuplesortstate* tuple_sort,
                                                  ItemPointer target_item_pointer);
 
-/** Preserve the exact index-source ERROR contract across a C++ callback. */
+/** Convert C++ failures into PostgreSQL errors, keeping existing PostgreSQL error details. */
 template <class p_function>
 decltype(auto) run_index_source_cpp_checked(const char* failure_message, p_function&& function) {
     ErrorData* exact_error = nullptr;
@@ -127,9 +127,8 @@ decltype(auto) run_index_source_cpp_checked(const char* failure_message, p_funct
         unknown_cpp_error = true;
     }
 
-    // PostgreSQL reporting is a tail action after every C++ handler has ended.
-    // ReThrowError preserves the original ErrorData byte-for-byte; translated
-    // C++ failures retain the existing XX000 message and detail contract.
+    // C++ cleanup has finished before PostgreSQL raises the error. Reuse
+    // existing ErrorData, or report a C++ exception as an internal error.
     if (exact_error != nullptr) {
         ReThrowError(exact_error);
     }
@@ -148,7 +147,7 @@ decltype(auto) run_index_source_cpp_checked(const char* failure_message, p_funct
     pg_unreachable();
 }
 
-/** Replace only locator stubs before generic predicate/index expression code. */
+/** Turn sequence locators into readable values before evaluating index expressions. */
 static void promote_index_source_locators(Relation relation,
                                           TupleTableSlot* slot,
                                           bioseq::storage::pg_sequence_source_provider* provider,
@@ -173,7 +172,7 @@ static void promote_index_source_locators(Relation relation,
     }
 }
 
-/** Create a snapshot-bound source provider for expression-index evaluation. */
+/** Open sequence readers using the index scan's snapshot. */
 [[nodiscard]] static bioseq::storage::pg_sequence_source_provider*
 create_index_source_provider(Relation relation, Snapshot snapshot) {
     return run_index_source_cpp_checked(
@@ -196,19 +195,13 @@ double bioseq_index_build_range_scan(Relation bioseq_column_relation,
                                      void* callback_state,
                                      TableScanDesc scan) {
     if (start_blockno != 0 || numblocks != InvalidBlockNumber) {
-        /*
-         * BioseqColumn utility hook already errors out for BRIN indexes on columnar
-         * tables, but be on the safe side.
-         */
+        /* This callback needs a full scan. BRIN-style block ranges are unsupported. */
         bioseq_log<logging_level::error, logging_target::postgres>(
             "BRIN indexes on columnar tables are not supported");
     }
 
     if (scan) {
-        /*
-         * Parallel scans on columnar tables are already discardad by
-         * BioseqColumnGetRelationInfoHook but be on the safe side.
-         */
+        /* Parallel index builds cannot pass an existing table scan here. */
         bioseq_log<logging_level::error, logging_target::postgres>(
             "parallel scans on columnar are not supported");
     }
@@ -217,17 +210,12 @@ double bioseq_index_build_range_scan(Relation bioseq_column_relation,
     bioseq::postgres::support::page_cache_disable_scope cache_guard{
         bioseq::settings::column_cache::enabled};
 
-    /**
-     * Uses one registered snapshot for table rows, source metadata, and locator
-     * promotion throughout the index build.
-     */
+    /* Use the same snapshot for table rows, source metadata, and sequences. */
     Snapshot snapshot = {0};
     bool owns_snapshot_registration = false;
 
-    /*
-     * For serial index build, we begin our own scan. We may also need to
-     * register a snapshot whose lifetime is under our direct control.
-     */
+    /* Keep the transaction snapshot registered until our scan ends. Bootstrap
+     * processing uses SnapshotAny. */
     if (!IsBootstrapProcessingMode()) {
         snapshot = RegisterSnapshot(GetTransactionSnapshot());
         owns_snapshot_registration = true;
@@ -251,10 +239,7 @@ double bioseq_index_build_range_scan(Relation bioseq_column_relation,
         report_total_virtual_blocks(bioseq_column_relation, snapshot, PROGRESS_SCAN_BLOCKS_TOTAL);
     }
 
-    /*
-     * Set up execution state for predicate, if any.
-     * Note that this is only useful for partial indexes.
-     */
+    /* Prepare the predicate used by a partial index. */
     EState* estate = CreateExecutorState();
     ExprContext* econtext = GetPerTupleExprContext(estate);
     econtext->ecxt_scantuple = table_slot_create(bioseq_column_relation, nullptr);
@@ -292,7 +277,7 @@ double bioseq_index_build_range_scan(Relation bioseq_column_relation,
     table_endscan(scan);
 
     if (progress) {
-        /* report the last "virtual" block as "done" */
+        /* Include the final virtual block in the completed count. */
         report_total_virtual_blocks(bioseq_column_relation, snapshot, PROGRESS_SCAN_BLOCKS_DONE);
     }
 
@@ -308,28 +293,21 @@ double bioseq_index_build_range_scan(Relation bioseq_column_relation,
     return static_cast<double>(reltuples);
 }
 
-/**
- * Report index-build progress using virtual blocks derived from row identities.
+/** Report the virtual block count as total or completed index-build work.
  *
- * Reports progress based on
- * number of "virtual" blocks that given relation has.
- * "progressArrIndex" argument determines which entry in st_progress_param
- * array should be updated. In this case, we only expect PROGRESS_SCAN_BLOCKS_TOTAL
- * or PROGRESS_SCAN_BLOCKS_DONE to specify whether we want to report calculated
- * number of blocks as "done" or as "total" number of "virtual" blocks to scan.
+ * Bioseq row numbers map to virtual TIDs. Their block numbers give PostgreSQL
+ * a progress measure even though column data is stored in stripes.
  */
 static void
 report_total_virtual_blocks(Relation relation, Snapshot snapshot, int progress_arr_index) {
-    /**
-     * Reports progress with virtual blocks derived from gap-tolerant row identities.
-     */
+    
     Assert(progress_arr_index == PROGRESS_SCAN_BLOCKS_TOTAL ||
            progress_arr_index == PROGRESS_SCAN_BLOCKS_DONE);
     BlockNumber nvirtual_blocks = column_virtual_block_count(relation, snapshot);
     pgstat_progress_update_param(progress_arr_index, nvirtual_blocks);
 }
 
-/** Return the number of virtual blocks spanned by visible row identities. */
+/** Return the virtual block count covered by visible stripe metadata. */
 static BlockNumber column_virtual_block_count(Relation relation, Snapshot snapshot) {
     ItemPointerData highest_item_pointer = highest_column_item_pointer(relation, snapshot);
     if (!ItemPointerIsValid(&highest_item_pointer)) {
@@ -337,14 +315,11 @@ static BlockNumber column_virtual_block_count(Relation relation, Snapshot snapsh
         return 0;
     }
 
-    /*
-     * Since BlockNumber is 0-based, increment it by 1 to find the total
-     * number of "virtual" blocks.
-     */
+    /* Virtual block numbers start at zero. */
     return ItemPointerGetBlockNumber(&highest_item_pointer) + 1;
 }
 
-/** Return the highest visible virtual TID, or an invalid TID for an empty relation. */
+/** Return the highest TID in visible stripes, or an invalid TID for an empty table. */
 static ItemPointerData highest_column_item_pointer(Relation relation, Snapshot snapshot) {
     stripe_metadata* stripe_with_highest_row_number =
         find_highest_row_number_stripe(relation, snapshot);
@@ -382,11 +357,8 @@ build_index_from_column_rows(TableScanDesc scan,
 
         BlockNumber current_block_number = ItemPointerGetBlockNumber(&slot->tts_tid);
         if (progress && last_reported_block_number != current_block_number) {
-            /*
-             * bioseq_getnextslot guarantees that returned tuple will
-             * always have a greater ItemPointer than the ones we fetched
-             * before, so we directly use BlockNumber to report our progress.
-             */
+            /* Row TIDs increase during this scan, so their block numbers can track
+             * completed work. */
             Assert(last_reported_block_number == InvalidBlockNumber ||
                    current_block_number >= last_reported_block_number);
             pgstat_progress_update_param(PROGRESS_SCAN_BLOCKS_DONE, current_block_number);
@@ -406,7 +378,7 @@ build_index_from_column_rows(TableScanDesc scan,
         std::array<bool, INDEX_MAX_KEYS> index_nulls;
         ItemPointerData item_pointer_data = slot->tts_tid;
 
-        /* currently, columnar tables can't have dead tuples */
+        /* The scan has already excluded rows hidden by its snapshot and row mask. */
         bool tuple_is_alive = true;
         const auto previous_scope = exchange_slice_materialization_scope({
             .attachment = nullptr,
@@ -440,7 +412,7 @@ build_index_from_column_rows(TableScanDesc scan,
     return reltuples;
 }
 
-/** Validate a concurrent index and insert every missing visible row. */
+/** Validate a concurrent index build and insert missing rows that satisfy its predicate. */
 void bioseq_index_validate_scan(Relation bioseq_column_relation,
                                 Relation index_relation,
                                 IndexInfo* index_info,
@@ -448,10 +420,7 @@ void bioseq_index_validate_scan(Relation bioseq_column_relation,
                                 ValidateIndexState* validate_index_state) {
     report_total_virtual_blocks(bioseq_column_relation, snapshot, PROGRESS_SCAN_BLOCKS_TOTAL);
 
-    /*
-     * Set up execution state for predicate, if any.
-     * Note that this is only useful for partial indexes.
-     */
+    /* Prepare the predicate used by a partial index. */
     EState* estate = CreateExecutorState();
     ExprContext* econtext = GetPerTupleExprContext(estate);
     econtext->ecxt_scantuple = table_slot_create(bioseq_column_relation, nullptr);
@@ -498,7 +467,7 @@ void bioseq_index_validate_scan(Relation bioseq_column_relation,
 
     table_endscan(scan);
 
-    /* report the last "virtual" block as "done" */
+    /* Include the final virtual block in the completed count. */
     report_total_virtual_blocks(bioseq_column_relation, snapshot, PROGRESS_SCAN_BLOCKS_DONE);
 
     ExecDropSingleTupleTableSlot(econtext->ecxt_scantuple);
@@ -507,7 +476,7 @@ void bioseq_index_validate_scan(Relation bioseq_column_relation,
     index_info->ii_PredicateState = nullptr;
 }
 
-/** Insert rows absent from the sorted TID stream during concurrent validation. */
+/** Insert rows missing from the sorted index-TID list, subject to the index predicate. */
 static void
 validate_missing_index_rows(TableScanDesc scan,
                             Relation index_relation,
@@ -530,11 +499,8 @@ validate_missing_index_rows(TableScanDesc scan,
         ItemPointer bioseq_column_item_pointer = &slot->tts_tid;
         BlockNumber current_block_number = ItemPointerGetBlockNumber(bioseq_column_item_pointer);
         if (last_reported_block_number != current_block_number) {
-            /*
-             * bioseq_getnextslot guarantees that returned tuple will
-             * always have a greater ItemPointer than the ones we fetched
-             * before, so we directly use BlockNumber to report our progress.
-             */
+            /* Row TIDs increase during this scan, so their block numbers can track
+             * completed work. */
             Assert(last_reported_block_number == InvalidBlockNumber ||
                    current_block_number >= last_reported_block_number);
             pgstat_progress_update_param(PROGRESS_SCAN_BLOCKS_DONE, current_block_number);
@@ -546,10 +512,7 @@ validate_missing_index_rows(TableScanDesc scan,
         if (!index_tuple_sort_empty &&
             (!ItemPointerIsValid(&indexed_item_pointer_data) ||
              ItemPointerCompare(&indexed_item_pointer_data, bioseq_column_item_pointer) < 0)) {
-            /*
-             * Skip indexed item pointers until we find or pass the current
-             * columnar relation item pointer.
-             */
+            /* Advance the index TIDs until they reach or pass this table row. */
             indexed_item_pointer_data = skip_item_pointers_before(validate_index_state->tuplesort,
                                                                   bioseq_column_item_pointer);
             index_tuple_sort_empty = !ItemPointerIsValid(&indexed_item_pointer_data);
@@ -610,16 +573,10 @@ validate_missing_index_rows(TableScanDesc scan,
     }
 }
 
-/**
- * Advance a sorted TID stream to the first item at or beyond a target.
+/** Consume sorted TIDs until reaching or passing the target.
  *
- * Iterates the tuple sort until finding an
- * ItemPointer that is greater than or equal to given target_item_pointer and
- * returns that ItemPointer.
- * If such an ItemPointer does not exist, then returns invalid ItemPointer.
- *
- * Note that this function assumes given tuple_sort doesn't have any NULL
- * Datum's.
+ * Return an invalid TID when the stream ends. The stream must contain no
+ * null values.
  */
 static ItemPointerData skip_item_pointers_before(Tuplesortstate* tuple_sort,
                                                  ItemPointer target_item_pointer) {
@@ -643,10 +600,8 @@ static ItemPointerData skip_item_pointers_before(Tuplesortstate* tuple_sort,
 
 #ifndef USE_FLOAT8_BYVAL
 
-        /*
-         * If int8 is pass-by-ref, we need to free Datum memory.
-         * See tuplesort_getdatum function's comment.
-         */
+        /* tuplesort_getdatum returns allocated storage when int8 is passed
+         * by reference. Free it after decoding the TID. */
         pfree(DatumGetPointer(ts_datum));
 #endif
     }
