@@ -49,19 +49,20 @@ inline constexpr std::uint64_t k_qualification_gibibyte =
 inline constexpr std::uint64_t k_qualification_mebibyte =
     1024ULL * 1024ULL;
 
-/// @brief One finite cgroup memory limit and the usage charged to it.
+/// @brief A cgroup memory limit and its current usage, in bytes.
 struct cgroup_memory_limit_sample {
     std::uint64_t limit_bytes{};
     std::uint64_t current_bytes{};
 };
 
-/// @brief One finite cgroup CPU bandwidth limit.
+/// @brief CPU time allowed per cgroup scheduling period.
 struct cgroup_cpu_quota_sample {
     std::uint64_t quota_microseconds{};
     std::uint64_t period_microseconds{};
 };
 
-/// @brief Pure memory-capacity reduction used by host qualification.
+/// @brief Memory available after applying host and cgroup limits.
+/// Records which cgroup samples impose the smallest limit and headroom.
 struct effective_memory_capacity {
     std::uint64_t total_bytes{};
     std::uint64_t available_bytes{};
@@ -69,90 +70,95 @@ struct effective_memory_capacity {
     std::optional<std::size_t> available_limit_sample;
 };
 
-/// @brief Pure CPU-capacity reduction used by host qualification.
+/// @brief CPU capacity after applying host counts, affinity and cgroup limits.
 struct effective_cpu_capacity {
     double cores{};
     std::optional<std::size_t> quota_sample;
 };
 
-/// @brief Effective NUMA memory-node relationship for the current task.
+/// @brief Counts allowed and online NUMA nodes, and records any restriction.
 struct linux_memory_node_scope {
     unsigned int allowed_nodes{};
     unsigned int online_nodes{};
     bool restricted{};
 };
 
-/// @brief Cgroup controller generation used for one capacity observation.
+/// @brief Cgroup interface used for a resource measurement.
 enum class cgroup_controller_version {
     none,
     v1,
     v2,
 };
 
-/// @brief Strictly parses a bounded classic-locale finite real.
-/// @return nullopt for empty, overlong, partial, non-finite, or overflow input.
+/// @brief Parses a finite decimal value using the classic locale.
+/// Returns nullopt for empty, overlong, partial, non-finite or overflowing input.
 [[nodiscard]] std::optional<double>
 parse_finite_real(std::string_view text);
 
-/// @brief Parses a cgroup memory limit; `max` is represented by nullopt.
+/// @brief Parses a cgroup memory limit. Returns nullopt for max and throws on invalid input.
 [[nodiscard]] std::optional<std::uint64_t>
 parse_cgroup_memory_limit(std::string_view text);
 
-/// @brief Parses cgroup v2 cpu.max; an unlimited quota is nullopt.
+/// @brief Parses the quota and period from cgroup v2 cpu.max.
+/// Returns nullopt for an unlimited quota and throws on invalid input.
 [[nodiscard]] std::optional<cgroup_cpu_quota_sample>
 parse_cgroup_cpu_max(std::string_view text);
 
-/// @brief Counts the exact CPU IDs in a Linux cpuset list.
+/// @brief Counts distinct CPU IDs in a Linux cpuset list.
+/// Merges overlapping ranges, returns nullopt for an empty list and throws on invalid input.
 [[nodiscard]] std::optional<unsigned int>
 parse_cgroup_cpuset_count(std::string_view text);
 
-/// @brief Applies all finite ancestor cgroup limits to host memory evidence.
+/// @brief Limits host memory totals and available bytes using the supplied cgroup samples.
 [[nodiscard]] effective_memory_capacity constrain_memory_capacity(
     std::uint64_t host_total_bytes,
     std::uint64_t host_available_bytes,
     std::span<const cgroup_memory_limit_sample> limits);
 
-/// @brief Applies affinity, cpuset, and ancestor quotas to host CPU evidence.
+/// @brief Finds CPU capacity within the supplied host, affinity, cpuset and quota limits.
 [[nodiscard]] effective_cpu_capacity constrain_cpu_capacity(
     unsigned int host_cores,
     std::optional<unsigned int> affinity_cores,
     std::optional<unsigned int> cpuset_cores,
     std::span<const cgroup_cpu_quota_sample> quotas);
 
-/// @brief Classifies the task's allowed NUMA nodes against online nodes.
+/// @brief Checks which online NUMA nodes the task can use.
+/// Throws if either list is empty or an allowed node is absent from the online list.
 [[nodiscard]] linux_memory_node_scope classify_linux_memory_node_scope(
     std::string_view allowed_nodes,
     std::string_view online_nodes);
 
-/// @brief Extracts the unique Mems_allowed_list value from task status.
+/// @brief Reads the single Mems_allowed_list field from task status.
+/// Throws if the field is missing, empty or repeated.
 [[nodiscard]] std::string parse_linux_mems_allowed_list(
     std::string_view task_status);
 
-/// @brief Selects v2 only when its controller interface is observable.
+/// @brief Selects an observed cgroup interface, preferring v2 to v1.
 [[nodiscard]] cgroup_controller_version select_cgroup_controller_version(
     bool v2_interface_observed,
     bool v1_interface_observed) noexcept;
 
-/// @brief Rejects unresolved namespace-relative cgroup coordinates.
+/// @brief Checks that a cgroup path is absolute and contains no parent-directory steps.
 [[nodiscard]] bool is_safe_cgroup_namespace_path(
     std::string_view text) noexcept;
 
-/// @brief Tests whether a membership can be located below a mount root.
+/// @brief Checks whether cgroup membership is at or below the mount root.
+/// Both paths must be absolute and contain no parent-directory steps.
 [[nodiscard]] bool is_resolvable_cgroup_membership(
     std::string_view membership,
     std::string_view mount_root) noexcept;
 
-/// @brief True only for the Linux affinity error that requests a larger mask.
+/// @brief Checks for Linux EINVAL, which makes the affinity probe retry with a larger mask.
 [[nodiscard]] bool is_scheduler_affinity_resize_required(
     int error_number) noexcept;
 
-/// @brief Unsuccessful acceptance result caused by host infrastructure.
+/// @brief The host failed the resource checks required for this test.
 class host_qualification_inconclusive : public std::runtime_error {
 public:
     using std::runtime_error::runtime_error;
 };
 
-/// @brief Capacity evidence for one exact resolved filesystem path.
+/// @brief Filesystem capacity and free-space checks for a resolved path.
 struct filesystem_qualification_result {
     std::string role;
     std::filesystem::path path;
@@ -167,7 +173,7 @@ struct filesystem_qualification_result {
         const filesystem_qualification_result&) const = default;
 };
 
-/// @brief Uncached sequential write/read evidence from the target filesystem.
+/// @brief Sequential I/O timings and the result of requesting cache eviction or bypass.
 struct io_qualification_result {
     std::filesystem::path path;
     std::uint64_t bytes{};
@@ -182,13 +188,13 @@ struct io_qualification_result {
     bool operator==(const io_qualification_result&) const = default;
 };
 
-/// @brief Acceptance state of one pre-initdb host qualification.
+/// @brief Whether the host passed the checks performed before initdb.
 enum class host_qualification_status {
     passed,
     inconclusive,
 };
 
-/// @brief Structured pre-initdb host qualification result.
+/// @brief Resource measurements and pass status collected before initdb.
 struct host_qualification_result {
     std::uint64_t ordinal{};
     std::string test_case;
@@ -226,7 +232,7 @@ struct host_qualification_result {
     bool operator==(const host_qualification_result&) const = default;
 };
 
-/// @brief Acceptance thresholds and an optional distinct cache/temp path.
+/// @brief Minimum resources required by a test, with an optional separate cache filesystem.
 struct host_qualification_requirements {
     std::string test_case;
     std::uint64_t minimum_total_ram_bytes{
@@ -764,7 +770,8 @@ parse_finite_real(std::string_view text) {
     return qualification_snapshot_detail::real(text);
 }
 
-/// @brief Publishes the complete current host-qualification registry.
+/// @brief Saves the supplied host-check results for the watchdog.
+/// Returns true only after the snapshot is durably published.
 [[nodiscard]] inline bool
 publish_supervision_host_qualifications(
     std::span<const host_qualification_result> results) noexcept {
@@ -849,7 +856,8 @@ publish_supervision_host_qualifications(
     }
 }
 
-/// @brief Loads one complete, strictly bounded qualification snapshot.
+/// @brief Reads a host-check snapshot, returning nullopt on missing or invalid data.
+/// Limits file size and record counts before building the result.
 [[nodiscard]] inline
 std::optional<std::vector<host_qualification_result>>
 load_supervision_host_qualifications(
@@ -2095,7 +2103,7 @@ void record(host_qualification_result& result) {
 
 export namespace bioseq::postgres_test {
 
-/// @brief Clears structured host evidence before one native test session.
+/// @brief Clears stored host-check results and restarts their numbering.
 inline void clear_host_qualifications() noexcept {
     try {
         auto& state = qualification_detail::process_state();
@@ -2106,7 +2114,7 @@ inline void clear_host_qualifications() noexcept {
     }
 }
 
-/// @brief Returns all pre-initdb host qualification observations.
+/// @brief Copies all recorded host-check results.
 [[nodiscard]] inline std::vector<host_qualification_result>
 host_qualification_results() {
     auto& state = qualification_detail::process_state();
@@ -2114,7 +2122,7 @@ host_qualification_results() {
     return state.results;
 }
 
-/// @brief True when a case has an unsuccessful infrastructure observation.
+/// @brief Returns true if this test case has an inconclusive host check.
 [[nodiscard]] inline bool has_inconclusive_host_qualification(
     std::string_view test_case) {
     const auto results = host_qualification_results();
@@ -2127,7 +2135,15 @@ host_qualification_results() {
         });
 }
 
-/// @brief Qualifies exact host paths before initdb creates the cluster.
+/**
+ * Checks that the host has enough memory, CPU capacity and filesystem
+ * space for the test, then measures sequential I/O in the data directory.
+ * Cgroup limits and CPU affinity affect the available capacity.
+ *
+ * Call this before initdb. It records the measurements and throws
+ * host_qualification_inconclusive if a check fails, so insufficient host
+ * resources can be reported separately from a test failure.
+ */
 [[nodiscard]] inline host_qualification_result qualify_host_before_initdb(
     const std::filesystem::path& data_directory,
     host_qualification_requirements requirements = {}) {

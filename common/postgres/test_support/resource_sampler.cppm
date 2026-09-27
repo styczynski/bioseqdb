@@ -32,7 +32,7 @@ import :supervision;
 
 export namespace bioseq::postgres_test {
 
-/// @brief Exact sample taken at a caller-defined workload stage boundary.
+/// Memory and file-size observations requested at a named workload stage.
 struct resource_sample_boundary {
     std::uint64_t ordinal{};
     std::string stage;
@@ -41,7 +41,7 @@ struct resource_sample_boundary {
     std::optional<std::uint64_t> owned_root_bytes;
 };
 
-/// @brief Process-tree and marker-owned filesystem sampling evidence.
+/// Sample counts, failures and observed peaks for cluster memory and files.
 struct resource_usage_samples {
     std::uint64_t peak_postmaster_process_tree_rss_bytes{};
     std::uint64_t peak_owned_root_bytes{};
@@ -52,7 +52,7 @@ struct resource_usage_samples {
     std::vector<resource_sample_boundary> stage_boundaries;
 };
 
-/// @brief One parent-linked member of a complete postmaster tree snapshot.
+/// A process and its parent in an observed postmaster process tree.
 struct postgres_process_tree_member {
     std::uint64_t pid{};
     std::uint64_t parent_pid{};
@@ -273,11 +273,8 @@ struct process_snapshot_result {
             if (error != std::errc::no_such_file_or_directory) {
                 return std::nullopt;
             }
-            // The owned tree is live while PostgreSQL atomically publishes
-            // and removes files.  An entry may therefore disappear after the
-            // iterator observed its name but before status(2).  That entry is
-            // absent from this inherently non-atomic sample; every other
-            // filesystem error still invalidates the observation.
+            // PostgreSQL may remove a file after the iterator finds its name. Skip
+            // that missing entry. Other filesystem errors invalidate the sample.
             error.clear();
         } else if (regular) {
             const std::uintmax_t bytes = iterator->file_size(error);
@@ -299,10 +296,8 @@ struct process_snapshot_result {
             if (error != std::errc::no_such_file_or_directory) {
                 return std::nullopt;
             }
-            // recursive_directory_iterator cannot promise a resumable state
-            // after an increment error.  Preserve the valid prefix as this
-            // instant's lower-bound sample; a later periodic sample observes
-            // the subsequently stable tree.
+            // Stop after this disappearing entry because iteration may not resume
+            // safely. Keep the bytes counted so far and try a fresh walk next time.
             return total;
         }
     }
@@ -360,7 +355,7 @@ void append_journal(
 
 export namespace bioseq::postgres_test {
 
-/// @brief Reads the postmaster PID from an initialized, running PGDATA.
+/// Read a PID greater than one from postmaster.pid, or throw.
 [[nodiscard]] inline std::uint64_t read_postmaster_pid_file(
     const std::filesystem::path& data_directory) {
     std::ifstream input(data_directory / "postmaster.pid");
@@ -373,13 +368,20 @@ export namespace bioseq::postgres_test {
     return pid;
 }
 
-/// @brief Samples a postmaster and all descendants as one RSS observation.
+/**
+ * Sum the RSS readings for the postmaster and its observed descendants.
+ * Return nullopt if a process cannot be read or the sum overflows. These
+ * readings are collected one process at a time.
+ */
 [[nodiscard]] inline std::optional<std::uint64_t>
 sample_postgres_tree_rss_bytes(std::uint64_t postmaster_pid) {
     return resource_detail::process_tree_rss_bytes(postmaster_pid);
 }
 
-/// @brief Returns a complete postmaster process tree for watchdog cleanup.
+/**
+ * Collect postmaster and descendant PIDs with their parent links for cleanup.
+ * Return nullopt when a required process query fails.
+ */
 [[nodiscard]] inline std::optional<
     std::vector<postgres_process_tree_member>>
 capture_postgres_process_tree(std::uint64_t postmaster_pid) {
@@ -399,7 +401,7 @@ capture_postgres_process_tree(std::uint64_t postmaster_pid) {
     return members;
 }
 
-/// @brief Returns only the PIDs from a complete postmaster tree snapshot.
+/// Collect postmaster and descendant PIDs, or nullopt when discovery fails.
 [[nodiscard]] inline std::optional<std::vector<std::uint64_t>>
 capture_postgres_process_tree_pids(std::uint64_t postmaster_pid) {
     const auto snapshot =
@@ -415,13 +417,17 @@ capture_postgres_process_tree_pids(std::uint64_t postmaster_pid) {
     return pids;
 }
 
-/// @brief Samples all regular-file bytes under one marker-owned root.
+/**
+ * Count regular-file bytes found under the supplied root.
+ * Files can disappear during the walk, so the result is a sample. The caller
+ * is responsible for choosing a root it owns.
+ */
 [[nodiscard]] inline std::optional<std::uint64_t>
 measure_owned_root_bytes(const std::filesystem::path& root) {
     return resource_detail::strict_tree_bytes(root);
 }
 
-/// @brief Truncates crash-resilient resource evidence for one case.
+/// Clear this case's resource journal, discarding any failure.
 inline void initialize_supervision_resource_journal() noexcept {
     try {
         const auto directory = supervision_state_directory();
@@ -436,7 +442,7 @@ inline void initialize_supervision_resource_journal() noexcept {
     }
 }
 
-/// @brief Loads complete samples recorded before runner termination.
+/// Load valid resource-journal records, skipping malformed records.
 [[nodiscard]] inline resource_usage_samples
 load_supervision_resource_samples(
     const std::filesystem::path& directory) {
@@ -543,7 +549,11 @@ load_supervision_resource_samples(
     return samples;
 }
 
-/// @brief Owns the worker threads that sample one live private cluster.
+/**
+ * Sample memory and file sizes for a live private PostgreSQL cluster.
+ * Separate worker threads use their own sampling intervals. Keep observed
+ * peaks and failure counts, and append measurements to the supervision journal.
+ */
 class cluster_resource_sampler {
 public:
     cluster_resource_sampler(
@@ -587,7 +597,7 @@ public:
         }
     }
 
-    /// @brief Forces both samples and records their stage association.
+    /// Take a memory sample and then a file-size sample for the named stage.
     void record_stage_boundary(std::string_view stage) noexcept {
         const std::optional<std::uint64_t> rss = sample_rss_once();
         const std::optional<std::uint64_t> root = sample_root_once();
@@ -608,7 +618,7 @@ public:
         }
     }
 
-    /// @brief Stops workers and returns all evidence collected so far.
+    /// Stop both workers, take final samples and return the collected measurements.
     [[nodiscard]] resource_usage_samples finish() {
         {
             std::scoped_lock lock(mutex_);
@@ -631,7 +641,7 @@ public:
         return snapshot();
     }
 
-    /// @brief Returns a thread-safe, non-terminal snapshot.
+    /// Copy the collected measurements under a lock while sampling continues.
     [[nodiscard]] resource_usage_samples snapshot() const {
         std::scoped_lock lock(mutex_);
         return samples_;

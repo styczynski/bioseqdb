@@ -43,7 +43,7 @@ import bioseq.common.durable_file_io;
 
 export namespace bioseq::postgres_test {
 
-/// @brief Process identity stable across PID reuse and safe to signal.
+/// @brief Saved PID, start token and executable used to check a process before cleanup.
 struct supervised_process_identity {
     std::uint64_t pid{};
     std::string start_token;
@@ -52,7 +52,7 @@ struct supervised_process_identity {
     std::filesystem::path data_directory;
 };
 
-/// @brief Result of signalling a child whose exact parent is kernel-stopped.
+/// @brief Outcome of attempting a child signal while its parent is stopped.
 enum class supervised_child_signal_outcome {
     delivered,
     target_absent,
@@ -60,7 +60,7 @@ enum class supervised_child_signal_outcome {
     delivered_unverified,
 };
 
-/// @brief Identity evidence refreshed immediately after a pinned child signal.
+/// @brief Signal outcome with a refreshed child identity when available.
 struct supervised_child_signal_result {
     supervised_child_signal_outcome outcome{
         supervised_child_signal_outcome::rejected};
@@ -79,14 +79,14 @@ struct supervised_child_signal_result {
     }
 };
 
-/// @brief Commit-aware terminal state of a frozen process-tree kill.
+/// @brief Whether any kill was delivered and whether the signal sequence completed.
 enum class process_tree_termination_outcome {
     precommit_failure,
     committed_complete,
     committed_incomplete,
 };
 
-/// @brief Evidence returned after a frozen-tree termination attempt.
+/// @brief Delivered kills and remaining work from a tree-termination attempt.
 struct process_tree_termination_result {
     process_tree_termination_outcome outcome{
         process_tree_termination_outcome::precommit_failure};
@@ -99,7 +99,7 @@ struct process_tree_termination_result {
     }
 };
 
-/// @brief Tracks the irreversible boundary at the first delivered SIGKILL.
+/// @brief Records when the first delivered SIGKILL makes resuming the tree unsafe.
 class process_tree_termination_progress {
 public:
     void record_kill_delivery() noexcept {
@@ -145,7 +145,7 @@ private:
     bool failed_{};
 };
 
-/// @brief One cluster identity persisted for an out-of-process watchdog.
+/// @brief Cluster paths and postmaster identity saved for the external watchdog.
 struct supervised_cluster_identity {
     std::filesystem::path root;
     std::filesystem::path data_directory;
@@ -156,7 +156,7 @@ struct supervised_cluster_identity {
     std::int64_t postmaster_process_group{};
 };
 
-/// @brief Test-only fault stage for fail-closed registry contracts.
+/// @brief Journal failures that tests can inject into supervision updates.
 enum class supervision_journal_fault {
     none,
     create_staging_file,
@@ -170,14 +170,14 @@ enum class supervision_journal_fault {
     decision_reconciliation_fsync_directory,
 };
 
-/// @brief One generation-consistent live-resource registry snapshot.
+/// @brief Cluster and process records read from the same registry generation.
 struct supervision_registry_snapshot {
     std::uint64_t generation{};
     std::vector<supervised_cluster_identity> clusters;
     std::vector<supervised_process_identity> processes;
 };
 
-/// @brief Opaque durable intent created before a supervised posix_spawn.
+/// @brief Tracks a pending process launch while the registry is marked dirty.
 struct supervision_launch_intent {
     std::uint64_t id{};
     bool supervision_required{};
@@ -216,7 +216,7 @@ journal_fault() {
     return fault;
 }
 
-/// @brief One synchronous durable-publication fault-injection context.
+/// @brief Test fault and optional delay for a file-publication operation.
 struct journal_fault_context {
     supervision_journal_fault fault{supervision_journal_fault::none};
     bool delay_directory_sync{};
@@ -229,11 +229,9 @@ enum class directory_fsync_checkpoint {
 };
 
 /**
- * @brief Maps supervision fault stages onto canonical durable-file operations.
- *
- * The callback injects before the matching durable-file operation. Decision
- * directory-fsync failures retain their observable publication window so the
- * cross-process reader contract continues to exercise rollback under flock.
+ * Returns an injected I/O error before the selected journal operation.
+ * Directory-sync faults can pause after publication becomes visible, giving
+ * reader tests time to exercise the decision lock and rollback handling.
  */
 [[nodiscard]] inline int inject_journal_fault(
     void* opaque,
@@ -296,14 +294,15 @@ enum class directory_fsync_checkpoint {
     return matches ? EIO : 0;
 }
 
-/// @brief Returns the byte view consumed by canonical durable publications.
+/// @brief Borrows the text as bytes for a file write.
 [[nodiscard]] inline std::span<const std::byte> payload_bytes(
     std::string_view payload) noexcept {
     return std::as_bytes(
         std::span<const char>{payload.data(), payload.size()});
 }
 
-/// @brief Reads one bounded regular file without following its final symlink.
+/// @brief Reads a regular file within size limits and checks for changes during the read.
+/// Rejects a symlink in the final path component and returns nullopt on failure.
 [[nodiscard]] inline std::optional<std::string> read_stable_text(
     const std::filesystem::path& path,
     std::uint64_t minimum_bytes,
@@ -328,7 +327,7 @@ enum class directory_fsync_checkpoint {
     }
 }
 
-/// @brief Validates the exact marker format through a stable no-follow read.
+/// @brief Checks that the watchdog marker contains a positive PID followed by one newline.
 [[nodiscard]] inline bool is_valid_watchdog_state_marker(
     const std::filesystem::path& path) noexcept {
     const auto payload = read_stable_text(path, 2U, 32U);
@@ -346,7 +345,8 @@ enum class directory_fsync_checkpoint {
         && owner_pid > 0U;
 }
 
-/// @brief Checks a directory entry without following its final symlink.
+/// @brief Checks whether an entry exists without following its final symlink.
+/// Returns nullopt when the lookup cannot determine presence.
 [[nodiscard]] inline std::optional<bool> is_path_entry_present_no_follow(
     const std::filesystem::path& path) noexcept {
     try {
@@ -725,7 +725,11 @@ private:
     int descriptor_{};
 };
 
-/// @brief Direct-child member that prevents one owned PGID from being reused.
+/**
+ * Keeps a direct child in a process group while another operation checks
+ * and signals that group. The child holds the group ID in use. Destruction
+ * releases the child and waits for it, using SIGKILL if it does not exit.
+ */
 class process_group_pin {
 public:
     process_group_pin(pid_t child, int release_descriptor) noexcept
@@ -745,7 +749,7 @@ public:
         release_and_reap();
     }
 
-    /// @brief Resumes the sentinel after a group-wide stop before releasing it.
+    /// @brief Sends SIGCONT to the helper child after its group was stopped.
     void resume_after_group_stop() noexcept {
         if (child_ > 1) {
             static_cast<void>(::kill(child_, SIGCONT));
@@ -793,7 +797,8 @@ private:
     int release_descriptor_{-1};
 };
 
-/// @brief Joins a direct child to an existing same-session group and holds it.
+/// @brief Starts a helper child in the given process group to hold its group ID.
+/// Returns nullopt if the child cannot join the group.
 [[nodiscard]] inline std::optional<process_group_pin> pin_process_group(
     std::int64_t process_group) noexcept {
     if (process_group <= 1
@@ -1034,9 +1039,8 @@ acquire_decision_lock(
                     registry_clean_transition)) {
             return true;
         }
-        // The clean transition was visible but not durable. Re-establish the
-        // same generation's dirty marker durably before reporting failure so
-        // an out-of-process watchdog cannot accept the clean registry pair.
+        // The dirty marker was removed before its directory was synced.
+        // Try to restore it so the watchdog rejects this update.
         static_cast<void>(write_durable_file(
             *state.directory / "registries.dirty",
             std::to_string(state.generation) + "\n",
@@ -1052,10 +1056,9 @@ acquire_decision_lock(
 export namespace bioseq::postgres_test {
 
 /**
- * @brief Exposes the no-follow classifier to native portability contracts.
- *
- * Normal absence is `false`; an entry is `true`; every lookup failure other
- * than ENOENT remains indeterminate (`nullopt`) and therefore fail-closed.
+ * Exposes the entry-presence check to portability tests. Returns false
+ * for a missing entry, true for an existing entry, and nullopt when the
+ * lookup fails. A symlink counts as an entry.
  */
 [[nodiscard]] inline std::optional<bool>
 is_supervision_path_entry_present_no_follow_for_testing(
@@ -1063,26 +1066,26 @@ is_supervision_path_entry_present_no_follow_for_testing(
     return supervision_detail::is_path_entry_present_no_follow(path);
 }
 
-/// @brief Selects one deterministic registry I/O failure for contracts.
+/// @brief Selects the journal I/O failure to inject in tests.
 inline void set_supervision_journal_fault_for_testing(
     supervision_journal_fault fault) noexcept {
     supervision_detail::journal_fault().store(
         fault, std::memory_order_relaxed);
 }
 
-/// @brief Encodes arbitrary journal text without delimiter ambiguity.
+/// @brief Encodes text as hex so tabs and newlines cannot split journal fields.
 [[nodiscard]] inline std::string supervision_hex_encode(
     std::string_view value) {
     return supervision_detail::hex_encode(value);
 }
 
-/// @brief Decodes one journal field; malformed input returns nullopt.
+/// @brief Decodes a hex journal field, returning nullopt for invalid hex.
 [[nodiscard]] inline std::optional<std::string> supervision_hex_decode(
     std::string_view value) {
     return supervision_detail::hex_decode(value);
 }
 
-/// @brief Enables crash journals in one exact marker-owned state directory.
+/// @brief Creates the watchdog marker and starts empty process and cluster registries.
 inline void configure_supervision_state(
     const std::filesystem::path& directory) {
     std::filesystem::create_directories(directory);
@@ -1109,7 +1112,7 @@ inline void configure_supervision_state(
     }
 }
 
-/// @brief Disables journals without removing watchdog-owned evidence.
+/// @brief Clears in-memory supervision state while keeping its files for the watchdog.
 inline void disable_supervision_state() noexcept {
     try {
         auto& state = supervision_detail::process_state();
@@ -1124,7 +1127,7 @@ inline void disable_supervision_state() noexcept {
     }
 }
 
-/// @brief Returns the active crash-journal directory, if any.
+/// @brief Returns the configured supervision directory, if any.
 [[nodiscard]] inline std::optional<std::filesystem::path>
 supervision_state_directory() {
     auto& state = supervision_detail::process_state();
@@ -1132,7 +1135,8 @@ supervision_state_directory() {
     return state.directory;
 }
 
-/// @brief Captures a PID-reuse-resistant identity and verifies its executable.
+/// @brief Reads a process start token, executable and group.
+/// Checks the executable against expected_executable when one is supplied.
 [[nodiscard]] inline std::optional<supervised_process_identity>
 capture_supervised_process_identity(
     std::uint64_t pid,
@@ -1172,7 +1176,7 @@ capture_supervised_process_identity(
     }
 }
 
-/// @brief True only while the PID still denotes the captured executable/run.
+/// @brief Checks that the saved PID still matches its executable and start token.
 [[nodiscard]] inline bool is_supervised_process_identity_current(
     const supervised_process_identity& process) noexcept {
     if (process.pid <= 1 || process.start_token.empty()
@@ -1185,7 +1189,7 @@ capture_supervised_process_identity(
         && current->start_token == process.start_token;
 }
 
-/// @brief True only while the identity remains in its captured process group.
+/// @brief Checks that the saved process still belongs to its recorded group.
 [[nodiscard]] inline bool is_supervised_process_group_current(
     const supervised_process_identity& process) noexcept {
     if (!is_supervised_process_identity_current(process)) {
@@ -1198,7 +1202,7 @@ capture_supervised_process_identity(
         && current->process_group == process.process_group;
 }
 
-/// @brief True only while the exact captured process is kernel-stopped.
+/// @brief Checks the saved identity and reads whether the process is stopped.
 [[nodiscard]] inline bool is_supervised_process_stopped(
     const supervised_process_identity& process) noexcept {
     try {
@@ -1235,7 +1239,7 @@ capture_supervised_process_identity(
     }
 }
 
-/// @brief True only when the recorded PID currently has no process.
+/// @brief Returns true for an invalid PID or when the OS reports that the PID is absent.
 [[nodiscard]] inline bool is_supervised_process_absent(
     const supervised_process_identity& process) noexcept {
     if (process.pid <= 1
@@ -1251,7 +1255,7 @@ capture_supervised_process_identity(
     return presence != 0 && errno == ESRCH;
 }
 
-/// @brief True when the stopped exact parent pins this exact zombie child.
+/// @brief Checks that the saved child is a zombie whose saved parent remains stopped.
 [[nodiscard]] inline bool is_supervised_child_terminal(
     const supervised_process_identity& parent,
     const supervised_process_identity& child) noexcept {
@@ -1275,7 +1279,8 @@ capture_supervised_process_identity(
     }
 }
 
-/// @brief True only while a stopped exact parent pins this exact child PID.
+/// @brief Checks the parent-child relationship and requires the parent to be stopped.
+/// The stopped parent keeps this child PID from being reaped and reused.
 [[nodiscard]] inline bool is_supervised_child_pinned(
     const supervised_process_identity& parent,
     const supervised_process_identity& child) noexcept {
@@ -1298,12 +1303,15 @@ capture_supervised_process_identity(
     }
 }
 
-/// @brief Signals an exact child only while its stopped parent pins PID reuse.
-///
-/// The parent identity, stopped state, and live PPID edge are checked directly
-/// before and after delivery.  A stale child is rejected.  Once SIGKILL was
-/// delivered, an inconclusive post-check is reported as committed rather than
-/// as a rollback-safe failure.
+/**
+ * Checks the saved parent and child before sending a signal. The parent
+ * must remain stopped so it cannot reap the child and allow PID reuse.
+ * After delivery, the function checks the parent again and, for stop or
+ * continue signals, waits for the requested child state.
+ *
+ * A delivered signal with an inconclusive follow-up check is reported as
+ * delivered_unverified. Cleanup must treat a delivered SIGKILL as irreversible.
+ */
 [[nodiscard]] inline supervised_child_signal_result
 signal_supervised_child_while_parent_stopped(
     const supervised_process_identity& parent,
@@ -1399,7 +1407,12 @@ signal_supervised_child_while_parent_stopped(
     }
 }
 
-/// @brief Signals a PGID while a verified direct-child sentinel prevents reuse.
+/**
+ * Holds a process-group ID with a helper child, checks for a matching
+ * saved process, and sends the requested group signal. Returns true when
+ * the group is absent or no saved process still matches, as well as after
+ * a successful signal.
+ */
 [[nodiscard]] inline bool signal_supervised_process_group(
     std::int64_t process_group,
     std::span<const supervised_process_identity> anchors,
@@ -1458,11 +1471,12 @@ signal_supervised_child_while_parent_stopped(
     }
 }
 
-/// @brief Verifies that a live postgres identity owns this exact PGDATA.
-///
-/// Verification requires identity continuity, a stable postmaster.pid whose
-/// first two fields name the PID and canonical PGDATA, a valid start-time
-/// field, and an OS-observed `-D` argument naming the same directory.
+/**
+ * Checks that the saved process uses the expected data directory. Its
+ * command line must name that directory with -D, and postmaster.pid must
+ * contain the matching PID and directory plus a positive start-time field.
+ * The start-time field is parsed but is not compared with the process token.
+ */
 [[nodiscard]] inline bool is_supervised_postmaster_bound_to_data_directory(
     const supervised_process_identity& process) noexcept {
     try {
@@ -1509,7 +1523,7 @@ signal_supervised_child_while_parent_stopped(
     }
 }
 
-/// @brief True only when no process remains in the recorded process group.
+/// @brief Returns true for an invalid group ID or when the OS reports the group absent.
 [[nodiscard]] inline bool is_supervised_process_group_absent(
     std::int64_t process_group) noexcept {
     if (process_group <= 1
@@ -1524,7 +1538,12 @@ signal_supervised_child_while_parent_stopped(
     return errno == ESRCH;
 }
 
-/// @brief Atomically elects disarm or timeout ownership for one watchdog.
+/**
+ * Try to claim the watchdog decision for the supplied owner. A file lock
+ * serializes claims, and success requires a durable decision file.
+ * If publication becomes visible before directory sync succeeds, try to
+ * remove it. If it remains, accept it only after the directory is synced.
+ */
 [[nodiscard]] inline bool try_claim_supervision_decision(
     const std::filesystem::path& directory,
     std::string_view owner) noexcept {
@@ -1612,9 +1631,8 @@ signal_supervised_child_while_parent_stopped(
                 supervision_detail::directory_fsync_checkpoint::
                     decision_reconciliation);
         if (!reconciliation_durable) {
-            // A visible decision may be accepted only after a successful
-            // directory fsync. Retry rollback, then reconcile the namespace
-            // without the one-shot test fault before deciding the receipt.
+            // The decision is already visible. Retry removing it and sync the
+            // directory without the test fault before reporting who owns cleanup.
             if (!decision_absent) {
                 remove_error.clear();
                 decision_removed =
@@ -1633,7 +1651,7 @@ signal_supervised_child_while_parent_stopped(
     }
 }
 
-/// @brief Reports whether either side has already claimed the watchdog.
+/// @brief Checks for a valid decision file while holding the shared decision lock.
 [[nodiscard]] inline bool is_supervision_decision_claimed(
     const std::filesystem::path& directory) noexcept {
     try {
@@ -1652,7 +1670,7 @@ signal_supervised_child_while_parent_stopped(
     }
 }
 
-/// @brief Atomically replaces one bounded watchdog evidence snapshot.
+/// @brief Replaces a watchdog snapshot and reports whether the file became durable.
 [[nodiscard]] inline bool publish_supervision_snapshot(
     std::string_view basename,
     std::string_view payload) noexcept {
@@ -1690,7 +1708,8 @@ signal_supervised_child_while_parent_stopped(
     }
 }
 
-/// @brief Loads only a complete final watchdog evidence snapshot.
+/// @brief Reads a watchdog snapshot within the size limit.
+/// Returns nullopt on read failure. The caller checks the snapshot format.
 [[nodiscard]] inline std::optional<std::string>
 load_supervision_snapshot(
     const std::filesystem::path& directory,
@@ -1717,7 +1736,8 @@ load_supervision_snapshot(
     }
 }
 
-/// @brief Durably marks a supervised child launch before posix_spawn.
+/// @brief Marks the registry dirty before launching a supervised child.
+/// Returns an inactive intent when supervision is disabled, or nullopt on failure.
 [[nodiscard]] inline std::optional<supervision_launch_intent>
 begin_supervised_launch() noexcept {
     try {
@@ -1742,7 +1762,8 @@ begin_supervised_launch() noexcept {
     }
 }
 
-/// @brief Commits the exact spawned child into its pre-launch dirty generation.
+/// @brief Records the launched child and completes its pending launch.
+/// Publishes the registry when no other launches are pending.
 inline bool commit_supervised_launch(
     supervision_launch_intent intent,
     std::uint64_t pid,
@@ -1784,7 +1805,8 @@ inline bool commit_supervised_launch(
     }
 }
 
-/// @brief Cancels one failed launch while preserving dirty state on I/O error.
+/// @brief Removes a failed launch and any supplied PID from the registry.
+/// Publishes the result once all pending launches are resolved.
 inline bool cancel_supervised_launch(
     supervision_launch_intent intent,
     std::uint64_t pid = 0) noexcept {
@@ -1818,7 +1840,7 @@ inline bool cancel_supervised_launch(
     }
 }
 
-/// @brief Removes one reaped lifecycle child from timeout ownership.
+/// @brief Removes a process record after the caller has reaped the child.
 inline bool remove_supervised_process(std::uint64_t pid) noexcept {
     try {
         auto& state = supervision_detail::process_state();
@@ -1856,7 +1878,8 @@ inline bool remove_supervised_process(std::uint64_t pid) noexcept {
     }
 }
 
-/// @brief Atomically publishes one live private cluster for its watchdog.
+/// @brief Adds or replaces a cluster record and publishes the watchdog registries.
+/// Does nothing when supervision is disabled.
 inline void register_supervised_cluster(
     supervised_cluster_identity cluster) {
     auto& state = supervision_detail::process_state();
@@ -1906,7 +1929,7 @@ inline void register_supervised_cluster(
     }
 }
 
-/// @brief Removes one stopped/cleaned cluster from the watchdog registry.
+/// @brief Removes a cluster record after the caller has stopped or cleaned it.
 inline bool remove_supervised_cluster(
     const std::filesystem::path& root) noexcept {
     try {
@@ -1945,7 +1968,12 @@ inline bool remove_supervised_cluster(
     }
 }
 
-/// @brief Strictly loads one clean, generation-consistent registry pair.
+/**
+ * Reads the process and cluster journals only when their generation
+ * numbers match the clean marker and no dirty or partial marker is found.
+ * Invalid records return nullopt. The caller must prevent concurrent
+ * registry changes while deciding how to clean up the recorded resources.
+ */
 [[nodiscard]] inline std::optional<supervision_registry_snapshot>
 load_supervision_registry_snapshot(
     const std::filesystem::path& directory) noexcept {
@@ -2174,7 +2202,7 @@ load_supervision_registry_snapshot(
     }
 }
 
-/// @brief Verifies both live-resource journals are clean, valid, and empty.
+/// @brief Checks that a valid registry snapshot contains no clusters or processes.
 [[nodiscard]] inline bool is_supervision_registry_empty(
     const std::filesystem::path& directory) noexcept {
     const auto snapshot = load_supervision_registry_snapshot(directory);
@@ -2182,7 +2210,8 @@ load_supervision_registry_snapshot(
         && snapshot->processes.empty();
 }
 
-/// @brief Removes only a clean state with no registered live resources.
+/// @brief Removes the supervision directory after its registry is found empty.
+/// Callers must prevent new registrations during this check and removal.
 inline bool remove_supervision_state(
     const std::filesystem::path& directory) noexcept {
     try {
