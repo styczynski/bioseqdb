@@ -1,0 +1,24 @@
+\label{sec:arch-authorship}
+
+I developed BioSeqDB over approximately three years with most of that time was dedicated to learning how alignment software works in general. Early work included
+Python aligner prototypes written approximately two years ago. I
+designed the system and implemented the BioSeqDB-specific algorithms,
+representations and optimizations presented as my contributions in the
+preceding chapters. Moving from those prototypes to a PostgreSQL extension
+also required substantial integration, testing and performance work.
+
+The entire project was authored only by me:
+\begin{itemize}
+  \item Created ports of existing algorithms based on their high-level design into portable GPU kernels and SIMD kernels including my own custom optimisations (all the algorithms are custom implementations authored by me)
+  \item Designed and implemented C++ interfaces, Postgres interfaces
+  \item Ported Citus/Hydra columnar storage to new PostgreSQL versions and adapted it to my custom needs
+\end{itemize}
+
+With contributions from AI tools in the only non-core areas that helped me focus on the important problems:
+\begin{itemize}
+  \item Development tools including source generator that helped me to generate SQL boilerplate
+  \item Benchmarking utilities to measure performance
+  \item Automatic refactor of my files that included only: moving functions to different files, renaming functions, variables and files and making sure that code follows clang tidy formatter
+\end{itemize}
+
+

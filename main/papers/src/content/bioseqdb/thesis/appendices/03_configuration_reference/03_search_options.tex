@@ -1,58 +1,32 @@
-\section{Per-search options are not additional GUCs}
+\section{Per-search options}
 \label{sec:appendix-search-options}
 \label{sec:appendix-options-precedence}
 
-The third argument of \texttt{mmsearch} accepts the
-\nolinkurl{bioseq_aligner_options} composite. The
-\texttt{aligner\_options(...)} constructor creates that value. Both names
-belong to the extension's installation schema, assumed to be
-\texttt{public} in the example below. The sequence type remains in
-\texttt{bioseq}.
+Additionally instead of operating on global settings, user can also provide single object as third parameter to the \texttt{mmsearch} function call.
 
-All 36 constructor arguments default to SQL \texttt{NULL}. They do not
-capture the current GUC values when the composite is constructed.
-When the search resolves its parameters, each non-NULL field replaces its
-corresponding inherited value. An omitted field and an explicitly NULL
-field both leave that default unchanged. Zero and \texttt{false} are
-explicit overrides. The independent \texttt{index\_read\_requirement}
-starts at \texttt{allow}, encoded as 0.
+\info{Parameter encoding}{
+  Currently the enum options are encoded by integers - they correspond to the global GUCs, but you can use only numbers. 
+  This is just unimplemented feature - the types of the options should be changed to strings and encoded to internal enum int values.
+  It was requiring less effort to expose internal representation, so it was left as is, see listing below~\ref{lst:configuration-options}.
+}
 
+Encoding of parameters as integer values:
 \begin{lstlisting}[style=bioseq-search-sql,
-  caption={Construct per-search overrides without changing the session settings.},
+  caption={Passing options by 3rd argument of mmsearch},
   label={lst:configuration-options}]
 SELECT (public.aligner_options(
   minimizer_algorithm => 0,
   index_read_requirement => 1)).*;
 \end{lstlisting}
 
-Here code 0 selects scalar minimizers and code 1 disables persisted
-target-index reads for that search. The constructor alone performs no
-sequence search. The same composite can be passed to an eligible stored
-column query or a sequence join.
-
-The options must resolve during planning to a constant of the exact
-composite type. A constructor with constant arguments satisfies this rule.
-Row-dependent options and unresolved generic-plan parameters are not
-supported. Omitting the third argument, using an empty constructor and
-passing \nolinkurl{NULL::public.bioseq_aligner_options} all request inherited
-options.
-
-Table~\ref{tab:configuration-options} gives every field in constructor order.
-The first 35 fields map to GUCs documented above. The table's
-\texttt{double} type means SQL \texttt{double precision}. These four fields
-are converted to single precision in the alignment parameters.
-The constructor only forms the composite value. The planner's decoder
-validates the algorithm and index-requirement codes when a search uses it.
-It does not enforce the ordinary numeric GUC intervals on the other
-per-call fields. Kernel requirements still apply.
-
+Every options is available below, for meaning and usage check the GUC tables:
 \input{appendices/03_configuration_reference/04_options_table}
 
 \subsection{The index-read requirement}
 \label{sec:appendix-options-index-policy}
 
-This option has no GUC equivalent. It describes what a particular search
-requires, independently of how its target index was built.
+This is special field that has no GUC equivalent, that is only available via \texttt{aligner\_options}. This is special flag very useful during testing and controls
+how index reader behaves.
 
 \begingroup
 \small
@@ -61,7 +35,7 @@ requires, independently of how its target index was built.
   >{\raggedright\arraybackslash}p{.07\linewidth}
   >{\raggedright\arraybackslash}p{.25\linewidth}
   >{\raggedright\arraybackslash}p{\dimexpr.43\linewidth-6\tabcolsep\relax}@{}}
-\caption{The per-search index policy, separate from the GUC inventory.}
+\caption{Special option controling index reader}
 \label{tab:configuration-index-requirement}\\
 \toprule
 \textbf{Options field} & \textbf{Type} & \textbf{Value} & \textbf{Description}\\
@@ -76,51 +50,12 @@ requires, independently of how its target index was built.
 \multirow[t]{3}{=}{\nolinkurl{index_read_requirement}} &
 \multirow[t]{3}{=}{int} &
 \textbf{0: \texttt{allow}}\par(default) &
-Controls whether the search may depend on a persisted target index.
-Follow the optional-read GUC and use a compatible supported reader when
-available. The executor may instead compute a temporary lookup.\\*
+If no compatible index is available, seeds can be recomputed from scratch. This is the most useful in practical sense as it allows the largest flexibility for user. \\*
 & & 1: \nolinkurl{require_absent} &
-Execute without persisted-index reads or a reused assembled persisted
-lookup. Existing indexes are not deleted. Separate eligible background
-persistence is not prohibited.\\*
+Never read index even if it exists, always recompute seeds from scratch. Additionally setting this option will produce errors if deffered index update is ON. 
+Practically used in testing scenarios to see what happens if index does not exist.\\*
 & & 2: \nolinkurl{require_compatible_persisted} &
-Require a compatible saved generation, overriding the optional-read GUC.
-Missing or incompatible storage is an error. Recomputing the target index
-cannot satisfy this requirement.\\
+Hard requirement that index must allways exist. If the index does not exist or is incompatible (different k/w parameters etc.), the query will produce error before execution. \\
 \end{longtable}
 \endgroup
 
-The prepared persisted reader belongs to an eligible two-input
-\texttt{BioseqBatchJoin}. An ordinary executable \texttt{BioseqScan}
-rejects requirement 2. A transformed target, such as a slice or
-concatenation, must use its evaluated sequence view. That path forces
-requirement 1 and rejects requirement 2.
-
-\subsection{Overrides and execution requirements}
-\label{sec:appendix-options-algorithms}
-
-The main GUC tables show integer codes for all three algorithm fields.
-Their inherited built-in choices are minimizer code 4
-(\texttt{bounded\_nthash\_simd}), chaining code 1
-(\texttt{simd\_minimap2}) and base-alignment code 1
-(\texttt{block\_aligner}). These are inherited choices, not non-NULL
-constructor defaults.
-
-Persisted readers must still prepare query minimizers compatible with their
-saved target profile. An accepted per-search override does not guarantee
-that it can use an existing index.
-
-An explicit \texttt{vulkan\_enabled => true} also requests a standalone
-Vulkan prefilter in an eligible ordinary scan with an exact edit-distance
-filter. Merely inheriting the enabled GUC does not make that extra request.
-Consequently, an explicit per-call Boolean and the corresponding session
-default are not interchangeable in that case.
-
-Base alignment runs when the requested result requires it. Choosing
-\nolinkurl{base_alignment_algorithm} alone does not cause a coordinate-only
-search to calculate a base-alignment score. Requests for CIGAR,
-\texttt{has\_cigar} or edit-related results select the additional work.
-BlockAligner's first gap penalties
-must be positive with a sum no greater than 128. Effective block sizes must
-be powers of two with the minimum no greater than the maximum. The GUC
-numeric ranges do not express all these joint conditions.

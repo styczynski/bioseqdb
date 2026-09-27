@@ -6,6 +6,6 @@ SELECT t.id AS target_id, q.id AS query_id,
   bioseq.score(t.seq) AS score,
   bioseq.cigar(t.seq) AS cigar
 FROM samples AS t JOIN samples AS q
-  ON mmsearch(t.seq, q.seq)
+  ON mmsearch(t.seq, q.seq, aligner_options(index_read_requirement => 2))
 ORDER BY target_id, query_id, target_start,
   query_start;

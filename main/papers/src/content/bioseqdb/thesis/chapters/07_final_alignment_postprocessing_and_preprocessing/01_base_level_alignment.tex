@@ -1,195 +1,147 @@
-
-\section{From a seed chain to a base-level alignment}
+\section{Base-level alignment}
 \label{sec:final-alignment-role}
-
-Chaining identifies a plausible correspondence between query and target
-positions. Final alignment resolves the bases between the anchors: it assigns
-a score and, when requested, reconstructs the substitutions, insertions and
-deletions as a CIGAR. This is the dynamic-programming problem introduced in
-Section~\ref{sec:exact-dp}. BioseqDB divides a chained region into an extension
-on each flank and fills between selected anchors. Consequently, the number
-and geometry of these subproblems matter as well as the total read length.
-
-\subsection{The two CPU alignment contracts}
 \label{sec:final-alignment-cpu-contracts}
 
-KSW2 and Block Aligner both use SIMD, but they do not search the same set of
-matrix cells or implement the same scoring contract. KSW2 supports two affine
-gap penalties, a fixed band and Z-drop stopping. Z-drop allows extra score
-loss when the path moves away from its previous diagonal, so that a long gap
-need not stop an extension immediately. The ordinary gap-fill path also uses
-an approximate maximum; requests for an exact edit count disable its band
-and Z-drop restrictions.
+A chain suggests where two sequences match. The base aligner resolves the
+symbols between anchors and extends their flanks, producing a score and an
+alignment path (Section~\ref{sec:exact-dp}). BioseqDB uses local ports of KSW2
+from minimap2 and Block Aligner~\cite{minimap2_paper,block_aligner_paper}.
+Both use SIMD. I use these existing algorithms without proposing a new base
+aligner.
 
-Block Aligner uses the first affine gap penalty and a block that moves,
-grows and shrinks through the matrix~\cite{block_aligner_paper}. Fills between
-anchors use its global mode; flanks use its own X-drop rule, which requires
-two consecutive low-scoring steps. The current pipeline supplies minimum
-and maximum block sizes of 16 and 32. Increasing these limits can explore
-more cells around gaps, at the cost of more work and trace storage. Neither
-the read length nor an end-to-end timing alone establishes which limits
-should be changed.
+Table~\ref{tab:final-aligner-comparison} compares their search and scoring.
+For a gap of length \(\ell\), \(q\) is the opening penalty and \(e\) the
+cost per symbol. KSW2's two affine penalties distinguish short and long gaps.
 
-\label{sec:final-alignment-fused-work}
-The implementation also tries to prove that an equal-length gap has a unique
-straight-diagonal optimum before running Block dynamic programming. A
-successful proof produces the score and trace directly; other gaps still use
-the adaptive recurrence. This shortcut has its own geometry, sequence-storage
-and scoring restrictions. Both aligners otherwise combine dynamic
-programming, trace storage, traceback and CIGAR construction in one invocation.
-A timer surrounding that invocation therefore measures more than output
-formatting. Equal match counts do not establish equal CIGARs, scores or
-search effort between the two contracts.
+\begin{table}[H]
+\centering
+\small
+\caption{CPU aligners incorporated into BioseqDB.}
+\label{tab:final-aligner-comparison}
+\setlength{\tabcolsep}{4pt}
+\renewcommand{\arraystretch}{1.1}
+\begin{tabularx}{\linewidth}{@{}>{\raggedright\arraybackslash}p{.19\linewidth}
+  >{\raggedright\arraybackslash}X >{\raggedright\arraybackslash}X@{}}
+\toprule
+ & \textbf{KSW2} & \textbf{Block Aligner}\\
+\midrule
+DP region & Fixed diagonal band & Moving square that grows and shrinks\\
+Gap cost & \(\min(q_1+e_1\ell,q_2+e_2\ell)\) & \(q_1+e_1\ell\)\\
+Flank stopping & Z-drop & X-drop after two consecutive low-scoring steps\\
+Search limits & Band width and Z-drop threshold
+ & Block size, currently 16--32 in the CPU pipeline\\
+\bottomrule
+\end{tabularx}
+\end{table}
 
-% Chaining identifies an ordered set of anchors with plausible query and target
-% coordinates. It does not determine the substitutions, insertions, and
-% deletions between those anchors. Final alignment resolves this remaining
-% ambiguity. It refines the outer coordinates, assigns a dynamic-programming
-% score, and reconstructs an edit path when the query requests a CIGAR or an
-% exact edit count.
+If \(S^\star\) is the best score reached at \((i^\star,j^\star)\), a later
+score \(S\) at \((i,j)\) is tested against
+\begin{equation}
+\begin{aligned}
+  \text{X-drop:}\quad&S^\star-S>X,\\
+  \text{Z-drop:}\quad&S^\star-S>Z+e\left|(i-i^\star)-(j-j^\star)\right|.
+\end{aligned}
+\label{eq:zdrop}
+\end{equation}
+Z-drop allows extra score loss when crossing a gap changes the diagonal.
+Here \(e\) is its gap-extension penalty. BioseqDB supplies the same configured
+threshold as \(Z\) to KSW2 and as \(X\) to Block, despite their different rules.
+Block fills between anchors globally and uses X-drop on the flanks.
+KSW2 can stop a fill under Z-drop, but disables both banding and Z-drop for
+mandatory fills when an exact edit predicate is requested.
 
-% BioSeqDB treats final alignment as an optional pipeline stage. Coordinate-only
-% queries can return regions derived from seeds and chains. A request for a
-% base-level path enables traceback, while an exact edit predicate also requires
-% the traced path because a seed-derived divergence estimate is insufficient.
-% Avoiding dynamic programming when these outputs are absent is important for
-% database workloads that project many candidate coordinates.
+\clearpage
+\section{How Block Aligner follows the alignment}
+\label{sec:final-alignment-block}
 
-% The stage has three execution routes. KSW2 supplies two-piece affine scoring,
-% a static band, Z-drop, and minimap-style endpoint rules. Block Aligner uses a
-% single affine model and an adaptive SIMD block. A restricted GPU route aligns
-% windows produced by GPU seeding and chaining. These routes do not have
-% identical scoring or endpoint semantics. Route selection is explicit, and
-% each route has a distinct scoring and result contract.
+Block Aligner moves a \(B\times B\) square through the scoring matrix,
+computing strips of width \(s\). Border scores guide its direction.
+If progress stops, it returns to a checkpoint and tries a larger block.
+Later progress near the end of a border can permit shrinking
+(Figure~\ref{fig:block-adaptive-reconstruction}). A finite block limit can
+exclude a better path outside the computed cells.
 
-% The alignment modes in Section~\ref{sec:alignment-model} determine which
-% matrix borders are fixed and which endpoints are free. BioSeqDB applies these
-% conditions at the level of subproblems. Inter-anchor rectangles are global
-% fills with fixed endpoints. The two outer rectangles are extension problems
-% whose endpoint may be selected before the end of the available flank. This
-% distinction is more accurate than describing an entire chained region as one
-% global or local matrix.
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[x=0.42cm,y=0.42cm,>=Latex,font=\small]
+  \begin{scope}[xshift=0cm]
+    \draw[step=1,gray!28,very thin] (0,0) grid (6,6);
+    \draw[blue!70!black,very thick] (0,0) rectangle (3,3);
+    \fill[blue!16] (2,0) rectangle (3,3);
+    \draw[->,thick] (3.2,1.4) to (4.5,1.4);
+    \node[align=center,text width=3.7cm] at (3,7.4)
+      {shift toward the stronger outgoing border};
+    \node at (3,-1) {(a) move};
+  \end{scope}
+  \begin{scope}[xshift=5.2cm]
+    \draw[step=1,gray!28,very thin] (0,0) grid (6,6);
+    \draw[blue!70!black,very thick] (1.5,1.5) rectangle (4.5,4.5);
+    \draw[teal!70!black,dashed,very thick] (0,0) rectangle (6,6);
+    \fill[red!65] (2.7,2.7) circle (0.12);
+    \node[align=center,text width=3.7cm] at (3,7.4)
+      {restore a checkpoint and enlarge the block};
+    \node at (3,-1) {(b) grow};
+  \end{scope}
+  \begin{scope}[xshift=10.4cm]
+    \draw[step=1,gray!28,very thin] (0,0) grid (6,6);
+    \draw[teal!70!black,very thick] (0,0) rectangle (6,6);
+    \fill[green!22] (4,4) rectangle (6,6);
+    \draw[blue!70!black,dashed,very thick] (3,3) rectangle (6,6);
+    \draw[->,thick] (5.3,5.3) to (6.5,6.1);
+    \node[align=center,text width=3.7cm] at (3,7.4)
+      {shrink after progress reaches a border suffix};
+    \node at (3,-1) {(c) shrink};
+  \end{scope}
+\end{tikzpicture}
+\caption{Block Aligner moves toward the stronger border, returns to a saved
+checkpoint when it needs a larger block, and shrinks when progress permits.
+The coloured outlines show the block before and after each decision.}
+\label{fig:block-adaptive-reconstruction}
+\end{figure}
 
-% \section{Affine-gap dynamic programming}
-% \label{sec:final-alignment-affine}
+\begin{algorithm}[H]
+\caption{Main decisions of adaptive Block Aligner}
+\label{alg:adaptive-block-alignment}
+\footnotesize
+\begin{algorithmic}[1]
+  \Require sequences \(Q,T\), affine scores, bounds \(B_{\min},B_{\max}\), strip width \(s\)
+  \Require global or extension mode, X-drop threshold \(X\)
+  \Ensure score and optional CIGAR for the selected path
+  \State \(B\gets B_{\min},\quad S^\star\gets-\infty,\quad u\gets0,\quad z\gets0\)
+    \Comment{\(u\): stalled steps, \(z\): X-drop steps}
+  \State place the block at the matrix origin and save a checkpoint
+  \While{true}
+    \State compute newly exposed cells by affine-gap SIMD dynamic programming
+    \State \(M\gets\) maximum score in these cells, \(u\gets u+1\)
+    \State \(v\gets[M>S^\star]\) \Comment{new best score}
+    \If{\(v\)}
+      \State \(S^\star\gets M,\quad u\gets0\), save endpoint and checkpoint
+    \EndIf
+    \State \(z\gets z+1\) if \(M<S^\star-X\), otherwise \(z\gets0\)
+    \State \textbf{if} extension mode and \(z=2\) \textbf{then break}
+    \State \textbf{if} both sequence ends have been computed \textbf{then break}
+    \If{\(2B\leq B_{\max}\) and (\(u\geq B/s\) or the last step grew without improving)}
+      \State restore checkpoint, \(B\gets2B,\quad u\gets0\)
+    \Else
+      \If{\(B>B_{\min}\) and \(v\) and a border-suffix score is at least \(M\)}
+        \State keep the bottom-right half, \(B\gets B/2\), save checkpoint
+      \EndIf
+      \State shift by \(s\) toward the stronger outgoing border
+        \Comment{respect matrix edges}
+    \EndIf
+  \EndWhile
+  \State select the global endpoint, or the saved best endpoint in extension mode
+  \State if CIGAR is requested, trace back from that endpoint
+\end{algorithmic}
+\end{algorithm}
 
-% Let \(Q=q_1\ldots q_n\) be a query and \(T=t_1\ldots t_m\) a target interval.
-% For substitution score \(s(q_i,t_j)\), an affine gap of length \(k\geq 1\)
-% has penalty
-% \[
-%     g(k)=q+ke,
-% \]
-% where \(q>0\) is the gap-open penalty and \(e>0\) is the extension penalty.
-% The first gap symbol therefore costs \(q+e\). With query positions on the
-% vertical axis and target positions on the horizontal axis, the global
-% Needleman, Wunsch, and Gotoh recurrence is
-% \begin{align}
-%  I(i,j) &= \max\{H(i-1,j)-q-e,\ I(i-1,j)-e\},
-%  \label{eq:affine-i}\\
-%  D(i,j) &= \max\{H(i,j-1)-q-e,\ D(i,j-1)-e\},
-%  \label{eq:affine-d}\\
-%  H(i,j) &= \max\{H(i-1,j-1)+s(q_i,t_j),\ I(i,j),\ D(i,j)\}.
-%  \label{eq:affine-h}
-% \end{align}
-% The insertion and deletion states record whether a path already ends in a
-% gap. A global fill initializes both axes with cumulative gap costs. An
-% extension changes the boundary and endpoint rules while retaining the same
-% cell recurrence. A full matrix takes \(O(nm)\) time and \(O(nm)\) trace memory
-% when every decision is retained \cite{gotoh_1982_affine}.
+\noindent\label{sec:final-alignment-fused-work}
+One alignment call includes scoring, trace storage, traceback and CIGAR
+construction. BioseqDB can skip Block DP when a score bound proves that an
+equal-length fill's straight diagonal is uniquely optimal. The timer in
+Section~\ref{sec:bench-a-b} includes this shortcut too.
 
-% The default nucleotide model uses match score \(a=2\), mismatch penalty
-% \(b=4\), and two affine families
-% \[
-%    (q_1,e_1)=(4,2), \qquad (q_2,e_2)=(24,1).
-% \]
-% KSW2 assigns a gap the lower of the two costs,
-% \[
-%     g(k)=\min\{4+2k,\ 24+k\}.
-% \]
-% The short family is cheaper below length 20, both are equal at 20, and the
-% long family is cheaper above 20. The recurrence keeps two insertion states
-% and two deletion states:
-% \begin{align}
-%  I_r(i,j)&=\max\{H(i-1,j)-q_r-e_r,\ I_r(i-1,j)-e_r\},\\
-%  D_r(i,j)&=\max\{H(i,j-1)-q_r-e_r,\ D_r(i,j-1)-e_r\},
-%  \qquad r\in\{1,2\},\\
-%  H(i,j)&=\max\{H(i-1,j-1)+s(q_i,t_j),
-%  I_1,I_2,D_1,D_2\}.
-% \end{align}
-% This model charges short sequencing errors and long gaps differently. Block
-% Aligner instead uses only the first affine family. Selecting Block Aligner is
-% therefore a scoring choice as well as a performance choice.
-
-% \subsection{Banding and stopping criteria}
-
-% Anchors suggest an expected diagonal \(d_0\). KSW2 can restrict evaluation to
-% cells satisfying
-% \[
-%         |(i-j)-d_0|\leq w,
-% \]
-% where \(w\) is the half-width of the band. Work is then approximately
-% \(O(w(n+m))\), but an optimum that leaves the band cannot be recovered. The
-% ordinary alignment width is derived from the chaining width as
-% \[
-%         w_{\mathrm{align}}=\lfloor 1.5w_{\mathrm{chain}}+1\rfloor.
-% \]
-
-% Z-drop terminates an extension whose score has deteriorated sufficiently from
-% the best cell. If \(S^\star\) is the best score at
-% \((i^\star,j^\star)\), termination is permitted when
-% \begin{equation}
-%  S^\star-S(i,j)>
-%  Z+e_z\left|(i-i^\star)-(j-j^\star)\right|.
-%  \label{eq:zdrop}
-% \end{equation}
-% The displacement term allows a long gap to move away from the best diagonal
-% without receiving the same stopping penalty as a score loss along that
-% diagonal. In the two-piece kernel, \(e_z\) is the long-gap extension penalty.
-% Block Aligner does not use this rule. Its outer extensions apply X-drop and
-% require two consecutive steps below the threshold before stopping.
-
-% For mandatory KSW2 fills used by an exact edit predicate, banding and Z-drop
-% are disabled. This prevents the path between two fixed anchors from ending
-% early. The outer candidate window and the selected chain still constrain the
-% search, so this setting does not turn the complete mapping task into an
-% unbounded full-matrix comparison.
-
-% \clearpage
-% \section{Alignment around a chain}
-% \label{sec:final-alignment-three-phase}
-
-% BioSeqDB follows the ordinary DNA extension structure of minimap2
-% \cite{minimap2_paper}. It solves three kinds of subproblem rather than one
-% matrix over the complete region. The left flank is reversed and aligned as an
-% extension. Rectangles between selected anchors are global fills. The right
-% flank is a forward extension.
-
-% \begin{table}[htbp]
-% \centering
-% \small
-% \caption{Boundary conditions of the three alignment phases.}
-% \label{tab:alignment-phase-contracts}
-% \setlength{\tabcolsep}{4pt}
-% \begin{tabularx}{\linewidth}{@{}p{0.18\linewidth}p{0.19\linewidth}X X@{}}
-% \toprule
-% \textbf{Phase} & \textbf{Orientation} & \textbf{KSW2} & \textbf{Block Aligner}\\
-% \midrule
-% Left flank & reversed & extension endpoint, band, and Z-drop & native X-drop
-% extension\\
-% Between anchors & forward & global two-piece affine fill & global
-% single-affine adaptive block\\
-% Right flank & forward & extension endpoint, band, and Z-drop & native X-drop
-% extension\\
-% \bottomrule
-% \end{tabularx}
-% \end{table}
-
-% Short distances between consecutive anchors are accumulated. A fill is
-% started only after both the query and target spans reach a minimum length, or
-% when the last anchor forces the remaining rectangle. This reduces a long
-% region to a sequence of moderate subproblems. It also prevents the overhead of
-% running dynamic programming separately for every closely spaced seed.
-
+% Other existing illustrations retained as source material.
 % \begin{figure}[htbp]
 % \centering
 % \begin{tikzpicture}[
@@ -212,310 +164,6 @@ search effort between the two contracts.
 % global inter-anchor fills. Several short anchor intervals may form one fill.}
 % \label{fig:three-phase-alignment}
 % \end{figure}
-
-% \begin{algorithm}[htbp]
-% \caption{Final alignment of one chained region}
-% \label{alg:three-phase-alignment}
-% \begin{minipage}{\linewidth}
-% \small
-% \textbf{Input.} Query \(Q\), target \(T\), ordered anchors \(A\), parameters
-% \(P\), and a selected backend.
-% \begin{enumerate}
-%     \item Derive inner anchor bounds and bounded outer extension intervals.
-%     \item If both left intervals are nonempty, align them in reverse
-%           orientation and update the left endpoint.
-%     \item Place a cursor at the first anchor.
-%     \item Visit each later anchor in order.
-%     \begin{enumerate}
-%         \item Accumulate query and target distance while either span is below
-%               \(P.\mathit{minLen}\), except at the final anchor.
-%         \item Solve each resulting positive rectangle as a global fill.
-%         \item Append its CIGAR and move the cursor to the current anchor.
-%     \end{enumerate}
-%     \item If both right intervals are nonempty, run the permitted forward
-%           extension and update the right endpoint.
-%     \item Merge adjacent equal CIGAR operations and project reverse-strand
-%           coordinates when required.
-% \end{enumerate}
-% \end{minipage}
-% \end{algorithm}
-
-% Each phase returns a score, consumed lengths, endpoint information, and an
-% optional trace. A non-dropped global fill consumes both slices. Ordinary KSW2
-% fills may instead stop under Z-drop and use their maximum-scoring positions as
-% truncated endpoints. Exact-edit KSW2 disables Z-drop. An extension may consume
-% only a prefix of the available oriented slices, which moves the
-% reported outer coordinate to its selected endpoint. The region result is
-% formed by adding phase scores and concatenating phase traces in coordinate
-% order. Reversing the left input changes the direction of computation, but not
-% the final order of the reported path.
-
-% Stopping state is also phase-specific. A KSW2 Z-drop in an earlier phase can
-% suppress a later right extension because the minimap-style control flow treats
-% the region as dropped. Block global fills do not use Z-drop. Its left and
-% right X-drop extensions are separate searches, so the right extension remains
-% eligible after an earlier Block phase. This is a material behavioural
-% difference and is retained as a backend rule rather than normalised through a
-% shared option.
-
-% The port differs from minimap2 in its supported policy surface. It implements
-% the ordinary DNA seed-gap and end-extension structure, but not the splice,
-% RNA, inversion-retry, or long-join policies. It also obtains slices from lazy
-% sequence representations, including reverse-oriented slices, without first
-% copying a complete region. These differences concern the surrounding
-% pipeline. The KSW2 recurrence remains recognisable, while Block Aligner uses a
-% separate phase contract instead of imitating KSW2 options that it does not
-% support.
-
-% \section{KSW2 with portable SIMD}
-% \label{sec:final-alignment-ksw2}
-
-% \subsection{Difference representation}
-
-% A direct SIMD implementation stores absolute \(H\), \(I\), and \(D\) scores.
-% Absolute values grow with sequence length and may require wide lanes. KSW2
-% uses the Suzuki and Kasahara observation that differences between neighbouring
-% scores remain bounded by the scoring parameters even when the absolute score
-% is large \cite{suzuki_kasahara_2018}. Representative differences are
-% \[
-%     U(i,j)=H(i,j)-H(i-1,j), \qquad
-%     V(i,j)=H(i,j)-H(i,j-1).
-% \]
-% The main recurrence operates on signed byte values derived from these
-% differences. Wider scores are reconstructed where exact maxima and endpoints
-% are needed. More cells therefore fit in each SIMD vector.
-
-% BioSeqDB expresses this recurrence with portable SIMD operations. Lanes hold
-% cells from one alignment problem, usually along an anti-diagonal. This is
-% intra-sequence parallelism. It differs from placing several independent
-% sequence pairs in the lanes of one vector. A single-affine specialization is
-% used when the two penalty pairs are equal. The default parameters select the
-% two-piece specialization, with four gap states and their continuation bits.
-% Trace decisions are stored for cells inside the admitted band.
-
-% \subsection{Endpoint and traceback rules}
-
-% KSW2 tracks the best internal cell, the best score at each sequence end, and
-% the bottom-right score when that cell is reached. A global fill traces from
-% the bottom-right cell. An extension normally traces from the best admitted
-% endpoint, with the query-end score and end bonus considered by the selected
-% mode. A left extension is computed on reversed slices, after which its CIGAR
-% runs are restored to source order.
-
-% The BioSeqDB port changes data access and allocation rather than the scoring
-% model. It encodes only each requested subrange from a lazy view, reuses
-% operation-local scratch, and dispatches the same recurrence to supported CPU
-% targets. The second affine family, band, Z-drop, endpoint bonus, and tie rules
-% remain reasons to select KSW2. They are not projected onto Block Aligner.
-
-% \section{Adaptive block alignment}
-% \label{sec:final-alignment-block}
-
-% \subsection{Block movement and growth}
-
-% Block Aligner evaluates the single-affine recurrence in a moving
-% \(B\times B\) square rather than a fixed diagonal band
-% \cite{block_aligner_paper}. Each step computes a strip of width \(S\) on the
-% right or lower edge. The maximum over the two outgoing border prefixes chooses
-% whether the block moves right or down. The block can therefore follow a path
-% that moves far from the original diagonal.
-
-% Greedy movement can miss a path after a long gap or a low-scoring interval.
-% When several steps fail to find a new maximum, the algorithm restores a
-% checkpoint and increases \(B\). The larger region admits more alternatives.
-% After progress resumes near an outgoing border suffix, the block may shrink
-% and move diagonally. The minimum and maximum block sizes bound this adaptation.
-
-% \begin{figure}[htbp]
-% \centering
-% \begin{tikzpicture}[x=0.42cm,y=0.42cm,>=Latex,font=\small]
-%   \begin{scope}[xshift=0cm]
-%     \draw[step=1,gray!28,very thin] (0,0) grid (6,6);
-%     \draw[blue!70!black,very thick] (0,0) rectangle (3,3);
-%     \fill[blue!16] (2,0) rectangle (3,3);
-%     \draw[->,thick] (3.2,1.4) to (4.5,1.4);
-%     \node[align=center,text width=3.7cm] at (3,7.4)
-%       {shift toward the stronger outgoing border};
-%     \node at (3,-1) {(a) move};
-%   \end{scope}
-%   \begin{scope}[xshift=5.2cm]
-%     \draw[step=1,gray!28,very thin] (0,0) grid (6,6);
-%     \draw[blue!70!black,very thick] (1.5,1.5) rectangle (4.5,4.5);
-%     \draw[teal!70!black,dashed,very thick] (0,0) rectangle (6,6);
-%     \fill[red!65] (2.7,2.7) circle (0.12);
-%     \node[align=center,text width=3.7cm] at (3,7.4)
-%       {restore a checkpoint and enlarge the block};
-%     \node at (3,-1) {(b) grow};
-%   \end{scope}
-%   \begin{scope}[xshift=10.4cm]
-%     \draw[step=1,gray!28,very thin] (0,0) grid (6,6);
-%     \draw[teal!70!black,very thick] (0,0) rectangle (6,6);
-%     \fill[green!22] (4,4) rectangle (6,6);
-%     \draw[blue!70!black,dashed,very thick] (3,3) rectangle (6,6);
-%     \draw[->,thick] (5.3,5.3) to (6.5,6.1);
-%     \node[align=center,text width=3.7cm] at (3,7.4)
-%       {shrink after progress reaches a border suffix};
-%     \node at (3,-1) {(c) shrink};
-%   \end{scope}
-% \end{tikzpicture}
-% \caption{Adaptive block movement. Border scores guide each shift. Lack of
-% progress causes replay with a larger block, while later progress permits a
-% smaller block.}
-% \label{fig:block-adaptive-reconstruction}
-% \end{figure}
-
-% \subsection{SIMD recurrence within a block}
-
-% Vectors are laid out vertically or horizontally inside the block. One gap
-% state then has a dependency between lanes. For vector values
-% \(x_0,\ldots,x_{L-1}\), the required affine prefix operation is
-% \begin{equation}
-%     y_i=\max_{0\leq k\leq i}\{x_k+(i-k)g\},
-%     \qquad g=-e.
-%     \label{eq:block-prefix}
-% \end{equation}
-% Shift-and-maximum stages at distances \(1,2,4\), and then higher powers of two
-% compute this scan in \(O(\log L)\) vector operations. A carry connects the end
-% of one vector with the next. The diagonal transition and the other gap state
-% use ordinary vector dependencies.
-
-% Score computation retains only the block borders and checkpoint copies, so
-% its working score memory is \(O(B)\). Traceback needs additional strip records
-% along the adaptive trajectory. A checkpoint includes the trace position, which
-% allows speculative strips to be discarded when the algorithm grows and
-% replays a region.
-
-% BioSeqDB keeps the reference step geometry and admits SIMD lane shapes that
-% preserve it. Global mode fills the fixed rectangles between anchors. X-drop
-% mode handles the outer extensions. Input ranks are obtained from the same
-% lazy views as KSW2. SIMD masks encode direction and gap continuation decisions,
-% and traceback decodes these masks directly into packed runs. The main material
-% difference from KSW2 remains the adaptive search with one affine family.
-
-% \begin{algorithm}[htbp]
-% \caption{Adaptive block alignment}
-% \label{alg:adaptive-block-alignment}
-% \begin{minipage}{\linewidth}
-% \small
-% \textbf{Input.} Encoded slices, affine scores, block bounds, and either global
-% or X-drop mode.
-% \begin{enumerate}
-%     \item Place a minimum-size block at the initial matrix corner and save a
-%           checkpoint.
-%     \item Compute the next outgoing strip with the vector prefix recurrence.
-%     \item Record score and trace borders, then update the best score.
-%     \item If progress continues, move toward the stronger outgoing border.
-%     \item If progress stalls and growth is possible, restore the checkpoint,
-%           enlarge the block, and recompute that region.
-%     \item If the best score reaches a suitable border suffix, shrink the block
-%           and advance diagonally.
-%     \item Repeat until the global endpoint or the X-drop condition is reached.
-%     \item Trace backward through the retained strips and emit packed runs.
-% \end{enumerate}
-% \end{minipage}
-% \end{algorithm}
-
-% \subsection{Exact diagonal certificate}
-% \label{sec:block-diagonal-certificate}
-
-% An equal-length fill can sometimes be resolved without constructing a block.
-% Let its common length be \(n\), let \(D\) be the exact score of the coordinate
-% diagonal, and let \(M\) be the largest substitution score. Any different
-% global path must contain the same positive number of inserted and deleted
-% symbols. Its score is at most
-% \[
-%     U=(n-1)M-2(q+e).
-% \]
-% It follows that
-% \begin{equation}
-%     D>U \quad\Longrightarrow\quad
-%     \text{the coordinate diagonal is the unique optimum}.
-%     \label{eq:block-certificate}
-% \end{equation}
-% Strict inequality excludes a competing path with an equal score. When the
-% condition holds, BioSeqDB can return the diagonal score, a single match run,
-% and the exact mismatch count. Otherwise it runs the adaptive dynamic program.
-% The certificate proves only this specific geometry and does not make Block
-% Aligner exact for every admitted input.
-
-% \section{Traceback, CIGAR, and edit counting}
-% \label{sec:final-alignment-cigar}
-
-% All alignment routes cross their low-level boundary using packed CIGAR runs
-% of the form
-% \[
-%         \mathit{word}=(\mathit{length}\ll4)\mid\mathit{opcode}.
-% \]
-% The common opcodes include \(M\) for a diagonal step, \(I\) for an insertion,
-% \(D\) for a deletion, and the more explicit equality and mismatch variants
-% \(=\) and \(X\). A run records one opcode and its length. Adjacent equal runs
-% are merged within a traceback and across phase boundaries.
-
-% The forward calculation and backward trace have separate roles. The forward
-% pass selects scores and endpoints. The trace reconstructs the path through
-% diagonal and gap states. KSW2 records decisions for its admitted band. Block
-% Aligner records decisions for computed strips. The GPU route either retains a
-% bounded direction matrix or reconstructs directions tile by tile. All three
-% then produce the same run-oriented interface.
-
-% A generic \(M\) run does not reveal whether its diagonal symbols are equal.
-% The edit count is therefore computed from the emitted path and the
-% corresponding sequence symbols:
-% \[
-%  E_{\mathrm{path}}=
-%  \#\{\text{unequal diagonal steps}\}
-%  +\sum_{I\text{ runs}}\mathit{length}
-%  +\sum_{D\text{ runs}}\mathit{length}.
-% \]
-% Block Aligner counts unequal diagonal steps during traceback, while KSW2 can
-% replay diagonal runs against the sequence ranks. These CPU routes return the
-% unit-cost edit count of the chosen path. It is distinct from the affine score
-% and from a seed-derived estimate.
-
-% The CIGAR also defines coordinate consumption. A diagonal run consumes query
-% and target symbols, an insertion consumes query symbols, and a deletion
-% consumes target symbols. Replaying these rules checks the reported span and
-% allows CPU routes to derive aligned lengths and edit count. The complete GPU
-% route currently returns CIGAR and match counts, but it does not expose the
-% chosen-path edit-count field or accept an exact edit predicate. Reverse-strand
-% coordinates are converted only after the phase CIGARs have been assembled in
-% alignment order.
-
-% \section{Accelerator boundary and gridded traceback}
-% \label{sec:final-alignment-gpu}
-
-% The GPU route begins after candidate windows have been chosen by GPU seeding
-% and chaining. If a query needs coordinates only, those windows can be returned
-% without base alignment. If it needs CIGAR, each selected query and target
-% window is packed as symbol ranks and submitted as one job in a batch. The
-% result contains score, endpoints, status, and a slice of packed CIGAR runs.
-
-% This route has an explicit ownership boundary. Its configuration must select
-% the complete GPU frontend and an admitted base-alignment identity. The latter
-% does not mean that the CPU Block Aligner recurrence runs on the device. It is
-% a route selection condition. The general CIGAR kernel uses its own two-piece
-% affine global recurrence over the selected coordinate window. Unsupported
-% geometry or an unavailable GPU component rejects the route instead of
-% continuing with a CPU alignment under the same label.
-
-% Conventional GPU traceback writes one direction value for every computed
-% cell. G3SA reduces this traffic by retaining score states at tile boundaries
-% and recomputing directions only for tiles reached by the final path
-% \cite{g3sa_paper}. BioSeqDB applies the same memory principle in Vulkan. The
-% forward pass stores five affine score states along tile borders. Starting from
-% the global endpoint, traceback reloads a border, recomputes one tile in fast
-% memory, traces to the next boundary, and discards the temporary directions.
-% For tile dimensions \(b_q\) and \(b_t\), border storage is proportional to
-% \[
-%   \left\lceil\frac{n}{b_q}\right\rceil
-%   \left\lceil\frac{m}{b_t}\right\rceil
-%   \bigl(b_q+b_t\bigr),
-% \]
-% apart from the constant number of affine states. One reusable tile needs
-% \(O(b_qb_t)\) direction storage. The scheme replaces a full \(O(nm)\)
-% direction matrix with tile borders and additional arithmetic during
-% traceback. It is most useful when writing the full trace matrix would dominate
-% device memory traffic.
 
 % \begin{figure}[htbp]
 % \centering
@@ -553,40 +201,3 @@ search effort between the two contracts.
 % traceback.}
 % \label{fig:gridded-traceback}
 % \end{figure}
-
-% Short or structurally simple windows first use specialized scripts, including
-% greedy gap scripts that are not guaranteed to maximize the affine score.
-% Moderate windows can retain a bounded direction matrix. Longer
-% admitted windows use gridded traceback. The current GPU CIGAR recurrence is
-% global over the chosen window. It does not apply the KSW2 band, Z-drop, or end
-% bonus even if related values are present in the broader request. It should
-% therefore be described as a GPU-specific alignment contract, not as a device
-% implementation of KSW2 or Block Aligner.
-
-% \section{Runtime selection and design limits}
-% \label{sec:final-alignment-batching}
-% \label{sec:final-alignment-decision}
-
-% The alignment route is selected explicitly before region alignment. The
-% selected CPU kernel is then specialized for KSW2 or Block Aligner, so the
-% inner recurrence does not branch on the backend for each cell. Output needs
-% are resolved separately. A coordinate-only query may omit base alignment,
-% while CIGAR or exact edit output makes traceback mandatory.
-
-% The GPU route additionally requires the complete accelerated frontend and an
-% admitted feature tuple before alignment begins.
-
-% Several limits follow from these contracts. First, KSW2 and Block Aligner can
-% return different scores because their gap models and search regions differ.
-% Second, the ordinary DNA extension port does not implement every specialised
-% minimap2 mode. Third, the GPU route uses a global coordinate window and lacks
-% the current CPU endpoint rules. Fourth, adaptive search and finite bands can
-% both omit cells that an unrestricted matrix would examine.
-
-% These differences are exposed through route selection rather than hidden
-% behind a single claim of algorithmic equivalence. KSW2 is appropriate when
-% two-piece affine scoring and minimap-style stopping rules are required. Block
-% Aligner is appropriate when its single-affine adaptive search matches the
-% requested semantics. The GPU path is appropriate only when the complete
-% accelerated route and its global window contract are admitted. When available,
-% CIGAR and edit count describe the path produced by the selected route.

@@ -1,35 +1,96 @@
-\section{When indexes are built and when queries use them}
-\label{sec:index-runtime-selection}
-\label{sec:index-registry}
+\section{Other index considerations}
+\label{sec:index-operational-considerations}
 
-Index maintenance and index reading are separate decisions. Saving an index
-does not force every query to use it, and selecting an index for reading does
-not build it. The policies below concern BioseqDB's sequence indexes, not
-PostgreSQL's native indexes on table columns.
+Indexes can automatically update themselves on index, however currently enabled by default is grouped MPF index, which due to bugs cannot correctly 
+return minimizers which leads to recomputing them when no explicit index read policy is specified and it doesn't support update on insert.
+More details are presented in the Appendix 1, where I also present concrete examples of how the BioseqDB should be used.
 
-\subsection{Maintenance policies}
-\label{sec:index-update-policy}
+This bug was caused by the fact that grouped MPF not only produces relational index, but also saves that compressed relation chunks into separate file that is used to enable faster reads during JOINs.
+The reader by default rejects ordinary single table queries, so you need to change the GUC to disable grouped-MPF (and use regular MPF instead).
+Saving file enables the JOIN to concurrently access stored data which is a cheap workaround around the decision to only use single Postgres reader process.
 
-Each registered index has a maintenance policy for each sequence column.
-\path{bioseq.set_index_policy} changes that policy for all current sequence
-columns in the named table. Table~\ref{tab:index-update-policy} describes the
-two choices, and Table~\ref{tab:index-policy-defaults} gives their defaults.
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[x=1cm,y=1cm,font=\footnotesize]
+  \foreach \shift/\mode/\heading in
+    {0/0/{(a) Ordinary MPF},7/1/{(b) Grouped MPF}} {
+    \begin{scope}[xshift=\shift cm]
+      \node[anchor=west,font=\bfseries] at (.1,10.65) {\heading};
+      \node at (4.1,10.15) {\texttt{refs}: targets};
+      \draw[fill=black!4,draw=black!55] (2.4,8.08) rectangle (5.8,9.88);
+      \draw[fill=indexGreen!16,draw=indexGreen] (2.4,8.68) rectangle (5.8,9.28);
+      \draw[black!55] (2.4,9.28)--(5.8,9.28);
+      \draw[black!55] (3.45,8.08)--(3.45,9.88);
+      \node at (2.925,9.58) {id};
+      \node at (4.625,9.58) {seq};
+      \node at (2.925,8.98) {$t_0$};
+      \node at (4.625,8.98) {$\cdots$};
+      \node[text=black!50] at (2.925,8.38) {$t_1$};
+      \node[text=black!50] at (4.625,8.38) {$\cdots$};
+      \draw[index arrow] (4.1,7.98)--(4.1,7.27);
+      \node[anchor=west] at (4.3,7.68) {index for $t_0$};
 
+      \ifnum\mode=0
+        \node at (4.1,7.04) {MPF index relation};
+        \foreach \yy in {6.6,6.23,5.86} {
+          \draw[fill=black!6,draw=black!55] (2.7,\yy-.12) rectangle (5.5,\yy+.12);
+          \draw[fill=indexOrange!25,draw=indexOrange] (3.25,\yy-.12) rectangle (5.5,\yy+.12);
+        }
+        \draw[index arrow,indexOrange] (4.1,5.59)--(4.1,4.75);
+        \node[anchor=west,align=left] at (4.32,5.18) {load and\\assemble};
+        \draw[fill=indexOrange!10,draw=indexOrange] (3.0,2.25) rectangle (6.15,4.65);
+        \node at (4.575,4.3) {private CPU lookup};
+      \else
+        \node at (4.1,7.04) {MPF reader image};
+        \draw[fill=indexGreen!7,draw=indexGreen]
+          (2.7,5.74)--(5.5,5.74)--(5.5,6.43)--(5.21,6.72)--(2.7,6.72)--cycle;
+        \draw[indexGreen] (5.21,6.72)--(5.21,6.43)--(5.5,6.43);
+        \foreach \yy in {6.47,6.2,5.93}
+          \draw[line width=3pt,indexGreen!45] (2.98,\yy)--(4.92,\yy);
+        \draw[index arrow,indexGreen] (4.1,5.59)--(4.1,4.75);
+        \node[anchor=west,align=left] at (4.32,5.18) {open and\\\texttt{mmap}};
+        \draw[dashed,fill=indexGreen!6,draw=indexGreen] (3.0,2.25) rectangle (6.15,4.65);
+        \node at (4.575,4.3) {mapped array view};
+      \fi
+      \node[align=center] at (4.575,3.36) {one reader\\for target $t_0$};
+
+      \node at (1.0,5.02) {\texttt{queries}};
+      \draw[fill=indexBlue!6,draw=indexBlue] (.1,2.25) rectangle (1.9,4.65);
+      \draw[indexBlue] (.75,2.25)--(.75,4.65);
+      \foreach \yy in {4.05,3.45,2.85}
+        \draw[indexBlue] (.1,\yy)--(1.9,\yy);
+      \node at (.425,4.35) {id};
+      \node at (1.325,4.35) {seq};
+      \foreach \yy/\q in {3.75/0,3.15/1,2.55/2} {
+        \node at (.425,\yy) {$q_{\q}$};
+        \node at (1.325,\yy) {$\cdots$};
+        \draw[index arrow,indexBlue] (1.98,\yy)--(2.9,\yy);
+      }
+      \node[align=center] at (1.0,1.72) {keep query\\rows};
+      \draw[index arrow] (4.575,2.14)--(4.575,1.55);
+      \node at (4.575,1.27) {target positions for anchors};
+      \draw[black!45] (3.1,.8)--(6.05,.8);
+      \foreach \xx in {3.32,4.02,5.7}
+        \fill[indexGreen] (\xx,.8) circle (2.2pt);
+    \end{scope}
+  }
+\end{tikzpicture}
+\caption{For large joins grouped-MPF uses saved direct binary dump of relational index, which speeds up the alignment by reducing time to sequentially read the backing table}
+\label{fig:index-join-read-paths}
+\end{figure}
+
+All indexes in BioseqDB can be automatically updated on insert (but as noted earlier, grouped-MPF will produce error on insert due to buggy implementation)
 \begin{table}[htbp]
 \centering
 \small
-\caption{Maintenance policies selected with \texttt{bioseq.set\_index\_policy}.}
+\caption{Maintenance policies}
 \label{tab:index-update-policy}
 \begin{tabularx}{\linewidth}{@{}p{.31\linewidth}X@{}}
 \toprule
 \textbf{Policy} & \textbf{Meaning}\\
 \midrule
-\texttt{UPDATE\_ON\_INSERT} & Request automatic maintenance for newly stored
-sequences when the global insertion-maintenance setting permits it. Ordinary
-indexes are built for the new sequence, without rebuilding older rows.\\
-\texttt{UPDATE\_MANUALLY} & Skip automatic insertion maintenance for this
-index. Build or rebuild it with \texttt{bioseq.update\_index}. Existing index
-contents remain available to eligible readers.\\
+\texttt{UPDATE\_ON\_INSERT} & Automatically compute and store minimizers for new sequences \\
+\texttt{UPDATE\_MANUALLY} & User needs to manually call \texttt{bioseq.update\_index} \\
 \bottomrule
 \end{tabularx}
 \end{table}
@@ -37,7 +98,7 @@ contents remain available to eligible readers.\\
 \begin{table}[htbp]
 \centering
 \small
-\caption{Default policies before a table has explicit overrides.}
+\caption{Default policies in BioseqDB}
 \label{tab:index-policy-defaults}
 \begin{tabularx}{\linewidth}{@{}p{.34\linewidth}p{.30\linewidth}X@{}}
 \toprule
@@ -50,311 +111,24 @@ contents remain available to eligible readers.\\
 \end{tabularx}
 \end{table}
 
-There is also a global setting,
-\path{bioseq.index.insert_maintenance.enabled}, whose current default is
-\texttt{off}. Thus a default \texttt{INSERT} saves the sequence but builds
-none of these indexes. In particular, the MPF policy's name does not imply
-that it is being maintained while this setting is off.
-
-The following example deliberately selects ordinary MPF maintenance.
-Disabling grouped construction is necessary because the ordinary insertion
-hook cannot publish a grouped minimizer generation. I also select the scalar
-algorithm because the default bounded ntHash requires the grouped format to
-record its hash identity. The table uses
-\texttt{bioseq.seq('dna4',32)} and starts without a grouped MPF index.
-
-\noindent\begin{minipage}{\linewidth}
-\begin{lstlisting}[style=bioseq-index-sql,
-  caption={Enable ordinary MPF maintenance for an inserted sequence.},
-  label={lst:index-policy}]
-SET bioseq.aligner.grouped_soa_generation.enabled = off;
-SET bioseq.aligner.minimizer.algorithm = 'scalar';
-SET bioseq.index.insert_maintenance.enabled = on;
-SELECT bioseq.set_index_policy(
-  'reads'::regclass, 'minimizers_per_fragment', 'UPDATE_ON_INSERT');
-
-INSERT INTO reads (id, sample_id, seq)
-VALUES (101, 7, repeat('ACGT', 2000)::bioseq.seq('dna4', 32));
-\end{lstlisting}
-\end{minipage}
-
-The switches in Listing~\ref{lst:index-policy} are alternatives to the
-grouped workflow in Section~\ref{sec:index-mpf5-sidecar}. They are not
-additional steps to run after that example. They also permit maintenance of
-other indexes with an on-insert policy, including symbol counts.
-An \texttt{UPDATE} writes a replacement sequence row and applies insertion
-maintenance to that replacement. Changing the policy does not backfill
-older rows, erase existing indexes, or choose the active read index.
-
-When grouped construction and insertion maintenance are both enabled,
-ordinary \texttt{INSERT} rejects an enabled minimizer index with on-insert
-policy. For this workflow, the user must leave
-insertion maintenance off, commit the source rows and explicitly build their
-index. This prevents an ordinary relation-only write from leaving a grouped
-reader file inconsistent, as explained in
-Section~\ref{sec:index-file-consistency}.
-
-\texttt{bioseq.load} has a separate batched path. When insertion maintenance
-is enabled, it first finishes the streamed source writes, then calls the
-explicit builder for indexes with \texttt{UPDATE\_ON\_INSERT}. This permits
-grouped construction after loading within that command. It is not the
-per-row \texttt{INSERT} hook, and the grouped builder's usual restrictions
-still apply.
-
-For example, this policy keeps MPS outside automatic load maintenance:
-
-\noindent\begin{minipage}{\linewidth}
-\begin{lstlisting}[style=bioseq-index-sql,
-  caption={Keep MPS construction separate from loading.}]
-SELECT bioseq.set_index_policy('reference_sequences'::regclass,
-  'minimizers_per_sequence', 'UPDATE_MANUALLY');
-\end{lstlisting}
-\end{minipage}
-
-MPS already has this policy by default. The explicit call is useful when a
-table previously selected automatic MPS maintenance. It changes neither MPF
-nor symbol-count policy.
-
-After loading and committing the source rows, the next listing builds MPS.
-It assumes the current defaults, with generation construction enabled and both
-asynchronous-persistence switches off. The target starts without an older
-ordinary MPS relation. Changing a construction setting does not convert an
-existing ordinary relation into a grouped one.
-
-\noindent\begin{minipage}{\linewidth}
-\begin{lstlisting}[style=bioseq-index-sql,
-  caption={Build MPS explicitly after loading and committing the source.},
-  label={lst:index-build-mps}]
-BEGIN;
-SELECT bioseq.update_index('reference_sequences'::regclass,
-                          'minimizers_per_sequence');
-COMMIT;
-\end{lstlisting}
-\end{minipage}
-
-The builder uses the configured algorithm, $k$ and $w$ for a supported
-compiled profile. The explicit rebuild runs in the caller's transaction and
-does not depend on the insertion-maintenance gate. Supported CPU MPS profiles
-use generation storage grouped by hash across the sequence. Other supported
-MPS routes use the grouped arrays described earlier. Neither creates the MPF
-reader file.
-
-\subsection{Reading policies}
+\subsection{Reading saved minimizers}
 \label{sec:index-read-policy}
 
-A search has a per-call \texttt{index\_read\_requirement}, supplied through
-\texttt{aligner\_options}. Its default is \texttt{allow}, encoded as 0.
-It is not a GUC. A GUC is a PostgreSQL configuration setting changed with
-\texttt{SET}, such as \path{bioseq.index.sequence_read.enabled}.
+The query and target must agree on their minimizer scheme and parameters otherwise the reader will refuse to read the index or emit the error.
+By default read requirement allows both reading the index and in case if does not exist or is incompatible, recomputing all minimizers. This behaviour however has some noticable bugs~\ref{tab:configuration-index-requirement}.
 
-\begin{table}[htbp]
-\centering
-\small
-\caption{The search's \texttt{index\_read\_requirement} option.}
-\label{tab:index-read-requirement}
-\begin{tabularx}{\linewidth}{@{}p{.31\linewidth}X@{}}
-\toprule
-\textbf{Value} & \textbf{What the search requires}\\
-\midrule
-0: \texttt{allow} (default) & Permit a supported compatible stored read when
-\path{bioseq.index.sequence_read.enabled} is on. The executor can instead
-compute a temporary lookup. This value does not select the grouped MPF CPU
-reader described in Section~\ref{sec:index-mpf5-sidecar}.\\
-1: \texttt{require\_absent} & Do not read a persisted index or reuse its
-assembled lookup. Compute the lookup for this execution. The name refers
-to execution without persisted reads, not to an assertion that no index
-exists on disk.\\
-2: \path{require_compatible_persisted} & Require a compatible saved
-generation through a supported reader. A missing or incompatible generation
-is an error. Recomputing it during the query cannot satisfy this request.
-This requirement overrides the optional-read GUC.\\
-\bottomrule
-\end{tabularx}
-\end{table}
+\paragraph{Repeated lookups on wider hashes}
+\label{sec:index-direct-lookup}
+\label{sec:index-control-scan-waves}
+For supported 32-bit hashes, grouped MPF provides a sequence-wide
+direct lookup from a query hash to its position list. Wider hashes use the
+directory row, which searches fragment metadata. This means that queries
+can therefore read the same data again and again
 
-The optional-read GUC defaults to \texttt{on}. Setting it to \texttt{off}
-prevents optional stored reads, but does not prevent index construction.
-Conversely, setting it to \texttt{on} does not create missing index data.
-Requiring a temporary lookup does not prohibit separately permitted
-background persistence after the query.
-
-Compatibility means more than finding a file. The saved generation must
-belong to the visible source sequence and use the minimizer profile expected
-by the query. An index built with one hash algorithm cannot supply the
-positions for another algorithm's hash values. Changing $k$ or $w$ can also
-change which minimizers exist. The reader checks these identities before
-using the saved data.
-
-The executor must support the requested read as well. A complete stored
-target in an eligible two-input \texttt{BioseqBatchJoin} can use the grouped
-MPF file with requirement 2. An ordinary single-table \texttt{BioseqScan}
-currently rejects that requirement. It does not become a batch join because
-a saved index exists.
-
-\texttt{bioseq.set\_active\_read\_index(table, index\_name)} chooses which
-logical minimizer index the table's sequence columns should use. It does not
-build that index. Existing maintenance policies are retained. If the call
-creates a new policy row, that row starts with manual maintenance, so an
-explicit selection can differ from the implicit defaults in
-Table~\ref{tab:index-policy-defaults}.
-
-\warn{Alpha software and restrictive memory checks}{
-\label{warn:index-query-minimizers}
-Please note that BioseqDB is still alpha software and has numerous issues.
-One problem is that its memory checks are too restrictive for small queries.
-The current policy keeps at least 2~GiB of system memory available, so even
-an allocation of a few hundred bytes can be refused when other applications
-use too much RAM. You should leave more than 2~GiB available, plus space for
-the query itself. On macOS, the estimate counts free and inactive pages.
-There is also a process-memory limit of 80\% of physical RAM.
-
-This can produce the misleading error
-\texttt{transient query execution stats disagree with its generated backend}.
-The query may simply have failed to allocate its minimizer buffer. It does
-not mean that the target index is missing or that query minimizers rejected
-that index. The saved index describes the target sequence. BioseqDB must
-still compute minimizers for the query sequence to find matching hashes.
-
-If this happens under memory pressure, close other applications and retry.
-Rebuilding the target index does not fix the memory shortage. The error
-handling needs to report allocation failures separately from actual
-minimizer-statistics errors. If the message remains when enough memory is
-available, that requires further investigation.
-}
-
-\subsection{Construction, deferred work and other settings}
-\label{sec:index-build-settings}
-
-Table~\ref{tab:index-main-settings} collects the switches that decide whether
-index work is performed. They supplement the per-index and per-query policies.
-The defaults here are those of the current implementation.
-
-\begin{table}[htbp]
-\centering
-\small
-\caption{BioseqDB index construction and reading switches.}
-\label{tab:index-main-settings}
-\begin{tabularx}{\linewidth}{@{}p{.39\linewidth}p{.08\linewidth}X@{}}
-\toprule
-\textbf{Setting} & \textbf{Default} & \textbf{Effect}\\
-\midrule
-\path{bioseq.index.insert_maintenance.enabled} & off & Global gate for automatic
-maintenance, subject to each index's policy and the grouped-insertion
-restriction described above.\\
-\path{bioseq.index.sequence_read.enabled} & on & Allow optional stored reads.
-Per-call requirements 1 and 2 override this choice.\\
-\path{bioseq.aligner.grouped_soa_generation.enabled} & on & Select generation-based
-minimizer builds. MPF publishes grouped arrays and a reader file. Supported
-CPU MPS profiles publish data grouped by hash across the sequence.
-Changing this setting alone builds or converts nothing.\\
-\path{bioseq.index.async_persistence.enabled} & off & Permit eligible deferred
-persistence work. Explicit \texttt{update\_index} remains synchronous.\\
-\path{bioseq.index.recompute_async_persistence.enabled} & off & Additionally
-permit a recomputing query to request deferred persistence. It needs the
-preceding switch and does not guarantee a saved result.\\
-\bottomrule
-\end{tabularx}
-\end{table}
-
-The deferred implementation is limited. Its surviving query-side submission
-path handles ordinary MPS, with $k=15,w=10$ and an accepted backend.
-It excludes the default bounded ntHash algorithm. It also requires an
-eligible enabled index with on-insert policy and an available worker queue.
-Its policy selection prefers MPF before MPS, independently of the active
-read index, but the submission path rejects MPF. Thus enabling both switches
-alone is not enough to arrange an MPS rebuild.
-
-Accepted requests retain source identifiers and parameters. They are
-submitted after transaction commit and discarded on abort. A worker opens
-its own transaction and checks the source and maintenance policy again.
-It does not inherit the query's snapshot or relation pointers. This machinery
-does not maintain grouped MPF reader files. The explicit grouped builder
-rejects either asynchronous-persistence switch being on.
-
-There are additional controls for representation and resource use, listed
-in Table~\ref{tab:index-other-settings}. None introduces another read-policy
-value or a separate switch for creating the MPF reader file.
-
-\begin{table}[htbp]
-\centering
-\small
-\caption{Other controls that affect BioseqDB sequence indexes.}
-\label{tab:index-other-settings}
-\begin{tabularx}{\linewidth}{@{}p{.40\linewidth}X@{}}
-\toprule
-\textbf{Setting and default} & \textbf{Role}\\
-\midrule
-\path{bioseq.aligner.minimizer.algorithm}\newline
-\texttt{bounded\_nthash\_simd} & Selects minimizer generation and its hash
-identity. Construction and reading must agree on a compatible profile.\\
-\path{bioseq.aligner.minimizer.kmer_size}: 15\newline
-\path{bioseq.aligner.minimizer.window_size}: 10 & Select $k$ and $w$.
-The grouped builder validates them against compiled profiles.\\
-\path{bioseq.aligner.fragment_minimizer.lookup_route}\newline
-\path{direct_compact_hash_lookup} & Use the direct section for supported
-32-bit MPF hashes. The alternative \texttt{control\_block\_scan} searches
-fragment controls. Wider hashes use controls even under the direct default.\\
-\path{bioseq.index.memory_cap_mb}: 0 & Additional resident-index memory cap.
-Zero uses the common runtime budget. It does not mean unlimited memory.\\
-\path{bioseq.index_build.run_buffer_bytes}: 0 & Internal superuser setting
-for external-sort run size. Zero chooses a size from the memory budget.\\
-\path{bioseq.index.sequence_minimizer_sort.algorithm}\newline
-\texttt{std\_sort} & Select the ordinary MPS sorting implementation.
-The other choices are \texttt{simd\_u128\_vqsort} and
-\texttt{simd\_u128\_vec\_stream\_1}, \texttt{\_2}, or \texttt{\_4}.\\
-\path{bioseq.aligner.vulkan.index_build.enabled}: off & Permit the GPU
-index-build route when Vulkan execution and the selected algorithm support it.\\
-\path{bioseq.aligner.vulkan.index_cache.enabled}: on & Retain compatible
-GPU index data for reuse. A search may override it through
-\texttt{aligner\_options(vulkan\_index\_cache\_enabled => ...)}.\\
-\bottomrule
-\end{tabularx}
-\end{table}
-
-Algorithm and occurrence-filter settings still affect the search itself.
-For example, the query's occurrence limit must fit the direct file's saved
-limit from Section~\ref{sec:index-direct-lookup}. CPU or GPU selection and
-scheduler resources also determine which implementation can run. Those are
-execution choices, not additional policies for maintaining stored indexes.
-
-\subsection{Reusing bytes already in memory}
+\paragraph{Index in RAM}
 \label{sec:index-residency}
+Mapping a reader file does not load all its pages into RAM. First accesses
+can require disk reads, while later accesses may use the operating-system
+page cache. Restarting PostgreSQL discards process-local state but does not
+guarantee an empty operating-system cache.
 
-Persistent storage avoids rebuilding an index after every query. Memory
-caches avoid some of the reads and preparation within a backend's lifetime.
-They hold different objects:
-\begin{itemize}
-  \item \textbf{Serialized chunks.} Ordinary relation readers have a bounded
-    cache of index bytes. A reader may still copy a cached chunk into its
-    own buffer.
-  \item \textbf{Prepared CPU lookups.} Ordinary MPF and MPS readers can retain
-    assembled objects identified by source, index, algorithm and interval.
-  \item \textbf{Mapped file pages.} The operating system caches pages touched
-    through the reader-file mapping. The grouped route does not fill the
-    ordinary serialized-chunk cache.
-  \item \textbf{GPU arrays.} Device data can remain available while a batch
-    or a compatible cache entry owns it.
-\end{itemize}
-
-Evicting a cache entry removes the cache's reference. An active reader can
-still own the object, so a cache limit is not a bound on the backend's total
-memory. Query buffers and other readers can overlap with it. Similarly,
-a file's mapped address range is not the amount of RAM currently occupied
-by its pages.
-
-Abort cleanup discards ordinary chunk-cache entries written by the failed
-transaction. Source and index invalidation discard affected cached objects.
-Reusing a prepared lookup still requires matching identities. Releasing
-these memory resources does not remove the stored index or reader file.
-
-\section{What the database integration adds}
-\label{sec:index-storage-conclusions}
-\label{sec:index-operational}
-
-BioseqDB keeps minimizer indexes alongside versioned sequence storage.
-Ordinary maintenance can index newly inserted sequences, while grouped
-construction publishes complete generations for selective readers. The MPF
-reader file gives workers direct access to those saved arrays. These choices
-avoid repeated work, but require explicit rules for construction, compatible
-reads and source changes. Recovery of unlogged data and removal of retired
-files remain limitations of the current implementation.

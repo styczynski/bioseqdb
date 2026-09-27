@@ -34,10 +34,6 @@
 %     path: chapters/02_alignment_foundations
 %     description: develops exact dynamic programming and seed-and-extend mapping. It also presents graph-based approaches and the limits of existing tools.
 %   - !partial
-%     title: The BioSeqDB alignment pipeline
-%     path: chapters/04_pipeline
-%     description: presents the complete processing path with its stage contracts and CPU and accelerator routes.
-%   - !partial
 %     title: Minimizer extraction
 %     path: chapters/05_minimizers
 %     description: explains minimizer sketching and rolling hashing. It compares the SIMD and Vulkan implementations with minimap2 and SIMD-Minimizers.
@@ -46,9 +42,9 @@
 %     path: chapters/06_chaining
 %     description: derives the chaining objective and compares its scalar RMQ SIMD and GPU forms. It then states the selection policy.
 %   - !partial
-%     title: Final alignment, prefiltering and postprocessing
+%     title: Final alignment and postprocessing
 %     path: chapters/07_final_alignment_postprocessing_and_preprocessing
-%     description: describes affine-gap alignment with KSW2 and block-based SIMD extension. It also covers traceback and accelerator integration.
+%     description: compares KSW2 and Block Aligner, explains SneakySnake filtering and distinguishes the reported alignment statistics.
 %   - !partial
 %     title: Sequence representations and lazy evaluation
 %     path: chapters/09_sequence_abstractions
@@ -65,10 +61,10 @@
 %     title: Persistent sequence indexes
 %     path: chapters/12_index_storage
 %     description: describes index construction and storage with compatibility checks and selective cold loading. It also explains updates and differences from minimap2 indexes.
-%   - !partial
-%     title: BioSeqDB architecture
-%     path: chapters/13_bioseqdb_architecture
-%     description: connects algorithm selection and oneTBB scheduling to a reusable processing core. It also covers sequence ingestion, remote access, code generation, validation and authorship.
+%%   - !partial
+%%     title: BioSeqDB architecture
+%%     path: chapters/13_bioseqdb_architecture
+%%     description: connects algorithm selection and oneTBB scheduling to a reusable processing core. It also covers sequence ingestion, remote access, code generation, validation and authorship.
 %   - !partial
 %     title: Benchmarking and performance evaluation
 %     path: chapters/16_benchmarking
@@ -77,6 +73,9 @@
 %     title: Conclusions
 %     path: chapters/17_conclusion
 %     description: answers the research questions and summarizes the final system. It identifies the principal limitations and possible extensions.
+% authorship: !partial
+%   title: Authorship, development and AI assistance
+%   path: chapters/18_authorship
 % appendices:
 %   - !partial
 %     title: A runnable SQL walkthrough
@@ -400,6 +399,10 @@
     \defchapter{\data{chapters.\chapteri.title}}{r:\data{chapters.\chapteri.ref}}
     \datapartial{chapters.\chapteri}
 }
+
+\chapter*{Authorship, development and AI assistance}
+\addcontentsline{toc}{chapter}{Authorship, development and AI assistance}
+\datapartial{authorship}
 
 \else
 \foreachdata{chapters}{\chapteri} {

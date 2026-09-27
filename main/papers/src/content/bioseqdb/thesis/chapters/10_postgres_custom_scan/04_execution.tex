@@ -227,6 +227,17 @@ Integrity flags
 \end{longtable}
 \endgroup
 
+\subsection{Memory admission before dispatch}
+\label{sec:dispatch-memory-admission}
+
+Before overlapping work, BioseqDB requests a process-local reservation for
+its input and temporary buffers. The check considers available memory,
+the process footprint and existing reservations. A rejected request returns
+immediately. The caller must reduce the work group, use a supported serial
+path or report an error. The admission check itself does not wait for memory
+to become available. A reservation accounts for intended use, but does not
+reserve physical pages in the operating system.
+
 \subsection{MVCC support}
 \label{sec:scan-row-stability}
 

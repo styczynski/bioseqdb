@@ -21,37 +21,37 @@
 \bottomrule
 \endlastfoot
 % GUC: bioseq.storage.compression.algorithm
-\multirow[t]{4}{=}{\nolinkurl{bioseq.storage.compression.algorithm}} & \multirow[t]{4}{=}{enum} & {\bfseries \nolinkurl{zstd}}\par(default) & Chooses the compression codec for newly created column-storage options. Use Zstandard when compiled in. This is the preferred build-time default. Changing the default does not rewrite existing table data.\\*
+\multirow[t]{4}{=}{\nolinkurl{bioseq.storage.compression.algorithm}} & \multirow[t]{4}{=}{enum} & {\bfseries \nolinkurl{zstd}}\par(default) & Choose the compression algorithm used for storing data columns Use Zstandard when compiled in. This is the preferred build-time default. Changing the default does not rewrite any existing indices!\\*
  &  & \nolinkurl{none} & Store column chunks without compression.\\*
- &  & \nolinkurl{pglz} & Use PostgreSQL's PGLZ codec. This is the default when neither optional codec is compiled in.\\*
+ &  & \nolinkurl{pglz} & Use Postgres built-in coded. This becomes the default when neither of previous two is available.\\*
  &  & \nolinkurl{lz4} & Use LZ4 when compiled in. This becomes the default when Zstandard is unavailable.\\[4pt]
 \midrule
 % GUC: bioseq.storage.compression.level
-\nolinkurl{bioseq.storage.compression.level} & int & {\bfseries \nolinkurl{3}}\par(default)\par $1\ldots 19$ & Sets the Zstandard compression level for new storage options. The current PGLZ and LZ4 paths do not use this level.\\[4pt]
+\nolinkurl{bioseq.storage.compression.level} & int & {\bfseries \nolinkurl{3}}\par(default)\par $1\ldots 19$ & Set the zstd compression level if zstd is used.\\[4pt]
 \midrule
 % GUC: bioseq.storage.stripe.row_limit
-\nolinkurl{bioseq.storage.stripe.row_limit} & int & {\bfseries \nolinkurl{150000}}\par(default)\par $1000\ldots 100000000$\par rows & Sets the maximum rows in a new table's column stripe. Existing table options and stored stripes are unchanged.\\[4pt]
+\nolinkurl{bioseq.storage.stripe.row_limit} & int & {\bfseries \nolinkurl{150000}}\par(default)\par $1000\ldots 100000000$\par rows & Sets the maximum rows in a new table's column stripe, when writing rows. Existing table options and stored stripes are unchanged.\\[4pt]
 \midrule
 % GUC: bioseq.storage.chunk_group.row_limit
-\nolinkurl{bioseq.storage.chunk_group.row_limit} & int & {\bfseries \nolinkurl{10000}}\par(default)\par $1000\ldots 100000000$\par rows & Sets the maximum rows in a new table's chunk group. Chunk groups divide a stripe into smaller column-reading units.\\[4pt]
+\nolinkurl{bioseq.storage.chunk_group.row_limit} & int & {\bfseries \nolinkurl{10000}}\par(default)\par $1000\ldots 100000000$\par rows & Sets the maximum rows in a new table's chunk group, when writing rows. Chunk groups divide a stripe into smaller column-reading units.\\[4pt]
 \midrule
 % GUC: bioseq.storage.dml.enabled
-\multirow[t]{2}{=}{\nolinkurl{bioseq.storage.dml.enabled}\par\textit{hidden}} & \multirow[t]{2}{=}{bool} & {\bfseries \nolinkurl{on}}\par(default) & Controls whether reads apply deleted-row masks. Hide rows that have been deleted or replaced. Keep this enabled for ordinary queries.\\*
- &  & \nolinkurl{off} & Bypass deletion-mask filtering. This is a diagnostic control, not a read-only mode.\\[4pt]
+\multirow[t]{2}{=}{\nolinkurl{bioseq.storage.dml.enabled}\par\textit{hidden}} & \multirow[t]{2}{=}{bool} & {\bfseries \nolinkurl{on}}\par(default) & Special setting that controls whether reads apply deleted-row masks. Default, shouldn't be changed. Normally deleted rows that are marked as such, should not be returned in queries.\\*
+ &  & \nolinkurl{off} & Bypass any deletion filtering. Useful for debugging, the queries will return all rows including deleted ones. Note that if the table is rewritten using VACCUM FULL, then deleted rows will physically dissapear!\\[4pt]
 \midrule
 % GUC: bioseq.column_cache.enabled
-\multirow[t]{2}{=}{\nolinkurl{bioseq.column_cache.enabled}} & \multirow[t]{2}{=}{bool} & {\bfseries \nolinkurl{on}}\par(default) & Controls the backend's decompressed column-chunk cache. Cache eligible decompressed buffers during scanning. Normal scan teardown clears this cache. It is distinct from the query-result cache.\\*
- &  & \nolinkurl{off} & Read and decompress without retaining buffers in this cache.\\[4pt]
+\multirow[t]{2}{=}{\nolinkurl{bioseq.column_cache.enabled}} & \multirow[t]{2}{=}{bool} & {\bfseries \nolinkurl{on}}\par(default) & Controls the backend's decompressed column-chunk cache. After decompression save the buffer, so it's avaialable for reuse Decompression cache only applies to one query. After completion of the query, the cache is cleared.\\*
+ &  & \nolinkurl{off} & Read and decompress but do not save buffers in cache.\\[4pt]
 \midrule
 % GUC: bioseq.column_cache.capacity_mb
-\nolinkurl{bioseq.column_cache.capacity_mb} & int & {\bfseries \nolinkurl{200}}\par(default)\par $20\ldots 20000$\par MiB & Limits the decompressed column-chunk cache. Buffers in use remain protected, so this is not a limit on total backend memory.\\[4pt]
+\nolinkurl{bioseq.column_cache.capacity_mb} & int & {\bfseries \nolinkurl{200}}\par(default)\par $20\ldots 20000$\par MiB & Limits the decompressed column-chunk cache  BioseqDB will still allocate buffers for decompression, so this setting does not control the total memory used during decompression\\[4pt]
 \midrule
 % GUC: bioseq.load.write_overlap.enabled
-\multirow[t]{2}{=}{\nolinkurl{bioseq.load.write_overlap.enabled}} & \multirow[t]{2}{=}{bool} & {\bfseries \nolinkurl{off}}\par(default) & Controls overlap between input decoding and table writes during loading. Use the ordinary loading schedule.\\*
- &  & \nolinkurl{on} & Overlap decoding with writing through a bounded queue. The PostgreSQL backend still performs table writes.\\[4pt]
+\multirow[t]{2}{=}{\nolinkurl{bioseq.load.write_overlap.enabled}} & \multirow[t]{2}{=}{bool} & {\bfseries \nolinkurl{off}}\par(default) & Experimental setting to use parallelized writing and decoding of data chunks through queue when loading FASTA/FASTQ files. Default reader perform decoding and writing (placing sequences in buffer) sequentially.\\*
+ &  & \nolinkurl{on} & Enable parallelized writing and decoding of data chunks through queue.\\[4pt]
 \midrule
 % GUC: bioseq.storage.sequence_shard.max_size_gib
-\nolinkurl{bioseq.storage.sequence_shard.max_size_gib}\par\textit{superuser} & int & {\bfseries \nolinkurl{1024}}\par(default)\par $0\ldots 2147483647$\par GiB & Sets the sequence-shard size limit. A positive limit must accommodate one complete sequence. Zero starts a new shard for each insertion. Existing sequences are not moved.\\[4pt]
+\nolinkurl{bioseq.storage.sequence_shard.max_size_gib}\par\textit{superuser} & int & {\bfseries \nolinkurl{1024}}\par(default)\par $0\ldots 2147483647$\par GiB & Sets the sequence-shard size limit. If the shard table exceeds that size, then new table will be created. Setting it to 0 means that each sequence is stored in a separate table (useful for debugging, but extremally ineffective in practice)\\[4pt]
 \end{longtable}
 \endgroup
 
@@ -77,37 +77,37 @@
 \bottomrule
 \endlastfoot
 % GUC: bioseq.execution.parallel.enabled
-\multirow[t]{2}{=}{\nolinkurl{bioseq.execution.parallel.enabled}\par\textit{hidden}} & \multirow[t]{2}{=}{bool} & {\bfseries \nolinkurl{on}}\par(default) & Controls PostgreSQL parallel-scan alternatives in the planner. Allow eligible parallel scan paths. Actual worker availability still depends on PostgreSQL. This does not make alignment custom scans parallel-safe.\\*
- &  & \nolinkurl{off} & Do not add those parallel scan alternatives.\\[4pt]
+\multirow[t]{2}{=}{\nolinkurl{bioseq.execution.parallel.enabled}\par\textit{hidden}} & \multirow[t]{2}{=}{bool} & {\bfseries \nolinkurl{on}}\par(default) & Enable Postgres parallel queries Allow possible parallel scan paths (actual worker availability still depends on PostgreSQL planner, so this setting does not force the planner to use parallel scans). Additionally, any query using mmsearch won't be parallelized, due to current code architecture. The parallel scans however are possible for metadata queries. Alignment won't use parallel scans even with this setting enabled.\\*
+ &  & \nolinkurl{off} & Disable all parallel scans on BioseqDB tables.\\[4pt]
 \midrule
 % GUC: bioseq.execution.parallel.minimum_processes
-\nolinkurl{bioseq.execution.parallel.minimum_processes} & int & {\bfseries \nolinkurl{8}}\par(default)\par $1\ldots 32$ & Requests the PostgreSQL worker count for eligible Bioseq parallel scan paths. Despite its name, this does not reserve or guarantee a minimum number of launched workers.\\[4pt]
+\nolinkurl{bioseq.execution.parallel.minimum_processes} & int & {\bfseries \nolinkurl{8}}\par(default)\par $1\ldots 32$ & Requests the PostgreSQL worker count for possbible Bioseq parallel scan paths. This is soft minimum and the actual worker count is determined by the PostgreSQL planner.\\[4pt]
 \midrule
 % GUC: bioseq.vectorization.enabled
-\multirow[t]{2}{=}{\nolinkurl{bioseq.vectorization.enabled}\par\textit{hidden}} & \multirow[t]{2}{=}{bool} & {\bfseries \nolinkurl{on}}\par(default) & Controls supported SQL filter and aggregate vectorization. Use supported vectorized SQL operations when the plan permits them. Minimizer and chaining algorithms have separate selectors.\\*
- &  & \nolinkurl{off} & Use scalar SQL processing for those operations.\\[4pt]
+\multirow[t]{2}{=}{\nolinkurl{bioseq.vectorization.enabled}\par\textit{hidden}} & \multirow[t]{2}{=}{bool} & {\bfseries \nolinkurl{on}}\par(default) & Can disable vectorized SQL operations for aggregates like SUM(), COUNT(), etc. Use supported vectorized SQL operations when the plan allows them. Vectorized operations only apply to non-sequence aggregates, not alignment pipeline.\\*
+ &  & \nolinkurl{off} & Use normal SQL processing for those operations.\\[4pt]
 \midrule
 % GUC: bioseq.planner.index_scan.enabled
-\multirow[t]{2}{=}{\nolinkurl{bioseq.planner.index_scan.enabled}\par\textit{hidden}} & \multirow[t]{2}{=}{bool} & {\bfseries \nolinkurl{on}}\par(default) & Controls Bioseq's handling of PostgreSQL index-scan paths on table columns. Permit supported index-scan integration. This does not control minimizer-index reuse.\\*
- &  & \nolinkurl{off} & Disable that planner integration.\\[4pt]
+\multirow[t]{2}{=}{\nolinkurl{bioseq.planner.index_scan.enabled}\par\textit{hidden}} & \multirow[t]{2}{=}{bool} & {\bfseries \nolinkurl{on}}\par(default) & Can allow usage of non-BioseqDB indices with BioseqDB tables. Allow using non-BioseqDB indices during queries, for example it becomes possible to use B-tree index on metadata column. This settings does not control any BioseqDB indices like MPF/MPS etc.\\*
+ &  & \nolinkurl{off} & Do not allow using any non-BioseqDB indices on BioseqDB tables. This can heavily degrade performance as Postgres will select plan that ignores existing B-trees, hash indexes etc.\\[4pt]
 \midrule
 % GUC: bioseq.planner.custom_scan.enabled
-\multirow[t]{2}{=}{\nolinkurl{bioseq.planner.custom_scan.enabled}\par\textit{hidden}} & \multirow[t]{2}{=}{bool} & {\bfseries \nolinkurl{on}}\par(default) & Controls Bioseq custom-scan paths. Allow the planner to install Bioseq custom scans.\\*
- &  & \nolinkurl{off} & Disable their construction. Ordinary mmsearch has no slower standalone scalar-function fallback.\\[4pt]
+\multirow[t]{2}{=}{\nolinkurl{bioseq.planner.custom_scan.enabled}\par\textit{hidden}} & \multirow[t]{2}{=}{bool} & {\bfseries \nolinkurl{on}}\par(default) & Entirely disable all BioseqDB custom scans. Allow the planner to install Bioseq custom scans. Useful to force Postgres to select non-BioseqDB plans. Do not use this unless you know what you're doing.\\*
+ &  & \nolinkurl{off} & Disable custom scans. This means that it won't be possible to use 'mmsearch' function anymore as it requires custom scan path. All other metadata queries still will be possible.\\[4pt]
 \midrule
 % GUC: bioseq.planner.custom_scan.max_paths
-\nolinkurl{bioseq.planner.custom_scan.max_paths}\par\textit{hidden} & int & {\bfseries \nolinkurl{64}}\par(default)\par $1\ldots 1024$ & Bounds the custom-scan path alternatives explored for one relation, including parameterized predicate combinations.\\[4pt]
+\nolinkurl{bioseq.planner.custom_scan.max_paths}\par\textit{hidden} & int & {\bfseries \nolinkurl{64}}\par(default)\par $1\ldots 1024$ & Limit paths explored by GQO for BioseqDB custom scans. Increasing the number may yield better plans, but increase planning time.\\[4pt]
 \midrule
 % GUC: bioseq.planner.qual_pushdown.enabled
-\multirow[t]{2}{=}{\nolinkurl{bioseq.planner.qual_pushdown.enabled}\par\textit{hidden}} & \multirow[t]{2}{=}{bool} & {\bfseries \nolinkurl{on}}\par(default) & Controls supported predicate pushdown into custom scans. Consider moving eligible filters into the scan.\\*
- &  & \nolinkurl{off} & Leave these filters outside the pushed-down scan work.\\[4pt]
+\multirow[t]{2}{=}{\nolinkurl{bioseq.planner.qual_pushdown.enabled}\par\textit{hidden}} & \multirow[t]{2}{=}{bool} & {\bfseries \nolinkurl{on}}\par(default) & Controls behaviour of predicate pushdown. Normally filters can be pushed down into the scan, which improved performance. The predicates that Postgres reports as highly-correlated will be used to possibly reduce number of loaded chunks (min/max prunning mechanism) Pushdown uses correlation statistics for column reported by Postgres to decide if this predicate can be useful to avoid loading chunks\\*
+ &  & \nolinkurl{off} & Leave predicates outside the scan, which may severely degrade performance.\\[4pt]
 \midrule
 % GUC: bioseq.planner.qual_pushdown.correlation_threshold
-\nolinkurl{bioseq.planner.qual_pushdown.correlation_threshold}\par\textit{hidden} & real & {\bfseries \nolinkurl{0.4}}\par(default)\par $0\ldots 1$ & Sets the minimum absolute column correlation used by the pushdown decision. Values closer to one demand stronger correlation.\\[4pt]
+\nolinkurl{bioseq.planner.qual_pushdown.correlation_threshold}\par\textit{hidden} & real & {\bfseries \nolinkurl{0.4}}\par(default)\par $0\ldots 1$ & Sets the minimum absolute column correlation value (reported by Postgres table statistics) used by chunk prunning logic described for bioseq.planner.qual\_pushdown.enabled. Values closer to one, mean stronger correlation.\\[4pt]
 \midrule
 % GUC: bioseq.planner.sequence_sort_scan.enabled
-\multirow[t]{2}{=}{\nolinkurl{bioseq.planner.sequence_sort_scan.enabled}\par\textit{hidden}} & \multirow[t]{2}{=}{bool} & {\bfseries \nolinkurl{off}}\par(default) & Controls the experimental sequence batch-sort scan. Leave ordinary sort planning in place.\\*
- &  & \nolinkurl{on} & Consider the custom batch-sort path for eligible single sequence sort keys.\\[4pt]
+\multirow[t]{2}{=}{\nolinkurl{bioseq.planner.sequence_sort_scan.enabled}\par\textit{hidden}} & \multirow[t]{2}{=}{bool} & {\bfseries \nolinkurl{off}}\par(default) & Enable or disable custom sort for BioseqDB sequences. Sort works only if there's single sorting key that is sequence column itself. Use default Postgres sort.\\*
+ &  & \nolinkurl{on} & Consider the custom batch-sort where possible.\\[4pt]
 \end{longtable}
 \endgroup
 
@@ -133,16 +133,16 @@
 \bottomrule
 \endlastfoot
 % GUC: bioseq.scheduler.backend.max_concurrency
-\nolinkurl{bioseq.scheduler.backend.max_concurrency}\par\textit{reload} & int & {\bfseries \nolinkurl{0}}\par(default)\par $0\ldots 1024$ & Caps participating task slots in each backend. Zero uses the available CPU count. The participating caller counts toward the cap. This is not a cluster-wide worker quota.\\[4pt]
+\nolinkurl{bioseq.scheduler.backend.max_concurrency}\par\textit{reload} & int & {\bfseries \nolinkurl{0}}\par(default)\par $0\ldots 1024$ & Limits maximum number of workers in TBB worker pool (this is separate to Postgres max workers setting)\\[4pt]
 \midrule
 % GUC: bioseq.scheduler.pipeline.mode
-\multirow[t]{3}{=}{\nolinkurl{bioseq.scheduler.pipeline.mode}} & \multirow[t]{3}{=}{enum} & {\bfseries \nolinkurl{task_parallel}}\par(default) & Chooses where the task scheduler may run work concurrently. Allow eligible parallel regions inside the pipeline as well as parallel dispatch. Input access, batch size and memory admission can still limit parallelism.\\*
- &  & \nolinkurl{single_thread} & Run dispatch and coarse pipeline work on the caller.\\*
- &  & \nolinkurl{parallel_dispatch} & Allow independent eligible dispatch jobs to overlap, without selecting internal task-parallel regions.\\[4pt]
+\multirow[t]{3}{=}{\nolinkurl{bioseq.scheduler.pipeline.mode}} & \multirow[t]{3}{=}{enum} & {\bfseries \nolinkurl{task_parallel}}\par(default) & Changes how the pipeline execution is performed Each query dispatches separate worker (exxtension of parallel\_dispatch) and additionally each stage of pipeline can submit independent tasks to TBB worker pool In the benchmark I use task\_parallel, because it enables the highest degree of parallelism\\*
+ &  & \nolinkurl{single_thread} & Each query dispatches separate worker, but one pipeline itself isn't parallelized.\\*
+ &  & \nolinkurl{parallel_dispatch} & \\[4pt]
 \midrule
 % GUC: bioseq.scheduler.postgres_parallel.enabled
-\multirow[t]{2}{=}{\nolinkurl{bioseq.scheduler.postgres_parallel.enabled}} & \multirow[t]{2}{=}{bool} & {\bfseries \nolinkurl{off}}\par(default) & Controls task concurrency inside a PostgreSQL parallel-worker process. Restrict that process to one task slot.\\*
- &  & \nolinkurl{on} & Allow it to use multiple task slots within the backend concurrency cap.\\[4pt]
+\multirow[t]{2}{=}{\nolinkurl{bioseq.scheduler.postgres_parallel.enabled}} & \multirow[t]{2}{=}{bool} & {\bfseries \nolinkurl{off}}\par(default) & Reduce tasks slots to 1 Disable any parallelism completely (note that if bioseq.scheduler.pipeline.mode is set to task\_parallel, then pipeline will be executed via task queues, but only one worker will be active at the time. This setting is the highest level limiter on parallelism of workers) This setting effectively forces bioseq.scheduler.backend.max\_concurrency to be 1\\*
+ &  & \nolinkurl{on} & Allow >1 parallel tasks limit\\[4pt]
 \end{longtable}
 \endgroup
 
@@ -168,41 +168,41 @@
 \bottomrule
 \endlastfoot
 % GUC: bioseq.index.insert_maintenance.enabled
-\multirow[t]{2}{=}{\nolinkurl{bioseq.index.insert_maintenance.enabled}} & \multirow[t]{2}{=}{bool} & {\bfseries \nolinkurl{off}}\par(default) & Gates automatic index maintenance requested by each stored index policy. Save new source rows without automatic index builds. Explicit update\_index does not depend on this gate.\\*
- &  & \nolinkurl{on} & Maintain enabled on-insert indexes. Ordinary INSERT rejects grouped minimizer maintenance. Streamed loading has a separate batched build path.\\[4pt]
+\multirow[t]{2}{=}{\nolinkurl{bioseq.index.insert_maintenance.enabled}} & \multirow[t]{2}{=}{bool} & {\bfseries \nolinkurl{off}}\par(default) & Enables automatic index incremental update when row is inserted into the table. Save new source rows without automatic index builds. You can always still manually update index via update\_index function.\\*
+ &  & \nolinkurl{on} & Currently grouped MPF index (the default one) does not support this function and reports an error.\\[4pt]
 \midrule
 % GUC: bioseq.index.sequence_read.enabled
-\multirow[t]{2}{=}{\nolinkurl{bioseq.index.sequence_read.enabled}} & \multirow[t]{2}{=}{bool} & {\bfseries \nolinkurl{on}}\par(default) & Controls optional persisted sequence-index reads. Permit compatible stored reads where the executor supports them. Per-search index\_read\_requirement codes 1 and 2 override this choice. It never builds an index.\\*
- &  & \nolinkurl{off} & Skip optional persisted reads and compute needed data during execution.\\[4pt]
+\multirow[t]{2}{=}{\nolinkurl{bioseq.index.sequence_read.enabled}} & \multirow[t]{2}{=}{bool} & {\bfseries \nolinkurl{on}}\par(default) & Controls whether the pipeline executor can read indexes. If the option is disabled, then pipeline will always recompute all seeds from scratch. Normally allow reading BioseqDB indices. There's also per-search option passed via aligner\_options: index\_read\_requirement codes 1 and 2 override this setting.\\*
+ &  & \nolinkurl{off} & Force pipeline to always recompute all seeds from scratch.\\[4pt]
 \midrule
 % GUC: bioseq.index.async_persistence.enabled
-\multirow[t]{2}{=}{\nolinkurl{bioseq.index.async_persistence.enabled}} & \multirow[t]{2}{=}{bool} & {\bfseries \nolinkurl{off}}\par(default) & Gates eligible deferred index persistence. Do not stage asynchronous persistence work. Grouped explicit builds require this setting off.\\*
+\multirow[t]{2}{=}{\nolinkurl{bioseq.index.async_persistence.enabled}} & \multirow[t]{2}{=}{bool} & {\bfseries \nolinkurl{off}}\par(default) & Very experimental setting that allows main process to asynchronously update missing indices for sequences: If query does not have seeds in index for certain sequence and needs to compute them, after the query the index will be updated. Do not stage asynchronous persistence work. Grouped MPF index (default) does not implement this feature and using it with this option enabled will produce an error. Additionally you need to enable bioseq.index.recompute\_async\_persistence.enabled as well.\\*
  &  & \nolinkurl{on} & Allow the limited ordinary-MPS submission path when its other requirements are met.\\[4pt]
 \midrule
 % GUC: bioseq.index.recompute_async_persistence.enabled
-\multirow[t]{2}{=}{\nolinkurl{bioseq.index.recompute_async_persistence.enabled}} & \multirow[t]{2}{=}{bool} & {\bfseries \nolinkurl{off}}\par(default) & Controls deferred persistence requests after a query recomputes minimizers. Keep recomputation separate from deferred persistence. Grouped explicit builds require this setting off.\\*
- &  & \nolinkurl{on} & Allow eligible requests when async\_persistence is also on. This does not promise that an index will be saved.\\[4pt]
+\multirow[t]{2}{=}{\nolinkurl{bioseq.index.recompute_async_persistence.enabled}} & \multirow[t]{2}{=}{bool} & {\bfseries \nolinkurl{off}}\par(default) & Separate setting, but effectively to enable async persistence you need to enable bioseq.index.async\_persistence.enabled together with this one. Same as bioseq.index.async\_persistence.enabled Set bioseq.index.async\_persistence.enabled to the same value as this one.\\*
+ &  & \nolinkurl{on} & Same as bioseq.index.async\_persistence.enabled\\[4pt]
 \midrule
 % GUC: bioseq.index.memory_cap_mb
-\nolinkurl{bioseq.index.memory_cap_mb} & int & {\bfseries \nolinkurl{0}}\par(default)\par $0\ldots 2147483647$\par MiB & Adds a cap on accounted resident-index reservations. Zero uses the common runtime memory budget. Other query buffers are outside this index count.\\[4pt]
+\nolinkurl{bioseq.index.memory_cap_mb} & int & {\bfseries \nolinkurl{0}}\par(default)\par $0\ldots 2147483647$\par MiB & Specialized limit on the memory allocated by index builders/readers in MB. Using 0 means that they share the same memory budget as other query buffers.\\[4pt]
 \midrule
 % GUC: bioseq.index.sequence_minimizer_sort.algorithm
-\multirow[t]{5}{=}{\nolinkurl{bioseq.index.sequence_minimizer_sort.algorithm}\par\textit{hidden}} & \multirow[t]{5}{=}{enum} & {\bfseries \nolinkurl{std_sort}}\par(default) & Chooses the pair sorter for ordinary MPS builds. Use the standard-library comparison sorter.\\*
- &  & \nolinkurl{simd_u128_vqsort} & Use Highway VQSort on packed 128-bit keys.\\*
- &  & \nolinkurl{simd_u128_vec_stream_1} & Use the SIMD sorter with one vector stream.\\*
- &  & \nolinkurl{simd_u128_vec_stream_2} & Use the SIMD sorter with two vector streams.\\*
- &  & \nolinkurl{simd_u128_vec_stream_4} & Use the SIMD sorter with four vector streams.\\[4pt]
+\multirow[t]{5}{=}{\nolinkurl{bioseq.index.sequence_minimizer_sort.algorithm}\par\textit{hidden}} & \multirow[t]{5}{=}{enum} & {\bfseries \nolinkurl{std_sort}}\par(default) & Change sorting algorithm used for non-grouped MPF index builds Use the standard-library sort SIMD versions weren't tested by me in terms of correctness and they were slower than the default\\*
+ &  & \nolinkurl{simd_u128_vqsort} & Use Highway VQSort on packed 128-bit keys (implementation from C++ Highway repo).\\*
+ &  & \nolinkurl{simd_u128_vec_stream_1} & Use the custom SIMD sorter with one vector stream.\\*
+ &  & \nolinkurl{simd_u128_vec_stream_2} & Use the custom SIMD sorter with two vector streams.\\*
+ &  & \nolinkurl{simd_u128_vec_stream_4} & Use the custom SIMD sorter with four vector streams.\\[4pt]
 \midrule
 % GUC: bioseq.index_build.run_buffer_bytes
-\nolinkurl{bioseq.index_build.run_buffer_bytes}\par\textit{hidden, superuser} & int & {\bfseries \nolinkurl{0}}\par(default)\par $0\ldots 2147483647$\par bytes & Overrides the external-sort run buffer size. Zero computes a size from the process memory budget and index cap. This is an administrative tuning control.\\[4pt]
+\nolinkurl{bioseq.index_build.run_buffer_bytes}\par\textit{hidden, superuser} & int & {\bfseries \nolinkurl{0}}\par(default)\par $0\ldots 2147483647$\par bytes & For MPS overrides the external-sort run buffer size. Zero computes a size from the common BioseqDB memory budget.\\[4pt]
 \midrule
 % GUC: bioseq.aligner.fragment_minimizer.lookup_route
-\multirow[t]{2}{=}{\nolinkurl{bioseq.aligner.fragment_minimizer.lookup_route}} & \multirow[t]{2}{=}{enum} & {\bfseries \nolinkurl{direct_compact_hash_lookup}}\par(default) & Chooses how a grouped MPF reader finds a query hash. Use the saved direct section for supported 32-bit hash domains. Wider hashes use fragment controls. The required compatible file must already exist. This is not a PostgreSQL hash index.\\*
- &  & \nolinkurl{control_block_scan} & Search the grouped controls in the mapped fragment arrays.\\[4pt]
+\multirow[t]{2}{=}{\nolinkurl{bioseq.aligner.fragment_minimizer.lookup_route}} & \multirow[t]{2}{=}{enum} & {\bfseries \nolinkurl{direct_compact_hash_lookup}}\par(default) & Changes how grouped MPF works when reading is performed By default read hash directly from the hash bucket. The directory row should be faster in theory, but it's disabled, because I'm not sure if it's correct\\*
+ &  & \nolinkurl{control_block_scan} & Search the directory row for the hash bucket first\\[4pt]
 \midrule
 % GUC: bioseq.aligner.grouped_soa_generation.enabled
-\multirow[t]{2}{=}{\nolinkurl{bioseq.aligner.grouped_soa_generation.enabled}} & \multirow[t]{2}{=}{bool} & {\bfseries \nolinkurl{on}}\par(default) & Selects the representation produced by explicit minimizer-index builds. Publish grouped generations. MPF also publishes its immutable reader file. Changing this setting alone builds or converts nothing. Grouped builds require both asynchronous switches off.\\*
- &  & \nolinkurl{off} & Use the older ordinary representation where the chosen algorithm supports it.\\[4pt]
+\multirow[t]{2}{=}{\nolinkurl{bioseq.aligner.grouped_soa_generation.enabled}} & \multirow[t]{2}{=}{bool} & {\bfseries \nolinkurl{on}}\par(default) & Selects if we want to use grouped MPF version of index or non-grouped one (for writing only) Prefer grouped version of MPF index over non-grouped (for writing only) Changing this does not rewrite existing indexes, only applies to new ones and does not affect reading!\\*
+ &  & \nolinkurl{off} & Use only non-grouped MPF when possible (for writing only)\\[4pt]
 \end{longtable}
 \endgroup
 
@@ -228,23 +228,23 @@
 \bottomrule
 \endlastfoot
 % GUC: bioseq.aligner.minimizer.kmer_size
-\nolinkurl{bioseq.aligner.minimizer.kmer_size} & int & {\bfseries \nolinkurl{15}}\par(default)\par $1\ldots 64$\par symbols & Sets the number of sequence symbols in each k-mer. The selected algorithm and compiled profile impose additional restrictions. Per search: \nolinkurl{kmer_size}.\\[4pt]
+\nolinkurl{bioseq.aligner.minimizer.kmer_size} & int & {\bfseries \nolinkurl{15}}\par(default)\par $1\ldots 64$\par symbols & Sets the number of sequence symbols in each k-mer Per search: \nolinkurl{kmer_size}.\\[4pt]
 \midrule
 % GUC: bioseq.aligner.minimizer.window_size
-\nolinkurl{bioseq.aligner.minimizer.window_size} & int & {\bfseries \nolinkurl{10}}\par(default)\par $1\ldots 1024$\par k-mers & Sets the number of consecutive k-mers in one minimizer window. It does not count sequence symbols. Per search: \nolinkurl{window_size}.\\[4pt]
+\nolinkurl{bioseq.aligner.minimizer.window_size} & int & {\bfseries \nolinkurl{10}}\par(default)\par $1\ldots 1024$\par k-mers & Sets the number of consecutive k-mers in one minimizer window Per search: \nolinkurl{window_size}.\\[4pt]
 \midrule
 % GUC: bioseq.aligner.minimizer.algorithm
-\multirow[t]{5}{=}{\nolinkurl{bioseq.aligner.minimizer.algorithm}} & \multirow[t]{5}{=}{enum} & {\bfseries \nolinkurl{bounded_nthash_simd}\par code 4}\par(default) & Chooses how query and target minimizers are extracted. Use the bounded SIMD ntHash implementation. Execution requires a supported generated profile. Changing the algorithm can invalidate compatibility with saved indexes. Per search: \nolinkurl{minimizer_algorithm}.\\*
- &  & \nolinkurl{scalar}\par code 0 & Use scalar minimap2-style integer-hash extraction.\\*
- &  & \nolinkurl{simd_minimap2_reference}\par code 1 & Use the SIMD implementation of minimap2's integer-hash sketch semantics where supported.\\*
- &  & \nolinkurl{two_stack_nthash}\par code 2 & Use rolling ntHash and two-stack window-minimum maintenance.\\*
- &  & \nolinkurl{vulkan_minimap_integer}\par code 3 & Use Vulkan integer-hash minimizer extraction on a supported device and execution route.\\[4pt]
+\multirow[t]{5}{=}{\nolinkurl{bioseq.aligner.minimizer.algorithm}} & \multirow[t]{5}{=}{enum} & {\bfseries \nolinkurl{bounded_nthash_simd}\par code 4}\par(default) & Chooses how minimizers are calculated Use the bounded SIMD BioseqDB algorithm Changing the algorithm can invalidate compatibility with saved indexes! Per search: \nolinkurl{minimizer_algorithm}.\\*
+ &  & \nolinkurl{scalar}\par code 0 & Minimap2 scalar algorithm\\*
+ &  & \nolinkurl{simd_minimap2_reference}\par code 1 & Use the naive version of SIMD implementation of minimap2's\\*
+ &  & \nolinkurl{two_stack_nthash}\par code 2 & Use rolling ntHash and two-stack window-minimum inspired by simd-minimizers paper.\\*
+ &  & \nolinkurl{vulkan_minimap_integer}\par code 3 & Use BioseqDB GPU algorithm\\[4pt]
 \midrule
 % GUC: bioseq.aligner.seeding.maximum_occurrence
-\nolinkurl{bioseq.aligner.seeding.maximum_occurrence} & int & {\bfseries \nolinkurl{500}}\par(default)\par $1\ldots 16777216$\par positions & Excludes minimizer keys with more target occurrences than this limit. A direct persisted reader also requires the request to fit its saved occurrence limit. Per search: \nolinkurl{max_occ}.\\[4pt]
+\nolinkurl{bioseq.aligner.seeding.maximum_occurrence} & int & {\bfseries \nolinkurl{500}}\par(default)\par $1\ldots 16777216$\par positions & Excludes minimizer keys with more target occurrences than this limit. Per search: \nolinkurl{max_occ}.\\[4pt]
 \midrule
 % GUC: bioseq.aligner.seeding.intermediate_occurrence_threshold
-\nolinkurl{bioseq.aligner.seeding.intermediate_occurrence_threshold} & int & {\bfseries \nolinkurl{500}}\par(default)\par $1\ldots 16777216$\par positions & Stores an intermediate seed-occurrence threshold. This field currently has no execution consumer, so it does not perform another filtering pass. Per search: \nolinkurl{mid_occ}.\\[4pt]
+\nolinkurl{bioseq.aligner.seeding.intermediate_occurrence_threshold} & int & {\bfseries \nolinkurl{500}}\par(default)\par $1\ldots 16777216$\par positions & Currently unused Per search: \nolinkurl{mid_occ}.\\[4pt]
 \end{longtable}
 \endgroup
 
@@ -270,40 +270,40 @@
 \bottomrule
 \endlastfoot
 % GUC: bioseq.aligner.chaining.maximum_gap
-\nolinkurl{bioseq.aligner.chaining.maximum_gap} & int & {\bfseries \nolinkurl{5000}}\par(default)\par $1\ldots 1073741824$\par positions & Sets the requested maximum anchor gap used by chaining. Scalar chaining raises this limit to at least the bandwidth. Per search: \nolinkurl{max_gap}.\\[4pt]
+\nolinkurl{bioseq.aligner.chaining.maximum_gap} & int & {\bfseries \nolinkurl{5000}}\par(default)\par $1\ldots 1073741824$\par positions & Sets the requested maximum anchor gap used by chaining. Scalar (minimap2)chaining raises this limit to at least the bandwidth value. Per search: \nolinkurl{max_gap}.\\[4pt]
 \midrule
 % GUC: bioseq.aligner.chaining.maximum_reference_gap
-\nolinkurl{bioseq.aligner.chaining.maximum_reference_gap} & int & {\bfseries \nolinkurl{-1}}\par(default)\par $-1\ldots 1073741824$\par positions & Stores a separate reference-gap request. This field currently has no execution consumer, so changing it does not add a separate reference-gap rule. Per search: \nolinkurl{max_gap_ref}.\\[4pt]
+\nolinkurl{bioseq.aligner.chaining.maximum_reference_gap} & int & {\bfseries \nolinkurl{-1}}\par(default)\par $-1\ldots 1073741824$\par positions & Currently unused Per search: \nolinkurl{max_gap_ref}.\\[4pt]
 \midrule
 % GUC: bioseq.aligner.chaining.bandwidth
-\nolinkurl{bioseq.aligner.chaining.bandwidth} & int & {\bfseries \nolinkurl{500}}\par(default)\par $1\ldots 1048576$\par positions & Bounds query-versus-target gap differences in chainers that use a diagonal band. Alignment paths also consume this parameter. Per search: \nolinkurl{bandwidth}.\\[4pt]
+\nolinkurl{bioseq.aligner.chaining.bandwidth} & int & {\bfseries \nolinkurl{500}}\par(default)\par $1\ldots 1048576$\par positions & Despite the name it's also used by aligner stage, limits maximum distane to diagonal. Per search: \nolinkurl{bandwidth}.\\[4pt]
 \midrule
 % GUC: bioseq.aligner.chaining.long_join_bandwidth
-\nolinkurl{bioseq.aligner.chaining.long_join_bandwidth} & int & {\bfseries \nolinkurl{0}}\par(default)\par $0\ldots 1048576$\par positions & Stores a long-join bandwidth request. This field currently has no execution consumer and does not enable a long-join pass. Per search: \nolinkurl{bandwidth_long}.\\[4pt]
+\nolinkurl{bioseq.aligner.chaining.long_join_bandwidth} & int & {\bfseries \nolinkurl{0}}\par(default)\par $0\ldots 1048576$\par positions & Currently unused. Per search: \nolinkurl{bandwidth_long}.\\[4pt]
 \midrule
 % GUC: bioseq.aligner.chaining.maximum_skipped_anchors
-\nolinkurl{bioseq.aligner.chaining.maximum_skipped_anchors} & int & {\bfseries \nolinkurl{25}}\par(default)\par $0\ldots 1048576$ & Sets the selected chainer's early-stop limit for predecessor search. SQL SIMD chaining requires a positive value even though the GUC accepts zero. Per search: \nolinkurl{max_chain_skip}.\\[4pt]
+\nolinkurl{bioseq.aligner.chaining.maximum_skipped_anchors} & int & {\bfseries \nolinkurl{25}}\par(default)\par $0\ldots 1048576$ & Limit of consecutive updates for anchors that do not improve score (only for supported algorithms like scalar) Per search: \nolinkurl{max_chain_skip}.\\[4pt]
 \midrule
 % GUC: bioseq.aligner.chaining.maximum_predecessors
-\nolinkurl{bioseq.aligner.chaining.maximum_predecessors} & int & {\bfseries \nolinkurl{5000}}\par(default)\par $1\ldots 4194304$ & Bounds the predecessor window for scan-based chainers. Scalar chaining can examine one additional candidate. RMQ does not use this field. Per search: \nolinkurl{max_chain_iter}.\\[4pt]
+\nolinkurl{bioseq.aligner.chaining.maximum_predecessors} & int & {\bfseries \nolinkurl{5000}}\par(default)\par $1\ldots 4194304$ & Limits how many predecessors chainer can consider, but scalar chaining (depending on the actual algorithm) can examine one additional candidate. RMQ does not use this field. Per search: \nolinkurl{max_chain_iter}.\\[4pt]
 \midrule
 % GUC: bioseq.aligner.chaining.minimum_seed_count
-\nolinkurl{bioseq.aligner.chaining.minimum_seed_count} & int & {\bfseries \nolinkurl{3}}\par(default)\par $0\ldots 1048576$ & Sets the minimum seed count for an accepted chain. It is a chain threshold, not a required number of SQL result rows. Per search: \nolinkurl{min_seed_count}.\\[4pt]
+\nolinkurl{bioseq.aligner.chaining.minimum_seed_count} & int & {\bfseries \nolinkurl{3}}\par(default)\par $0\ldots 1048576$ & Sets the minimum seed count for an accepted chain. Per search: \nolinkurl{min_seed_count}.\\[4pt]
 \midrule
 % GUC: bioseq.aligner.chaining.minimum_score
-\nolinkurl{bioseq.aligner.chaining.minimum_score} & int & {\bfseries \nolinkurl{40}}\par(default)\par $0\ldots 1048576$ & Sets the minimum accepted chain score. The score is computed by the selected chaining algorithm. Per search: \nolinkurl{min_chain_score}.\\[4pt]
+\nolinkurl{bioseq.aligner.chaining.minimum_score} & int & {\bfseries \nolinkurl{40}}\par(default)\par $0\ldots 1048576$ & Sets the minimum accepted chain score (the score is computed by the selected chaining algorithm) Per search: \nolinkurl{min_chain_score}.\\[4pt]
 \midrule
 % GUC: bioseq.aligner.chaining.gap_penalty_scale
-\nolinkurl{bioseq.aligner.chaining.gap_penalty_scale} & real & {\bfseries \nolinkurl{0.8}}\par(default)\par $0\ldots 100$ & Scales the gap penalty used by chaining. Larger values penalize that contribution more strongly. Per search: \nolinkurl{chain_gap_scale}.\\[4pt]
+\nolinkurl{bioseq.aligner.chaining.gap_penalty_scale} & real & {\bfseries \nolinkurl{0.8}}\par(default)\par $0\ldots 100$ & Scales the gap penalty used by chaining (larger values penalize that contribution more strongly) Per search: \nolinkurl{chain_gap_scale}.\\[4pt]
 \midrule
 % GUC: bioseq.aligner.chaining.skip_penalty_scale
-\nolinkurl{bioseq.aligner.chaining.skip_penalty_scale} & real & {\bfseries \nolinkurl{0.0}}\par(default)\par $0\ldots 100$ & Scales the chaining skip-distance penalty. Zero removes this scaled contribution. Per search: \nolinkurl{chain_skip_scale}.\\[4pt]
+\nolinkurl{bioseq.aligner.chaining.skip_penalty_scale} & real & {\bfseries \nolinkurl{0.0}}\par(default)\par $0\ldots 100$ & Scales the chaining skip-distance penalty. Per search: \nolinkurl{chain_skip_scale}.\\[4pt]
 \midrule
 % GUC: bioseq.aligner.chaining.algorithm
-\multirow[t]{4}{=}{\nolinkurl{bioseq.aligner.chaining.algorithm}} & \multirow[t]{4}{=}{enum} & {\bfseries \nolinkurl{simd_minimap2}\par code 1}\par(default) & Chooses how matching seed anchors become chains. Use the bounded SIMD batch policy. Its approximation need not reproduce scalar chains exactly. A valid selector does not make every hardware and input combination executable. Per search: \nolinkurl{chaining_algorithm}.\\*
- &  & \nolinkurl{scalar_minimap2}\par code 0 & Use scalar minimap2-style dynamic-programming chaining.\\*
- &  & \nolinkurl{range_minimum_query}\par code 2 & Use the range-minimum-query chainer instead of scanning the ordinary predecessor window.\\*
- &  & \nolinkurl{vulkan_tiled_dynamic_programming}\par code 3 & Use tiled GPU dynamic-programming chaining on a supported Vulkan route.\\[4pt]
+\multirow[t]{4}{=}{\nolinkurl{bioseq.aligner.chaining.algorithm}} & \multirow[t]{4}{=}{enum} & {\bfseries \nolinkurl{simd_minimap2}\par code 1}\par(default) & Selects algorithm used for chaining BioseqDB implementation of accelerated minimap2-inspired chaining Selected algorithm might still be rejected if the hardware does not support it Per search: \nolinkurl{chaining_algorithm}.\\*
+ &  & \nolinkurl{scalar_minimap2}\par code 0 & Minimap2 scalar chaining\\*
+ &  & \nolinkurl{range_minimum_query}\par code 2 & BioseqDB RMQ on AVL trees similar to what minimap2 uses\\*
+ &  & \nolinkurl{vulkan_tiled_dynamic_programming}\par code 3 & Use tiled GPU chaining\\[4pt]
 \end{longtable}
 \endgroup
 
@@ -329,7 +329,7 @@
 \bottomrule
 \endlastfoot
 % GUC: bioseq.aligner.secondary.overlap_threshold
-\nolinkurl{bioseq.aligner.secondary.overlap_threshold} & real & {\bfseries \nolinkurl{0.5}}\par(default)\par $0\ldots 1$ & Sets the primary/secondary classification threshold combining query-interval overlap with uncovered query length. It is not simply a percentage of shared bases. Per search: \nolinkurl{mask_level}.\\[4pt]
+\nolinkurl{bioseq.aligner.secondary.overlap_threshold} & real & {\bfseries \nolinkurl{0.5}}\par(default)\par $0\ldots 1$ & Sets the primary/secondary classification thresholds Per search: \nolinkurl{mask_level}.\\[4pt]
 \midrule
 % GUC: bioseq.aligner.secondary.uncovered_length_limit
 \nolinkurl{bioseq.aligner.secondary.uncovered_length_limit} & int & {\bfseries \nolinkurl{2147483647}}\par(default)\par $0\ldots 2147483647$\par symbols & Limits the uncovered query length used when classifying an alignment as secondary to an existing primary. Per search: \nolinkurl{mask_len}.\\[4pt]
@@ -338,7 +338,7 @@
 \nolinkurl{bioseq.aligner.secondary.score_ratio_threshold} & real & {\bfseries \nolinkurl{0.8}}\par(default)\par $0\ldots 1$ & Sets the secondary-to-primary score-ratio threshold. Zero bypasses this filtering step, including its secondary-count limit. Per search: \nolinkurl{pri_ratio}.\\[4pt]
 \midrule
 % GUC: bioseq.aligner.secondary.maximum_count
-\nolinkurl{bioseq.aligner.secondary.maximum_count} & int & {\bfseries \nolinkurl{5}}\par(default)\par $0\ldots 1024$ & Limits retained secondary alignments across the complete list passed to the filtering stage. It is not a SQL LIMIT and is bypassed when the score-ratio threshold is zero. Per search: \nolinkurl{best_n}.\\[4pt]
+\nolinkurl{bioseq.aligner.secondary.maximum_count} & int & {\bfseries \nolinkurl{5}}\par(default)\par $0\ldots 1024$ & Limits retained secondary alignments across the complete list passed to the filtering stage Per search: \nolinkurl{best_n}.\\[4pt]
 \end{longtable}
 \endgroup
 
@@ -391,14 +391,14 @@
 \nolinkurl{bioseq.aligner.scoring.end_bonus} & int & {\bfseries \nolinkurl{-1}}\par(default)\par $-1\ldots 1048576$ & Sets KSW2's sequence-end bonus. Negative one disables the bonus. Native BlockAligner does not use it. Per search: \nolinkurl{end_bonus}.\\[4pt]
 \midrule
 % GUC: bioseq.aligner.block_alignment.minimum_block_size
-\nolinkurl{bioseq.aligner.block_alignment.minimum_block_size} & int & {\bfseries \nolinkurl{32}}\par(default)\par $8\ldots 4096$ & Sets BlockAligner's minimum adaptive block size. After widening to the active SIMD lane count, block sizes must be powers of two and the minimum cannot exceed the maximum. Per search: \nolinkurl{block_min_size}.\\[4pt]
+\nolinkurl{bioseq.aligner.block_alignment.minimum_block_size} & int & {\bfseries \nolinkurl{32}}\par(default)\par $8\ldots 4096$ & Sets BlockAligner's minimum adaptive block size. (block sizes must be powers of two and the minimum cannot exceed the maximum) Per search: \nolinkurl{block_min_size}.\\[4pt]
 \midrule
 % GUC: bioseq.aligner.block_alignment.maximum_block_size
-\nolinkurl{bioseq.aligner.block_alignment.maximum_block_size} & int & {\bfseries \nolinkurl{256}}\par(default)\par $8\ldots 16384$ & Sets BlockAligner's maximum adaptive block size. Its effective size must be a power of two and at least the effective minimum. Per search: \nolinkurl{block_max_size}.\\[4pt]
+\nolinkurl{bioseq.aligner.block_alignment.maximum_block_size} & int & {\bfseries \nolinkurl{256}}\par(default)\par $8\ldots 16384$ & Sets BlockAligner's maximum adaptive block size. (block sizes must be powers of two and the minimum cannot exceed the maximum) Per search: \nolinkurl{block_max_size}.\\[4pt]
 \midrule
 % GUC: bioseq.aligner.base_alignment.algorithm
-\multirow[t]{2}{=}{\nolinkurl{bioseq.aligner.base_alignment.algorithm}} & \multirow[t]{2}{=}{enum} & {\bfseries \nolinkurl{block_aligner}\par code 1}\par(default) & Chooses the base-alignment implementation when requested results need this stage. Use adaptive block alignment with the first gap-penalty pair. Selecting an implementation does not itself request CIGAR or base-alignment output. Per search: \nolinkurl{base_alignment_algorithm}.\\*
- &  & \nolinkurl{ksw2}\par code 0 & Use KSW2 with its banded extension and two gap-penalty pairs.\\[4pt]
+\multirow[t]{2}{=}{\nolinkurl{bioseq.aligner.base_alignment.algorithm}} & \multirow[t]{2}{=}{enum} & {\bfseries \nolinkurl{block_aligner}\par code 1}\par(default) & Selects the base alignment algorithm Adaptive block aligner Per search: \nolinkurl{base_alignment_algorithm}.\\*
+ &  & \nolinkurl{ksw2}\par code 0 & Use KSW2 aligner\\[4pt]
 \end{longtable}
 \endgroup
 
@@ -424,34 +424,34 @@
 \bottomrule
 \endlastfoot
 % GUC: bioseq.aligner.vulkan.enabled
-\multirow[t]{2}{=}{\nolinkurl{bioseq.aligner.vulkan.enabled}} & \multirow[t]{2}{=}{bool} & {\bfseries \nolinkurl{on}}\par(default) & Permits execution of selected Vulkan algorithms. Allow supported GPU work. This does not select a GPU algorithm by itself. An explicit per-search true value also requests a standalone GPU prefilter in an eligible scan. Per search: \nolinkurl{vulkan_enabled}.\\*
- &  & \nolinkurl{off} & Disallow Vulkan execution. Explicit GPU requests fail instead of silently changing algorithms.\\[4pt]
+\multirow[t]{2}{=}{\nolinkurl{bioseq.aligner.vulkan.enabled}} & \multirow[t]{2}{=}{bool} & {\bfseries \nolinkurl{on}}\par(default) & Enables GPU execution Allow supported GPU work GPU algorithms currently are not optimised and severly increase the query time. Enabling execution doesn't mean the GPU will be used (for example software-emulated GPUs are disabled by default). The correct GPU algorithm also need to be selected by setting respective GUCs for aligner/chaining. Per search: \nolinkurl{vulkan_enabled}.\\*
+ &  & \nolinkurl{off} & Setting aligner/chaining algorithms (or other) to Vulkan will immediately fail.\\[4pt]
 \midrule
 % GUC: bioseq.aligner.vulkan.seed_lookup.enabled
-\multirow[t]{2}{=}{\nolinkurl{bioseq.aligner.vulkan.seed_lookup.enabled}} & \multirow[t]{2}{=}{bool} & {\bfseries \nolinkurl{off}}\par(default) & Selects Vulkan seed-hit lookup. Do not select GPU seed lookup through this switch. Per search: \nolinkurl{vulkan_seed_hits_enabled}.\\*
- &  & \nolinkurl{on} & Request GPU seed lookup subject to the supported route and device requirements.\\[4pt]
+\multirow[t]{2}{=}{\nolinkurl{bioseq.aligner.vulkan.seed_lookup.enabled}} & \multirow[t]{2}{=}{bool} & {\bfseries \nolinkurl{off}}\par(default) & Enabled GPU-acclelerated minimizers (reading) Disable GPU for reading minimizer indexes Per search: \nolinkurl{vulkan_seed_hits_enabled}.\\*
+ &  & \nolinkurl{on} & Enable GPU minimizer lookup (but other GPU settings apply)\\[4pt]
 \midrule
 % GUC: bioseq.aligner.vulkan.index_cache.enabled
-\multirow[t]{2}{=}{\nolinkurl{bioseq.aligner.vulkan.index_cache.enabled}} & \multirow[t]{2}{=}{bool} & {\bfseries \nolinkurl{on}}\par(default) & Controls reuse of GPU-resident minimizer-index uploads. Retain compatible device index data for reuse on a selected GPU seed route. Per search: \nolinkurl{vulkan_index_cache_enabled}.\\*
- &  & \nolinkurl{off} & Do not reuse uploads through this GPU index cache.\\[4pt]
+\multirow[t]{2}{=}{\nolinkurl{bioseq.aligner.vulkan.index_cache.enabled}} & \multirow[t]{2}{=}{bool} & {\bfseries \nolinkurl{on}}\par(default) & Cache minimizer index data to be reused across GPU calls (applies only to single pipeline execution and transfers between GPU/CPU memory) Save buffer with minimizers Per search: \nolinkurl{vulkan_index_cache_enabled}.\\*
+ &  & \nolinkurl{off} & GPU doesn't reuse minimizers during computation\\[4pt]
 \midrule
 % GUC: bioseq.aligner.vulkan.fused_frontend.enabled
-\multirow[t]{2}{=}{\nolinkurl{bioseq.aligner.vulkan.fused_frontend.enabled}} & \multirow[t]{2}{=}{bool} & {\bfseries \nolinkurl{off}}\par(default) & Selects the resident fused Vulkan frontend. Leave this frontend unselected.\\*
- &  & \nolinkurl{on} & Request fused device frontend work as part of a supported Vulkan execution route.\\[4pt]
+\multirow[t]{2}{=}{\nolinkurl{bioseq.aligner.vulkan.fused_frontend.enabled}} & \multirow[t]{2}{=}{bool} & {\bfseries \nolinkurl{off}}\par(default) & Enable experimental GPU fused kernel (this doesn't work correctly) Leave this frontend unselected.\\*
+ &  & \nolinkurl{on} & Enable special optimisation for GPU kernels\\[4pt]
 \midrule
 % GUC: bioseq.aligner.vulkan.index_build.enabled
-\multirow[t]{2}{=}{\nolinkurl{bioseq.aligner.vulkan.index_build.enabled}} & \multirow[t]{2}{=}{bool} & {\bfseries \nolinkurl{off}}\par(default) & Selects GPU target-index construction. Do not request GPU construction through this switch.\\*
- &  & \nolinkurl{on} & Request device target-index construction when the remaining Vulkan route requirements are met.\\[4pt]
+\multirow[t]{2}{=}{\nolinkurl{bioseq.aligner.vulkan.index_build.enabled}} & \multirow[t]{2}{=}{bool} & {\bfseries \nolinkurl{off}}\par(default) & Enabled GPU-acclelerated minimizers (writing) Disable GPU for wrikting minimizer indexes\\*
+ &  & \nolinkurl{on} & Enable GPU minimizer index building (but other GPU settings apply)\\[4pt]
 \midrule
 % GUC: bioseq.aligner.vulkan.alignment_extension.enabled
-\multirow[t]{2}{=}{\nolinkurl{bioseq.aligner.vulkan.alignment_extension.enabled}} & \multirow[t]{2}{=}{bool} & {\bfseries \nolinkurl{off}}\par(default) & Selects the GPU base-alignment extension stage. Do not request GPU extension.\\*
- &  & \nolinkurl{on} & Permit the extension stage on a supported Vulkan route. GPU CIGAR output requires this stage.\\[4pt]
+\multirow[t]{2}{=}{\nolinkurl{bioseq.aligner.vulkan.alignment_extension.enabled}} & \multirow[t]{2}{=}{bool} & {\bfseries \nolinkurl{off}}\par(default) & Enabled CIGAR computation on GPU Disbable CIGAR computation on GPU\\*
+ &  & \nolinkurl{on} & Allow computing CIGAR on GPU (but other GPU settings apply)\\[4pt]
 \midrule
 % GUC: bioseq.aligner.vulkan.ordered_sketch_tile_bp
-\nolinkurl{bioseq.aligner.vulkan.ordered_sketch_tile_bp} & int & {\bfseries \nolinkurl{2048}}\par(default)\par $1\ldots 16777216$\par symbols & Stores an ordered-sketch tile-size request. It is copied into parameters but currently has no execution consumer.\\[4pt]
+\nolinkurl{bioseq.aligner.vulkan.ordered_sketch_tile_bp} & int & {\bfseries \nolinkurl{2048}}\par(default)\par $1\ldots 16777216$\par symbols & Currently unused\\[4pt]
 \midrule
 % GUC: bioseq.aligner.vulkan.radix_sort_digit_bits
-\nolinkurl{bioseq.aligner.vulkan.radix_sort_digit_bits} & int & {\bfseries \nolinkurl{8}}\par(default)\par $1\ldots 16$\par bits & Stores a device radix-sort digit width. It is copied into parameters but currently has no execution consumer.\\[4pt]
+\nolinkurl{bioseq.aligner.vulkan.radix_sort_digit_bits} & int & {\bfseries \nolinkurl{8}}\par(default)\par $1\ldots 16$\par bits & Currently unused\\[4pt]
 \end{longtable}
 \endgroup
 
@@ -477,11 +477,11 @@
 \bottomrule
 \endlastfoot
 % GUC: bioseq.diagnostics.logging.enabled
-\multirow[t]{2}{=}{\nolinkurl{bioseq.diagnostics.logging.enabled}\par\textit{superuser}} & \multirow[t]{2}{=}{bool} & {\bfseries \nolinkurl{off}}\par(default) & Controls extension diagnostic logging. Leave the diagnostic logger disabled.\\*
- &  & \nolinkurl{on} & Enable diagnostic logging for troubleshooting.\\[4pt]
+\multirow[t]{2}{=}{\nolinkurl{bioseq.diagnostics.logging.enabled}\par\textit{superuser}} & \multirow[t]{2}{=}{bool} & {\bfseries \nolinkurl{off}}\par(default) & Enable or dissable internal logging. BioseqDB internally supports logging to file, but current builds are all configured to use only postgres logging mechanisms. Disable internal logger.\\*
+ &  & \nolinkurl{on} & Enable internal logger.\\[4pt]
 \midrule
 % GUC: bioseq.planner.diagnostics.log_level
-\multirow[t]{9}{=}{\nolinkurl{bioseq.planner.diagnostics.log_level}} & \multirow[t]{9}{=}{enum} & {\bfseries \nolinkurl{debug3}}\par(default) & Chooses the PostgreSQL severity for planner diagnostic messages. Emit them at DEBUG3 severity. PostgreSQL's message thresholds determine where the messages appear.\\*
+\multirow[t]{9}{=}{\nolinkurl{bioseq.planner.diagnostics.log_level}} & \multirow[t]{9}{=}{enum} & {\bfseries \nolinkurl{debug3}}\par(default) & Chooses the PostgreSQL severity for planner diagnostic messages (logging levels are Postgres specific). Emit them at DEBUG3 severity. PostgreSQL's message thresholds determine where the messages appear.\\*
  &  & \nolinkurl{debug5} & Emit them at DEBUG5 severity.\\*
  &  & \nolinkurl{debug4} & Emit them at DEBUG4 severity.\\*
  &  & \nolinkurl{debug2} & Emit them at DEBUG2 severity.\\*
@@ -492,8 +492,8 @@
  &  & \nolinkurl{warning} & Emit them at WARNING severity.\\[4pt]
 \midrule
 % GUC: bioseq.aligner.profiling.enabled
-\multirow[t]{2}{=}{\nolinkurl{bioseq.aligner.profiling.enabled}} & \multirow[t]{2}{=}{bool} & {\bfseries \nolinkurl{off}}\par(default) & Controls aligner runtime profiling. Run without the optional profiling collection.\\*
- &  & \nolinkurl{on} & Collect pipeline profiling information. Instrumentation can alter execution scheduling and measured cost.\\[4pt]
+\multirow[t]{2}{=}{\nolinkurl{bioseq.aligner.profiling.enabled}} & \multirow[t]{2}{=}{bool} & {\bfseries \nolinkurl{off}}\par(default) & Enables internal profiling of the pipeline execution profiling measures statistics like number of minimizers/chains/timings per pipeline stage etc.\\*
+ &  & \nolinkurl{on} & Profiling can increase execution time\\[4pt]
 \end{longtable}
 \endgroup
 
@@ -519,12 +519,12 @@
 \bottomrule
 \endlastfoot
 % GUC: bioseq_cache.query_cache.mode
-\multirow[t]{3}{=}{\nolinkurl{bioseq_cache.query_cache.mode}} & \multirow[t]{3}{=}{enum} & {\bfseries \nolinkurl{disabled}}\par(default) & Selects reuse by the optional query-result-cache extension. Do not use the query-result cache. Non-disabled modes require shared preloading and a server restart.\\*
+\multirow[t]{3}{=}{\nolinkurl{bioseq_cache.query_cache.mode}} & \multirow[t]{3}{=}{enum} & {\bfseries \nolinkurl{disabled}}\par(default) & Enables experimental query result cache (provided by BioseqDB bioseq\_cache subextension) Do not use the query result cache (disabled due to my low confidence if it works correctly) Any mode other than 'disabled' required Postgres shared libraries reload.\\*
  &  & \nolinkurl{exact_query} & Reuse completed identical requests and coordinate concurrent identical computations.\\*
- &  & \nolinkurl{reusable_fragments} & Permit completed-fragment reuse for providers that support it. The Bioseq alignment adapter currently supports exact reuse only.\\[4pt]
+ &  & \nolinkurl{reusable_fragments} & Permit completed-fragment reuse for providers that support it. The Bioseq alignment adapter currently supports exact reuse only (this mode is not implemented)\\[4pt]
 \midrule
 % GUC: bioseq_cache.query_cache.completed_result_ttl_ms
-\nolinkurl{bioseq_cache.query_cache.completed_result_ttl_ms} & int & {\bfseries \nolinkurl{3600000}}\par(default)\par $0\ldots 2147483647$\par ms & Limits the age of a completed cached result, measured from completion. Zero prevents ordinary later reuse. An already-registered waiter can still consume completion once. It is not a query timeout.\\[4pt]
+\nolinkurl{bioseq_cache.query_cache.completed_result_ttl_ms} & int & {\bfseries \nolinkurl{3600000}}\par(default)\par $0\ldots 2147483647$\par ms & Maximum age of the records in the bioseq\_cache tables that can be reused\\[4pt]
 \end{longtable}
 \endgroup
 
@@ -550,15 +550,15 @@
 \bottomrule
 \endlastfoot
 % GUC: bioseq.testing.chunked_scanner.enabled
-\multirow[t]{2}{=}{\nolinkurl{bioseq.testing.chunked_scanner.enabled}\par\textit{hidden, superuser}} & \multirow[t]{2}{=}{bool} & {\bfseries \nolinkurl{off}}\par(default) & Selects a synthetic sequence scanner in test builds. Use the normal scanner selection.\\*
- &  & \nolinkurl{on} & Force the synthetic chunked-input route where supported.\\[4pt]
+\multirow[t]{2}{=}{\nolinkurl{bioseq.testing.chunked_scanner.enabled}\par\textit{hidden, superuser}} & \multirow[t]{2}{=}{bool} & {\bfseries \nolinkurl{off}}\par(default) & Forces BioseqDB to load entire sequence into memory and create 'fake' lazy-loading interface that accesses it. Used by me to test C++ interface for lazy-loading. Use the normal scanner.\\*
+ &  & \nolinkurl{on} & Force load entire sequence into memory and create lazy-loader interface for that RAM sequence.\\[4pt]
 \midrule
 % GUC: bioseq.testing.in_memory_scanner.enabled
-\multirow[t]{2}{=}{\nolinkurl{bioseq.testing.in_memory_scanner.enabled}\par\textit{hidden, superuser}} & \multirow[t]{2}{=}{bool} & {\bfseries \nolinkurl{off}}\par(default) & Selects an in-memory input scanner in test builds. Use the normal scanner selection.\\*
- &  & \nolinkurl{on} & Materialize sequence input before scanner dispatch.\\[4pt]
+\multirow[t]{2}{=}{\nolinkurl{bioseq.testing.in_memory_scanner.enabled}\par\textit{hidden, superuser}} & \multirow[t]{2}{=}{bool} & {\bfseries \nolinkurl{off}}\par(default) & Forces BioseqDB to load entire sequence into memory and passes it directly to the pipeline. (Note that this is the same for user as bioseq.testing.chunked\_scanner.enabled with the only difference being internally used C++ API). Used by me to test C++ interface for lazy-loading. Use the normal scanner.\\*
+ &  & \nolinkurl{on} & Force load entire sequence into memory and pass it directly to the pipeline.\\[4pt]
 \midrule
 % GUC: bioseq.testing.persisted_index.failure_mode
-\multirow[t]{2}{=}{\nolinkurl{bioseq.testing.persisted_index.failure_mode}\par\textit{hidden, superuser}} & \multirow[t]{2}{=}{enum} & {\bfseries \nolinkurl{none}}\par(default) & Injects a persisted-index reader failure for tests. Do not inject a failure.\\*
- &  & \nolinkurl{unsupported_vector_shape} & Make the adapter report an unsupported vector shape.\\[4pt]
+\multirow[t]{2}{=}{\nolinkurl{bioseq.testing.persisted_index.failure_mode}\par\textit{hidden, superuser}} & \multirow[t]{2}{=}{enum} & {\bfseries \nolinkurl{none}}\par(default) & Cause 'fake' index reader failure to be reported during queries. Do nothing.\\*
+ &  & \nolinkurl{unsupported_vector_shape} & Make the index reader report an unsupported vector shape (due to wrong w/k etc. parameters used during index build).\\[4pt]
 \end{longtable}
 \endgroup
