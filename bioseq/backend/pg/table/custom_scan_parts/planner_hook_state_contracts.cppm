@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Owns the saved PostgreSQL planner-hook chain state.
+ * @brief Keeps the planner hooks installed before Bioseq registers its own callbacks.
  */
 module;
 #include <bioseq/pg_compat.h>
@@ -8,7 +8,7 @@ module;
 export module bioseq.postgres.table:custom_scan_planner_hook_state_contracts;
 
 export {
-    /* saved hook values in case of unload */
+    /* Run saved hooks before Bioseq changes planner paths or relation metadata. */
     set_rel_pathlist_hook_type previous_set_rel_pathlist_hook = nullptr;
     set_join_pathlist_hook_type previous_set_join_pathlist_hook = nullptr;
 #if PG_VERSION_NUM >= 190000

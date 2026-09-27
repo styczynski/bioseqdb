@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Defines per-row join runtime state without importing executor implementations.
+ * @brief Defines the child-plan and alignment state kept by a per-row mmsearch join.
  */
 module;
 
@@ -27,9 +27,10 @@ import :custom_scan_runtime_match_contracts;
 
 export {
     /**
-     * @brief Owns the child plan and buffered alignment state for one per-row join execution.
+     * @brief Holds buffered rows and alignment results for one per-row join execution.
      *
-     * The query-context callback releases C++ state if PostgreSQL ERROR skips normal shutdown.
+     * The query-memory callback destroys this C++ state if a PostgreSQL error
+     * skips the normal executor shutdown.
      */
     struct per_row_join_runtime {
         bioseq::scheduler::dispatch_buffer_runtime buffer{k_bioseq_runtime_buffer_reserve};
@@ -62,7 +63,12 @@ export {
         bool cleanup_callback_registered = false;
     };
 
-    /** @brief Standard-layout PostgreSQL custom-scan state for a per-row join. */
+    /**
+     * @brief Places PostgreSQL's CustomScanState first and keeps C++ state behind a pointer.
+     *
+     * This layout lets PostgreSQL allocate the scan state separately from the
+     * runtime that needs C++ construction and destruction.
+     */
     struct per_row_join_state {
         CustomScanState custom_scan_state;
         void* runtime = nullptr;
