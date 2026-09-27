@@ -1,7 +1,7 @@
 module;
 
-// This private partition is compile/link evidence only. Its target is absent
-// from the runtime registry mask and from hwy::SupportedTargets().
+// This partition checks compilation and linking of target attributes.
+// Its target is excluded from runtime dispatch and SupportedTargets().
 #define HWY_COMPILE_ALL_ATTAINABLE 1
 #define HWY_DISABLED_TARGETS (~(@TARGET_POLICY_MASK@))
 #define HWY_HEADER_ONLY 1
@@ -42,8 +42,8 @@ static_assert(HWY_TARGET == @TARGET_TOKEN@);
 namespace bioseq::highway_gcc_canary::HWY_NAMESPACE {
 namespace hn = hwy::HWY_NAMESPACE;
 
-// Deliberately uncalled: parsing and code generation must accept an operation
-// that distinguishes the attributed target from the runtime baseline target.
+// Compile this target-specific operation to check that its required CPU
+// features are enabled. The runtime test never calls it.
 #if @TARGET_DISTINGUISHING_PROBE_KIND@ == 1
 HWY_ATTR void attribute_target_only_aes(
     const std::uint8_t* input,
@@ -102,8 +102,8 @@ HWY_ATTR auto attribute_free_function(
   return value + std::uint32_t{4};
 }
 
-// Named attributed driver forces code generation for every representative
-// placement emitted by body_with_highway_attributes().
+// Force code generation for the function, member and lambda attribute
+// placements produced by body_with_highway_attributes().
 HWY_ATTR auto highway_attribute_coverage(
     const std::uint32_t input) noexcept -> std::uint32_t {
   attribute_worker worker{input};
