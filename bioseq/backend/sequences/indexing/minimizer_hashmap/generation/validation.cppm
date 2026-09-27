@@ -1,6 +1,6 @@
 /**
  * @file minimizer_hashmap/generation/validation.cppm
- * @brief Validates ordered grouped-SoA rows and publication heads.
+ * @brief Check a generation's row order and checksums before validating its active head.
  */
 export module bioseq.indexing.minimizer_hashmap:generation_validation;
 
@@ -38,10 +38,12 @@ import :generation_publication;
 
 export namespace bioseq::indexing {
 
-/// Streaming complete-generation validator for ordered qualified rows.
+/// Check a complete generation as stored rows are reread in order.
+/// Verify row addresses, sizes and CRCs, extent CRCs, and the final checksum
+/// of payload-row checksums. Payload values are not decoded by this validator.
 class minimizer_generation_row_validator {
   private:
-    /// Restricts construction to metadata-validated generation state.
+    /// Constructor tag available after metadata validation succeeds.
     struct validated_tag {};
 
     encoded_grouped_soa_generation generation_{};
@@ -54,7 +56,7 @@ class minimizer_generation_row_validator {
     bool manifest_seen_ = false;
     bool ready_validated_ = false;
 
-    /// Copy bounded generation metadata after `create()` validates every fixed contract.
+    /// Copy generation metadata after create() checks it.
     explicit minimizer_generation_row_validator(validated_tag,
                                                 const encoded_grouped_soa_generation& generation)
         : generation_(generation) {}
@@ -82,8 +84,8 @@ class minimizer_generation_row_validator {
     }
 
   public:
-    /// Validate every metadata equation and both fixed rows before any caller
-    /// can enter row/subspan arithmetic.
+    /// Check generation metadata, encoded head and manifest rows, and chunk counts
+    /// before accepting the stored row stream.
     [[nodiscard]] static std::expected<minimizer_generation_row_validator,
                                        minimizer_generation_encoding_error>
     create(const encoded_grouped_soa_generation& generation) {
@@ -129,7 +131,9 @@ class minimizer_generation_row_validator {
         return minimizer_generation_row_validator{validated_tag{}, generation};
     }
 
-    /// Consume one qualified payload, directory, or manifest row in order.
+    /// Check the next payload, directory, or manifest row and advance the reader.
+    /// Reject extra rows after the manifest. A failed validation may already
+    /// have changed counters, so discard the validator after an error.
     [[nodiscard]] std::expected<void, minimizer_generation_encoding_error>
     accept(const minimizer_generation_row_view& row) noexcept {
         if (ready_validated_ || manifest_seen_) {
@@ -276,7 +280,8 @@ class minimizer_generation_row_validator {
         return std::unexpected(minimizer_generation_encoding_error::row_count);
     }
 
-    /// Verify terminal row counts and the ordered payload checksum.
+    /// Require every expected row and compare the ordered payload checksum.
+    /// Repeated calls succeed once validation is complete.
     [[nodiscard]] std::expected<void, minimizer_generation_encoding_error> finish_ready() noexcept {
         if (ready_validated_) {
             return {};
@@ -296,8 +301,8 @@ class minimizer_generation_row_validator {
         return {};
     }
 
-    /// Validate the separately published active-head row only after READY was
-    /// completely reread and accepted.
+    /// Compare the active-head row with the expected head after finish_ready()
+    /// has accepted the complete generation.
     [[nodiscard]] std::expected<void, minimizer_generation_encoding_error>
     validate_publication_head(const minimizer_generation_row_view& row) const noexcept {
         if (!ready_validated_) {
