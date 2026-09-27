@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Builds base BioseqScan plans and serialized match-owner descriptors.
+ * @brief Builds BioseqScan plans and records which target supplies each match result.
  */
 module;
 #include <bioseq/pg_compat.h>
@@ -46,7 +46,7 @@ using namespace bioseq::postgres::support;
 
 export {
 
-    /** @brief Checks whether a helper identity is already bound to a target-list position. */
+    /** @brief Checks whether this helper call is already recorded at the output position. */
     [[nodiscard]] bool base_match_helper_site_already_registered(List* sites,
                                                                  FuncExpr* helper,
                                                                  const AttrNumber resno) noexcept {
@@ -71,7 +71,12 @@ export {
         return false;
     }
 
-    /** @brief Collects serialized match-helper bindings from a base-scan target list. */
+    /**
+     * @brief Records match helpers found in the scan's output expressions.
+     *
+     * Each entry names its output position and target argument for later ownership
+     * checks. Raises a PostgreSQL error if a helper has an invalid form or result type.
+     */
     [[nodiscard]] List* collect_base_match_helper_sites(List* targetlist,
                                                         Node* target_recipe,
                                                         const Index target_relid,
@@ -103,9 +108,11 @@ export {
     }
 
     /**
-     * @brief Converts an admitted base CustomPath into its immutable executor plan.
+     * @brief Converts a selected base-scan path into a PostgreSQL executor plan.
      *
-     * The returned CustomScan and private payload are allocated in the current planner context.
+     * Separates alignment work from ordinary filters and saves helper bindings and
+     * algorithm settings. PostgreSQL allocates the CustomScan and its private data
+     * in the current planner memory context.
      */
     Plan* bioseq_column_scan_path_plan_custom_path(PlannerInfo* root,
                                                    RelOptInfo* rel,
@@ -115,11 +122,8 @@ export {
                                                    List* custom_plans) {
         bioseq_log<logging_level::debug>(
             "[bioseq] pg: BioseqColumnScanPath_PlanCustomPath() entered");
-        /*
-         * Must return a CustomScan, not a larger structure containing a
-         * CustomScan as the first field. Otherwise, copyObject() will fail to
-         * copy the additional fields.
-         */
+        /* Use standard CustomScan fields and node lists so copyObject()
+         * preserves all plan data. */
         CustomScan* cscan = makeNode(CustomScan);
 
         cscan->methods = bioseq_column_scan_scan_methods();
@@ -183,21 +187,12 @@ export {
             planner_owned_target_recipe != nullptr &&
             try_cast_pg_node<Var>(planner_owned_target_recipe) == nullptr;
 
-        /* EXPLAIN does not retain a separate projected-column list here. */
+        /* EXPLAIN derives the columns it needs from the finished plan. */
 
         if (bioseq::settings::planner::qual_pushdown::enabled) {
-            /*
-             * Lists of pushed-down clauses. The Vars in custom_exprs referencing
-             * other relations will be changed into exec Params by
-             * create_customscan_plan().
-             *
-             * Like CustomPath->custom_private, keep a list of plain clauses
-             * separate from the list of all clauses by making them sublists of a
-             * 2-element list.
-             *
-             * custom_exprs retains every selected pushdown qualifier. Reader-side
-             * eligibility is decided later without precompiling ScanKeys here.
-             */
+            /* Keep plain and all pushed-down filters in separate expression lists.
+             * PostgreSQL can then replace outer Vars with PARAM_EXEC. The storage reader
+             * decides which of these expressions it can use when it starts the scan. */
             postgres_list<List> private_lists(best_path->custom_private);
             List* plain_clauses =
                 extract_actual_clauses(private_lists.get_first(), false /* no pseudoconstants */);
@@ -224,9 +219,8 @@ export {
             }
         }
 
-        /* Split the exact edit predicate out before ExecInitQual sees it.  Its
-         * placeholder has no value until match_results are drained, whereas every
-         * remaining scan qual is valid in the ordinary pre-alignment stage. */
+        /* Evaluate the edit-distance bound after alignment has produced a
+         * match. Other scan filters can run before alignment. */
         std::optional<strict_edit_predicate> strict_edit_predicate;
         {
             const bioseq_stub_oids& edit_oids = get_cached_stub_oids();
@@ -295,10 +289,9 @@ export {
                             argument != nullptr && argument->varno == scan_relid &&
                             argument->varattno > 0 && argument->varlevelsup == 0 &&
                             bms_is_empty(argument->varnullingrels);
-                        /* Keep a direct scan-local mismatch inside this owner so its
-                         * finalized injector emits the established target-column
-                         * diagnostic.  Wrapped mismatches remain unclaimed and reach
-                         * the scalar fail-closed boundary. */
+                        /* Keep helpers that directly name this scan's columns here so ownership
+                         * validation can report a wrong target column. Unrelated expressions
+                         * remain outside this scan. */
                         if (helper != nullptr && planner_owned_target_recipe != nullptr) {
                             belongs_to_scan =
                                 batch_join_match_helper_names_recipe(helper,
@@ -324,10 +317,8 @@ export {
                         }
                     }
                     if (belongs_to_scan) {
-                        /* Descendant-owner propagation may already have widened this
-                         * private BioseqScan PathTarget with the exact whole helper.
-                         * Retain one authoritative carrier/site instead of appending a
-                         * duplicate from processed_tlist. */
+                        /* An earlier path rewrite may already have added this whole helper.
+                         * Reuse that output column instead of recording the call twice. */
                         bool already_projected = false;
                         for (TargetEntry* existing : postgres_list<TargetEntry>(tlist)) {
                             if (existing != nullptr && equal(existing->expr, n->expr)) {
@@ -397,10 +388,9 @@ export {
                                          descriptor,
                                          sites,
                                          makeInteger(static_cast<int>(owner_rte->relid)));
-            /* The planner-scope descriptor/sites above deliberately retain their
-             * query-local pre-setrefs Vars for ambiguity resolution.  The finalizer
-             * fills these two executor-only fields from post-setrefs custom_exprs and
-             * scan targetlist identities once Plan.plan_node_id is stable. */
+            /* Keep the original query Vars for checking which scan owns each helper.
+             * After setrefs assigns final plan identities, the finalizer fills these
+             * two fields with the expressions used by the executor. */
             owner_tag = lappend(owner_tag, NIL);
             owner_tag = lappend(owner_tag, NIL);
             Assert(list_length(owner_tag) == k_bioseq_base_match_owner_plan_fields);
@@ -417,8 +407,8 @@ export {
                 if (list_length(tag) == 4 &&
                     intVal(list_nth(tag, 0)) == k_bioseq_locator_passthrough_magic &&
                     intVal(list_nth(tag, 1)) == k_bioseq_batch_join_plan_version) {
-                    /* Upper owners may append identity/helper columns after the
-                     * locator placeholder. Its recorded ordinal remains stable. */
+                    /* Find the locator by its saved column number. Later helper columns
+                     * may follow it in the output list. */
                     const int rowno_resno = intVal(list_nth(tag, 3));
                     TargetEntry* rowno_entry =
                         rowno_resno > 0 && rowno_resno <= list_length(cscan->scan.plan.targetlist)
@@ -446,15 +436,10 @@ export {
             }
         }
 
-        /*
-         * Vectorized QUAL execution. Split QUAL list into vectorized list
-         * stored in third position of custom_exprs list and rest of
-         * qual list (which can't be vectorized) in scan.plan.qual.
-         */
-        /* Locator/source scans deliberately run the scalar executor so every row
-         * can be promoted through its exact provider.  Do not remove vectorizable
-         * quals from scan.plan.qual when BeginCustomScan will disable the vector
-         * executor; doing so turns alias-local restrictions into a cross product. */
+        /* Put vectorized filters in the third expression list. Keep the
+         * remaining filters in plan.qual for scalar evaluation. */
+        /* Locator and source scans evaluate filters one row at a time. Keep
+         * their filters in plan.qual, because these scans disable vector execution. */
         if (bioseq::settings::vectorization::enabled && !locator_passthrough_requested &&
             !lazy_source_projection_requested) {
             List* candidate_qual_list = rewrite_vectorized_expression_list(cscan->scan.plan.qual);
@@ -471,22 +456,19 @@ export {
         } else {
             bioseq_log<logging_level::debug>("[bioseq] pg: BioseqColumnScanPath_PlanCustomPath() "
                                              "vectorization disabled, qual not split");
-            /* We still need to create third entry in custom_exprs */
+            /* Preserve the third list position when vectorization is disabled. */
             cscan->custom_exprs = lappend(cscan->custom_exprs, NIL);
         }
-        /* The fourth expression list is executor-only ownership state.  Keeping it
-         * in custom_exprs lets PostgreSQL replace outer Vars with PARAM_EXEC while
-         * ensuring ExecInitQual never sees the rendezvous function. */
+        /* Store owned mmsearch calls in the fourth expression list so PostgreSQL
+         * can rewrite outer references. Keeping them out of plan.qual prevents
+         * ExecInitQual from preparing the SQL stub for execution. */
         cscan->custom_exprs =
             lappend(cscan->custom_exprs,
                     owned_mmsearch_exprs != NIL ? copyObject(owned_mmsearch_exprs) : NIL);
 
-        /*
-         * Freeze every result-affecting BioseqScan setting only after applying
-         * the primary mmsearch aligner_options override and the evaluated-target
-         * index rule.  Executor, EXPLAIN, and cache-provider consumers decode this
-         * payload; none of them reconstruct these values from live semantic GUCs.
-         */
+        /* Save the scan's algorithm and index settings after applying SQL options
+         * and the transformed-target rule. Execution, EXPLAIN and cached-plan checks
+         * read this saved payload. */
         frozen_scan_semantics frozen_semantics{};
         frozen_semantics.params = build_params_from_gucs();
         bioseq::indexing::index_read_requirement planned_requirement =
@@ -521,7 +503,7 @@ export {
         return reinterpret_cast<Plan*>(cscan);
     }
 
-    /** @brief Orders lineage Vars by stable planner identity fields. */
+    /** @brief Gives source columns a repeatable order for match-owner records. */
     [[nodiscard]] int canonical_match_lineage_var_compare(const ListCell* left_cell,
                                                           const ListCell* right_cell) noexcept {
         const Var* left = reinterpret_cast<const Var*>(lfirst(left_cell));
@@ -543,7 +525,13 @@ export {
         return 0;
     }
 
-    /** @brief Builds a deduplicated, stable-order sequence-Var lineage for a target recipe. */
+    /**
+     * @brief Collects the distinct base sequence columns used by a target expression.
+     *
+     * Keeps local, positive-numbered Vars without outer-join nulling, sorts them
+     * and returns copies. These columns let ownership checks match a helper to
+     * the source of a transformed target.
+     */
     [[nodiscard]] List* canonical_match_base_lineage(Node* target_recipe,
                                                      const bioseq_stub_oids& oids) {
         if (target_recipe == nullptr)
@@ -579,7 +567,7 @@ export {
         return result;
     }
 
-    /** @brief Serializes a base relation's target recipe and canonical lineage for finalization. */
+    /** @brief Saves the target expression and its source columns for later match-owner checks. */
     [[nodiscard]] List* make_match_owner_descriptor(Node* target_recipe,
                                                     const Index base_relid,
                                                     const bioseq_stub_oids& oids) {
