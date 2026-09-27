@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Aggregates exact join-owner lineage, neutralization, and transformed-path verification.
+ * @brief Exports the checks that assign mmsearch and its match helpers to join executors.
  */
 export module bioseq.postgres.table:custom_scan_join_ownership;
 

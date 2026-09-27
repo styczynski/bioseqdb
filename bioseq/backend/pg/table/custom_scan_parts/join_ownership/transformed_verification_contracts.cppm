@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Declares exact transformed-owner retention without importing path traversal.
+ * @brief Declares checks for keeping or rebuilding joins with an mmsearch owner.
  */
 module;
 #include <bioseq/pg_compat.h>
@@ -9,7 +9,7 @@ export module bioseq.postgres.table:custom_scan_join_ownership_transformed_verif
 
 import std;
 
-/** @brief Captures path, ownership, and ABI diagnostics for the retainer decision. */
+/** @brief Path counts and failure details from checking or rebuilding mmsearch joins. */
 export struct exact_parameterized_bmo_retainer_audit {
     std::size_t candidates = 0u;
     std::size_t nest_paths = 0u;
@@ -94,8 +94,8 @@ export struct exact_parameterized_bmo_retainer_audit {
 };
 
 /**
- * @brief Retain or reconstruct exact join paths for a custom-owned mmsearch restriction.
- * @return True when at least one safe path is installed for the current join pair.
+ * @brief Keeps valid join paths or builds one with a custom scan owning mmsearch.
+ * @return True after installing at least one checked path in the join relation.
  */
 export [[nodiscard]] bool retain_join_paths_with_custom_restriction_owner(
     PlannerInfo* root,
