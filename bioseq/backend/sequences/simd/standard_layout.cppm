@@ -1,6 +1,6 @@
 /**
  * @file standard_layout.cppm
- * @brief Standard-layout conversion, rewidth, and comparison operations.
+ * @brief Converts and compares standard-layout compact sequences.
  */
 module;
 
@@ -35,23 +35,15 @@ HWY_BEFORE_NAMESPACE();
 
 namespace bioseq::simd::HWY_NAMESPACE {
 
-// ============================================================================
-// Lexicographic scalar comparator. Both sequences must share the same
-// alphabet and storage-unit type.
-//
-// Constrained against `supports_compact_sequence_bitcast_view<p_view>` so the
-// caller can pass either a raw `compact_sequence_range<p_range>` or a
-// `bit_casted_view<base, output>`.
-// ============================================================================
+// Comparing packed views with matching alphabets and storage-unit types.
 
-/// Compare two compact-sequence views lexicographically. Walks packed
-/// ranks unit-by-unit and breaks ties on `bp_size`. Both views must
-/// share alphabet and storage-unit type.
-/// @tparam p_left_view Left view satisfying `supports_compact_sequence_bitcast_view`.
-/// @tparam p_right_view Right view with matching alphabet and storage unit.
-/// @param lhs Left sequence view.
-/// @param rhs Right sequence view.
-/// @return Strong ordering of logical symbol sequences.
+/**
+ * Compares two packed views in alphabet-rank order.
+ *
+ * Skips equal packed words, then checks ranks in the first unequal word.
+ * Equal prefixes are ordered by sequence length. Both views must use the same
+ * alphabet, storage type, and packing layout. Padding does not affect the result.
+ */
 template<class p_left_view, class p_right_view>
 requires supports_compact_sequence_bitcast_view<p_left_view>
       && supports_compact_sequence_bitcast_view<p_right_view>
@@ -75,7 +67,7 @@ requires supports_compact_sequence_bitcast_view<p_left_view>
 	const size_t rhs_size = rhs.bp_size();
 	const size_t common_size = std::min(lhs_size, rhs_size);
 
-	// Short-circuit on either-empty inputs and reduce the result to length.
+	// An empty common prefix leaves only the lengths to compare.
 	if (common_size == 0) return lhs_size <=> rhs_size;
 
 	const storage_unit_type* lhs_data = lhs.read_cptr(lhs.cbegin());
@@ -124,23 +116,19 @@ requires supports_compact_sequence_bitcast_view<p_left_view>
 	return lhs_size <=> rhs_size;
 }
 
-// =====================================================================
-// Standard-layout compact-sequence adapters live beside the SIMD encoder and
-// decoder so their function templates can instantiate the target-specific
-// primitives. Callers use `bioseq::simd::active_target` without naming an
-// architecture namespace.
-// =====================================================================
+// These adapters share the codec target namespace so their templates can
+// call its SIMD helpers. active_target names the selected namespace.
 
 /**
- * @brief Encode text directly into an allocated standard-layout sequence.
- * @tparam p_sequence_header Destination header type.
- * @tparam p_alphabet Alphabet used to interpret input symbols.
- * @tparam p_allocator Byte allocator returning `p_sequence_header*`.
- * @param target_storage_byte_width Packed storage-unit width in bytes.
+ * @brief Encodes text and allocates a standard-layout sequence containing it.
+ *
+ * Uses a temporary packed vector, then copies its words after the new header.
+ * The requested storage width must be enabled for the header type.
+ * @param target_storage_byte_width Destination word width in bytes.
  * @param length Number of input characters.
- * @param input Input characters.
- * @param allocator Destination allocator.
- * @return Allocated sequence, or `nullptr` when allocation fails.
+ * @param input Character buffer.
+ * @param allocator Allocates the header and packed payload from a byte count.
+ * @return New sequence, or nullptr if the destination allocator returns null.
  */
 template<
     class p_sequence_header,
@@ -172,9 +160,8 @@ inline p_sequence_header* stdc_convert_from_cstr(
     p_sequence_header::supported_storage_unit_byte_widths_type::dispatch(
         target_storage_byte_width,
         [&result, &length, &input, &allocator]<std::size_t p_storage_byte_width>() {
-            // Fixed-width standard types give Highway an accepted lane type
-            // on every supported LP64 target. Some least-width integer aliases
-            // use a different C++ spelling despite an identical bit width.
+            // Use fixed-width integer types accepted by Highway. A least-width alias
+            // can name a different C++ type even when it has the same width.
             using storage_unit_type =
                 std::conditional_t<p_storage_byte_width == 8, std::uint64_t,
                 std::conditional_t<p_storage_byte_width == 4, std::uint32_t,
@@ -228,14 +215,14 @@ inline p_sequence_header* stdc_convert_from_cstr(
 }
 
 /**
- * @brief Recode a standard-layout sequence into another supported alphabet.
- * @tparam p_sequence_header Source and destination header type.
- * @tparam p_target_alphabet Destination alphabet.
- * @tparam p_allocator Byte allocator returning `p_sequence_header*`.
- * @param source Sequence to decode and recode.
- * @param target_byte_width Destination packed-unit width in bytes.
- * @param allocator Destination allocator.
- * @return Newly allocated recoded sequence, or `nullptr` on allocation failure.
+ * @brief Converts a standard-layout sequence to another supported alphabet.
+ *
+ * Decodes to text, then encodes that text with p_target_alphabet. Characters
+ * unrecognized by the target use its default rank.
+ * @param source Input sequence.
+ * @param target_byte_width Destination word width in bytes.
+ * @param allocator Allocates the resulting header and payload.
+ * @return New sequence, or nullptr if the destination allocator returns null.
  */
 template<
     class p_sequence_header,
@@ -268,14 +255,14 @@ inline p_sequence_header* stdc_recode_to(
 }
 
 /**
- * @brief Change packed storage width while retaining the logical alphabet.
- * @tparam p_sequence_header Source and destination header type.
- * @tparam p_allocator Byte allocator returning `p_sequence_header*`.
- * @param source Sequence to recast.
- * @param target Destination alphabet code and storage width.
- * @param allocator Destination allocator.
- * @return Newly allocated sequence, or `nullptr` for an alphabet mismatch or
- * allocation failure.
+ * @brief Changes packed word width while keeping the alphabet.
+ *
+ * Copies bytes directly when letters pack identically across widths. Other
+ * alphabets are decoded and encoded again at the new width.
+ * @param source Input sequence.
+ * @param target Required alphabet code and new word width.
+ * @param allocator Allocates the resulting header and payload.
+ * @return New sequence, or nullptr for an alphabet mismatch or null allocation.
  */
 template<class p_sequence_header, class p_allocator>
 requires (
@@ -288,19 +275,15 @@ inline p_sequence_header* stdc_rewidth_to_type_params(
     compact_sequence_stdc_type_params target,
     p_allocator&& allocator)
 {
-    // Width coalescing never changes alphabets. Keep this local guard even
-    // though SQL callers validate bound alphabets before entering the helper.
+    // Width conversion requires the source alphabet, including for callers
+    // outside SQL that have not checked the requested type.
     if (target.alphabet_code != source.alphabet_code) {
         return nullptr;
     }
 
-    // Same alphabet, width change. recast_storage_width copies the packed
-    // payload with a raw memcpy, which preserves the sequence ONLY when the
-    // alphabet's letters pack identically across storage widths — i.e. each
-    // byte holds a whole number of letters (8 % letter_bit_width == 0). dna4
-    // (2 bits/letter) qualifies; dna5 (3 bits/letter) does NOT — its letters
-    // straddle byte boundaries differently at each width. For non-byte-aligned
-    // alphabets use an alphabet-preserving ASCII round-trip below.
+    // A byte copy preserves ranks when the letter width divides eight, as
+    // dna4 does. dna5 leaves different padding at different word widths, so
+    // changing its width requires decoding and packing the letters again.
     bool byte_aligned = false;
     p_sequence_header::supported_alphabets_type::dispatch_alphabet_by_code(
         source.alphabet_code,
@@ -331,14 +314,11 @@ inline p_sequence_header* stdc_rewidth_to_type_params(
 }
 
 /**
- * @brief Compare two standard-layout compact sequences lexicographically.
+ * @brief Compares standard-layout sequences in alphabet-rank order.
  *
- * Both values must use the same alphabet. Their packed storage widths may
- * differ because lazy views normalize the comparison.
- * @tparam p_sequence_header Shared standard-layout header type.
- * @param lhs Left sequence.
- * @param rhs Right sequence.
- * @return Strong ordering of logical symbol sequences.
+ * Both sequences must use the same alphabet. Lazy views read each packed
+ * layout, so the storage widths may differ.
+ * @return Less, equal, or greater for the logical sequences.
  */
 template<class p_sequence_header>
 requires (is_compact_sequence_stdc<p_sequence_header>)
@@ -347,10 +327,8 @@ inline std::strong_ordering stdc_compare(
     const p_sequence_header& lhs,
     const p_sequence_header& rhs)
 {
-    // Cross-alphabet comparison is outside this function's contract. The
-    // PostgreSQL build reports the violation at runtime; standalone builds
-    // retain a debug assertion because they do not provide PostgreSQL logging
-    // levels.
+    // PostgreSQL reports an alphabet mismatch as an error. Standalone builds
+    // check this caller requirement with a debug assertion.
 #ifndef NO_POSTGRES
     if (lhs.alphabet_code != rhs.alphabet_code) {
         bioseq_log<logging_level::error, logging_target::postgres>(
@@ -400,17 +378,16 @@ inline std::strong_ordering stdc_compare(
 HWY_AFTER_NAMESPACE();
 
 namespace bioseq::simd {
-/// Highway target namespace selected at module build time. Forwards to
-/// the architecture-specific `HWY_NAMESPACE` instantiated in this TU.
+/// Highway target namespace chosen when this module is built.
 namespace active_target = ::bioseq::simd::HWY_NAMESPACE;
 
-/// Target-neutral entry point for `active_target::stdc_rewidth_to_type_params`.
-/// @tparam p_sequence_header Standard-layout header type.
-/// @tparam p_allocator Byte allocator returning `p_sequence_header*`.
-/// @param source Sequence to recast or round-trip.
-/// @param target Destination alphabet code and storage width.
-/// @param allocator Destination allocator.
-/// @return Newly allocated sequence, or `nullptr` on mismatch or allocation failure.
+/**
+ * Changes packed word width through the selected Highway target.
+ *
+ * The alphabet code must match the source. The allocator receives the required
+ * byte count and returns the new header. A mismatch or null allocation returns
+ * nullptr. See active_target::stdc_rewidth_to_type_params for packing rules.
+ */
 template<class p_sequence_header, class p_allocator>
 requires (
     is_compact_sequence_stdc<p_sequence_header>
