@@ -1,6 +1,6 @@
 /**
  * @file routing_stats_test.cpp
- * @brief Exercises block-aligner routing and execution statistics.
+ * @brief Checks which block alignment paths run and the counters they report.
  */
 #include <catch2/catch_test_macros.hpp>
 
@@ -54,7 +54,7 @@ TEST_CASE("Block minimap projection ignores dormant KSW fields and stats are exa
     dormant_changed.end_bonus = 9'999;
     dormant_changed.gap_open2 = 111;
     dormant_changed.gap_ext2 = 17;
-    dormant_changed.zdrop = 23'456;  // dormant for native Global gap fill
+    dormant_changed.zdrop = 23'456;  // Global block alignment ignores zdrop.
 
     block_aligner_execution_stats first_stats;
     const ksw_alignment_result first = block_aligner_align_pair<false>(
