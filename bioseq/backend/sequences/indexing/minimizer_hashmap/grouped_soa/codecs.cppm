@@ -1,6 +1,6 @@
 /**
  * @file minimizer_hashmap/grouped_soa/codecs.cppm
- * @brief Encodes and decodes grouped-SoA metadata and directories.
+ * @brief Reads and writes minimizer index metadata and bucket directories.
  */
 module;
 
@@ -38,7 +38,7 @@ import :grouped_soa_contracts;
 
 namespace bioseq::indexing::minimizer_generation_wire_detail {
 
-/// Write an unsigned scalar to a fixed little-endian byte range.
+/// Write an unsigned integer in little-endian order. The caller provides enough bytes.
 template <class p_uint>
     requires(std::is_unsigned_v<p_uint>)
 constexpr void write_le(std::span<std::byte> output, std::size_t offset, p_uint value) noexcept {
@@ -48,7 +48,7 @@ constexpr void write_le(std::span<std::byte> output, std::size_t offset, p_uint 
     }
 }
 
-/// Read an unsigned scalar from a fixed little-endian byte range.
+/// Read an unsigned integer in little-endian order. The caller provides enough bytes.
 template <class p_uint>
     requires(std::is_unsigned_v<p_uint>)
 [[nodiscard]] constexpr p_uint read_le(std::span<const std::byte> input,
@@ -61,7 +61,7 @@ template <class p_uint>
     return value;
 }
 
-/// Write a width-tagged grouped-SoA scalar when the range and value fit.
+/// Write a little-endian integer at the requested width, or return false if it will not fit.
 [[nodiscard]] constexpr bool write_shape_scalar(std::span<std::byte> output,
                                                 std::size_t offset,
                                                 minimizer_scalar_width width,
@@ -78,7 +78,7 @@ template <class p_uint>
     return true;
 }
 
-/// Read a width-tagged grouped-SoA scalar when the range is complete.
+/// Read a little-endian integer at the requested width, or return nullopt for an invalid range.
 [[nodiscard]] constexpr std::optional<std::uint64_t> read_shape_scalar(
     std::span<const std::byte> input, std::size_t offset, minimizer_scalar_width width) noexcept {
     const std::size_t bytes = static_cast<std::uint8_t>(width);
@@ -105,8 +105,8 @@ all_zero(std::span<const std::byte> input, std::size_t begin, std::size_t end) n
     return true;
 }
 
-/// Validate invariants available from a fixed manifest without referenced rows.
-/// Cross-object counts, checksums, and identities remain publication checks.
+/// Check the manifest's algorithm, packed layout and segment geometry.
+/// Publication separately checks these values against the stored rows.
 [[nodiscard]] constexpr std::optional<minimizer_generation_encoding_error>
 validate_manifest_standalone(const minimizer_generation_manifest& manifest) noexcept {
     const minimizer_producer_identity producer_backend{
@@ -173,7 +173,7 @@ validate_manifest_standalone(const minimizer_generation_manifest& manifest) noex
 
 export namespace bioseq::indexing {
 
-/// Encode a validated generation head to its exact 64-byte little-endian image.
+/// Check the layout and generation ID, then write the 64-byte little-endian head.
 [[nodiscard]] constexpr std::expected<
     std::array<std::byte, minimizer_generation_head::encoded_bytes>,
     minimizer_generation_encoding_error>
@@ -199,7 +199,7 @@ encode_minimizer_generation_head(const minimizer_generation_head& head) noexcept
     return output;
 }
 
-/// Decode one exact 64-byte generation head, rejecting malformed or reserved data.
+/// Read a 64-byte generation head and reject invalid fields or nonzero reserved bytes.
 [[nodiscard]] constexpr std::expected<minimizer_generation_head,
                                       minimizer_generation_encoding_error>
 decode_minimizer_generation_head(std::span<const std::byte> input) noexcept {
@@ -234,8 +234,8 @@ decode_minimizer_generation_head(std::span<const std::byte> input) noexcept {
     return head;
 }
 
-/// Encode a standalone-valid grouped-SoA manifest as exactly 176 bytes,
-/// including the revision-2 48-byte profile and READY-identity extension.
+/// Check the manifest and write its 176-byte record, including the minimizer profile
+/// and the algorithm identity needed to reopen the saved index.
 [[nodiscard]] constexpr std::expected<encoded_minimizer_manifest,
                                       minimizer_generation_encoding_error>
 encode_minimizer_generation_manifest_record(
@@ -313,7 +313,7 @@ encode_minimizer_generation_manifest_record(
     return output;
 }
 
-/// Encode the grouped-SoA manifest to its exact fixed-size byte array.
+/// Write a grouped-SoA manifest into a fixed-size byte array.
 [[nodiscard]] constexpr std::expected<
     std::array<std::byte, minimizer_generation_manifest::encoded_bytes>,
     minimizer_generation_encoding_error>
@@ -329,7 +329,7 @@ encode_minimizer_generation_manifest(const minimizer_generation_manifest& manife
     return encoded->storage;
 }
 
-/// Decode the exact 176-byte grouped-SoA manifest.
+/// Read and validate a 176-byte grouped-SoA manifest.
 [[nodiscard]] constexpr std::expected<minimizer_generation_manifest,
                                       minimizer_generation_encoding_error>
 decode_minimizer_generation_manifest(std::span<const std::byte> input) noexcept {
@@ -434,31 +434,31 @@ decode_minimizer_generation_manifest(std::span<const std::byte> input) noexcept 
     return manifest;
 }
 
-/// Largest supported tagged generation-head encoding.
+/// Maximum byte size of a supported generation head.
 inline constexpr std::size_t k_max_generation_head_bytes = k_hash_major_minimizer_head_bytes;
-/// Largest supported tagged generation-manifest encoding.
+/// Maximum byte size of a supported generation manifest.
 inline constexpr std::size_t k_max_manifest_bytes = k_hash_major_minimizer_manifest_bytes;
 static_assert(minimizer_generation_head::encoded_bytes == 64u);
 static_assert(minimizer_generation_manifest::encoded_bytes == 176u);
 static_assert(k_max_generation_head_bytes == 224u);
 static_assert(k_max_manifest_bytes == 336u);
 
-/// Identifies the rejected branch of exact-length tagged metadata decoding.
+/// Reports an unsupported record size or a validation error in the selected format.
 enum class tagged_minimizer_generation_encoding_error : std::uint8_t {
     encoded_size,
     grouped_soa,
     hash_major,
 };
 
-/// Any supported persisted minimizer generation head.
+/// A saved generation head in grouped-SoA or hash-major format.
 using tagged_minimizer_generation_head =
     std::variant<minimizer_generation_head, hash_major_minimizer_head>;
-/// Any supported persisted minimizer generation manifest.
+/// A saved generation manifest in grouped-SoA or hash-major format.
 using tagged_minimizer_generation_manifest =
     std::variant<minimizer_generation_manifest, hash_major_minimizer_manifest>;
 
-/** Exact-length grouped-SoA/hash-major dispatch. Only the declared storage
- * layouts participate in this tagged publication branch. */
+/** Decode a generation head in grouped-SoA or hash-major format.
+ * Its byte length selects the decoder, which then checks the record. */
 [[nodiscard]] inline std::expected<tagged_minimizer_generation_head,
                                    tagged_minimizer_generation_encoding_error>
 decode_tagged_minimizer_generation_head(std::span<const std::byte> input) noexcept {
@@ -479,7 +479,7 @@ decode_tagged_minimizer_generation_head(std::span<const std::byte> input) noexce
     return std::unexpected(tagged_minimizer_generation_encoding_error::encoded_size);
 }
 
-/// Decode a generation manifest by exact supported byte length.
+/// Decode a grouped-SoA or hash-major manifest, using its byte length to select the format.
 [[nodiscard]] inline std::expected<tagged_minimizer_generation_manifest,
                                    tagged_minimizer_generation_encoding_error>
 decode_tagged_minimizer_generation_manifest(std::span<const std::byte> input) noexcept {
@@ -500,11 +500,9 @@ decode_tagged_minimizer_generation_manifest(std::span<const std::byte> input) no
     return std::unexpected(tagged_minimizer_generation_encoding_error::encoded_size);
 }
 
-/// Translate the fixed runtime producer identity into the registered
-/// hash-major storage profile. Keeping this bridge beside the
-/// grouped-SoA producer/scheme registry prevents PostgreSQL publication and
-/// reopen code from independently reconstructing (or silently defaulting)
-/// persisted biological semantics.
+/// Derive the hash-major storage profile from the backend and algorithm identity.
+/// Index builders and readers use this same mapping so they agree on the hash scheme
+/// and on how positions are stored.
 [[nodiscard]] constexpr std::expected<hash_major_minimizer_storage_profile,
                                       hash_major_minimizer_error>
 hash_major_minimizer_profile_for_backend(
@@ -544,7 +542,7 @@ hash_major_minimizer_profile_for_backend(
     return profile;
 }
 
-/// Validate invariants intrinsic to one decoded directory entry.
+/// Check one directory entry against the profile, including hash bounds and stream sizes.
 [[nodiscard]] constexpr std::optional<minimizer_generation_encoding_error>
 validate_minimizer_bucket_dir_entry(const grouped_soa_bucket_directory_entry& entry,
                                     const grouped_soa_minimizer_profile& profile) noexcept {
@@ -598,7 +596,7 @@ validate_minimizer_bucket_dir_entry(const grouped_soa_bucket_directory_entry& en
     return std::nullopt;
 }
 
-/// Encode one logical directory entry to the exact 128-byte little-endian ABI.
+/// Validate a directory entry and write its 128-byte little-endian record.
 [[nodiscard]] constexpr std::expected<encoded_grouped_soa_bucket_directory_entry,
                                       minimizer_generation_encoding_error>
 encode_minimizer_bucket_dir_entry_record(const grouped_soa_bucket_directory_entry& entry,
@@ -633,11 +631,11 @@ encode_minimizer_bucket_dir_entry_record(const grouped_soa_bucket_directory_entr
     write_le<std::uint8_t>(bytes, 100, static_cast<std::uint8_t>(profile.control_layout));
     write_le<std::uint8_t>(bytes, 101, static_cast<std::uint8_t>(profile.count_semantics));
     write_le<std::uint8_t>(bytes, 102, static_cast<std::uint8_t>(profile.position_semantics));
-    write_le<std::uint8_t>(bytes, 103, 1u); // terminal-prefix present
+    write_le<std::uint8_t>(bytes, 103, 1u); // The start array includes its final end offset.
     return output;
 }
 
-/// Encode one grouped-SoA directory entry to its exact fixed-size byte array.
+/// Write a grouped-SoA directory entry into a fixed-size byte array.
 [[nodiscard]] constexpr std::expected<
     std::array<std::byte, grouped_soa_bucket_directory_entry::encoded_bytes>,
     minimizer_generation_encoding_error>
@@ -654,7 +652,7 @@ encode_grouped_soa_bucket_directory_entry(const grouped_soa_bucket_directory_ent
     return encoded->storage;
 }
 
-/// Decode and intrinsically validate one exact 128-byte directory entry.
+/// Read a 128-byte directory entry and check it against the supplied profile.
 [[nodiscard]] constexpr std::expected<grouped_soa_bucket_directory_entry,
                                       minimizer_generation_encoding_error>
 decode_minimizer_bucket_dir_entry(std::span<const std::byte> input,
@@ -702,7 +700,7 @@ decode_minimizer_bucket_dir_entry(std::span<const std::byte> input,
     return entry;
 }
 
-/// Validate stable ordinal assignment and sorted, non-overlapping hash ranges.
+/// Check directory numbering and order. Within each segment, hash ranges must not overlap.
 [[nodiscard]] inline std::optional<minimizer_generation_encoding_error>
 validate_minimizer_bucket_directory_entries(
     std::span<const grouped_soa_bucket_directory_entry> entries,
@@ -731,7 +729,7 @@ validate_minimizer_bucket_directory_entries(
     return std::nullopt;
 }
 
-/// Encode the authoritative header-free sequence of fixed directory entries.
+/// Write the checked directory entries consecutively, without a header.
 [[nodiscard]] inline std::expected<std::vector<std::byte>, minimizer_generation_encoding_error>
 encode_minimizer_bucket_directory(std::span<const grouped_soa_bucket_directory_entry> entries,
                                   const grouped_soa_minimizer_profile& profile) {
@@ -755,12 +753,12 @@ encode_minimizer_bucket_directory(std::span<const grouped_soa_bucket_directory_e
     return output;
 }
 
-/// Owning decoded view of the authoritative fixed directory bytes.
+/// Owns a validated directory, keeping both its encoded bytes and decoded entries.
 class grouped_soa_directory_view {
   public:
     grouped_soa_directory_view() = default;
 
-    /// Copy and validate a complete header-free encoded directory.
+    /// Copy and decode the complete directory, rejecting invalid entries or ordering.
     [[nodiscard]] static std::expected<grouped_soa_directory_view,
                                        minimizer_generation_encoding_error>
     decode(std::span<const std::byte> bytes, const grouped_soa_minimizer_profile& profile) {
@@ -791,11 +789,9 @@ class grouped_soa_directory_view {
         return view;
     }
 
-    /// Decode under a caller-held logical reservation. Both vectors reserve
-    /// first, then their actual capacities are reconciled before any persisted
-    /// byte or decoded entry is written. The caller's permit may include other
-    /// simultaneously-live allocations. Only the directory capacity delta is
-    /// added here.
+    /// Decode the directory using the caller's memory permit.
+    /// Reserve both vectors and adjust the permit to their allocated capacities before
+    /// filling them. Any memory already reserved for other objects stays accounted for.
     [[nodiscard]] static std::expected<grouped_soa_directory_view,
                                        minimizer_generation_encoding_error>
     decode_admitted(std::span<const std::byte> bytes,
@@ -865,23 +861,23 @@ class grouped_soa_directory_view {
         return view;
     }
 
-    /// Return the immutable encoded bytes suitable for direct GPU upload.
+    /// Borrow the encoded directory bytes for upload to the GPU.
     [[nodiscard]] std::span<const std::byte> encoded_bytes() const noexcept {
         return encoded_;
     }
 
-    /// Return decoded entries in their stable directory-ordinal order.
+    /// Borrow the decoded entries in directory order.
     [[nodiscard]] std::span<const grouped_soa_bucket_directory_entry> entries() const noexcept {
         return entries_;
     }
 
-    /// Return the canonical profile used to qualify every decoded entry.
+    /// Return the profile used to validate this directory.
     [[nodiscard]] const grouped_soa_minimizer_profile& profile() const noexcept {
         return profile_;
     }
 
-    /// Heap bytes owned by this view. Readers use capacities, rather than
-    /// logical sizes, when retaining a memory-admission permit.
+    /// Return the allocated capacity of both directory vectors in bytes.
+    /// Readers reserve this amount while they keep the directory in memory.
     [[nodiscard]] std::uint64_t owned_capacity_bytes() const noexcept {
         return bioseq::common::saturating_add(
             static_cast<std::uint64_t>(encoded_.capacity()),
@@ -889,13 +885,14 @@ class grouped_soa_directory_view {
                                            sizeof(grouped_soa_bucket_directory_entry)));
     }
 
-    /// Resolve one stable directory ordinal.
+    /// Return the entry at this directory index, or nullptr if it is out of range.
     [[nodiscard]] const grouped_soa_bucket_directory_entry*
     entry_by_ordinal(std::uint32_t ordinal) const noexcept {
         return ordinal < entries_.size() ? &entries_[ordinal] : nullptr;
     }
 
-    /// Find the unique hash partition in one fixed persisted position core.
+    /// Find the bucket whose hash range contains the hash in the requested segment.
+    /// Return nullptr if no bucket covers it.
     [[nodiscard]] const grouped_soa_bucket_directory_entry*
     find(std::int32_t position_segment, std::uint64_t hash) const noexcept {
         std::size_t lo = 0;
