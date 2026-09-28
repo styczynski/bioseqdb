@@ -673,7 +673,7 @@ block.}
   \node[anchor=west] at (12.05,4.38)
     {$g=k+w-2$ bases of context};
   \node[anchor=west,gray!75] at (12.05,3.82)
-    {remaining chunks follow the same rule};
+    {I didn't illustrate remaining chunks here};
   \draw[->] (3.55,5.70) -- (3.55,5.16);
   \draw[->] (7.55,5.70) -- (7.55,4.27);
 
@@ -686,7 +686,7 @@ block.}
   \node[stage] (absolute) at (14.45,1.55)
     {absolute positions\\$p_{c,t}+o_c$};
   \node[stage] (collect) at (19.05,1.55)
-    {collected output\\$p_0,p_1,p_2,\ldots$\\deduplicate identity};
+    {collected output\\$p_0,p_1,p_2,\ldots$\\deduplicate};
   \draw[->,thick] (lanes) -- (hash);
   \draw[->,thick] (hash) -- (minimum);
   \draw[->,thick] (minimum) -- (absolute);
@@ -1041,16 +1041,10 @@ The idea for one group is as follows:
   \node[align=center,text width=4.8cm,text=rewriteBlue!90!black,
         font=\small] at (2.80,.72)
     {$8$ window minima in two groups $G_0$ and $G_1$};
-  \node[align=center,text width=2.8cm,text=rewriteOrange!95!black,
-        font=\small] at (7.20,.72)
-    {$2w$ reductions};
-  \node[align=center,text width=4.0cm,text=rewriteGreen!75!black,
-        font=\small] at (11.80,.72)
-    {hash ties are resolved separately};
   
   \end{tikzpicture}
-  \caption{Working sets and execution of the chronological adjacent-window
-  kernel.  One group combines previous $w-1$ candidates with $L$ new
+  \caption{I illustrated here working sets and execution of the chronological adjacent-window algorithm.
+  One group combines previous $w-1$ candidates with $L$ new
   candidates, then loads $w$ shifted vectors, and reduces them componentwise to the
   rightmost minima of $L$ adjacent windows. Orange cells represent selected minimums (candidates for potential minimizer emit).
   A solid orange cell is the rightmost equal minimum selected by the source's $\leq$ comparison and a dashed cell is an earlier equal

@@ -9,11 +9,11 @@ In the last 15 years, there has been seen a massive development of sequencing te
  
 \noindent Although those platforms vary in detail, the general idea behind them is as follows:
 \begin{enumerate}
-\item DNA is fragmented through physical and chemical methods. Adapters are appended to the ends of the fragments to form what is called a sequencing library.
-\item Fragments of unwanted size or self-ligated adapters are removed from the library.
-\item The library is immobilized on a chemical bead so that it can be steadily observed.
-\item Amplification is performed, e.g. through PCR emulsion
-\item A combination of optical devices and fluorophores is used to make reads.
+\item DNA is fragmented through some specific physical and chemical methods, then adapter sequences are appended to the ends of the fragments.
+\item Fragments of unwanted size are removed
+\item The entire set of fragments is physically fixed on chemical bead.
+\item Amplification, where we duplicate fragments, is performed for example through PCR emulsion
+\item A combination of optical devices and fluorophores (light-sensitive chemicals) is used to make reads.
 \end{enumerate}
 
 With new advancements in sequencing technologies, the cost of sequencing a genome has been decreasing significantly to the point where most popular open databases store more than 10s of petabytes of data.
@@ -67,10 +67,7 @@ A protein sequence is written over the twenty common amino-acid symbols. It's al
     Twenty common amino-acid symbols \\
     \bottomrule
   \end{tabular}
-  \caption{Biological alphabets and the distinctions that a sequence-processing
-    system must not erase. The table describes biological data in general. It
-    does not assert that every alphabet or ambiguity convention is exposed by
-    every BioSeqDB SQL path.}
+  \caption{Biological alphabets}
   \label{tab:biological-alphabets}
 \end{table}
 
