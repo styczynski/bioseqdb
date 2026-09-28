@@ -9,20 +9,25 @@ representations and optimizations presented as my contributions in the
 preceding chapters. Moving from those prototypes to a PostgreSQL extension
 also required substantial integration, testing and performance work.
 
-The entire project was authored only by me:
+BioseqDB code was designed and implemented by me:
 \begin{itemize}
   \item Created ports of existing algorithms based on their high-level design into portable GPU kernels and SIMD kernels including my own custom optimisations (all the algorithms are custom implementations authored by me)
   \item Designed and implemented C++ interfaces, Postgres interfaces
   \item Ported Citus/Hydra columnar storage to new PostgreSQL versions and adapted it to my custom needs
 \end{itemize}
 
-With contributions from various sources, like external libraries, Stack Overflow resources, github gists are only present in the only non-core areas that helped me focus on the important problems:
+With contributions from various sources, like external libraries, Stack Overflow resources, github gists are only present in the only non-core areas that helped me focus on the important problems. The following are not a part of this thesis:
 \begin{itemize}
   \item Development tools including source generator that helped me to generate SQL boilerplate
   \item Benchmarking utilities to measure performance
-  \item Scripts and AI-based tools to perform automatic refactor of my files that included only: moving functions to different files, renaming functions, variables and files and making sure that code follows clang tidy formatter
+  \item Edits done by scripts and AI-based automated tools to perform automatic refactor of my files that included only: moving functions to different files, renaming functions, variables and files and making sure that code follows clang tidy formatter
 \end{itemize}
 
 \section{Funding}
 
 The work was self-funded and total spending was approximately $2000\$$ for AWS/Vast.ai infrastructure and hardware rentals.
+I decided to resign from my personal job as higher level software engineer to focus entirely on this project.
+
+\section{Support}
+
+I would additionally like to thank entire Postgres dev team especially all Slack chanells members for their support and helpfulness.

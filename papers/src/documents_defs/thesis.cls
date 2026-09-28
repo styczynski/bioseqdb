@@ -61,6 +61,15 @@
 
 \newcommand{\autorZAlbumem}[2]{\begin{minipage}{0.45\textwidth}\centering{\Large\bfseries #1}\\[2mm]\if\dataeq{languages.0}{en-US} Student no.\else Nr albumu:\fi\ #2\end{minipage}\ }
 
+% Optional dedication on the existing page immediately after the title.
+\newcommand{\ThesisPostTitleContent}{%
+  \if\dataeq{acknowledgments.path}{??}%
+    \vfill\mbox{}%
+  \else
+    \datapartial{acknowledgments}%
+  \fi
+}
+
 \if\dataeq{languages.0}{en-US}
 	\renewcommand\maketitle{%
 	  \begin{titlepage}%
@@ -107,7 +116,7 @@
 		\end{titlepage}%
 		\begin{titlepage}
 	 		\c@page=2
- 			\vfill \mbox{}
+	 		\ThesisPostTitleContent
 	 	\end{titlepage}
 
 
@@ -258,7 +267,7 @@
 	  \end{titlepage}%
 	   \begin{titlepage}
 	  \c@page=2
-	\vfill \mbox{}
+	\ThesisPostTitleContent
 	  \end{titlepage}
 
 	  \setcounter{footnote}{0}%
