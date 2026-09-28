@@ -417,10 +417,10 @@ The figure assumes query \texttt{SELECT id FROM table WHERE sample\_id BETWEEN 5
     (7.6,.22)--(10.25,.22);
   \node[align=center] at (8.93,-.37) {no sequence\\fragment reads};
 \end{tikzpicture}
-\caption{Column selection and group pruning for simple query \texttt{SELECT id FROM table WHERE sample\_id BETWEEN 500 AND 600}.
-Blue cells are read, orange crosses mark groups whose aggregates exclude all the rows. Unrequested sequence locators remain unread, 
-because they were not specified in the \texttt{SELECT} clause. 
-The drawing shows only logical representation of chunks, not actual disk layout.}
+\caption{Column selection and group pruning for a simple query \texttt{SELECT id FROM table WHERE sample\_id BETWEEN 500 AND 600}.
+Blue cells are read, orange crosses mark groups whose aggregates exclude all the rows. Unrequested sequence locators are unread,
+because they were not specified in the \texttt{SELECT} clause.
+In the drawing I only illustrate the idea of reading rows, not their actual layout in storage.}
 \label{fig:column-store-layout}
 \end{figure}
 

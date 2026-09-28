@@ -93,14 +93,13 @@ Can convert to and from other bitpacked or not-bitpacked sequences, but if const
 \addlinespace
 & \texttt{R} is an SeqAn alphabet type, as in
 \path{compact_sequence_range<dna4>} &
-The same as \path{sequence_custom_alphabet<A, U, b>}, but has sensible defaults for used underlying alphabet's storage unit width etc.
+The same as \path{sequence_custom_alphabet<A, U, b>}, but has sensible defaults for the underlying alphabet's storage unit width etc.
 Commonly used in tests. Code interfacing directly with BioseqDB C++ API should use this specialization. \\
 \addlinespace
 & \texttt{R} is
 \path{compact_sequence_stdc_instance<...>} &
 Holds only reference to the underlying object.
-Adapter to convert \path{compact_sequence_stdc_instance<...>} to \path{compact_sequence_range<R>}. \path{compact_sequence_stdc_instance<...>} is a type that comes from \path{compact_sequence_stdc<...>} - described below
-Used internally \\
+Adapter to convert \path{compact_sequence_stdc_instance<...>} to \path{compact_sequence_range<R>}. \path{compact_sequence_stdc_instance<...>} is a type that comes from \path{compact_sequence_stdc<...>} - described below and used internally when passing sequences from Postgres \\
 \midrule
 \path{compact_sequence_stdc<...>}\par\vspace{2.5pt}
 Represents standard layout C type~\cite{cppreference_standard_layout_type} that is used to type-erase \path{compact_sequence_range<R>} types i.e allow user to
@@ -114,23 +113,22 @@ and symbol count
 Used heavy by Postgres code as we cannot store template instances directly and need to hold them in one object that converts type parameters of templates to runtime values (with correct runtime dispatch). If you want to store sequences of different alphabets in one single container, you should use this. \\
 \addlinespace
 & \path{compact_sequence_stdc_instance<Stdc, A, W>}, internal type obtained when dispatching the type at runtime &
-Carries nothing, this is primarily runtime tag
-Shouldn't be used directly, one should receive \path{compact_sequence_range<compact_sequence_stdc_instance<...>>} when using dispatch methods of the stdc template \\
+This type carries no data and is used as a runtime tag (this is a common pattern to differentiate between template specialisations). It shouldn't be used directly. One should receive \path{compact_sequence_range<compact_sequence_stdc_instance<...>>} when using dispatch methods of the stdc template \\
 \midrule
 \path{lazy_sequence<R, Scanner>}\par\vspace{2.5pt}
 Represents sequence that can be loaded in fragments by some storage provider represented by type parameter \path{Scanner} &
 \texttt{Scanner} has static constexpr method \path{is_fragmented()} that returns false (this means that Scanner always holds entire sequence in memory and there's only one fragment). This is used as compatibility layer so you can directly create lazy sequence from compact sequence range instance.
 I have \path{resident_sequence_scanner<U>} for trivial implementation of non-fragmented scanners so you can write \path{lazy_sequence<R, resident_sequence_scanner<R>>} and don't have to implement scanner type on your own.&
-Holds single non-owning pointer to \path{compact_sequence_range<R>}
+Holds a single (borrowed) pointer to \path{compact_sequence_range<R>}
 Used as adapter to convert compact sequence range to lazy sequence. All primary pipeline operations should accept it as parameter \\
 \addlinespace
 & \texttt{Scanner} is fragmented (\path{is_fragmented()} returns true) &
-Ows scanner, internal small cache for sequence fragments that are neither copyable or movable
+Owns a scanner and a small internal cache for sequence fragments (which are neither copyable nor movable).
 Allows iteration over data source of sequences that doesn't fit into memory at once. This is primary specialisation for loading sequences from PostgreSQL relations. The Postgres side implements large scanner type that tells the lazy sequence template how to fetch blocks of sequences \\
 \midrule
 \path{bit_casted_view<Base, Out>}\par\vspace{2.5pt}
 Only legal for few types of alphabets and storage widths. &
-Special non-owning type that is used to provide zero-cost changes to pitpacking. It allows to cast bitpacked sequences to different storage widths i.e cast sequence encoded on 32-bit int to be read as sequence encoded on 64-bit or 16-bit or 8-bit units.
+Special non-owning type that is used to provide zero-cost casts for bit-packed sequences. It allows to cast bitpacked sequences to different storage widths i.e cast sequence encoded on 32-bit int to be read as sequence encoded on 64-bit or 16-bit or 8-bit units.
 There are special requirements for alphabet to be able to do that (discussed below).
 &
 Holds only reference to underlying compact sequence range
@@ -152,15 +150,15 @@ This struct holds Postgres Scanner state - it is either a detoasted flat value o
 Postgres Scanner for sequence only holds descriptor for already materialized sequence \\
 \midrule
 \path{retained_lazy_sequence_view<A>}\par\vspace{2.5pt}
-Has only one form. This type pairs view mentioned above with opaque lifetime pointer. It's used in Postgres code for management of sequence lifecycle during DB operations &
-Constructed from a view, an opaque lifetime pointer and a \texttt{noexcept} release callback, so there is nothing to specialize &
-Used wherever a view has to outlive the expression that produced it. The Postgres read session allocates the owner in its own memory context and registers it there, so the retain is dropped even when Postgres unwinds with \texttt{longjmp} and skips C++ destructors.
+This type has only one form. It's a struct that has 3 fields: the view mentioned above, an opaque lifetime pointer to some data and a destructor callback pointer. It's used in Postgres code for management of sequence lifecycle during DB operations &
+Constructed from a view, an opaque lifetime pointer and a \texttt{noexcept} release callback. &
+Used wherever a view has to outlive the expression that produced it. The Postgres read session allocates the owner in its own memory context and registers it there, so the destructor callback can be called even if Postgres fails (Postgres performs \texttt{longjmp} and skips C++ destructors).
 This means that this type is specific version of \path{std::unique_ptr} that allows us to provide custom lifecycle management during scans. \\
 \midrule
 \path{admitted_packed_sequence<A>}\par\vspace{2.5pt}
 Supporting type to propagate sequence along with memory permit (memory permits are used in BioseqDB to manage large memory regions for sequences) &
 Created during materialization by \path{materialize_packed_sequence}. In BioseqDB there's a little sequence access planner that is responsible for deciding if we can materialize it all at once and directly or it needs to be streamed. \path{plan_sequence_access} picks this type when a contiguous resident region and we cannot use existing materialization (for example we access specific nucleotide that doesn't align well with storage unit boundary, but the GPU algorithm requires continous region of sequence, so we need to copy it) &
-Owns the permit, the aligned buffer and its descriptor together, so accounted bytes are released with the object.
+The struct owns its memory permit, the aligned buffer and its descriptor. Their resources, including the accounted bytes, are released through the usual RAII.
 Its \path{view()} returns an ordinary view over \path{resident_adapter<A>}, which is how SIMD and GPU kernels obtain contiguous packed input from a sequence that is tree-backed or fragmented \\
 \end{longtable}
 \endgroup

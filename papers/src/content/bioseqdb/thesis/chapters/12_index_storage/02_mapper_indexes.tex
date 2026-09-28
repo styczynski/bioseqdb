@@ -195,9 +195,9 @@ index concept.
   \node[anchor=west,text=black!65] at (0,-.45)
     {A singleton needs no separate list. Repeated keys share a contiguous array.};
 \end{tikzpicture}
-\caption{A simplified minimap2 bucket: hashes 13 and 21 have the same
+\caption{A simplified minimap2 hash bucket: hashes 13 and 21 have the same
 lowest two bits, but different remaining keys, so they land in bucket 1 together. The two occurrences of hash
-21 become adjacent in the bucket's position array.}
+21 are placed next to each other in the bucket's position array.}
 \label{fig:index-mmi-construction}
 \end{figure}
 
@@ -250,6 +250,6 @@ I just assume that we use 2-letter k-mers of natural language for simplicity.
   \node[anchor=west,align=left] at (6,-.15)
     {Entry = (target ID, word start).\\Positions start at zero.};
 \end{tikzpicture}
-\caption{A small example of MMseqs2's lists construction, where word/count/offsets triplets are stored in single file, file the actual (very large) lists of entries are stored separately}
+\caption{A small example of MMseqs2's list construction, where word/count/offsets triplets are stored in a single file - practically only indices are stored there, while the actual (very large) lists of entries are stored separately.}
 \label{fig:index-mmseqs-inverted}
 \end{figure}

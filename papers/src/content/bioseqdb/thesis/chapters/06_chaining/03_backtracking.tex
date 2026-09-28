@@ -263,7 +263,7 @@ The final array $A$ contains all anchors, while output array $U$ contains packed
   \Require input anchors \(a_0,\ldots,a_{n-1}\), scores \(f\), predecessors \(p\)
   \Require limits \(S=\texttt{min\_sc}\),
            \(K=\texttt{min\_cnt}\), and \(D=\texttt{max\_drop}\)
-  \Ensure packed minimap2 records \(U\) and forward-order anchor array \(A\)
+  \Ensure packed minimap2 records \(U\) and anchor array \(A\) with each chain in forward order and chains sorted by reference start
   \State define
         \(\Call{Pack}{s,c}=(\operatorname{uint64}(s)\ll32)\mathbin{\vert}c\)
   \State \(Z\gets[(f_i,i)\mid 0\leq i<n\text{ and }f_i\geq S]\)
@@ -274,7 +274,7 @@ The final array $A$ contains all anchors, while output array $U$ contains packed
   \For{\(\mathrm{phase}\in
         \langle\mathrm{count},\mathrm{write}\rangle\)}
     \State \(t[0\ldots n)\gets0,\quad N_C\gets0,\quad N_V\gets0\)
-          \Comment{accepted records and retained indices}
+          \Comment{\(t\) marks anchors, \(N_C\) counts chains, \(N_V\) counts retained indices}
     \For{\(k\gets |Z|-1\) \textbf{down to} \(0\)}
       \State \(e\gets Z_k.\mathrm{index}\)
       \If{\(t_e=0\)}

@@ -5,8 +5,6 @@ I perfomed intermediate testing to verify if predictions coming from synthetic r
 
 The test used $|T|=500Mbps$ and $|Q|=5Mbps$ sequences  with just one $N=1$ occurence (this means that this is very optimistic case of random scenario)
 
-\todo{Replace this section with final results or remove it entirely (the b panel is misleading and there's no interpretation of the results.). For anyone reading: this is just old test I found to illustrate performance so it's probably outdated and misleading because for backtracking there is single SIMD algorithm. Benchmarking framwork resuses labels but it's the same algorithm in panel B for B1/B5 and it makes no sense at all}
-
 \begin{figure}[H]
 \centering
 \begin{tikzpicture}[scale=1.0,transform shape,x=1cm,y=1cm,
@@ -58,3 +56,4 @@ The test used $|T|=500Mbps$ and $|Q|=5Mbps$ sequences  with just one $N=1$ occur
 \end{figure}
 
 The figure above depicts only two runs and presents only quick prototyping test measurements to judge if we are going in right direction.
+Please note that on bottom chart B1 and B5 are similar, because they use the same backtracking implementation (this is the same algorithm).

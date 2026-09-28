@@ -104,7 +104,7 @@ Below we have list of architectures for which the binary was compiled. Runnable 
 of compiled and CPU-supported targets (can be used only if built for this architecture and the current hardware supports it).
 \texttt{QuerySketchStage} lists used minimizer algorithm, and
 \texttt{Highway Function} lists the C++ function name.
-See Section~\ref{sec:minimizer-hardware-selection}.}
+For the configured CPU minimizer algorithms, see Section~\ref{sec:configured-cpu-minimizers}.}
 
 \BioseqWalkRow[firstline=19,lastline=27,gobble=12]{plan}{appendices/02_sql_walkthrough/plans/10_explain_search.plan}{%
 Internally BioseqDB is implemented as type-driven heavily-templated code, so CEP means "constant expression parameter".
@@ -118,7 +118,7 @@ produces very large binaries the linker msut work with).
 \BioseqWalkRow[firstline=28,lastline=41,gobble=12]{plan}{appendices/02_sql_walkthrough/plans/10_explain_search.plan}{%
 Chaining joins seed anchors:
 \texttt{min\_chain\_score} and \texttt{min\_seed\_count}, \texttt{max\_chain\_skip} and \texttt{max\_chain\_iter} are parameters
-specifically discussed in chaining section~\ref{sec:chaining-bioseqdb}
+specifically discussed in chaining chapter~\ref{r:{06-chaining}}
 
 \texttt{vectorized} in this case means that the C++ function can accept batch instead of single element (all the properties in square brackets are compile-time properties of the code itself)}
 
@@ -216,7 +216,7 @@ quality (similar to mapq minimap2), while \texttt{divergence} is the score estim
 The Boolean fields report strand orientation, chain classification and CIGAR.}
 
 \BioseqWalkRow[firstline=24,lastline=28]{sql}{appendices/02_sql_walkthrough/sql/15_all_fields.sql}{%
-This join requires the compatible persisted target index built in step 7~\ref{sec:index-read-policy} and as mentioned 
+This join requires the compatible persisted target index built in step 7~\ref{sec:index-operational-considerations} and as mentioned
 before currently due to bugs in implementation of grouped-MPF index this JOIN correctly reads index, while default read policy
 ignores it. Moreover as mentioned alignment without join will also ignore index.}
 

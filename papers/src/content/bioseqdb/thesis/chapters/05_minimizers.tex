@@ -25,7 +25,7 @@
 % to the next page because it does not fit in the remaining space.
 \raggedbottom
 
-\section{From every base to a sparse, comparable sketch}
+\section{Minimizer sketching}
 \label{sec:minimizers-role}
 
 The first computational stage of the BioSeqDB aligner needs to compute
@@ -38,33 +38,30 @@ We expect the seed set to be sparse enough to reduce index and lookup costs, but
 As described before minimap2 and BioseqDB operate on minimizers. I didn't specifically added support for "true" cannonical minimizers in a sense that I 
 adhered to the minimap2 approach i.e taking minimum of hashes of k-mer and its reverse complement.
 
-Formally, let $S=s_0s_1\ldots s_{n-1}$ be a nucleotide sequence. The $k$-mer beginning
-at zero-based position $i$ is
+Formally, let $S=s_0s_1\ldots s_{n-1}$ be a nucleotide sequence, so the $k$-mer beginning
+at position $i$ (indexing starting from zero) is
 \[
   K_i=S[i,i+k).
 \]
-For DNA, the forward and reverse-complement encodings are
+For DNA, we now encode the forward and reverse-complement strands via some method, which is usually just a bit-packed representation where each symbol is encoded in a few bits:
 \[
   F_i=\operatorname{enc}(K_i),
   \qquad
   R_i=\operatorname{enc}(\overline{K_i}).
 \]
-A canonical $k$-mer uses the same key on both strands. A common choice is
+The canonical $k$-mer then uses the minimum of both encoded fragments (this is the same approach as in minimap2).
 \[
   C_i=\min(F_i,R_i),
   \qquad
   z_i=\mathbf{1}[R_i<F_i],
 \]
-where $z_i$ records the selected strand. Applying a hash function $H$ gives a
-candidate
+where $z_i$ saves a bit indicating which strand was selected. Now the hash function $H$ is applied to the chosen strand representation:
 \[
   x_i=(h_i,p_i,z_i),
   \qquad
   h_i=H(C_i).
 \]
-The position $p_i$ may denote the first or final base of $K_i$. BioSeqDB's
-minimap-compatible schemes use the final base because that is the convention
-used by minimap2~\cite{minimap2_paper}.
+The position $p_i$ may denote the first or last base of $K_i$ depending on the software. BioSeqDB's minimap-compatible schemes save the last position of the $k$-mer, similarly to minimap2~\cite{minimap2_paper}.
 
 For a window of $w$ consecutive candidates,
 \[
@@ -393,8 +390,7 @@ Equal hashes at different positions are not duplicate records. We wanmt to keep 
                             2/3/rewrite min,3/9/rewrite new}
     \node[\sty] at (1.90+.74*\i,1.94) {\v};
   \node[rewrite note,text width=5.0cm,anchor=west] at (5.05,1.74)
-    {The rightmost 3 remains the saved minimum.  The earlier 3 is still a
-     different identity and can require its own event.};
+    {The rightmost 3 remains the saved minimum};
 
   \draw[rewrite flow] (3.00,1.42) |- (3.95,.52);
   \node[rewrite out,minimum width=1.55cm] at (4.80,.52) {3 at right};
@@ -443,9 +439,9 @@ stores the current minimum and the array slot containing it.
   \node[rewrite note,text width=3.75cm,anchor=west] at (8.35,1.10)
     {2 leaves. Read all $w=4$ live slots and choose 5: $O(w)$.};
 \end{tikzpicture}
-\caption{The two costs of one minimap2 window advance. Gray cells are already
+\caption{The two costs (cheap/expensive) of one minimap2 step. Gray cells are already
 in the ring, blue is the entering candidate, and orange is the saved or newly
-found minimum. A normal step performs one comparison. When the saved minimum
+found minimum. A normal cheap step performs one comparison, but when the saved minimum
 leaves, the algorithm reads the complete window again (rescan)}
 \label{fig:rewrite-minimap-rescan}
 \end{figure}
@@ -549,7 +545,7 @@ does not remove their loads and comparisons.}
 Note that algorithm fundamentally stays the same, we only now divided input sequence into chunks and translated each operation (hashing, comparisons) into SIMD instructions:
 
 \begin{algorithm}[H]
-\caption{SIMD minimap2-style rescan, with the output cases stated plainly}
+\caption{Naive SIMDified minimap2 rescan algorithm}
 \label{alg:simd-minimap-rescan}
 \small
 \begin{enumerate}
@@ -705,9 +701,7 @@ far-apart streams at the same step.  After several steps, the SIMD-Minimizers pa
 rearranges that output matrix so one row contains consecutive windows from
 one stream.  Consecutive windows often select the same position.  Once those
 positions are adjacent in a row, the paper compares neighbors and keeps only
-positions that changed.  Finally, when the ordered stream results are joined,
-it removes the repeated boundary position caused by the overlapping input
-pieces.
+positions that changed. At the end duplicates for windows needs to be removed.
 
 
 \begin{figure}[H]
@@ -760,11 +754,7 @@ pieces.
   \foreach \r in {0,...,3}
     \draw[->,gray!70] (15.95,3-\r) -- (16.50,3-\r);
 \end{tikzpicture}
-\caption{Transposition and boundary deduplication for four logical chunks.
-The input rows are vector steps and the columns are chunks. Transposition
-makes each chunk a sorted row. Each row has its own previous-position carry,
-shown in gray. Only new positions are appended, so padding cells are not part
-of the output.}
+\caption{How transposition of the results is done to get consecutive positions in each vector. Then SIMD-Minimizers do deduplication for four vectors}
 \label{fig:transpose-dedup}
 \end{figure}
 
@@ -1293,21 +1283,18 @@ hash_lo,      hash_hi      = And(Mul(lex_, golden), hash_mask)
 elem_lo,      elem_hi      = IfThenElse(valid_, hash_|pos_, max)
 \end{BioseqCppSnippet}
 
-We chose 2 streams rather than 4 execution stream because the per-stream
-state plus the shared ring buffer for $w=10$ already consumes
-$\sim 26$ NEON registers per stream. Doubling it could make the ring buffer
-spill to stack losing the ILP benefit.
+I chose 2 streams, rather than 4 execution streams, because the per-stream state plus the shared ring buffer for $w=10$ requires
+$\sim 26$ NEON registers per stream. If I wanted to double the number of streams, it could make the ring buffer spill to the stack, losing the ILP benefit.
 
-The wall-clock effect at 903\,kbp was a $\sim 4$\,ms reduction on
-\texttt{mm\_sketch\_simd} (from 12\,ms to 8\,ms);
-Figure~\ref{fig:phase-evolution} plots the full evolution.
+For the test case of length 903\,kbp, as seen in Figure~\ref{fig:phase-evolution}, I got a $\sim 4$\,ms reduction in the runtime of the
+\texttt{mm\_sketch\_simd} function (from 12\,ms to 8\,ms).
 
 \subsection{Seeding prototype V12: Forced inline}
 
-V11 was good but disappointing: the wall-clock saving was less than
-the theoretical $2\times$ ILP win we expected.
-\texttt{xcrun llvm-objdump -d build/bioseq/bioseq\_bench} on the V11
-wrapper revealed the underlying problem, which took weeks of debugging:
+V11 performance was better than for earlier prototypes. However, I wasn't satisfied. The measured speedup was less than the $2\times$ that I could optimistically expect from ILP.
+I spent the next weeks investigating the performance gap here and finally discovered the issue by manually inspecting the disassembled binary code.
+I used \texttt{xcrun llvm-objdump -d build/bioseq/bioseq\_bench} on the V11
+prototype to find the underlying problem. I shared this case to emphasize how the development of BioseqDB was constantly blocked by implementation details, C++ API details and hardware problems. This is only one out of thousands of issues I needed to address during development of BioseqDB:
 
 \begin{BioseqAsmSnippet}
 ldp q0, q1, [sp, #0x150]       // load bp_row from stack
@@ -1807,7 +1794,7 @@ the caller using heuristic. \textsc{HostAndDevice} creates an $A$-record device 
   \State \Return without a GPU dispatch \textbf{if} $T=0$
   \State $G\gets\min(\lceil T/64\rceil,G_{\max}),\quad S\gets256,
          \quad B\gets\lceil T/S\rceil$
-  \State \Call{PrepareBoundDeviceInputs}{$Q,\mathcal T$}
+  \State \Call{PrepareDeviceInputs}{$Q,\mathcal T$}
   \State allocate device buffers \emph{Count}$[T]$, \emph{Offset}$[T]$,
          and \emph{Block}$[B]$
   \State \textbf{if} $P=\textsc{HostAndDevice}$ \textbf{then}
@@ -1938,12 +1925,11 @@ The type first reserves
 \[
   H=\min(2K,56)
 \]
-hash bits.  Let $R=H+L+1$, where the last term is the strand bit.  The type uses
+hash bits.  Let $R=H+L+1$, where the last $1$ is just the strand bit.  The type uses
 the first width $W\in\{16,32,64\}$ for which $R\leq W$.  Every bit above the
 position and strand fields then belongs to the hash, so the stored hash field
-has $W-L-1$ bits.  If $R>64$, the record uses two 64-bit words.  One word
-contains a 56-bit hash and an 8-bit span.  The other word contains the position, the
-strand bit, and any unused high bits.
+has $W-L-1$ bits.  If $R>64$, the record uses two 64-bit values: one word
+contains a 56-bit hash and an 8-bit span, while the other word contains the position, the strand bit (and any unused high bits).
 
 \begin{figure}[H]
 \centering
@@ -2024,7 +2010,7 @@ Theoretically the template can produce a two-byte record, but this bucket isn't 
 The $\langle2,2\rangle$ on the figure is just the demonstrative example to show that template is supported even in very degenerated edge cases (we don't actually use special form for sequences with less than 4 bases as it would make very little sense).
 
 
-\section{Configured CPU algorithms}
+\section{BioseqDB CPU minimizer algorithms}
 \label{sec:configured-cpu-minimizers}
 
 The PostgreSQL setting \texttt{bioseq.aligner.minimizer.algorithm} chooses the

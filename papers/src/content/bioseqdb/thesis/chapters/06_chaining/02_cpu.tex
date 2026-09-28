@@ -21,7 +21,7 @@ We will call iteration over $\mathcal{C}_i$ a scan. Minimap2 does this scan by v
 
 After sorting, minimap2 numbers the anchors \(0,1,\ldots,n-1\). When the DP algorithm
 reaches anchor \(i\), the scores \(f_0,\ldots,f_{i-1}\) and predecessor
-indices \(p_0,\ldots,p_{i-1}\) have already been calculated. It starts a new
+indices \(p_0,\ldots,p_{i-1}\) have already been calculated. So minimap2 starts a new
 chain at \(i\) with
 \[
   f_i=\ell_i \qquad\text{and}\qquad p_i=-1,
@@ -33,7 +33,7 @@ calculates
   c_j=f_j+E(j,i).
 \]
 If \(c_j>f_i\), anchor \(j\) becomes the new predecessor:
-\(f_i\gets c_j\) and \(p_i\gets j\) (strict equality is important here so we avoid using older anchors with the same score)
+\(f_i\gets c_j\) and \(p_i\gets j\) (strict inequality is important here so we avoid using older anchors with the same score).
 
 Trying every earlier anchor would make this dynamic program expensive. Minimap2 applies the following strategies to limit the work performed:
 \begin{itemize}
@@ -658,24 +658,21 @@ The figure below depcits two kinds of SIMD B1 algorithms. The first one (a) wasn
         inner xsep=4pt,inner ysep=2pt]
     at (7.35,-1.55) {one-lane total \(C_m=17\)};
 \end{tikzpicture}
-\caption{Two strategies for calculating SIMD B1 (a) Exact B1 calculates
-four totals together, then applies state changes in the scalar order whenever
-some lane can improve.  (b) Bounded SIMD is more clever - it starts with
-\(\mathbf H^{(-1)}=[8,8,8,8]\) and
-\(\mathbf P^{(-1)}=[-1,-1,-1,-1]\).  Each row shows both vectors after its
-batch.  Green boxes hold scores and blue boxes hold their predecessor indices.
-An orange border around \(C\) marks a new improvement (maximum). Orange
-borders around \(H\) and \(P\) show the stored pair that changed.  All four
-lanes change in batch 0.  In batch 1, only lane zero changes, to
-\((H_0,P_0)=(13,8)\).
-Batch 2 changes neither vector, so \(u=1=U\) and candidates 0 through 3 (bottom gray area) are
-omitted.  The downward arrow shows that each lane keeps its best
-\((H,P)\) pair while the scan moves through older batches.  The horizontal
-maximum then compares the four lane scores.  Lane 1 supplies the pair selected
-by that horizontal maximum,
-\((H^{(2)}_1,P^{(2)}_1)=(16,13)\), marked by the green bracket and outlines.
-The orange box marks saved candidate \(m=2\), whose separate one-lane total
-\(C_m=17\) replaces the result with \((17,2)\).}
+\caption{Here I compare the state updates for the two SIMD B1 algorithms:
+In (a), exact B1 first calculates four totals together, then the remaining code is scalar and we process each lane in a loop.
+The bounded algorithm is presented in (b). It's significantly smarter as now each lane represents a separate chain and we keep its best \((H,P)\) values in separate vectors. The downward arrow shows how each lane keeps this pair while the scan moves through older batches.
+We start with \(\mathbf H^{(-1)}=[8,8,8,8]\) and
+\(\mathbf P^{(-1)}=[-1,-1,-1,-1]\). Each row shows both vectors after its batch. All four lanes change in batch 0. Batch 1 updates only lane 0 to the new best pair \((H_0,P_0)=(13,8)\).
+Batch 2 leaves both vectors unchanged. Now \(u=1=U\), so I omit
+candidates 0 to 3 (drawn in the bottom gray area).
+Taking the horizontal maximum across the four lane scores selects
+\((H^{(2)}_1,P^{(2)}_1)=(16,13)\) from lane 1 (the green bracket and outlines).
+Note that we still score the saved candidate \(m=2\), shown in the orange box, separately
+in one lane. Its score is \(C_m=17\), so it now replaces our selected result with \((17,2)\).
+On the diagram, green boxes contain scores and blue boxes contain their
+predecessor indexes. I use orange borders in two places: around \(C\) to
+mark a new improvement (maximum), and around \(H\) and \(P\) to show which
+stored pair was updated.}
 \label{fig:chaining-b5-batches}
 \end{figure}
 
@@ -699,12 +696,12 @@ The algorithm is described in detail in Algorithm~\ref{alg:chaining-b5}.
            \(\texttt{max\_chain\_iter}>0\), saved index \(m\)
   \Ensure \(f_i,p_i\)
   \State \(U\gets\max\{1,\lfloor S/L\rfloor+1\}\)
-        \Comment{whole-batch stopping limit}
+        \Comment{stop limit for entire vector}
   \State \(\mathbf H\gets[\ell_i]^L,\quad
          \mathbf P\gets[-1]^L,\quad u\gets0\)
         \Comment{one temporary winner per lane}
   \State \(o\gets st_i\)
-        \Comment{no omitted interval yet: \([st_i,o)\) is empty}
+        \Comment{\(o\) bounds the interval skipped at limit \(U\), initially \([st_i,o)\) is empty}
   \For{\(b\gets0,1,\ldots\) while \(\mathrm{end}_b>st_i\)}
     \State calculate \(\mathrm{begin}_b,\mathrm{end}_b,a_b,\mathbf j_b\) using
            Equation~\ref{eq:chaining-simd-batch-map}
@@ -718,10 +715,10 @@ The algorithm is described in detail in Algorithm~\ref{alg:chaining-b5}.
              \mathbf f[\mathbf j_b]+\boldsymbol\epsilon,-\infty}\)
           \Comment{total candidate scores}
     \State \(\mathbf I\gets(\mathbf C>\mathbf H)\)
-          \Comment{strict lane-wise improvements}
+          \Comment{strict lane-wise score improvements}
     \State \(\mathbf H\gets\Call{Select}{\mathbf I,\mathbf C,\mathbf H}\)
     \State \(\mathbf P\gets\Call{Select}{\mathbf I,\mathbf j_b,\mathbf P}\)
-          \Comment{equal older candidates do not replace}
+          \Comment{older candidates with equal scores do not replace}
     \If{\(\Call{Any}{\mathbf I}\)}
       \State \(u\gets0\)
     \Else
@@ -736,14 +733,14 @@ The algorithm is described in detail in Algorithm~\ref{alg:chaining-b5}.
   \State \(f_i\gets\Call{HorizontalMax}{\mathbf H}\)
   \State \(\mathbf T\gets\Call{Select}{\mathbf H=f_i,\mathbf P,-1}\)
   \State \(p_i\gets\Call{HorizontalMax}{\mathbf T}\)
-        \Comment{largest predecessor index wins a score tie}
+        \Comment{If scores are equal, we choose the largest predecessor index}
   \If{\(f_i=\ell_i\)}
     \State \(p_i\gets-1\)
   \EndIf
   \If{\(m<st_i\) or \(m\) is outside the current reference and strand window}
     \State \(m\gets\operatorname*{arg\,max}_{st_i\leq j<i}(f_j,j)\),
            or \(-1\) if this interval is empty
-          \Comment{compare score first, then index}
+          \Comment{We compare score first and then index}
   \EndIf
   \If{\(st_i\leq m<o\)}
     \State \(\epsilon_m\gets\Call{PairScoreOneSIMDLane}{m,i}\)
@@ -757,7 +754,7 @@ The algorithm is described in detail in Algorithm~\ref{alg:chaining-b5}.
   \EndIf
   \If{\(m<0\) or \(f_i\geq f_m\)}
     \State \(m\gets i\)
-          \Comment{B5 moves the cache to the newer anchor on a tie}
+          \Comment{Update special anchor \(m\), choosing the newer anchor on a tie}
   \EndIf
 \end{algorithmic}
 \end{algorithm}

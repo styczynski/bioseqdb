@@ -37,20 +37,20 @@ The bounds follow a small set of intuitive rules simiar to design of slices in P
         gives SQL \texttt{NULL}. An explicit null slice bound also gives \texttt{NULL} i.e $s[a:\text{NULL}]$ is equivalent to $s[\text{NULL}:a]$ and is also equivalent to $s[\text{NULL}:\text{NULL}]$ (all of them result in \texttt{NULL})
 \end{itemize}
 
-The slicing can be implemented by old holding slice coordinates, without actually loading any sequences, by very simple coordinates arithmetic visible at figure below~\ref{fig:sequence-slice-coordinates}
+Slicing can be implemented by just holding slice coordinates, without actually loading any sequences, using very simple coordinate arithmetic shown in the figure below~\ref{fig:sequence-slice-coordinates}.
 For a slice view \(V=S[a,b)\), view position \(j\) refers to
-\(S[a+j]\). A second slice therefore combines its offsets directly:
+\(S[a+j]\). A second slice can combine its offsets directly to get:
 \[
   V[c,d)=S[a+c,a+d).
 \]
 The example's \(S[2,10)[1,5)\) is \(S[3,7)\), which reads
-\texttt{TAAC}. Reversal is represented by reversing start and end coordinates: For
+\texttt{TAAC}. The reversal operation is represented by reversing the start and end coordinates. For
 \(W=\operatorname{reverse}(S[a,b))\) we have:
 \[
   W[j]=S[b-1-j],\qquad
   W[c,d)=\operatorname{reverse}(S[b-d,b-c)).
 \]
-Complementing operation leaves the coordinates unchanged, but alters binary flag representing if the slice is complemented or not.
+The complementing operation leaves the coordinates unchanged, but it changes the binary flag representing whether the slice is complemented or not.
 
 \begin{figure}[H]
 \centering

@@ -15,16 +15,16 @@ The following tables present results comparins BioseqDB and minimap2 on one Maco
   and MAPQ in each repeat
 \end{itemize}
 
-By default chunk cache for decompressed columns is disabled.
-Each repeat runs 1,024 queries against one reference sequence:
+By default for benchmarks, the chunk cache for decompressed columns is disabled.
+Each test case runs 1,024 queries against one reference sequence:
 \begin{itemize}
   \item References contain exactly
-  $2\times10^9$ or $4\times10^9$ base pairs
-  The parameter pairs are $(k,w)=(15,10)$ and $(20,15)$,
-  \item Each query and target is randomly generated. DNA4 uses same probability for each base (25\%). The DNA5
+  $2\times10^9$ or $4\times10^9$ base pairs.
+  The parameter pairs are $(k,w)=(15,10)$ and $(20,15)$.
+  \item Each query and target is randomly generated. DNA4 uses the same probability for each base (25\%) and the DNA5
   generator assigns probability 1\% to N and 24.75\% to each base.
-  \item Query samples length is 20,000 bp and standard deviation 500 bp (before applying insertions and deletions), it's reverse-complemented with probability 0.5.
-  \item Substitution probability is 0.001 and for insert/deletions it's 0.0005.
+  \item Query samples have randomly generated lengths with a mean of 20,000 bp and a standard deviation of 500 bp (before applying insertions and deletions), and each sample is reverse-complemented with probability 0.5.
+  \item The substitution probability is 0.001 and for insertions/deletions it's 0.0005.
   \item Each query originates from one known sampled
   reference interval and later substitutions/insertions/deletions are applied to it.
 \end{itemize}
@@ -36,17 +36,16 @@ AWS machines were missing GPUs so all Vulkan rows are grouped together and marke
 
 \paragraph{Reading comparisons and highlights.}
 Each cell places the A duration above its comparison, followed by the B duration
-and its own comparison. Durations are rounded to tenths of a second for display.
-All comparisons and minima use the original integer nanoseconds.
+and its own comparison.
 \begin{itemize}
-  \item Minimap2 (light-gray) as the baseline is first row in each table. 
+  \item Minimap2 (light-gray), as the baseline, is the first row in each table.
   \item All of the rows apart from minimap2 are ordered top-to-bottom by the minimum A time for the given "index" configuration.
   \item A BioseqDB value is compared with minimap2 for the same configuration (green/red triangles), while the minimap2 row compares with the fastest
-  measured eligible BioseqDB effective path in that same column
+  measured eligible BioseqDB effective path in that same column.
   \item Pale yellow
   identifies the preferred BioseqDB configuration: MPF / Bounded / SIMD-DP /
   Block. This is the author's (my) selected configuration.
-  \item A dot means there is no measurement, while a horizontal dash with \textsuperscript{g} identifies that GPU configuration wasn't available (no GPU on AWS machines)
+  \item A dot means there is no measurement, while a horizontal dash with \textsuperscript{g} indicates that the GPU configuration wasn't available (no GPU on AWS machines).
 \end{itemize}
 
 

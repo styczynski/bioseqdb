@@ -33,4 +33,4 @@ SET bioseq.index.insert_maintenance.enabled = on;
 This code snippet avoid recomputing minimizer each time. Note that joins without these defaults (grouped-MPF for bounded SIMD) still require \path{aligner_options(index_read_requirement => 2)} to work correctly.
 
 
-Please note that in this example I use sequences longer than >30 bases. Due to how filtering works~\ref{sec:configured-cpu-minimizers}\ref{sec:chaining-bioseqdb} (also in minimap2) extremally short sequences might not produce any hits.
+Please note that in this example I use sequences longer than >30 bases. Due to how filtering works (Section~\ref{sec:configured-cpu-minimizers} and Chapter~\ref{r:{06-chaining}}, also in minimap2) extremally short sequences might not produce any hits.

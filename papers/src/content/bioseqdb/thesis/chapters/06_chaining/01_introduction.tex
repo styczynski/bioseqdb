@@ -1,9 +1,9 @@
-\section{From local seed hits to candidate mappings}
+\section{What happens with minimizers}
 \label{sec:chaining-purpose}
 
 When minimizers are generated and we take the intersection (by hash value) of the minimizer sets between the query and the reference, we get a set of seed hits which is encoded as anchors.
 
-\section{Anchor geometry and ordering}
+\section{Chaining geometries}
 \label{sec:chaining-geometry}
 
 A seed hit is represented by an anchor
@@ -422,10 +422,8 @@ The problem is that the new linear gap scoring is very simplistic and does not e
   \end{scope}
 \end{tikzpicture}
 \caption{A close and a far predecessor for the same current anchor
-\(a_i=(10,9)\). Both candidates lie on the diagonal \(r-q=1\), so both have
-\(\delta=0\). Their link lengths are nevertheless different: the close link
-has \(g=3\), whereas the far link has \(g=8\). Thus zero diagonal deviation
-does not mean zero or equal distance.}
+\(a_i=(10,9)\): we can see that both candidates lie on the diagonal \(r-q=1\), so both have
+\(\delta=0\). The close link has \(g=3\), but the far link has \(g=8\).}
 \label{fig:chaining-near-far-distance}
 \end{figure}
 

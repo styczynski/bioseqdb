@@ -29,25 +29,19 @@ This search operation is using an operation called "sequence alignment" which is
 
 \subsection{DNA, ribonucleic acid (RNA), and protein alphabets}
 
-DNA is a polymer containing one of four bases:
-adenine, cytosine, guanine and thymine. Their conventional one-letter symbols
-form the alphabet
+DNA consists of nucleotides with 4 types of bases: adenine (A), cytosine (C), guanine (G) and thymine (T). Their symbols form an alphabet that I will operate on:
 \[
   \Sigma_{\mathrm{DNA4}} =
   \{\mathtt{A},\mathtt{C},\mathtt{G},\mathtt{T}\}.
 \]
 
-Four symbols are sufficient for an unambiguous DNA string, but experimental
-data introduces ambiguity. The symbol \(\mathtt{N}\) conventionally means
-that the nucleotide at a position is unknown or was not resolved. Other
-International Union of Pure and Applied Chemistry (IUPAC) codes describe sets
-of possible bases, such as a purine at a position.
+Four symbols are sufficient for a DNA string with no unknown positions, but in practice sequencing may leave some nucleotides unresolved (for example, due to noise). The symbol \(\mathtt{N}\) represents an unknown nucleotide at a specific position.
 
-RNA uses adenine, cytosine, guanine and uracil, so a basic RNA alphabet replaces
-\(\mathtt{T}\) with \(\mathtt{U}\). Many RNA molecules are transcribed from
-DNA. \cite{crick_central_dogma_1970}
+RNA uses the same alphabet as DNA except that \(\mathtt{T}\) is replaced by \(\mathtt{U}\). Many RNA molecules are transcribed from DNA.~\cite{crick_central_dogma_1970}
 
-A protein sequence is written over the twenty common amino-acid symbols. It's alphabet is notably larger, but in most cases we can translate it to a DNA sequence and use the DNA alphabet directly.
+A protein sequence is a sequence that uses 20 common amino-acid symbols. Its alphabet is larger, but we can construct a possible DNA coding sequence for it. This sequence is generally not unique because several codons can encode the same amino acid.
+
+In BioseqDB I will primarily focus on DNA4 and DNA5 support. Other alphabets for proteins or RNA are currently not supported.
 
 \begin{table}[H]
   \centering
@@ -55,7 +49,7 @@ A protein sequence is written over the twenty common amino-acid symbols. It's al
   \setlength{\tabcolsep}{4pt}
   \begin{tabular}{@{}ll@{}}
     \toprule
-    Sequence class & Core symbols \\
+    Sequence type & Symbols (alphabet) \\
     \midrule
     DNA4 &
     \(\mathtt{A,C,G,T}\) \\
@@ -66,7 +60,7 @@ A protein sequence is written over the twenty common amino-acid symbols. It's al
     RNA5 &
     \(\mathtt{A,C,G,U,N}\) \\
     PROT20 &
-    Twenty common amino-acid symbols \\
+    Twenty amino-acid symbols, each encoded by a triplet of DNA bases \\
     \bottomrule
   \end{tabular}
   \caption{Biological alphabets}

@@ -98,7 +98,7 @@ longer k-mers than on the larger reference with shorter k-mers.
   {tab:bench-wide-hash}
 
 
-Smaller hashes can be directly fetched from MPF index, while for longer the directory row is used~\ref{sec:index-direct-lookup}~\ref{sec:index-control-scan-waves}, this however doesn't explain the difference.
+Smaller hashes can be directly fetched from MPF index, while for longer the directory row is used~\ref{sec:index-logical-layouts}~\ref{sec:index-cold-loading}, this however doesn't explain the difference.
 One possible explanation is that hash for scalar is too wide and it forces these lookups, because bounded SIMD algorithm limits the width of hashes.
 Alternatively this could be a problem with how the algorithm uses memory admission system and going into SWAP usage, but such drastic change is unlikely.
 What I think is the most likely, is the k=15, w=10 has certain optimisations I hardcoded first. When migrating algorithms to be generic I could do it in a way that the performance is heavily deraded for non-default caase.
@@ -271,7 +271,7 @@ transfers.
   {The local integrated GPU with Vulkan seeding and chaining.}
   {tab:bench-gpu-local}
 
-The GPU faster by serveral orders of magnitud don't translate into better performance:
+Initially my line of reasoning was to ignore my shortcomings when it comes to implementations in my code. Unfortunately, a GPU faster by several orders of magnitude didn't translate into better performance.
 
 \BenchmarkSlice{vastai}
   {minimap2,mps-vulkan-vulkan-block}
@@ -284,7 +284,7 @@ The GPU faster by serveral orders of magnitud don't translate into better perfor
 \subsubsection{GPU capacity failures}
 \label{sec:bench-gpu-capacity}
 
-I tried putting parts of MPS index directly on the GPU, however the buffers size is limited and current Bulkan code fails on measured cases for 4Gbp sequences.
+I tried putting parts of the MPS index directly on the GPU. However, the buffer size is limited and the current Vulkan code fails on the measured cases for 4\,Gbp sequences.
 
 \BenchmarkSlice{vastai}
   {mpf-vulkan-vulkan-block,mps-vulkan-vulkan-block}

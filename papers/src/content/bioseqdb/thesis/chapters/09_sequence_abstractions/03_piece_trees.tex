@@ -6,10 +6,10 @@ In BioseqDB this tree refers to Postgres operators and datums.
 
 The slice tree is constructed from the following elements:
 \begin{itemize}
-  \item A \textbf{source leaf} describes interval in the source sequence.
-  \item A \textbf{literal leaf} holds literal value referencing Postgres datum with additional metadata.
-  \item A \textbf{branch} node that represents concatenation of two children. It holds total length, piece count (total number of leafs in subtree) and tree height. We collect total length to estimate how long the memory region in the pool should be to accomodate the materialized sequence.
-  \item An \textbf{edge} that connects a node to its child. It holds reverse and complement flags, which affect the order of traversal and the interpretation of the leafs.
+  \item A \textbf{source leaf} describes an interval in the source sequence.
+  \item A \textbf{literal leaf} holds a literal value referencing a Postgres datum with additional metadata.
+  \item A \textbf{branch} node represents the concatenation of two children. It holds the total length, piece count (total number of leaves in the subtree) and tree height. We collect the total length to estimate how long the memory region in the pool should be to accommodate the materialized sequence.
+  \item An \textbf{edge} connects a node to its child. It holds reverse and complement flags.
 \end{itemize}
 
 Figure~\ref{fig:piece-tree} illustrates concatenation of three pieces including two source leaves and one literal leaf:

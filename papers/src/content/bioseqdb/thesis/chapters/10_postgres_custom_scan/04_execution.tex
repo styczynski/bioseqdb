@@ -144,11 +144,11 @@ Support for joins:
 \end{longtable}
 \endgroup
 
-The code in \texttt{ExecCustomScan} pulls one TAM row, runs filtering conditions (these can reject the row based on metdata) and on success calls \texttt{submit\_scan} to let buffer copy the tuple.
-When the copies in buffer reach the set capacity \texttt{dispatch\_batch\_capacity} \(8192 = 2^{13}\), \texttt{ready\_to\_dispatch} flag changes to true so the scan calls \texttt{run\_batch\_and\_build\_cursors}.
-This method is also invoked when there are no more tuples in TAM source.
+The code in \texttt{ExecCustomScan} gets one TAM row, runs filtering conditions (these can reject the row based on metadata) and on success calls \texttt{submit\_scan} to let the buffer copy the tuple.
+When the copies in the buffer reach the set capacity \texttt{dispatch\_batch\_capacity} \(8192 = 2^{13}\), the \texttt{ready\_to\_dispatch} flag changes to true so the scan calls \texttt{run\_batch\_and\_build\_cursors}.
+This method is also invoked when there are no more tuples in the TAM source.
 
-\texttt{run\_batch\_and\_build\_cursors} is where the batch starts and scanners and workers from Figure~\ref{fig:execcustomscan-dispatch} run.
+\texttt{run\_batch\_and\_build\_cursors} is the method called when the batch starts and scanners and workers from Figure~\ref{fig:execcustomscan-dispatch} run.
 It groups the locators already stored in the MinimalTuple copies, lets scanners fetch fragment bytes through the TAM under the Postgres table snapshot object and then distributes the views to workers.
 
 Then the scan needs to read results. Reading stage calls \texttt{read\_next\_output} on every later \texttt{ExecCustomScan} to retrieve the next result (this means that in this semantic first call to \texttt{ExecCustomScan} takes very long as it needs to align first batch, while later calls return tuples one-after-another from the output cursor until they are exhausted and process repeats).
@@ -157,7 +157,8 @@ After Postgres consumes that projected tuple, the next call drops the previous r
 When the cursor is empty and the TAM source is not yet exhausted, the node calls \texttt{clear\_slots} and returns to the writing stage (this corresponds to finishing batch and starting collecting rows again)
 
 \paragraph{Execution statistics.}
-Each completed call to \texttt{run\_batch\_and\_build\_cursors} writes a \texttt{pipeline\_execution\_stats} aggregate onto the buffer, where I collect debugging statistics. 
+Each completed call to \texttt{run\_\allowbreak{}batch\_\allowbreak{}and\_\allowbreak{}build\_\allowbreak{}cursors} writes a\linebreak
+\texttt{pipeline\_\allowbreak{}execution\_\allowbreak{}stats} aggregate onto the buffer, where I collect debugging statistics.
 \texttt{EXPLAIN ANALYZE} reads then through \texttt{execution\_stats()}.
 Table~\ref{tab:dispatch-buffer-stats} presents some of them as the list is long and not every one is relevant to the common user.
 
@@ -172,12 +173,12 @@ Table~\ref{tab:dispatch-buffer-stats} presents some of them as the list is long 
 \caption{Grouped execution statistics collected by the dispatch buffer.}
 \label{tab:dispatch-buffer-stats}\\
 \toprule
-Group & Fields (batched) & What they tell you \\
+Group & Fields & Description \\
 \midrule
 \endfirsthead
 \caption[]{Grouped execution statistics collected by the dispatch buffer (continued).}\\
 \toprule
-Group & Fields (batched) & What they tell you \\
+Group & Fields & Description \\
 \midrule
 \endhead
 \midrule
@@ -186,13 +187,13 @@ Group & Fields (batched) & What they tell you \\
 \bottomrule
 \endlastfoot
 
-Backend choice
-  & requested versus actual backend, backend declines, backend fallbacks
-  & Whether the scan asked for GPU or CPU, and whether the runtime had to use fallback (hardware unavailable or alogirhtm is not supported). \\
+Backend algorithm
+  & requested algorithm versus actual algorithm
+  & Whether the scan asked for GPU or CPU, and whether the runtime had to use fallback (hardware is unavailable or the algorithm is not supported). \\
 \addlinespace
 
 Alignment jobs
-  & attempted, completed, failed
+  & counts all started, failed and finished jobs
   & How many target and query pairs the pipeline tried, how many finished. \\
 \addlinespace
 
@@ -203,47 +204,41 @@ Target index
 
 GPU dispatch
   & seed, chain, backtrack and other stages
-  & How much of the aligner actually ran on the device \\
+  & Information about which stages actually run on a GPU \\
 \addlinespace
 
 Stage timings
-  & per-stage nanosecond counters (query sketch, index build, seed, chain, extend, \ldots)
-  & Which pipeline stage dominated wall time on this statement. \\
+  & per-stage time counters (query sketch, index build, seed, chain, extend, \ldots)
+  & Allows us to extract times for specific pipeline stages. \\
 \addlinespace
 
 Integrity flags
-  & mixed environment, mixed persisted identity, saturated counters
-  & Additional flags indicating overflow or aggregation of counters and "mixing" which means that different stages of pipeline run in different modes (incompatible k/w or GPU/CPU mixing) - this is used for debugging \\
+  & mixed environment / mixed index / saturated counters
+  & Additional flags indicating counter overflow or inconsistent information when statistics are aggregated (for example, different execution environments or persisted index identities). These flags are used for debugging. \\
 
 \end{longtable}
 \endgroup
 
-\subsection{Memory admission before dispatch}
+\subsection{Memory reservations (permits)}
 \label{sec:dispatch-memory-admission}
 
-Before overlapping work, BioseqDB requests a process-local reservation for
-its input and temporary buffers. The check considers available memory,
-the process footprint and existing reservations. A rejected request returns
-immediately. The caller must reduce the work group, use a supported serial
-path or report an error. The admission check itself does not wait for memory
-to become available. A reservation accounts for intended use, but does not
-reserve physical pages in the operating system.
+Before dispatching work, BioseqDB requests a memory reservation for
+its input and temporary buffers. This is an important part of the BioseqDB design as it allows the dispatch buffer to estimate how much memory will be needed and check this against available memory, the process footprint and existing reservations.
+
+BioseqDB handles these reservations through memory permits, which keep a byte count and a reference to the process-local admission controller. The actual buffers are allocated separately. Pipeline arenas can reuse their allocated space, and growing their backing storage requires another admission check. I use this mechanism to reduce memory pressure and the risk of going into SWAP.
 
 \subsection{MVCC support}
 \label{sec:scan-row-stability}
 
 PostgreSQL holds its current input row in temporary storage called a tuple
-slot, but another transaction may also update that row. \texttt{Snapshot} in Postgres is set of row versions some statement is allowed to see as it needs to perform visibility checks before doing anything~\parencite{postgresql17_mvcc}.
+slot, but another transaction may also update that row. \texttt{Snapshot} in Postgres describes which row versions a statement is allowed to see. PostgreSQL uses this snapshot for visibility checks when reading rows~\parencite{postgresql17_mvcc}.
 \texttt{configure\_params} borrows this snapshot object so later fragment reads and bulk fetches observe the same MVCC view as the original TAM fetch.
-Let's see if this is compatible with the BisoeqDB model:
+Let's see if this is compatible with the BioseqDB model:
 
 \begin{itemize}
   \item \textbf{Copying values:} Dispatch buffer always copies the original tuple into an owned MinimalTuple slot, so Postgres won't overwirte this data.
   \item \textbf{Saving Postgres snapshot object:} PostgreSQL uses a snapshot to
-    decide which row versions a command can see. The sequence saves scan's Snapshot and checks a stored reference against the row (visibility check). Stored source fragments
-    are immutable. An update publishes a new version, while an
-    older snapshot can still read its earlier version. Delaying a read does
-    not switch it to the latest committed sequence.\footnote{PostgreSQL 17,
+    decide which row versions a command can see. Sequence reads use the scan's Snapshot to check that the stored reference points to a visible source version (visibility check). The idea is that stored source fragments are immutable and an update publishes a new version, while an older snapshot can still read its earlier version.\footnote{PostgreSQL 17,
     \href{https://www.postgresql.org/docs/17/transaction-iso.html}
     {Transaction Isolation}.}
   \item \textbf{Saving row numbers:} While the primary key is important for user, the row internally holds a row number that is used to indentify results.
