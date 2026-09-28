@@ -1,40 +1,38 @@
 \label{chap:conclusion}
 
-BioSeqDB demonstrates that sequence search can be represented as a PostgreSQL
-execution operation rather than as a scalar call to an external mapper. The
-system stores packed biological sequences, constructs persistent minimizer
-indexes, and runs a minimap2-derived pipeline for seeding, chaining, filtering,
-and final extension. Planner support and custom scans preserve the batch
-structure required by SIMD and GPU implementations while presenting typed SQL
-results that can participate in filters, projections, and joins.
+There are several limitations to be addressed in the BioseqDB:
+\begin{itemize}
+    \item Grouped-MPF does not correctly work for update on insert.
+    \item Grouped-MPF uses woraround with writing a file to efficiently support joins.
+    \item The data is fetched only in one Postgres process, which causes the one core of CPU to be bottlenecked.
+    \item Some kernels contains probable mistakes that slows down  processing for any cases than k=15,w=10 significantly.
+    \item The pipeline code is overcomplicated and current type-driven template system causes the build to last up to 2 hours for optimsied builds on some machines.
+    \item The storage is optimised only for large sequences, so short sequences overuse memory significantly.
+    \item Buggy conditions cause minimizers to be recomputed instead of being loaded from the index.
+    \item Index format contains too many fields of which most are not used and the loading code heavily relies of bitwise operations.
+    \item Cache is experimental and didn't go proper testing, so I have no confirmation if it works reliably.
+    \item Benchmarking was done only on synthetic datasets instead of sequences from NCBI, which can mean that practical speedups are significantly lower.
+    \item Currrent join logic assumes reuse of target fragments, which means that BioseqDB can handle large table vs. small table, but will be slow for multi-alignment (large table vs. large table)
+    \item The error messages created by BioseqDB are hard to interpret and not very helpful to the user
+    \item Compilation requires expiermental version of tools e.g latest CMake version with special flag enabled to build C++ std modules.
+\end{itemize}
 
-The first research question concerned a shared representation for the
-algorithmic stages. Alphabet-generic compact ranges cover resident values,
-while lazy sequence views represent fragmented, sliced, and composed sources.
-Algorithms read the required region without first converting the complete
-value to a byte array. The second question concerned heterogeneous execution. Minimizer
-extraction and chaining provide regular work for the implemented SIMD and GPU
-routes. Dispatch follows explicit algorithm settings, input compatibility,
-index form, and resource availability. Final alignment uses banded or unbanded
-KSW2, adaptive Block Aligner, and GPU routes that may return specialized scripts
-before device dynamic programming. Optional prefilters may reject unsuitable
-candidates but do not replace alignment.
+However, the project can be classified as a success:
+\begin{itemize}
+    \item BioseqDB is first in literature aim to integrate existing database software with genomic toolset.
+    \item BioseqDB supports abitratly large sequences of any sizes, so it doesn't need any splitting step 
+    \item Most of the common operations like slicing, ordering, transforming sequences can be done in SQL instead of external tools
+    \item Most of the algorithms were ported by me based on their original source code, so now they're supported on any architecture.
+    \item BioseqDB aligner pipeline can be called as standalone binary directly.
+    \item I provided extensive analysis of algoritms that are poorly described in literature, so the provided illustrations and code listings can be used as a base to develop new software more easily and great learning material.
+    \item The overall performance was very satisfactory and speedups of x2, x10 to x100 on heavy SWAPped systems were achieved.
+\end{itemize}
 
-The third question concerned database execution. A custom scan owns the search
-expression, batches input rows, and substitutes match fields into planned
-expressions. This design also permits multiple alignments for one input row.
-The fourth question concerned the surrounding data system. Physical sequence
-storage, persistent indexes, bounded ingestion, external-provider relation definitions,
-cache coordination, and source-driven SQL generation give the kernels explicit
-storage and lifecycle contracts.
+\section{Acknowledgments}
 
-The remaining limits are operational and algorithmic. Some remote retrieval
-paths still require record-sized or archive-sized memory. Provider quotas are
-not coordinated across all PostgreSQL backends. Hardware-specific routes have
-batch-size thresholds and require broader evaluation on additional devices.
-GPU chaining may examine a bounded predecessor set, and seed and alignment
-backends retain route-specific contracts. The present mapper is centered on
-linear references rather than pangenome graphs. A relational database can
-nevertheless plan and execute batched
-sequence analysis while retaining typed data, bounded resources, persistent
-derived state, and explicit algorithm selection.
+I would like to thank to my supervisor prof. dr hab. Krzysztof Stencel, whos expertise in database systems was an inspiration for me to execute this project.
+I dedicate this work to Wiesław Styczyński and Agnieszka Styczyńska, who supported me with good words in times of doubts.
+
+\section{Funding}
+
+The work was self-funded and total spending was around $1000\$$ for AWS infrastructure and hardware rentals.

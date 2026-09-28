@@ -1,13 +1,3 @@
-% Existing systems show why these relationships matter. BioWorkbench imports
-% variant and gene annotations into SQLite and joins them with
-% SQL~\autocite{Mondelli_2018}. The IBM Functional Genomics Platform uses a DB2
-% column store and mapping tables to connect genomes, genes, proteins, and
-% annotations~\autocite{seabolt2020ibmfunctionalgenomicsplatform}. Database-backed
-% sequence search has also been studied with DynamoDB records that pair each
-% sequence with an organism name~\autocite{flach2020nosql}. These examples motivate
-% keeping biological data queryable. Here the engineering question is how to
-% store the sequence itself so that database execution can request its symbols
-% as needed.
 
 \section{Store sequences together with their metadata}
 \label{sec:pg-storage-role}

@@ -451,53 +451,6 @@ I wanted to address these limitations by implementing BioseqDB, Postgres extensi
 
 Tight integration with Postgres also means that as a side effect, we can utilise some benefits of persistent state: deferring expesive operations, keeping large indexing structures in memory in case use reruns query and more effective memory-disk caching schemes. 
 
-% BioSeqDB addresses database integration limits rather than mapper efficiency.
-% Minimap2 already provides an optimized nucleotide mapper and reusable
-% reference indexes \cite{minimap2_paper}. BLAST+ and MMseqs2 support large
-% sequence-database searches \cite{blast_plus_2009,mmseqs2_2017}. The relevant
-% limits are the trade-offs of sparse search and the boundary between standalone
-% tools and relational execution.
-
-% \subsection{Limits of sparse alignment search}
-
-% Minimizers reduce work by retaining only part of the available exact evidence.
-% Sensitivity depends on \(k\), the window length, ambiguous symbols, the error
-% pattern, and occurrence filtering. A short or damaged query may contain no
-% useful seed. A repetitive seed may produce many locations and weak positional
-% evidence. No later alignment kernel can recover a locus removed at this stage.
-
-% Chaining is exact only for its score and admitted predecessor set. Distance
-% limits, bandwidth, occurrence thresholds, and early stopping can remove a
-% useful chain. Final dynamic programming is likewise exact only over its
-% evaluated cells and endpoints. A narrow band, an adaptive block, X-drop, or
-% Z-drop may exclude the unconstrained optimum. Repeats can produce several
-% similar mappings, so MAPQ depends on alternatives and repetitiveness rather
-% than one alignment score. These are properties to report, not defects that
-% database integration removes.
-
-% Processor choice adds another trade-off. SIMD works best when lanes perform
-% similar operations over regular memory. GPU execution adds submission,
-% transfer, synchronization, and residency costs that need a sufficiently large
-% batch. A faster kernel does not imply a faster query when candidate
-% construction, data conversion, or result materialization dominates.
-
-% \subsection{Limits of a file-oriented execution boundary}
-
-% A conventional workflow exports selected sequences, invokes a mapper, parses
-% its output, and joins the records back to metadata. File formats remain useful
-% for interchange and archiving, but as a mandatory query boundary they hide
-% alignment work from the relational planner, repeat conversion, and leave index
-% compatibility to orchestration code. PostgreSQL functions can express typed
-% one-to-many computation, but a custom scan is needed to own batching, index
-% reuse, rescans, and result projection \cite{postgresql17_custom_scan}.
-
-% Representation and lifetime are part of this problem. Packed, out-of-line,
-% fragmented, and lazy sequences have different access costs. PostgreSQL may need
-% to detoast a variable-length value before access \cite{postgresql17_toast}.
-% Eager conversion can process a complete sequence when search needs one region.
-% A reusable index separately needs source and parameter identity, safe
-% publication, invalidation, and bounded loading. These are database lifecycle
-% requirements rather than changes to minimizer or alignment arithmetic.
 
 \clearpage
 \flushbottom

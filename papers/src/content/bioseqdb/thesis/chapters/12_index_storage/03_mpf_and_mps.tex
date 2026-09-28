@@ -224,44 +224,6 @@ There are 3 implementations of indexes inside BioseqDB:
 
 
 
-% The sequence store can fetch a small interval without decoding a whole
-% chromosome. Seed lookup has a different question: at which positions does a
-% query minimizer occur in the target? Reading every target symbol and rebuilding
-% its minimizer table for each query would repeat much of the same work.
-% A persistent index saves that table between executions.
-
-% The useful object is a mapping from a seed key to its occurrences. A
-% \emph{posting} is one stored occurrence, including a position and any source or
-% strand information needed to interpret it. A \emph{posting list} contains all
-% stored occurrences for one key. The key may be a minimizer hash, as in
-% BioSeqDB and minimap2, or a spaced word, as in the CPU MMseqs2 prefilter.
-% The seed-selection rule determines which occurrences the index stores.
-
-% Reuse of reference indexes already appears in biological workflows. For
-% example, BioWorkbench's RASflow workflow checks for an existing Bowtie2 index
-% before preparing it again\autocite{Mondelli_2018}. MMseqs2's interactive
-% search system also saves precomputed search structures to reduce setup for
-% repeated requests\autocite{mmseqs2_desktop_2019}. BioSeqDB has to connect this
-% reuse to the database's changing rows and to the search operators from the
-% previous chapters.
-
-% Four questions guide the design:
-% \begin{itemize}
-%   \item \textbf{What is stored?} Minimizer positions answer seed lookups;
-%     symbol counts answer a different question about sequence composition.
-%   \item \textbf{How is it grouped?} Grouping by target interval makes
-%     construction local. Grouping by hash makes later reads selective.
-%   \item \textbf{When is it usable?} The index must describe the same source
-%     version and minimizer rules as the query expects.
-%   \item \textbf{Who keeps its bytes alive?} A reader needs valid storage and
-%     buffers until its last lookup, including when another transaction changes
-%     the source.
-% \end{itemize}
-
-% An index is derived data: removing it does not remove the sequence. This also
-% distinguishes it from the completed-query cache in
-% Section~\ref{sec:bioseq-result-cache}. A minimizer index can serve many
-% different query sequences; a cached result describes completed executions.
 
 The main idea behind MPF and MPS was:
 \begin{itemize}
@@ -364,17 +326,6 @@ Also the fragment keys are just not reffering to fragments anymore, but they rep
 The directory contains metadata information like how many distinct hashes are there in total and for every group it stores min(hash), max(hash)
 to allow us to quickly skip groups if certain hash values do not exist there.
 
-% As mentione above~\ref{lst:types-of-indexes-in-bioseqdb} BioSeqDB supports \emph{minimizers per fragment} (MPF) and
-% \emph{minimizers per sequence} (MPS). MPF groups entries by source interval;
-% MPS groups them by hash across one logical sequence. Both preserve positions
-% needed to form anchors. Figure~\ref{fig:index-mpf-mps} shows the same six
-% occurrences in the two organizations, and the heap rows that store the lists.
-% Panel~(c) uses the per-fragment layout of Figure~\ref{fig:index-storage-layouts}.
-% The lists are stored.
-% A header and a control list sit in front of each position list.
-% A directory row stores metadata and does not store positions.
-% Here a minimizer position is its
-% last-symbol coordinate, using zero-based positions.
 
 \begin{figure}[htbp]
 \centering

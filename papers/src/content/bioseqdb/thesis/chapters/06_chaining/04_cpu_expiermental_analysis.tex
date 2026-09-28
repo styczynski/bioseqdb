@@ -25,18 +25,6 @@ cost exceeds its benefit.}
 
 As mentioned in section~\ref{sec:chaining-interpretation} there is a case of emergent assymetry: if one anchor matches with multiple anchors in the query, then we cannot easily tell which part of the query is best to match. The following sections demonstrates what happens in this scenario. The special query/target constructions are prepared in that asymmetry in mind.
 
-% The \emph{first predecessor path} starts at this chain end and repeatedly
-% follows \(p_j\) until the next predecessor is \(-1\).  A \emph{retained
-% anchor} is a minimizer hit that remains in the coordinate-sorted anchor array
-% after minimap2 applies its occurrence-frequency filters.  A
-% \emph{repeat-derived anchor} is a retained anchor that links a selected
-% minimizer in one block to an occurrence in another block.  A
-% \emph{same-target anchor group} contains retained anchors with the same
-% reference-sequence identifier, target end coordinate, and orientation.  Its
-% members have different query end coordinates in these constructions.  The
-% first predecessor path contains at most one member of such a group.  The
-% remaining members still occupy array slots.  They can make \(p_j<j-1\), even
-% when consecutive path anchors are close in both sequences.
 
 \subsubsection{Reference and query structures}
 
@@ -559,62 +547,6 @@ The exact definitions are as follows:
 
 
 
-% Filtering and
-% scoring parameters were not changed.  Instrumentation recorded the score and
-% predecessor arrays.  The only candidate-order change placed equal-score ends
-% in decreasing anchor-array index, matching BioseqDB's tie rule.  The tested
-% widths were \(L\in\{2,4,8,16,32,64\}\).  The branch counters were recomputed
-% from the recorded arrays.  For Mosaic, Degraded mosaic, and Spaced copy, an
-% independent checker reconstructed the expected path coordinates and compared
-% them with the recorded predecessor path.  For the Minimizer-island comb, the
-% checker compared the recorded predecessor array with the array specified by
-% the construction.  The first three named inputs used three fixed
-% random-number-generator seeds.
-
-% Let \(q\) be the number of anchors on the first predecessor path.  Let
-% \(B_L\) be the number of evaluations for which
-% \(\operatorname{Run}_L\) is true, \(E_L\) the number of times the first-path
-% loop evaluates \(\operatorname{Run}_L\), and \(P_L\) the number that satisfy
-% both bounds \(j\geq L-1\) and
-% \(c\leq n-L\).  Three different ratios are useful:
-% \[
-%   \operatorname{Fire}_L=\frac{B_L}{E_L},
-%   \qquad
-%   \operatorname{Contiguous}_L=\frac{B_L}{P_L},
-%   \qquad
-%   \operatorname{Coverage}_L=\frac{LB_L}{q}.
-% \]
-% The first ratio is the observed branch-firing rate.  The second isolates the
-% predecessor test after the bounds pass.  The third is the fraction of path
-% anchors consumed by vector batches.  A successful evaluation consumes
-% \(L\) anchors, so firing rate and anchor coverage are not interchangeable.
-% An empty denominator gives an undefined value.
-
-% For maximal runs of unit predecessor relations with lengths \(r_i\), the
-% greedy loop gives
-% \[
-%   B_L=\sum_i\left\lfloor\frac{r_i}{L}\right\rfloor,
-%   \qquad
-%   E_L=q-(L-1)B_L.
-% \]
-% In the Minimizer-island comb, the path ends at anchor-array index zero, so
-% \(p_0=-1=0-1\) contributes one unit relation.  The \(m=1\) path is one run of
-% length 91.  For
-% \(m\geq2\), the only maximal runs have lengths 39 and 52.  Thus
-% \[
-%   B_L=
-%   \left\lfloor\frac{39}{L}\right\rfloor+
-%   \left\lfloor\frac{52}{L}\right\rfloor,
-%   \qquad
-%   q=m+90.
-% \]
-% For fixed \(L\) with \(B_L>0\), both \(\operatorname{Fire}_L\) and
-% \(\operatorname{Coverage}_L\) decrease as \(\Theta(1/m)\).  For \(L=64\),
-% both values are zero for every \(m\geq2\).
-
-% The row prefixes in the next table refer to panels~(a)--(d) of
-% Figure~\ref{fig:chaining-runl-inputs}.  The itemized notes below the table
-% describe every input family.
 
 \begin{table}[H]
 \centering

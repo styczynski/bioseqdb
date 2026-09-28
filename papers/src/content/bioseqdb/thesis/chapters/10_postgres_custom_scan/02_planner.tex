@@ -1,19 +1,6 @@
 \section{Integrating Postgres}
 \label{sec:mmsearch-sql-rendezvous}
 
-% \texttt{mmsearch} is declared as an ordinary SQL function returning
-% \texttt{boolean}. PostgreSQL can therefore resolve its arguments and accept
-% it in a condition without a new SQL grammar. Its two-argument form uses the
-% session's alignment settings. A third argument can supply typed options.
-% The extra hit rows are part of BioSeqDB's search contract, which every
-% accepted plan must preserve.
-% During planning the call acts as a \emph{marker}: it identifies the search
-% that an owning custom scan must perform. When the plan is constructed, the
-% owner removes that marker from the conditions that PostgreSQL would otherwise
-% execute. An unowned non-null call reaches a function body that reports an
-% unsupported query shape. There is no ordinary scalar alignment fallback.
-
-% \subsection{Inspiration from PostgreSQL extensions}
 
 \subsection{Designing SQL API}
 

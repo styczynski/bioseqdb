@@ -191,61 +191,6 @@ For example,
 
 Similar to the minimizer chapter here we will discuss different approaches to chaining. The algorithm itself is based on dynamic programming scoring, but the details differ.
 
-% \begin{table}[H]
-% \centering
-% \caption{Comparison of different chaining algorithms}
-% \label{tab:chaining-algorithm-taxonomy}
-% \footnotesize
-% \setlength{\tabcolsep}{3.2pt}
-% \renewcommand{\arraystretch}{1.10}
-% \begin{tabularx}{\linewidth}{@{}
-%   >{\raggedright\arraybackslash}p{0.07\linewidth}
-%   >{\raggedright\arraybackslash}p{0.23\linewidth}
-%   >{\raggedright\arraybackslash}X
-%   >{\raggedright\arraybackslash}p{0.26\linewidth}@{}}
-% \toprule
-% \textbf{ID} & \textbf{Algorithm} & \textbf{Defining decision} &
-% \textbf{Implementations}\\
-% \midrule
-% B1 & Ordered predecessor scan & Visit recent candidates first. Increase the
-% skip counter when a marked candidate does not improve the score. Decrease a
-% positive counter after an improvement. Stop when the counter exceeds its
-% limit. Also score cached predecessor \(m\) when it exists and the main scan
-% does not reach it
-% & minimap2 non-RMQ chaining, BioSeqDB scalar and exact SIMD\\
-% B2 & Source-to-target DP & Apply each completed source score in parallel
-% to later targets admitted by the kernel's index and distance checks
-% & G3SA first CUDA pass\\
-% B3 & Ranking-value second pass & Rank predecessors by a value calculated from
-% their saved scores and coordinates. Keep at most one predecessor with the
-% largest accepted ranking value. If one was saved, calculate its full pair
-% score & G3SA second CUDA pass\\
-% B4 & Range-minimum-query tree DP & Use a balanced tree whose nodes cache the
-% smallest stored priority in each subtree, then calculate the full score for the
-% selected predecessor & minimap2 RMQ and BioSeqDB's experimental RMQ route,
-% which includes both query-coordinate boundaries and omits the bandwidth check\\
-% B5 & Per-element batch-limited DP & Keep one running score for each vector
-% element. Stop after enough consecutive batches leave all of those scores unchanged &
-% BioSeqDB bounded CPU SIMD\\
-% B6 & Per-target batch-limited DP & Keep one best score for the target.
-% Stop after enough consecutive batches fail to increase that score & BioSeqDB Vulkan\\
-% \bottomrule
-% \end{tabularx}
-% \end{table}
-
-% Scalar and exact SIMD both implement B1 because they make the same ordered
-% decisions. G3SA selects a short kernel or one of two tiled launch
-% configurations according to range size within B2 and B3. BioSeqDB CPU SIMD and
-% Vulkan use different batch stopping rules, so they are B5 and B6.
-
-% All implementations pass their saved scores and predecessors to later code
-% that builds and classifies mappings.
-
-% The BioSeqDB RMQ implementation includes both query-coordinate boundaries. It can
-% select a predecessor with the same query coordinate as the target and accept
-% it without a bandwidth test. We classify the tree design as B4 and describe
-% these defects in
-% Section~\ref{sec:chaining-bioseqdb}.
 
 \subsection{Shared pair score}
 \label{sec:chaining-score-model}

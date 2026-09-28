@@ -478,56 +478,6 @@ totals are \(-\infty\).}
 \end{figure}
 
 
-% \subsection{Exact SIMD B1}
-
-% For target \(i\), exact SIMD B1 initializes one shared score \(F=\ell_i\), one
-% shared predecessor \(P=-1\), and one shared skip counter \(s=0\).  These
-% values belong to the target, not to individual lanes.  After calculating
-% \(\mathbf C_b\), it builds two masks:
-% \begin{align}
-%   X_{b,\lambda}
-%     &= [C_{b,\lambda}>F],
-%     \label{eq:chaining-simd-can-improve}\\
-%   V_{b,\lambda}
-%     &= [C_{b,\lambda}\neq-\infty]\land[t_{j_{b,\lambda}}=i].
-%     \label{eq:chaining-simd-visited-hit}
-% \end{align}
-% Here \(X\) says that a candidate can beat the target score at the start of the
-% batch.  The mask \(V\) says that a valid candidate is marked by a newer
-% candidate's saved predecessor.  Before reading \(V\), the SIMD code writes
-% \(t_{p_j}\gets i\) for every valid lane with \(p_j\geq0\).  A predecessor
-% always has a smaller index than its anchor.  The writes can therefore be made
-% for the whole batch before the decisions without changing which marks the
-% newest-to-oldest scan observes.
-
-% If every element of \(\mathbf X_b\) is false, no candidate in the batch can
-% change \(F\).  Exact SIMD counts the true elements of \(\mathbf V_b\) at once.
-% If that count would make \(s\) exceed \texttt{max\_skip}, it reads only the
-% bits needed to locate the exact candidate where scalar B1 would stop.
-
-% If any element of \(\mathbf X_b\) is true, the code copies the pair scores
-% \(\boldsymbol\epsilon_b=[E(j_{b,\lambda},i)]_\lambda\) and \(\mathbf V_b\) to
-% small lane arrays.  It then reads those values from the newest lane to the
-% oldest lane, forms \(C_{b,\lambda}=f_{j_{b,\lambda}}+\epsilon_{b,\lambda}\),
-% and applies the scalar rules:
-% \begin{equation}
-%   \begin{aligned}
-%   C_{b,\lambda}>F
-%     &\;\Longrightarrow\;
-%       (F,P,s)\gets
-%       (C_{b,\lambda},j_{b,\lambda},\max(0,s-1)),\\
-%   C_{b,\lambda}\leq F\ \land\ V_{b,\lambda}
-%     &\;\Longrightarrow\; s\gets s+1.
-%   \end{aligned}
-%   \label{eq:chaining-simd-exact-control}
-% \end{equation}
-% This second step is a one-by-one control pass over SIMD-produced scores.  It
-% does not call the scalar pair-scoring function.  Strict comparison keeps the
-% newest predecessor when two candidates give an equal total score.  The code
-% then performs B1's saved-high-score-anchor check for \(m\), including its
-% strict cache update.  That extra calculation uses the SIMD scorer with one
-% active lane.
-
 
 We operate on batches so we need to adjust our definition of skip counter.
 Let \(S=\texttt{max\_chain\_skip}\):

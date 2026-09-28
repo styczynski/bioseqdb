@@ -46,15 +46,6 @@ SELECT seq[2:3] FROM table;
 \end{lstlisting}
 \end{minipage}
 
-% Additionally the scan needs to correctly handle PostgreSQL tuple visibility.
-% It wasn't the primary goal of BioseqDB to provide full correct MVCC support as operations favour OLAP use cases, so I didn't verify that 
-
-% Hydration during an \texttt{mmsearch} batch does not allocate a second user-facing tuple slot for the letters.
-% \texttt{submit\_scan} stores whatever the TAM left in the sequence column, usually a locator stub, inside the MinimalTuple copy.
-% Production alignment then streams those locators through statement-owned scanners, which still fetch fragment rows through the TAM (Figure~\ref{fig:sequence-scan-lifecycle}).
-% The testing GUCs that force an in-memory scanner flatten locators by writing a fetched \texttt{bioseq.seq} pointer into the sequence column of \emph{that same} copied slot.
-% Queries without \texttt{mmsearch} never enter this buffer.
-% They hydrate on the backend thread through the TAM, which is the solid alternative path in Figure~\ref{fig:execcustomscan-dispatch}.
 
 \subsubsection{Buffer API}
 
