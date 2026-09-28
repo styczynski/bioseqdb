@@ -12,17 +12,28 @@ The cases where divided by me into two groups:
   and the query together. The query batch shares that temporary index.
 \end{itemize}
 
+I measured two times: A and B, where A (always top number) represents total processing time and B represents the sum of time with excluded CIGAR/MAPQ work.
+For heavy parallelisation this doesn't mean that B was exactly equal to all processing time for seeding, chaining till final alignment, but it's good measurement to validate where the majority of work can be spent.
+In the future I plan to measure exactly which stages take the longest time with better instrumentation.
+
+The full tables below present only specific cell values, because the code for benchmarking selected tuples in non-deterministic order depending on processing speeds.
+The most important benchmarking values were still collected as main points of my interest were comparisons between DNA4/DNA5, different lengths, different k/w parameters and some 
+configurations wheren't optimised in reality (SIMD-ref role as naive SIMD scan implementation for example was to see how this performs in practice).
+
 Overall the main outcomes are as follows:
 \begin{enumerate}
-  \item BioseqDB is the first tool to my knowing that integrates database with aligner software
+  \item BioseqDB is the first tool to my knowing that integrates database with aligner software, so benchmarks are first of this kind.
   \item Memory admission system and custom grouped-MPF index allow to achieve speedups for already built index by 3x to 8x compared to minimap2 in typical cases and 100x where heavy swapping occurs for long sequences
   \item BioseqDB for preexisting index beats all common aligners and doesn't require any data preparation (other tools required customized scripts to split the long sequences into chunks)
   \item BioseqDB without index is usually slower than minimap2, but faster than other similar aligner tools (this is acceptable due to nature of the typical use cases)
   \item BisoeqDB exposed failures in terms of very inneficient GPU implementation and anomalous implementations of some of other coinfigurations (like scalar)
+  \item External aligners excluding BLAST, required me to split sequences beforehand and some of the splits were relatively small, 
+  meaning that the job for the tool (Winnowmap) was significantly easier. This means that BioseqDB is only capable solution outside of BLAST that can directly load very large sequences. When reading tables please note that this preprocessing 
+  bias the measured times for other aligners.
 \end{enumerate}
 
 \Needspace{13\baselineskip}
-\subsubsection{What an indexed minimizer comparison measures}
+\subsubsection{Problems with indexed comaprison for minimizers}
 \label{sec:bench-indexed-minimizers}
 
 Scalar and SIMD-ref have similar indexed times in this example, where they
@@ -127,8 +138,7 @@ other datasets.
 \subsubsection{Ambiguous bases problem}
 \label{sec:bench-dna5}
 
-The local DNA5 slowdown is much larger in the complete no-index measurement
-than in its index measurement.
+The local DNA5 the performance is much lower for the measurement without index than in its index measurement.
 
 \BenchmarkSlice{local}
   {mpf-bounded-simd-block}
@@ -136,8 +146,8 @@ than in its index measurement.
   {The preferred local configuration on DNA4 and DNA5.}
   {tab:bench-dna5}
 
-"N" bases change the workload at several stages. The bounded DNA5
-sketcher includes N in the k-mers it hashes and it involves entirely different bit-packed representation.
+"N" bases can be troublesome as the bit-packing representation if less-performant as padding for bits occupy more space.
+This also means that usual SIMD instructions needs extra bitshifts to extract the bits.
 
 \Needspace{13\baselineskip}
 \subsubsection{Anomalous A/B difference}

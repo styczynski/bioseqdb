@@ -18,16 +18,16 @@ As I discussed all methods of caching within BisoeqDB already, I present table w
 \begin{table}[htbp]
 \centering
 \small
-\caption{Stored bytes and reusable memory have different owners.}
+\caption{Different types of cahces relevant in context of BioseqDB}
 \label{tab:storage-cache-scopes}
 \begin{tabularx}{\linewidth}{@{}p{.23\linewidth}XX@{}}
 \toprule
-\textbf{Object} & \textbf{Retained data} & \textbf{Scope} \\
+\textbf{Name of the cache method} & \textbf{Saved data} & \textbf{Description} \\
 \midrule
-PostgreSQL buffer & Relation page bytes & Internal buffer manager in Postgres pins each page and loads/unloads pages on demand so multiple accesses to the same page are efficient \\
-Column cache~\ref{sec:pg-storage-caches} & Decoded column value buffer & Can cache decompressed chunks, so loading and decompression of the same chunks can be efficient \\
-Fragment slots~\ref{fig:sequence-scan-lifecycle} & Copy of one packed fragment & Scanner-owned packed copies reused within a read session, independently of the column-cache setting.\\
-Query-result cache~\ref{sec:seq-results-cache} & Completed SQL result rows & Separate \path{bioseq_cache} subextension can store and share results after pipeline execution is finished so same or similar queries can be efficient (experimental and disabled by default) \\
+PostgreSQL buffer & Relation pages & Internal buffer manager in Postgres loads/unloads pages and can pin pages to optimise page access. In BioseqDB I don't go to such low level of abstraction and assume page loading is opaque mechanism. \\
+Column cache~\ref{sec:pg-storage-caches} & Buffer with decompressed column chunks & Can cache decompressed chunks, so loading and decompression of the same chunks can be efficient. \\
+Fragment slots~\ref{fig:sequence-scan-lifecycle} & Copy of one packed fragment & Each scanner can store fragments in its own memory, so when pipeline needs to lookup sequence parts not far away it will resuse already loaded fragments \\
+Query-result cache~\ref{sec:seq-results-cache} & Completed SQL result rows & Separate \path{bioseq_cache} subextension can store and share results after pipeline execution is finished. This extenion is disabled by default, but it can read saved results if the queries are same. \\
 \bottomrule
 \end{tabularx}
 \end{table}

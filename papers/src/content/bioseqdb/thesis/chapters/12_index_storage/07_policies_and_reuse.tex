@@ -87,9 +87,9 @@ All indexes in BioseqDB can be automatically updated on insert (but as noted ear
 \label{tab:index-update-policy}
 \begin{tabularx}{\linewidth}{@{}p{.31\linewidth}X@{}}
 \toprule
-\textbf{Policy} & \textbf{Meaning}\\
+\textbf{Policy} & \textbf{Description}\\
 \midrule
-\texttt{UPDATE\_ON\_INSERT} & Automatically compute and store minimizers for new sequences \\
+\texttt{UPDATE\_ON\_INSERT} & When user inserts data, we automatically compute and store minimizers for new sequence \\
 \texttt{UPDATE\_MANUALLY} & User needs to manually call \texttt{bioseq.update\_index} \\
 \bottomrule
 \end{tabularx}
@@ -102,33 +102,12 @@ All indexes in BioseqDB can be automatically updated on insert (but as noted ear
 \label{tab:index-policy-defaults}
 \begin{tabularx}{\linewidth}{@{}p{.34\linewidth}p{.30\linewidth}X@{}}
 \toprule
-\textbf{Index} & \textbf{Maintenance policy} & \textbf{Default read role}\\
+\textbf{Index} & \textbf{Policy for user updates} & \textbf{Description}\\
 \midrule
-\path{minimizers_per_fragment} & \texttt{UPDATE\_ON\_INSERT} & Active minimizer index\\
-\path{minimizers_per_sequence} & \texttt{UPDATE\_MANUALLY} & Not selected\\
-\path{symbol_counts} & \texttt{UPDATE\_ON\_INSERT} & Used by supported symbol-count operations\\
+\path{minimizers_per_fragment} & \texttt{UPDATE\_ON\_INSERT} & Default minimizer index\\
+\path{minimizers_per_sequence} & \texttt{UPDATE\_MANUALLY} & Not selected by default\\
+\path{symbol_counts} & \texttt{UPDATE\_ON\_INSERT} & Used when user demans to count symbols in a sequence\\
 \bottomrule
 \end{tabularx}
 \end{table}
-
-\subsection{Reading saved minimizers}
-\label{sec:index-read-policy}
-
-The query and target must agree on their minimizer scheme and parameters otherwise the reader will refuse to read the index or emit the error.
-By default read requirement allows both reading the index and in case if does not exist or is incompatible, recomputing all minimizers. This behaviour however has some noticable bugs~\ref{tab:configuration-index-requirement}.
-
-\paragraph{Repeated lookups on wider hashes}
-\label{sec:index-direct-lookup}
-\label{sec:index-control-scan-waves}
-For supported 32-bit hashes, grouped MPF provides a sequence-wide
-direct lookup from a query hash to its position list. Wider hashes use the
-directory row, which searches fragment metadata. This means that queries
-can therefore read the same data again and again
-
-\paragraph{Index in RAM}
-\label{sec:index-residency}
-Mapping a reader file does not load all its pages into RAM. First accesses
-can require disk reads, while later accesses may use the operating-system
-page cache. Restarting PostgreSQL discards process-local state but does not
-guarantee an empty operating-system cache.
 

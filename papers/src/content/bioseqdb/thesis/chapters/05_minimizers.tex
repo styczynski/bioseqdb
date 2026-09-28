@@ -1681,7 +1681,7 @@ transpose between candidate construction and window reduction.
   stride/.style={flow,densely dashed}
 ]
   \node[anchor=west,font=\bfseries] at (0,9.25)
-    {(a) Blocks grid-stride over reads};
+    {(a) Blocks order};
   \node[block] (blk) at (1.65,8.50) {block $b$\\32 threads};
   \node[read] (r0) at (4.70,8.50) {read $b$};
   \node[read] (r1) at (7.75,8.50) {read $b+128$};
@@ -1709,7 +1709,7 @@ transpose between candidate construction and window reduction.
     {Thread $t$ is responsible for calculation for 4 positions. \\ Rows 0--3 are those windows, row 4 is just a extra context for calculation \\ (in our algorithms we assume left-side context, but in G3SA it's on the right side)};
 
   \node[anchor=west,font=\bfseries] at (0,3.98)
-    {(c) Four A3-style groups of adjacent windows};
+    {(c) 4 groups of adjacent windows};
   \foreach \r/\yy in {0/3.34,1/2.78,2/2.22,3/1.66}
     {
       \node[anchor=east,font=\scriptsize] at (1.05,\yy) {$G_{\r}$};
@@ -1722,100 +1722,10 @@ transpose between candidate construction and window reduction.
   \node[anchor=west,align=left,text width=4.15cm,font=\scriptsize]
     at (9.55,2.45)
     {Every thread performs\\width-$w$ scans};
-
-  \node[anchor=west,font=\bfseries] at (0,.95)
-    {(d) Ordered output and the rest of seeding};
-  \node[stage] (compact) at (1.55,.20)
-    {thread 0 walks\\$W_0,\ldots,W_{127}$};
-  \node[stage] (ties) at (4.65,.20)
-    {change/tie scans\\append minimizers};
-  \node[stage] (lookup) at (8.10,.20)
-    {next kernel\\index lookup + filter};
-  \node[stage] (sort) at (11.70,.20)
-    {emit anchors\\segmented radix sort};
-  \draw[flow] (compact)--(ties);
-  \draw[flow] (ties)--(lookup);
-  \draw[flow] (lookup)--(sort);
-  \node[anchor=north,font=\scriptsize,text=rewriteBlue!80!black]
-    at (3.10,-.25) {next chunk: advance by 128 and rebuild the slab};
 \end{tikzpicture}
 \caption{G3SA algorithm reconstructed from the CUDA code. This is similar to A3, but has specific work split per thread/warp (standrd CUDA SIMT model)}
 \label{fig:g3sa-minimizer-kernel}
 \end{figure}
-
-\subsection{Sketch pseudocode and work}
-
-Here, \Call{PublishBlockWrites}{} returns a block-scoped phase token. The token
-becomes ready only after every thread in the block has reached that phase and
-the named shared-memory writes are visible to every thread; awaiting it is
-therefore a collective rendezvous.
-
-\begin{algorithm}[H]
-\caption{G3SA sketching CUDA algorithm}
-\label{alg:g3sa-sketch-kernel}
-\footnotesize
-\begin{algorithmic}[1]
-  \Require concatenated reads $S$, offsets $O$, lengths $N$, index parameters
-           $k,w$
-  \State shared $\mathit{Base}[160]$, $\mathit{Cand}[160]$,
-         $\mathit{Winner}[128]$
-  \Procedure{SketchBlock}{$b,t$}
-    \Comment{$b$ is a block; $t\in[0,32)$ is its thread}
-    \For{$q\gets b;\ q<|\!N\!|;\ q\gets q+\operatorname{gridDim}_x$}
-      \State $p\gets O[q]$, $e\gets O[q]+N[q]$, $m\gets0$
-      \While{$p<e$}
-        \For{$r\gets0$ \textbf{to} $4$ in every thread}
-          \State $u\gets32r+t$
-          \State $\mathit{Base}[u]\gets
-                 (p+u<e)\ ?\ S[p+u]\ :\mathtt{NUL}$
-          \State $\mathit{Cand}[u]\gets\infty$
-        \EndFor
-        \State $\mathit{baseReady}\gets
-               \Call{PublishBlockWrites}{\mathit{Base},\mathit{Cand}}$
-        \State $\operatorname{await}(\mathit{baseReady})$
-        \For{$r\gets0$ \textbf{to} $4$ in every thread}
-          \State $u\gets32r+t$
-          \State $\mathit{Cand}[u]\gets
-                 \Call{GetHashedKmer}{\mathit{Base},u,k,p-O[q]}$
-        \EndFor
-        \State $\mathit{hashReady}\gets
-               \Call{PublishBlockWrites}{\mathit{Cand}}$
-        \State $\operatorname{await}(\mathit{hashReady})$
-        \For{$r\gets0$ \textbf{to} $3$ in every thread}
-          \State $s\gets32r+t$, $\mathit{best}\gets\infty$
-          \For{$j\gets0$ \textbf{to} $w-1$}
-            \If{$\mathit{Cand}[s+j].\mathit{hash}
-                  \leq\mathit{best}.\mathit{hash}$ and
-                  $p+s+j+k-1\leq e$}
-              \State $\mathit{best}\gets\mathit{Cand}[s+j]$
-            \EndIf
-          \EndFor
-          \If{$p+s+w+k-1\leq e$}
-            \State $\mathit{Winner}[s]\gets\mathit{best}$
-          \ElsIf{$N[q]<w+k-1$ and $s=0$ and $\mathit{best}<\infty$}
-            \State $\mathit{Winner}[0]\gets\mathit{best}$
-              \Comment{source short-read case}
-          \Else
-            \State $\mathit{Winner}[s]\gets0$
-          \EndIf
-        \EndFor
-        \State $\mathit{winnerReady}\gets
-               \Call{PublishBlockWrites}{\mathit{Winner}}$
-        \State $\operatorname{await}(\mathit{winnerReady})$
-        \If{$t=0$}
-          \State $m\gets\Call{AppendChangesAndHashTies}
-                    {\mathit{Cand},\mathit{Winner},w,O[q],m}$
-        \EndIf
-        \State $p\gets p+128$
-      \EndWhile
-      \If{$t=0$}
-        \State $\mathit{minimizerCount}[q]\gets m$
-      \EndIf
-    \EndFor
-  \EndProcedure
-\end{algorithmic}
-\end{algorithm}
-
 
 \section{BioseqDB GPU seeding}
 \label{sec:vulkan-minimizer-scheduling}
