@@ -5,15 +5,17 @@
 NHGRI (National Human Genome Research Institute) has carefully tracked costs per genome and expose this data publically.
 
 
-In the last 15 years, there has been seen a massive development of sequencing technologies. Companies like Applied Biosystems, Illumina, Roche, and Pacific Biosciences have developed a plethora of sequencing platforms, e.g. SOLiD, GS FLX, and PacBio. These tools are able to generate an enormous amount of data in a matter of days. As an example, Illumina NextSeq generates up to 360 Gbp, split into reads of length up to 150 bp in merely 2 days (data taken from Illumina website). \\
+In the last 15 years, there has been seen a massive development of sequencing technologies. Companies like Applied Biosystems, Pacific Biosciences, Illumina, Roche have developed number of sequencing platforms, 
+e.g. SOLiD, GS FLX, and PacBio. These tools are able to generate an enormous amount of data in very short period of time.
+As an example, Illumina NextSeq can generate up to 360 Gbp (Gbp means here sequence of size of $10^9$ symbols) in approximately 2 days.~\autocite{illumina_website}
  
-\noindent Although those platforms vary in detail, the general idea behind them is as follows:
+\noindent Although those platforms vary technologically, the general idea of sequencing is as follow:
 \begin{enumerate}
 \item DNA is fragmented through some specific physical and chemical methods, then adapter sequences are appended to the ends of the fragments.
 \item Fragments of unwanted size are removed
 \item The entire set of fragments is physically fixed on chemical bead.
 \item Amplification, where we duplicate fragments, is performed for example through PCR emulsion
-\item A combination of optical devices and fluorophores (light-sensitive chemicals) is used to make reads.
+\item A combination of optical devices and fluorophores (light-sensitive chemicals) is used to make reads (reading of a fragment).
 \end{enumerate}
 
 With new advancements in sequencing technologies, the cost of sequencing a genome has been decreasing significantly to the point where most popular open databases store more than 10s of petabytes of data.

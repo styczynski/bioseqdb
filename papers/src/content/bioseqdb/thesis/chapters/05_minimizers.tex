@@ -1191,35 +1191,19 @@ slowdown. This was caused by the fact that any minimum going outside the window 
     Pipeline total per pair & 158.4 & 170.7 & $+8\,\%$ \\
     \bottomrule
   \end{tabular}
-  \caption{Phase breakdown at 903\,kbp, V3 baseline -- pre-SIMD-Minimizers
-    work. The naive SIMD path (V6) is $+8\,\%$ \emph{slower} than
-    scalar despite four lanes of parallelism. The slowdown is split
-    between three regressions: (a) the SIMD minimizer's
-    \texttt{mm\_sketch\_simd} is itself slower than scalar
-    \texttt{mm\_sketch}; (b) the SIMD chainer feeds anchors into
-    \texttt{collect\_seed\_hits} that hit a worse code path; and
-    (c) the SIMD chain anchors are not cleanly indexable into the
-    sorted query-minimizer array, so \texttt{mm\_est\_err} explodes.
-    The V13 work mostly fixes (a) and (c).}
+  \caption{Per-stange timing breakdown measured by me. The naive SIMD path (V6) is $+8\,\%$ \emph{slower} than
+    scalar despite four lanes of parallelism}
   \label{tab:v6-phase}
 \end{table}
 
-The downstream regressions on \texttt{collect\_seed\_hits} and
-\texttt{mm\_est\_err} were caused by SIMD chainer producing a slightly
-different anchor distribution than scalar. This problem is orthogonal to the minimizer extraction and we mention it later.
+The regressions on \texttt{collect\_seed\_hits} and
+\texttt{mm\_est\_err} were caused by SIMD chain algorithms producing a "slightly"
+different anchor distribution than scalar. This problem is not directly relevant to the minimizer extraction for now, but I mention it later.
 
 \section{Seeding prototype V8: Implementing A2 algorithm}
 \label{sec:v8-two-stack}
 
-The single most important external input to this work was the
-SIMD-Minimizers paper of Groot Koerkamp \&
-Martayan~\cite{groot_koerkamp_simd_minimizers_2025}.  Its central
-insight is that the rescan method is fundamentally
-\emph{data-dependent}, and that any data-dependent branch costs more
-in SIMD than in scalar because lanes' branch targets are tied to
-each other.
-
-Algorithm~\ref{alg:two-stack} sketches the V8 inner loop.
+Algorithm~\ref{alg:two-stack} shows pseudocode for algorithm (A2) inspired by SIMD-Minimizers paper~\cite{groot_koerkamp_simd_minimizers_2025}.
 
 \begin{algorithm}[H]
 \caption{V8 \texttt{collect\_minimizers\_two\_stack\_simd} (per-step body)}
@@ -1230,20 +1214,20 @@ Algorithm~\ref{alg:two-stack} sketches the V8 inner loop.
 \State $\textit{hash} \gets \texttt{rolling\_kmer\_hash}.\textsc{Next}(d, c_\text{in}, c_\text{out})$
 \State $\textit{strand}, \textit{palindrome} \gets \textsc{StrandMask}(\textit{hash})$
 \State $\textit{valid} \gets \neg\textit{palindrome}$
-\State $\textit{hs} \gets \textsc{IfThenElse}(\textit{strand}, \textit{hash}\,|\,1, \textit{hash}\,\&\,{\sim}1)$ \Comment{strand bit packed in LSB}
+\State $\textit{hs} \gets \textsc{IfThenElse}(\textit{strand}, \textit{hash}\,|\,1, \textit{hash}\,\&\,{\sim}1)$ \Comment{Set strand bit}
 \State $\textit{elem} \gets \textsc{IfThenElse}(\textit{valid}, ((\textit{hash}\,\&\,\textbf{0xffff\_0000})\,|\,\textit{pos\_local}), \textbf{0xffff\_ffff})$
 \State $\textit{ring}[\textit{ring\_idx}] \gets \textit{elem}$ \Comment{single ring buffer slot per lane}
 \State $\textit{better} \gets \textit{elem} < \textit{prefix\_min}$
 \State $\textit{prefix\_min} \gets \textsc{IfThenElse}(\textit{better}, \textit{elem}, \textit{prefix\_min})$
 \State $\textit{ring\_idx} \mathrel{+}= 1$, $\textit{step} \mathrel{+}= 1$, $\textit{pos\_local} \mathrel{+}= 1$
 \If{$\textit{ring\_idx} = w$}                                          \Comment{rebuild suffix}
-    \State $\textit{ring}[i] \gets \min(\textit{ring}[i..w-1])$ \textbf{for all} $i$ \Comment{$O(w)$ uniform branch}
+    \State $\textit{ring}[i] \gets \min(\textit{ring}[i..w-1])$ \textbf{for all} $i$ \Comment{$O(w)$ iteration}
     \State $\textit{prefix\_min} \gets \textit{elem}$
     \State $\textit{ring\_idx} \gets 0$
 \EndIf
 \State $\textit{window\_min} \gets \min(\textit{prefix\_min}, \textit{ring}[\textit{ring\_idx}])$
 \If{$\textit{step} \ge k+w-1$ \textbf{and} $\textit{window\_min}.\text{pos} \ne \textit{last\_emit\_pos}$}
-    \State \textbf{emit} window minimum to per-lane scalar collector
+    \State SaveWindowMinimum(\textit{window\_min})
     \State $\textit{last\_emit\_pos} \gets \textit{window\_min}.\text{pos}$
 \EndIf
 \end{algorithmic}
@@ -1323,7 +1307,7 @@ Figure~\ref{fig:phase-evolution} plots the full evolution.
 V11 was good but disappointing: the wall-clock saving was less than
 the theoretical $2\times$ ILP win we expected.
 \texttt{xcrun llvm-objdump -d build/bioseq/bioseq\_bench} on the V11
-wrapper revealed the underlying problem. 
+wrapper revealed the underlying problem, which took weeks of debugging:
 
 \begin{BioseqAsmSnippet}
 ldp q0, q1, [sp, #0x150]       // load bp_row from stack
@@ -1339,22 +1323,18 @@ add x1, x22, #0x8
 bl 0x1002acca4 <step_one_bp_pair lambda>   // the offending call!
 \end{BioseqAsmSnippet}
 
-Despite the per-step body being decorated with
-\texttt{[[gnu::always\_inline]]}, Clang lowered the lambda as a
-function call at every BP step.  Each call paid:
+Despite me using 
+\texttt{[[gnu::always\_inline]]}, Clang translated the lambda to a function call, so each call needs to "pay" for:
 
 \begin{itemize}
 \item Function-call prologue/epilogue (\texttt{stp x28-x30 [sp,...]}).
-\item Captured-state spill/reload via stack -- every per-stream
-  state register was loaded from the captured-this pointer at
-  the start of each lambda invocation, and stored back at the
-  end.
-\item No ILP across iterations -- each lambda call is its own
-  function frame, so dependent state spills to memory between
-  consecutive iterations.
+\item Captured state (all referenced variables outside lambda) - this is very promblematic because each call
+needs to load state from stack and store it back
+\item There's no ILP happening as each lambda call is its own function frame
 \end{itemize}
 
-Figure~\ref{fig:phase-evolution} shows full evolution of the prototypes. The scalar part involves unavoidable SIMD overhead of collecting results into map, scalar scramble hashing (minimap2 hash) and encoding output into the bit structure.
+Figure~\ref{fig:phase-evolution} shows full evolution of my prototypes. I thought it would be interesting to showcase how they behaved.
+The scalar part involves unavoidable SIMD overhead of collecting results into map, scalar scramble hashing (minimap2 hash) and saving output in the bit structure.
 
 \begin{figure}[H]
   \centering
@@ -1498,7 +1478,7 @@ most of the time was spent on inserting minimizers into the index.
 
 The gap in performance didn't come from the minimizer hash distribution (or hashing speed itself) but from the usage of \texttt{std::unordered\_map}.
 The prototype's target index used STL's default hash table, while the C minimap2 path uses an open-addressing
-\texttt{khash\_t<uint64\_t>}. This shows another problem with directly porting minimap2 into C++. \texttt{std::unordered\_map} is known problem with standard library that we overlooked during implementation similarily to how \texttt{std::sort} was used for divergence estimation.
+\texttt{khash\_t<uint64\_t>}. This shows another problem with directly porting minimap2 into C++. \texttt{std::unordered\_map} is known problem with standard library~\autocite{stack_overflow_answer_cpp_maps} that we overlooked during implementation similarily to how \texttt{std::sort} was used for divergence estimation.
 The cleanest solution here was implementing indexing structures as flat hash maps directly.
 
 \subsection{Seeding prototype V15: Smaller minimizer space}
@@ -1532,8 +1512,8 @@ and the alignment had to walk through all of them. This means that we sped up in
 
 \subsection{Seeding prototypes summary}
 
-\todo{Cite this stack overflow answer: https://stackoverflow.com/a/25027750}
-The combination of the V12 inlinening fixes, the V13 estimator fix and replacing \path{boost::unordered_map} (marked as ${V13}^{*}$) yielded observable improvements. We didn't want to implement new hashing scheme at this time, only see the impact of using different hash storage.
+The combination of the V12 inlinening fixes, the V13 estimator fix and replacing \path{boost::unordered_map} (marked as ${V13}^{*}$) yielded finally observable improvements. 
+We didn't want to implement new hashing scheme at this time, only see the impact of using different hash storage.
 
 \begin{figure}[H]
   \centering
